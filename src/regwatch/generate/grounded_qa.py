@@ -213,6 +213,20 @@ def ask(
             model_name=response.model,
         )
 
+    # INV-1: strip any fabricated citation markers from the prose so the
+    # rendered answer never shows an unverifiable citation. Valid markers are
+    # kept intact; only those whose (short_name, page) is not in the validated
+    # set are removed.
+    valid_keys = {(c.short_name, c.page) for c in citations}
+
+    def _strip_bad(m: re.Match[str]) -> str:
+        return m.group(0) if (m.group(1), int(m.group(2))) in valid_keys else ""
+
+    cleaned_answer = _CITE_RE.sub(_strip_bad, answer)
+    # Tidy whitespace left behind by removed markers.
+    cleaned_answer = re.sub(r"\s+([.,;:])", r"\1", cleaned_answer)
+    cleaned_answer = re.sub(r"[ \t]{2,}", " ", cleaned_answer).strip()
+
     audit_id = log_query(
         mode="qa",
         query_text=question,
@@ -227,13 +241,13 @@ def ask(
             }
             for p in passages
         ],
-        answer_text=answer,
+        answer_text=cleaned_answer,
         citations=[asdict(c) for c in citations],
         refused=False,
         model_name=response.model,
     )
     return QAResult(
-        answer=answer,
+        answer=cleaned_answer,
         citations=citations,
         refused=False,
         model_name=response.model,

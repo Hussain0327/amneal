@@ -9,8 +9,8 @@ later flip a flag — for now everything is mechanical):
                           expected source.
   - faithfulness        : fraction of an answer's sentences that carry at
                           least one citation (proxy for ungroundedness).
-  - refusal_accuracy    : fraction of refusal-expected questions that actually
-                          refused (and vice-versa for non-refusal).
+  - refusal_accuracy    : fraction of items whose refuse/answer decision was
+                          correct.
 """
 
 from __future__ import annotations
@@ -156,9 +156,8 @@ def evaluate(
     n = len(items)
     non_refusal = max(1, n - sum(1 for it in items if it.must_refuse) - refused_incorrectly)
     refusal_expected = sum(1 for it in items if it.must_refuse)
-    refusal_accuracy = 1.0
-    if refusal_expected > 0:
-        refusal_accuracy = refusal_correct / refusal_expected
+    correct_non_refusals = (n - refusal_expected) - refused_incorrectly
+    refusal_accuracy = (refusal_correct + correct_non_refusals) / n
     return Scorecard(
         n=n,
         recall_at_k=sums["recall"] / non_refusal,

@@ -31,6 +31,9 @@ log = get_logger(__name__)
 
 DRUGSFDA_URL = "https://api.fda.gov/drug/drugsfda.json"
 ALLOWED_SOURCES = {"drugsfda", "anda_letter", "manual"}
+# Trust hierarchy: the most trustworthy source wins on update.
+# manual (user override) > anda_letter (user-verified letter) > drugsfda (re-import).
+_SOURCE_RANK = {"manual": 3, "anda_letter": 2, "drugsfda": 1}
 
 
 @dataclass
@@ -197,7 +200,10 @@ def upsert_entries(entries: list[WatchlistEntry]) -> int:
                 row = existing[0]
                 row.company_status = e.company_status or row.company_status
                 row.rld_name = e.rld_name or row.rld_name
-                row.source = e.source if e.source != "manual" else row.source
+                # Keep the higher-trust source (INV-5 set is preserved).
+                # Equal rank takes the incoming value.
+                if _SOURCE_RANK.get(e.source, 0) >= _SOURCE_RANK.get(row.source, 0):
+                    row.source = e.source
                 row.source_url = e.source_url or row.source_url
                 row.on_watchlist = True
                 s.add(row)

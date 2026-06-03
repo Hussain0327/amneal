@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from regwatch.common.text_normalize import canonical_name
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import Product
 from regwatch.watch.watchlist import (
@@ -11,7 +12,23 @@ from regwatch.watch.watchlist import (
     WatchlistEntry,
     add_manual_product,
     list_watchlist,
+    upsert_entries,
 )
+
+
+def _entry(active_ingredient: str, source: str, source_url: str | None) -> WatchlistEntry:
+    """Build a WatchlistEntry for a fixed product key, varying only the source."""
+    return WatchlistEntry(
+        active_ingredient=active_ingredient,
+        normalized_name=canonical_name(active_ingredient),
+        dosage_form="Injection",
+        route="Intravenous",
+        rld_name="Istodax",
+        rld_application_number="208574",
+        company_status="approved",
+        source=source,
+        source_url=source_url,
+    )
 
 
 def test_inv5_entry_rejects_unknown_source() -> None:
@@ -85,3 +102,33 @@ def test_no_products_created_outside_allowed_sources_via_orm() -> None:
     items = list_watchlist()
     # off-watchlist should not appear
     assert all(it["active_ingredient"] != "Z" for it in items)
+
+
+def test_upsert_upgrades_source_drugsfda_to_anda_letter() -> None:
+    """A lower-trust drugsfda row upgrades to anda_letter on the same key."""
+    init_db()
+    upsert_entries([_entry("Romidepsin", "drugsfda", "https://api.fda.gov/x")])
+    upsert_entries([_entry("Romidepsin", "anda_letter", "file://internal/anda.pdf")])
+    items = list_watchlist()
+    assert len(items) == 1
+    assert items[0]["source"] == "anda_letter"
+
+
+def test_upsert_does_not_downgrade_manual_to_drugsfda() -> None:
+    """A higher-trust manual row must not be overwritten by a drugsfda re-import."""
+    init_db()
+    upsert_entries([_entry("Romidepsin", "manual", "user://override")])
+    upsert_entries([_entry("Romidepsin", "drugsfda", "https://api.fda.gov/x")])
+    items = list_watchlist()
+    assert len(items) == 1
+    assert items[0]["source"] == "manual"
+
+
+def test_upsert_does_not_downgrade_anda_letter_to_drugsfda() -> None:
+    """anda_letter outranks drugsfda; re-import keeps the verified letter source."""
+    init_db()
+    upsert_entries([_entry("Romidepsin", "anda_letter", "file://internal/anda.pdf")])
+    upsert_entries([_entry("Romidepsin", "drugsfda", "https://api.fda.gov/x")])
+    items = list_watchlist()
+    assert len(items) == 1
+    assert items[0]["source"] == "anda_letter"

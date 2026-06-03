@@ -25,7 +25,7 @@ class LocalBgeSmallProvider:
     name = "local-bge-small"
     dim = 384
 
-    _model: object | None = None
+    _model: ClassVar[object | None] = None
     _cache: ClassVar[dict[str, list[float]]] = {}
 
     def _ensure_model(self) -> None:
@@ -33,7 +33,7 @@ class LocalBgeSmallProvider:
             return
         from sentence_transformers import SentenceTransformer
 
-        self._model = SentenceTransformer("BAAI/bge-small-en-v1.5")
+        LocalBgeSmallProvider._model = SentenceTransformer("BAAI/bge-small-en-v1.5")
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:

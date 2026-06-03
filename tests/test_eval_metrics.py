@@ -92,3 +92,35 @@ def test_evaluate_runs_through() -> None:
     assert sc.citation_precision == 1.0
     assert sc.refusal_accuracy == 1.0
     assert sc.refused_correctly == 1
+
+
+def test_refusal_accuracy_penalizes_wrong_refusals() -> None:
+    gold = [
+        GoldItem(
+            question="q1",
+            expected_sources=[{"short_name": "PSG_001", "page": 3}],
+            must_refuse=False,
+        ),
+        GoldItem(
+            question="q2",
+            expected_sources=[{"short_name": "PSG_001", "page": 3}],
+            must_refuse=False,
+        ),
+    ]
+
+    def _ask(q: str) -> _FakeResult:
+        if q == "q1":
+            # Wrongly refuses a real (non-refusal) question.
+            return _FakeResult(answer="refused", citations=[], refused=True)
+        return _FakeResult(
+            answer="Foo [PSG_001, p.3].",
+            citations=[_FakeCit("PSG_001", 3)],
+            refused=False,
+            retrieved=[{"short_name": "PSG_001", "page": 3, "doc_id": 1}],
+        )
+
+    sc = evaluate(gold, ask_callable=_ask)
+    assert sc.n == 2
+    assert sc.refused_incorrectly == 1
+    # (refusal_correct=0 + (n=2 - refusal_expected=0 - refused_incorrectly=1)) / n=2
+    assert sc.refusal_accuracy == 0.5
