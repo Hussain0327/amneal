@@ -54,7 +54,7 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/regwatch"]
+packages = ["src/regwatch", "config"]
 
 [tool.ruff]
 line-length = 100
@@ -72,7 +72,7 @@ select = [
     "SIM", # simplify
     "RUF", # ruff
 ]
-ignore = ["E501"]  # line length handled by black
+ignore = ["E501", "B008"]  # E501: line length handled by black; B008: typer.Option in defaults
 
 [tool.black]
 line-length = 100

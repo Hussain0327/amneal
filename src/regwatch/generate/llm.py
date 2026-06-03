@@ -129,8 +129,8 @@ class AnthropicProvider:
                 convo[-1] = {**convo[-1], "content": convo[-1]["content"] + prompt_suffix}
         resp = client.messages.create(
             model=self.model,
-            system=system or None,
-            messages=convo,
+            system=system or None,  # type: ignore[arg-type]
+            messages=convo,  # type: ignore[arg-type]
             temperature=temperature,
             max_tokens=max_tokens,
         )

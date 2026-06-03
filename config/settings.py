@@ -39,8 +39,25 @@ class Settings(BaseSettings):
         return [s.strip().upper() for s in self.company_applicant_aliases.split(",") if s.strip()]
 
     # ---------- Retrieval / refusal ----------
-    retrieval_top_k: int = 8
+    # Two-stage retrieval (per spec diagram):
+    #   stage 1: vector search returns VECTOR_TOP_K candidates (wide net)
+    #   stage 2: rerank to RERANK_TOP_K (the set we actually cite from)
+    # When the reranker is off, stage 2 is the identity — we just take the
+    # first RERANK_TOP_K of the wide net. This keeps the diagram and the
+    # config in agreement at all times.
+    vector_top_k: int = 50
+    rerank_top_k: int = 8
+    # Legacy alias — populated from RETRIEVAL_TOP_K if set (backwards compat).
+    retrieval_top_k: int | None = None
     refusal_score_threshold: float = 0.30
+
+    @property
+    def effective_rerank_top_k(self) -> int:
+        """Final-k after optional reranking. Prefers explicit RERANK_TOP_K."""
+        if self.retrieval_top_k is not None and self.retrieval_top_k != self.rerank_top_k:
+            # Honor legacy env var if user only set the old name.
+            return self.retrieval_top_k
+        return self.rerank_top_k
 
     @field_validator("refusal_score_threshold")
     @classmethod

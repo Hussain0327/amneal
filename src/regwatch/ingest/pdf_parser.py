@@ -38,7 +38,7 @@ def _normalize(text: str) -> str:
 
 def _try_pdfplumber(pdf_bytes: bytes) -> ParsedPdf | None:
     try:
-        import pdfplumber  # noqa: WPS433
+        import pdfplumber
     except Exception as exc:  # pragma: no cover
         log.warning("pdfplumber_unavailable", error=str(exc))
         return None
@@ -60,7 +60,7 @@ def _try_pdfplumber(pdf_bytes: bytes) -> ParsedPdf | None:
 
 def _try_pypdf(pdf_bytes: bytes) -> ParsedPdf | None:
     try:
-        from pypdf import PdfReader  # noqa: WPS433
+        from pypdf import PdfReader
     except Exception as exc:  # pragma: no cover
         log.warning("pypdf_unavailable", error=str(exc))
         return None

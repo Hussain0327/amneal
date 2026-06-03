@@ -111,7 +111,9 @@ def test_llm_provider_factory_echo() -> None:
 
 def test_llm_provider_openai_requires_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "openai")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # Use empty string instead of delenv: pydantic-settings would otherwise
+    # fall back to the host's .env which may have a real key.
+    monkeypatch.setenv("OPENAI_API_KEY", "")
     import config.settings as cs
 
     cs.settings = cs.get_settings()

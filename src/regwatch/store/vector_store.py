@@ -97,9 +97,7 @@ def similarity_search(
         # Chroma cosine distance is in [0, 2]; convert to similarity in [0, 1].
         sim = 1.0 - float(dists[i]) / 2.0
         sim = max(0.0, min(1.0, sim))  # clamp for float-precision overshoot
-        hits.append(
-            Hit(chunk_id=chunk_id, text=docs[i], metadata=dict(metas[i] or {}), score=sim)
-        )
+        hits.append(Hit(chunk_id=chunk_id, text=docs[i], metadata=dict(metas[i] or {}), score=sim))
     return hits
 
 

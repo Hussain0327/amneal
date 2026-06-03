@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from sqlalchemy import desc
 from sqlmodel import select
 
 from regwatch.common.logging import get_logger
@@ -90,7 +91,7 @@ def _latest_version_hash(psg_document_id: int) -> str | None:
             s.scalars(
                 select(PsgVersion.content_hash)
                 .where(PsgVersion.psg_document_id == psg_document_id)
-                .order_by(PsgVersion.captured_at.desc())  # type: ignore[arg-type]
+                .order_by(desc(PsgVersion.captured_at))  # type: ignore[arg-type]
                 .limit(1)
             )
         )
@@ -189,8 +190,7 @@ def ingest_listing(listing: PsgListing) -> str:
             embeddings = embedder.embed(texts)
             ids = [f"{doc_id}-{version_id}-{c.ordinal}" for c in chunks]
             metas = [
-                {**c.metadata, "section_path": c.metadata.get("section_path") or ""}
-                for c in chunks
+                {**c.metadata, "section_path": c.metadata.get("section_path") or ""} for c in chunks
             ]
             add_chunks(ids=ids, embeddings=embeddings, documents=texts, metadatas=metas)
             log.info("chunks_added", doc_id=doc_id, version_id=version_id, n=len(chunks))

@@ -22,6 +22,11 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     # Network-free providers by default.
     monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
     monkeypatch.setenv("LLM_PROVIDER", "echo")
+    # Pydantic-settings would otherwise load real keys from `.env`; clear them
+    # so tests run from a clean slate regardless of the host's .env.
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("OPENFDA_API_KEY", "")
     # Per-test storage.
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("CHROMA_DIR", str(tmp_path / "chroma"))

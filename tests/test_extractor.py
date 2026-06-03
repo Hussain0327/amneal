@@ -33,7 +33,10 @@ def test_extractor_drops_fields_without_valid_citation(monkeypatch) -> None:
         "fields": {
             "study_type": {
                 "value": "Single-dose fasting and fed",
-                "citation": {"page": 2, "quote": "Two studies are recommended: a fasting study and a fed study"},
+                "citation": {
+                    "page": 2,
+                    "quote": "Two studies are recommended: a fasting study and a fed study",
+                },
             },
             "dissolution": {
                 "value": "USP Apparatus 2 at 50 RPM",

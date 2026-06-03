@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from regwatch.common.text_normalize import canonical_name, is_combo, split_ingredients, stripped_name
+from regwatch.common.text_normalize import (
+    canonical_name,
+    is_combo,
+    split_ingredients,
+    stripped_name,
+)
 
 
 @pytest.mark.parametrize(

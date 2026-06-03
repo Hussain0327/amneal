@@ -1,3 +1,4 @@
+# python
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -9,25 +10,20 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+
+# runtime artifacts (anything we ingest, embed, log, or cache)
+data/
 *.log
 .DS_Store
 
-# Data
-data/raw/
-data/processed/
-data/chroma/
-data/regwatch.db
-data/regwatch.db-shm
-data/regwatch.db-wal
-
-# Env
+# env / secrets
 .env
 .env.local
 .env.*.local
 
-# Editor
+# editor
 .idea/
 .vscode/
 
-# Docs
-*.md
+# private notes (kept locally, not pushed)
+docs/

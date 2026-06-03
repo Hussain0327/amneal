@@ -21,7 +21,6 @@ from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
 from regwatch.store.vector_store import collection_size
 
-
 PAGES = [
     "I. Introduction\nThis Product-Specific Guidance describes the agency's "
     "current recommendations for bioequivalence (BE) studies for Albuterol "
@@ -82,9 +81,7 @@ def _patch_pipeline(monkeypatch) -> None:
     monkeypatch.setattr(pipeline_mod, "parse_pdf", fake_parse)
     # Patch LLM in extractor + change_detector.
     monkeypatch.setattr("regwatch.process.extractor.get_llm_provider", lambda: _StubLLM())
-    monkeypatch.setattr(
-        "regwatch.process.change_detector.get_llm_provider", lambda: _StubLLM()
-    )
+    monkeypatch.setattr("regwatch.process.change_detector.get_llm_provider", lambda: _StubLLM())
 
 
 def _listing() -> PsgListing:

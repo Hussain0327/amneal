@@ -10,8 +10,7 @@ from __future__ import annotations
 from textwrap import dedent
 
 # ---------- Grounded Q&A ----------
-GROUNDED_QA_SYSTEM = dedent(
-    """\
+GROUNDED_QA_SYSTEM = dedent("""\
     You are a regulatory research assistant for a generic-drug Clinical Regulatory
     Affairs team. You answer ONLY from the provided source passages. You do not
     use prior knowledge to fill gaps. You do not infer.
@@ -34,24 +33,20 @@ GROUNDED_QA_SYSTEM = dedent(
         Sources:
         - <short_name>, p.<n>: <one-line description>
         (one bullet per distinct passage cited)
-    """
-)
+    """)
 
-GROUNDED_QA_USER = dedent(
-    """\
+GROUNDED_QA_USER = dedent("""\
     Question: {question}
 
     Source passages:
     {passages}
 
     Answer with citations, or the refusal string if the passages are insufficient.
-    """
-)
+    """)
 
 
 # ---------- BE Requirements extraction ----------
-BE_EXTRACTION_SYSTEM = dedent(
-    """\
+BE_EXTRACTION_SYSTEM = dedent("""\
     You extract bioequivalence study requirements from FDA Product-Specific
     Guidances. You output JSON ONLY — no prose, no markdown fences.
 
@@ -76,24 +71,20 @@ BE_EXTRACTION_SYSTEM = dedent(
        Each citation is: {{"page": <int>, "quote": "<verbatim text>"}}.
 
     5. Return a top-level object: {{"fields": {{...as above...}}}}.
-    """
-)
+    """)
 
-BE_EXTRACTION_USER = dedent(
-    """\
+BE_EXTRACTION_USER = dedent("""\
     Extract BE requirements from the following PSG passages. Each passage is
     prefixed with its page number.
 
     {passages}
 
     Return the JSON object now.
-    """
-)
+    """)
 
 
 # ---------- Change summary ----------
-CHANGE_SUMMARY_SYSTEM = dedent(
-    """\
+CHANGE_SUMMARY_SYSTEM = dedent("""\
     You compare two versions of an FDA Product-Specific Guidance and produce a
     short, factual summary of what changed. You quote the changed passages and
     cite page numbers for each change. You do not speculate; if only metadata
@@ -105,11 +96,9 @@ CHANGE_SUMMARY_SYSTEM = dedent(
     3. Lead with bioequivalence-relevant changes (study type, fasting/fed,
        subjects, dissolution, waiver, BE acceptance interval).
     4. Do not recommend actions.
-    """
-)
+    """)
 
-CHANGE_SUMMARY_USER = dedent(
-    """\
+CHANGE_SUMMARY_USER = dedent("""\
     PREVIOUS version (truncated):
     {previous}
 
@@ -117,5 +106,4 @@ CHANGE_SUMMARY_USER = dedent(
     {current}
 
     Summarize what changed.
-    """
-)
+    """)

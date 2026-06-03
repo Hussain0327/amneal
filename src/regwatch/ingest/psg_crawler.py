@@ -29,10 +29,10 @@ from pathlib import Path
 from threading import Lock
 
 import httpx
+from config.settings import get_settings
 from selectolax.parser import HTMLParser, Node
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from config.settings import get_settings
 from regwatch.common.logging import get_logger
 from regwatch.common.text_normalize import canonical_name as norm_name
 from regwatch.common.text_normalize import stripped_name
@@ -202,7 +202,9 @@ def parse_listings(html: str) -> list[PsgListing]:
                 dosage_form=dosage_form,
                 rld_or_rs_numbers=rld_rs,
                 recommended_date=recommended_date,
-                pdf_url=href if href.startswith("http") else PDF_URL_TEMPLATE.format(appl_no=appl_no),
+                pdf_url=(
+                    href if href.startswith("http") else PDF_URL_TEMPLATE.format(appl_no=appl_no)
+                ),
                 source_url=PSG_INDEX_URL,
             )
         )

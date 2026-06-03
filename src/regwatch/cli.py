@@ -45,6 +45,15 @@ def cmd_status() -> None:
     )
 
 
+@app.command("aliases")
+def cmd_aliases(refresh: bool = typer.Option(False, "--refresh")) -> None:
+    """Discover applicant-name aliases from Drugs@FDA (no guessing)."""
+    from regwatch.watch.aliases import discover_applicant_aliases
+
+    aliases = discover_applicant_aliases(refresh=refresh)
+    rprint({"count": len(aliases), "aliases": aliases})
+
+
 @app.command("seed")
 def cmd_seed() -> None:
     """Phase-1 seed: ingest the three verified seed products."""
