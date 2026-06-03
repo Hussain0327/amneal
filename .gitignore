@@ -1,0 +1,33 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.uv/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
+.DS_Store
+
+# Data
+data/raw/
+data/processed/
+data/chroma/
+data/regwatch.db
+data/regwatch.db-shm
+data/regwatch.db-wal
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Editor
+.idea/
+.vscode/
+
+# Docs
+*.md
