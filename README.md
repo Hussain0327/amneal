@@ -110,6 +110,7 @@ instead of relying on `SQLModel.metadata.create_all`.
 
 ```
 POST  /query        grounded Q&A — {answer, citations[], refused}
+POST  /sources/search structured FDA source lookup — {routed_sources[], records[]}
 POST  /assemble     cited dossier for {active_ingredient, dosage_form?, rld?}
 GET   /watch/latest matched changes since cursor
 GET   /products     watchlist
@@ -155,6 +156,7 @@ src/regwatch/
   process/                chunker, embedder, extractor, change_detector
   store/                  db, models, vector_store (Chroma wrapper)
   retrieve/               retriever (stage 1), reranker (stage 2, off by default)
+  sources/                FDA source handlers + rules-first source router
   generate/               llm provider interface, grounded_qa, prompts
   watch/                  watchlist, aliases (Drugs@FDA discovery), matcher, alerts
   assemble/               dossier
@@ -191,6 +193,11 @@ Definition of Done passed before moving on.
 - The cross-encoder reranker exists as a hook but is off by default. Turn
   on with `RERANKER_ENABLED=true` and tune `VECTOR_TOP_K` upward.
 - Auto scheduling via APScheduler is a stub. POC runs ingest on demand.
+- FDA source handlers have started, but prod still needs persisted source
+  tables, freshness metadata, caching, and answer synthesis across structured
+  source results. Current source lookup supports PSG, Orange Book Products.txt,
+  Drugs@FDA, Drug Shortages, NDC, and REMS entry parsing as handler-level
+  evidence, not a full multi-source answer graph.
 
 ## License
 

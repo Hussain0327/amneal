@@ -34,6 +34,11 @@ OPENFDA_LABEL_URL = "https://api.fda.gov/drug/label.json"
 DISSOLUTION_DB_URL = "https://www.accessdata.fda.gov/scripts/cder/dissolution/dsp_SearchResults.cfm"
 
 
+def _form_tokens(value: str) -> set[str]:
+    """Significant dosage-form tokens, dropping short connector words."""
+    return {t for t in value.lower().replace(",", " ").split() if len(t) > 2}
+
+
 def _find_matching_psgs(active_ingredient: str, dosage_form: str | None) -> list[dict[str, Any]]:
     """Find PSG documents matching ingredient (and optionally dosage form)."""
     canon = canonical_name(active_ingredient)
@@ -44,12 +49,14 @@ def _find_matching_psgs(active_ingredient: str, dosage_form: str | None) -> list
         for d in rows:
             d_strip = stripped_name(d.active_ingredient or "")
             if d.normalized_name == canon or d_strip == strip:
-                if (
-                    dosage_form
-                    and d.dosage_form
-                    and dosage_form.lower() not in d.dosage_form.lower()
-                ):
-                    continue
+                if dosage_form and d.dosage_form:
+                    want = dosage_form.lower()
+                    have = d.dosage_form.lower()
+                    # Lenient match: keep if the query form is a substring OR shares
+                    # a form token, so "inhalation aerosol" matches "Aerosol, Metered"
+                    # while "tablet" is still correctly excluded.
+                    if want not in have and not (_form_tokens(want) & _form_tokens(have)):
+                        continue
                 matches.append(
                     {
                         "id": d.id,

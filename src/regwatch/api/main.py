@@ -5,6 +5,7 @@ response is reproducible in Postman from a `.env` and a running instance.
 
 Endpoints (per spec §10.16):
     POST  /query        — grounded Q&A
+    POST  /sources/search — structured FDA source lookup
     POST  /assemble     — build a cited dossier for a target product
     GET   /watch/latest — recent alerts
     GET   /products     — list watchlist
@@ -26,6 +27,8 @@ from pydantic import BaseModel, Field
 from regwatch.assemble.dossier import build_dossier
 from regwatch.common.logging import configure_logging
 from regwatch.generate.grounded_qa import ask
+from regwatch.sources.router import search_sources
+from regwatch.sources.types import SourceKind, SourceQuery
 from regwatch.store.db import init_db
 from regwatch.watch.alerts import latest_digest_records
 from regwatch.watch.watchlist import ALLOWED_SOURCES, add_manual_product, list_watchlist
@@ -91,6 +94,62 @@ def query(req: QueryRequest) -> QueryResponse:
         refused=result.refused,
         model_name=result.model_name,
         audit_id=result.audit_id,
+    )
+
+
+# ---------- /sources/search ----------
+class SourceSearchRequest(BaseModel):
+    query_text: str = ""
+    active_ingredient: str | None = None
+    brand_name: str | None = None
+    application_number: str | None = None
+    ndc: str | None = None
+    dosage_form: str | None = None
+    route: str | None = None
+    limit: int = Field(10, ge=1, le=50)
+    sources: list[SourceKind] | None = None
+
+
+class SourceRecordResponse(BaseModel):
+    source: SourceKind
+    title: str
+    source_url: str
+    identifiers: dict[str, str]
+    fields: dict[str, Any]
+
+
+class SourceSearchResponse(BaseModel):
+    routed_sources: list[SourceKind]
+    records: list[SourceRecordResponse]
+
+
+@app.post("/sources/search", response_model=SourceSearchResponse)
+def sources_search(req: SourceSearchRequest) -> SourceSearchResponse:
+    routed, records = search_sources(
+        SourceQuery(
+            query_text=req.query_text,
+            active_ingredient=req.active_ingredient,
+            brand_name=req.brand_name,
+            application_number=req.application_number,
+            ndc=req.ndc,
+            dosage_form=req.dosage_form,
+            route=req.route,
+            limit=req.limit,
+        ),
+        sources=req.sources,
+    )
+    return SourceSearchResponse(
+        routed_sources=routed,
+        records=[
+            SourceRecordResponse(
+                source=r.source,
+                title=r.title,
+                source_url=r.source_url,
+                identifiers=r.identifiers,
+                fields=r.fields,
+            )
+            for r in records
+        ],
     )
 
 

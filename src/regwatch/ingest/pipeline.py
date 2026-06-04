@@ -160,8 +160,12 @@ def _chunk_metadata_base(doc_id: int, version_id: int, listing: PsgListing) -> d
     }
 
 
-def ingest_listing(listing: PsgListing) -> str:
-    """Ingest one PSG listing. Returns 'added' | 'revised' | 'unchanged' | 'error'."""
+def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
+    """Ingest one PSG listing. Returns 'added' | 'revised' | 'unchanged' | 'error'.
+
+    `extract=False` skips the per-PSG LLM BE extraction (which is the only paid
+    step); chunks are still embedded locally, so the Ask/retrieval path works.
+    """
     init_db()
     try:
         log.info("psg_download", appl_no=listing.appl_no, name=listing.normalized_name)
@@ -199,20 +203,21 @@ def ingest_listing(listing: PsgListing) -> str:
             add_chunks(ids=ids, embeddings=embeddings, documents=texts, metadatas=metas)
             log.info("chunks_added", doc_id=doc_id, version_id=version_id, n=len(chunks))
 
-        try:
-            extraction = extract_be(parsed.pages)
-            _save_be_requirement(
-                psg_document_id=doc_id,
-                version_id=version_id,
-                fields=extraction.fields,
-                citations=extraction.citations,
-            )
-        except Exception as exc:
-            log.warning(
-                "be_extraction_skipped",
-                appl_no=listing.appl_no,
-                error=str(exc),
-            )
+        if extract:
+            try:
+                extraction = extract_be(parsed.pages)
+                _save_be_requirement(
+                    psg_document_id=doc_id,
+                    version_id=version_id,
+                    fields=extraction.fields,
+                    citations=extraction.citations,
+                )
+            except Exception as exc:
+                log.warning(
+                    "be_extraction_skipped",
+                    appl_no=listing.appl_no,
+                    error=str(exc),
+                )
 
         return "added" if is_new else "revised"
     except Exception as exc:
@@ -224,12 +229,12 @@ def ingest_listing(listing: PsgListing) -> str:
         return "error"
 
 
-def ingest_listings(listings: list[PsgListing]) -> IngestStats:
+def ingest_listings(listings: list[PsgListing], *, extract: bool = True) -> IngestStats:
     """Ingest a batch of listings. Idempotent on re-run."""
     stats = IngestStats()
     for listing in listings:
         stats.scanned += 1
-        outcome = ingest_listing(listing)
+        outcome = ingest_listing(listing, extract=extract)
         if outcome == "added":
             stats.added += 1
         elif outcome == "revised":

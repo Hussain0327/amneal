@@ -82,5 +82,50 @@ def cmd_seed() -> None:
     raise typer.Exit(code=0 if stats.errors == 0 else 2)
 
 
+@app.command("ingest-all")
+def cmd_ingest_all(
+    limit: int = typer.Option(0, "--limit", help="Max PSGs to ingest (0 = the whole catalog)."),
+    final_only: bool = typer.Option(False, "--final-only", help="Skip draft guidances."),
+    route: str = typer.Option("", "--route", help="Only this route, e.g. 'Oral' or 'Inhalation'."),
+    extract: bool = typer.Option(
+        True,
+        "--extract/--no-extract",
+        help="Run per-PSG LLM BE extraction (paid). --no-extract is free/local and "
+        "still makes the Ask path work for every drug.",
+    ),
+) -> None:
+    """Ingest the FULL FDA PSG catalog so the corpus can answer any published drug.
+
+    This is the same pipeline as `seed`, without the 5-product pin. Idempotent:
+    re-running skips PSGs whose content is unchanged, so it is safely resumable.
+    """
+    from regwatch.ingest.pipeline import ingest_listings
+    from regwatch.ingest.psg_crawler import fetch_all_listings
+
+    init_db()
+    listings = fetch_all_listings()
+    if final_only:
+        listings = [x for x in listings if x.psg_type == "final"]
+    if route:
+        listings = [x for x in listings if (x.route or "").lower() == route.lower()]
+    if limit > 0:
+        listings = listings[:limit]
+    rprint(
+        f"[cyan]ingesting {len(listings)} PSG listing(s)[/cyan] "
+        f"(extract={'on' if extract else 'off'})"
+    )
+    stats = ingest_listings(listings, extract=extract)
+    rprint(
+        {
+            "scanned": stats.scanned,
+            "added": stats.added,
+            "revised": stats.revised,
+            "unchanged": stats.unchanged,
+            "errors": stats.errors,
+        }
+    )
+    raise typer.Exit(code=0 if stats.errors == 0 else 2)
+
+
 if __name__ == "__main__":
     app()

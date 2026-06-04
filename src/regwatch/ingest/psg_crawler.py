@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import string
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,11 @@ from regwatch.common.text_normalize import stripped_name
 log = get_logger(__name__)
 
 PSG_INDEX_URL = "https://www.accessdata.fda.gov/scripts/cder/psg/index.cfm"
+# The default index page only server-renders a ~70-row "recent" slice. The full
+# catalog (~1,800 PSGs) is reachable only through the A-Z letter routes
+# (event=Home.Letter&searchLetter=X). Letters with no drugs (e.g. J, Y) fall back
+# to the default slice, so callers must union and de-dupe across letters.
+PSG_LETTER_URL = PSG_INDEX_URL + "?event=Home.Letter&searchLetter={letter}"
 PDF_URL_TEMPLATE = "https://www.accessdata.fda.gov/drugsatfda_docs/psg/PSG_{appl_no}.pdf"
 APPL_FROM_PDF = re.compile(r"PSG_(\d+)\.pdf", re.IGNORECASE)
 
@@ -115,8 +121,11 @@ def _td_application_numbers(td: Node) -> list[str]:
     return nums
 
 
-def fetch_index_html(*, client: httpx.Client | None = None) -> str:
-    """Fetch the PSG index page HTML (200 expected when UA is browser-like)."""
+def fetch_index_html(*, client: httpx.Client | None = None, url: str = PSG_INDEX_URL) -> str:
+    """Fetch a PSG index page HTML (200 expected when UA is browser-like).
+
+    `url` defaults to the landing page; pass a letter route to page the catalog.
+    """
     s = get_settings()
     owned = False
     if client is None:
@@ -128,9 +137,39 @@ def fetch_index_html(*, client: httpx.Client | None = None) -> str:
         owned = True
     try:
         _polite_pause()
-        resp = _fetch(client, PSG_INDEX_URL)
+        resp = _fetch(client, url)
         resp.raise_for_status()
         return resp.text
+    finally:
+        if owned:
+            client.close()
+
+
+def fetch_all_listings(*, client: httpx.Client | None = None) -> list[PsgListing]:
+    """Enumerate the COMPLETE PSG catalog by walking the A-Z letter routes.
+
+    The landing page only renders a recent slice (~70 rows); iterating
+    `event=Home.Letter&searchLetter=A..Z` and unioning by the parser's de-dupe
+    key recovers the full database (~1,800 PSGs / ~1,200 distinct drugs).
+    """
+    s = get_settings()
+    owned = False
+    if client is None:
+        client = httpx.Client(
+            timeout=s.http_timeout_s,
+            headers={"User-Agent": BROWSER_UA, "Accept": "text/html"},
+            follow_redirects=True,
+        )
+        owned = True
+    try:
+        merged: dict[tuple[str, str | None, str | None, str], PsgListing] = {}
+        for letter in string.ascii_uppercase:
+            html = fetch_index_html(client=client, url=PSG_LETTER_URL.format(letter=letter))
+            for row in parse_listings(html):
+                key = (row.appl_no, row.route, row.dosage_form, row.psg_type)
+                merged.setdefault(key, row)
+        log.info("psg_catalog_enumerated", listings=len(merged))
+        return list(merged.values())
     finally:
         if owned:
             client.close()

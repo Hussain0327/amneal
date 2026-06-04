@@ -49,6 +49,17 @@ def test_query_refuses_on_empty_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body["citations"] == []
 
 
+def test_sources_search_accepts_explicit_source_without_network() -> None:
+    r = _open().post(
+        "/sources/search",
+        json={"query_text": "show PSG rows", "sources": ["psg"]},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["routed_sources"] == ["psg"]
+    assert body["records"] == []
+
+
 def test_create_product_rejects_bad_source() -> None:
     r = _open().post(
         "/products",
