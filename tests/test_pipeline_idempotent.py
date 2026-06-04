@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
+import pytest
 from sqlmodel import select
 
 from regwatch.ingest import pipeline as pipeline_mod
@@ -35,7 +37,14 @@ PAGES = [
 class _StubLLM:
     name = "stub"
 
-    def complete(self, messages, *, temperature=0.0, max_tokens=1024, response_format=None):
+    def complete(
+        self,
+        messages: object,
+        *,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+        response_format: str | None = None,
+    ) -> object:
         from regwatch.generate.llm import LLMResponse
 
         # Simulate a BE-extraction prompt (response_format=json) and a
@@ -63,16 +72,16 @@ class _StubLLM:
         return LLMResponse(text="Initial version ingested.", model="stub")
 
 
-def _patch_pipeline(monkeypatch) -> None:
+def _patch_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
     """Bypass network + PDF rendering with deterministic stubs."""
     fake_pdf = b"%PDF-1.4 stub"
     fake_hash = "deadbeef" * 8
 
-    def fake_download(url: str, *, client=None):
+    def fake_download(url: str, *, client: object | None = None) -> tuple[Path, bytes, str]:
         # Returns (path, bytes, sha256_hex). We don't actually write a file.
         return Path("/tmp/regwatch-test.pdf"), fake_pdf, fake_hash
 
-    def fake_parse(pdf_bytes: bytes):
+    def fake_parse(pdf_bytes: bytes) -> ParsedPdf:
         return ParsedPdf(text="\n\f\n".join(PAGES), pages=PAGES, engine="stub")
 
     # Patch download in the crawler module AND in pipeline (it imports the symbol).
@@ -102,14 +111,20 @@ def _listing() -> PsgListing:
     )
 
 
-def _row_count(model) -> int:
+def _listing_with_reversed_rld_numbers() -> PsgListing:
+    li = _listing()
+    li.rld_or_rs_numbers = list(reversed(li.rld_or_rs_numbers))
+    return li
+
+
+def _row_count(model: Any) -> int:
     from sqlalchemy import func
 
     with session_scope() as s:
         return int(s.scalar(select(func.count()).select_from(model)) or 0)
 
 
-def test_pipeline_idempotent_run_twice(monkeypatch) -> None:
+def test_pipeline_idempotent_run_twice(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_pipeline(monkeypatch)
     init_db()
 
@@ -129,7 +144,18 @@ def test_pipeline_idempotent_run_twice(monkeypatch) -> None:
     assert _row_count(BeRequirement) == 1
 
 
-def test_pipeline_be_fields_all_have_citations(monkeypatch) -> None:
+def test_pipeline_rld_join_key_is_order_invariant(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_pipeline(monkeypatch)
+    init_db()
+
+    assert pipeline_mod.ingest_listing(_listing()) == "added"
+    assert pipeline_mod.ingest_listing(_listing_with_reversed_rld_numbers()) == "unchanged"
+    assert _row_count(PsgDocument) == 1
+    assert _row_count(PsgVersion) == 1
+    assert _row_count(BeRequirement) == 1
+
+
+def test_pipeline_be_fields_all_have_citations(monkeypatch: pytest.MonkeyPatch) -> None:
     """INV-1 placeholder at the field level — every populated field has a verified citation."""
     _patch_pipeline(monkeypatch)
     init_db()

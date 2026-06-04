@@ -11,6 +11,10 @@ permissions:
 jobs:
   lint-type-test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,19 +27,22 @@ jobs:
           enable-cache: true
 
       - name: install python
-        run: uv python install 3.12
+        run: uv python install ${{ matrix.python-version }}
 
       - name: sync deps
-        run: uv sync --extra dev
+        run: uv sync --extra dev --extra llm
 
       - name: ruff
-        run: uv run ruff check src tests
+        run: uv run ruff check src tests migrations
 
       - name: black --check
-        run: uv run black --check src tests
+        run: uv run black --check src tests migrations
 
       - name: mypy
-        run: uv run mypy src
+        run: uv run mypy src tests
 
       - name: pytest
         run: uv run pytest -q
+
+      - name: eval
+        run: uv run python -m regwatch.eval.run_eval --check-thresholds

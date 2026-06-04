@@ -17,7 +17,14 @@ from regwatch.watch.alerts import latest_digest_records
 from regwatch.watch.watchlist import list_watchlist
 
 st.set_page_config(page_title="REGWATCH", layout="wide")
-init_db()
+
+
+@st.cache_resource
+def _init_db_once() -> None:
+    init_db()
+
+
+_init_db_once()
 
 
 def render_sidebar() -> str:

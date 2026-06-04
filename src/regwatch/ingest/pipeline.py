@@ -45,13 +45,14 @@ class IngestStats:
 
 def _upsert_psg_document(listing: PsgListing, content_hash: str, pdf_path: str) -> tuple[int, bool]:
     """Upsert psg_document. Returns (id, is_new)."""
+    rld_or_rs_key = ",".join(sorted(listing.rld_or_rs_numbers))
     with session_scope() as s:
         stmt = (
             select(PsgDocument)
             .where(PsgDocument.normalized_name == listing.normalized_name)
             .where(PsgDocument.dosage_form == listing.dosage_form)
             .where(PsgDocument.route == listing.route)
-            .where(PsgDocument.rld_or_rs_number == ",".join(listing.rld_or_rs_numbers))
+            .where(PsgDocument.rld_or_rs_number == rld_or_rs_key)
         )
         rows = list(s.scalars(stmt))
         if rows:
@@ -64,14 +65,15 @@ def _upsert_psg_document(listing: PsgListing, content_hash: str, pdf_path: str) 
             doc.pdf_path = pdf_path
             s.add(doc)
             s.flush()
-            assert doc.id is not None
+            if doc.id is None:
+                raise RuntimeError("psg_document upsert did not produce an id")
             return doc.id, False
         doc = PsgDocument(
             active_ingredient=listing.active_ingredient,
             normalized_name=listing.normalized_name,
             dosage_form=listing.dosage_form,
             route=listing.route,
-            rld_or_rs_number=",".join(listing.rld_or_rs_numbers),
+            rld_or_rs_number=rld_or_rs_key,
             psg_type=listing.psg_type,
             recommended_date=listing.recommended_date,
             source_url=listing.pdf_url,
@@ -80,7 +82,8 @@ def _upsert_psg_document(listing: PsgListing, content_hash: str, pdf_path: str) 
         )
         s.add(doc)
         s.flush()
-        assert doc.id is not None
+        if doc.id is None:
+            raise RuntimeError("psg_document insert did not produce an id")
         return doc.id, True
 
 
@@ -115,7 +118,8 @@ def _insert_version(
         )
         s.add(v)
         s.flush()
-        assert v.id is not None
+        if v.id is None:
+            raise RuntimeError("psg_version insert did not produce an id")
         return v.id
 
 

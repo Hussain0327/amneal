@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 from config.settings import get_settings
@@ -117,11 +118,32 @@ def assemble(req: AssembleRequest) -> AssembleResponse:
 
 
 # ---------- /watch/latest ----------
+def _as_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _record_captured_at(record: dict[str, Any]) -> datetime | None:
+    raw = record.get("captured_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return _as_utc(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
 @app.get("/watch/latest")
-def watch_latest(since: str | None = None) -> dict[str, Any]:
+def watch_latest(since: datetime | None = None) -> dict[str, Any]:
     records = latest_digest_records(limit=200)
     if since:
-        records = [r for r in records if (r.get("captured_at") or "") >= since]
+        since_utc = _as_utc(since)
+        records = [
+            r
+            for r in records
+            if (captured_at := _record_captured_at(r)) is not None and captured_at >= since_utc
+        ]
     return {"count": len(records), "alerts": records}
 
 

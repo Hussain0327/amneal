@@ -19,6 +19,7 @@ from typing import Any
 
 import httpx
 from config.settings import get_settings
+from sqlalchemy import desc
 from sqlmodel import select
 
 from regwatch.common.logging import get_logger
@@ -65,7 +66,13 @@ def _find_matching_psgs(active_ingredient: str, dosage_form: str | None) -> list
 
 def _be_requirements_for_doc(doc_id: int) -> dict[str, Any] | None:
     with session_scope() as s:
-        rows = list(s.scalars(select(BeRequirement).where(BeRequirement.psg_document_id == doc_id)))
+        rows = list(
+            s.scalars(
+                select(BeRequirement)
+                .where(BeRequirement.psg_document_id == doc_id)
+                .order_by(desc(BeRequirement.version_id), desc(BeRequirement.id))  # type: ignore[arg-type]
+            )
+        )
         if not rows:
             return None
         be = rows[0]
@@ -78,10 +85,17 @@ def _be_requirements_for_doc(doc_id: int) -> dict[str, Any] | None:
 
 def _latest_psg_version_summary(doc_id: int) -> str | None:
     with session_scope() as s:
-        rows = list(s.scalars(select(PsgVersion).where(PsgVersion.psg_document_id == doc_id)))
+        rows = list(
+            s.scalars(
+                select(PsgVersion)
+                .where(PsgVersion.psg_document_id == doc_id)
+                .order_by(desc(PsgVersion.captured_at), desc(PsgVersion.id))  # type: ignore[arg-type]
+                .limit(1)
+            )
+        )
         if not rows:
             return None
-        return rows[-1].diff_summary
+        return rows[0].diff_summary
 
 
 def _fetch_rld_label(active_ingredient: str, rld: str | None) -> dict[str, Any] | None:

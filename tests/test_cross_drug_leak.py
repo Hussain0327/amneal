@@ -10,6 +10,8 @@ beclomethasone chunks carry the SAME "Single actuation content (SAC)" /
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from regwatch.generate import grounded_qa as qa_mod
@@ -54,17 +56,19 @@ def _seed() -> None:
     add_chunks(ids=ids, embeddings=vecs, documents=texts, metadatas=metas)
 
 
-def _stub_llm(text: str):
+def _stub_llm(text: str) -> Any:
     class _LLM:
         name = "stub"
 
-        def complete(self, *a, **kw):
+        def complete(self, *a: object, **kw: object) -> LLMResponse:
             return LLMResponse(text=text, model="stub")
 
     return _LLM()
 
 
-def test_beclomethasone_question_cannot_leak_albuterol(monkeypatch) -> None:
+def test_beclomethasone_question_cannot_leak_albuterol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _seed()
     # Answer cites the right drug AND illegally cites albuterol's boilerplate page.
     monkeypatch.setenv("REFUSAL_SCORE_THRESHOLD", "0.0")  # ensure we reach the LLM path

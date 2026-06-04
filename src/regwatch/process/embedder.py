@@ -48,7 +48,8 @@ class LocalBgeSmallProvider:
                 misses.append((i, key))
         if misses:
             self._ensure_model()
-            assert self._model is not None
+            if self._model is None:
+                raise RuntimeError("local embedding model failed to initialize")
             batch_texts = [texts[i] for i, _ in misses]
             vecs = self._model.encode(  # type: ignore[attr-defined]
                 batch_texts,

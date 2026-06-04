@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from regwatch.common.text_normalize import canonical_name
 from regwatch.ingest.psg_crawler import PsgListing
 from regwatch.store.db import init_db, session_scope
@@ -77,7 +79,7 @@ def test_alert_emitted_only_for_existing_version() -> None:
     assert alerts[0].psg_version_id > 0
 
 
-def test_digest_round_trip(tmp_path) -> None:
+def test_digest_round_trip(tmp_path: Path) -> None:
     _persist_version()
     alerts = build_alerts([_match()])
     write_digest(alerts)

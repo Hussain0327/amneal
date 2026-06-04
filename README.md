@@ -60,6 +60,7 @@ These are code with tests, not guidelines. See `tests/test_invariants.py`.
 | Embeddings | Pluggable. Default: local `BAAI/bge-small-en-v1.5` via sentence-transformers |
 | Vector store | ChromaDB, persistent on disk |
 | Structured store | SQLite via SQLModel |
+| DB migrations | Alembic baseline + incremental migrations |
 | Retrieval | Two-stage. Stage 1: `VECTOR_TOP_K=50` (wide). Stage 2: rerank → `RERANK_TOP_K=8`. Reranker off by default; when off, stage 2 is `passages[:rerank_top_k]` |
 | LLM | Pluggable behind `LLMProvider`. OpenAI via the **Responses API** (`OPENAI_API_MODE=responses`, default; `chat` falls back to Chat Completions). Role-specific models: router `gpt-5-nano` (reasoning), synthesizer + extractor `gpt-5.4-nano`, each falling back to `LLM_MODEL`. `anthropic` and `echo` (test-only) also supported |
 | API | FastAPI |
@@ -100,6 +101,10 @@ uv run streamlit run src/regwatch/ui/app.py
 # eval scorecard
 uv run python -m regwatch.eval.run_eval
 ```
+
+`regwatch init-db` applies Alembic migrations for the active `SQLITE_PATH`.
+When adding or changing tables, create a new migration under `migrations/versions/`
+instead of relying on `SQLModel.metadata.create_all`.
 
 ## API
 

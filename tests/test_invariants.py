@@ -15,6 +15,7 @@ Notation:
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 from config.settings import get_settings
@@ -61,11 +62,11 @@ def _meta(doc_id: int, page: int, short: str = "PSG_020503") -> dict:
     }
 
 
-def _stub_llm(text: str):
+def _stub_llm(text: str) -> Any:
     class _LLM:
         name = "stub"
 
-        def complete(self, *a, **kw):
+        def complete(self, *a: object, **kw: object) -> LLMResponse:
             return LLMResponse(text=text, model="stub")
 
     return _LLM()
@@ -74,7 +75,7 @@ def _stub_llm(text: str):
 # ---------- INV-1: Grounding ----------
 
 
-def test_inv1_extractor_drops_uncited_field(monkeypatch) -> None:
+def test_inv1_extractor_drops_uncited_field(monkeypatch: pytest.MonkeyPatch) -> None:
     """A claim with no source span is dropped at extraction time."""
     payload = {
         "fields": {
@@ -87,7 +88,9 @@ def test_inv1_extractor_drops_uncited_field(monkeypatch) -> None:
     assert "study_type" not in res.citations
 
 
-def test_inv1_grounded_answer_has_only_known_citations(monkeypatch) -> None:
+def test_inv1_grounded_answer_has_only_known_citations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Every [short, p.N] in an answer must correspond to a passage we sent."""
     _seed_corpus(
         [
@@ -110,12 +113,12 @@ def test_inv1_grounded_answer_has_only_known_citations(monkeypatch) -> None:
 # ---------- INV-2: Refuse over guess ----------
 
 
-def test_inv2_refuses_when_corpus_empty(monkeypatch) -> None:
+def test_inv2_refuses_when_corpus_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     """No documents indexed → must refuse, must not call the LLM."""
     init_db()
     called = {"n": 0}
 
-    def _no_llm(*a, **k):
+    def _no_llm(*a: object, **k: object) -> Any:
         called["n"] += 1
         return _stub_llm("This should never run.")
 
@@ -126,7 +129,9 @@ def test_inv2_refuses_when_corpus_empty(monkeypatch) -> None:
     assert called["n"] == 0
 
 
-def test_inv2_refuses_when_model_outputs_refusal_string(monkeypatch) -> None:
+def test_inv2_refuses_when_model_outputs_refusal_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """If the model returns the refusal string, the system must refuse."""
     _seed_corpus([("Generic body of content about bioequivalence.", _meta(2, 1, "PSG_222222"))])
     refusal = get_settings().refusal_text
@@ -136,7 +141,9 @@ def test_inv2_refuses_when_model_outputs_refusal_string(monkeypatch) -> None:
     assert result.answer == refusal
 
 
-def test_inv2_refuses_when_answer_has_no_valid_citations(monkeypatch) -> None:
+def test_inv2_refuses_when_answer_has_no_valid_citations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A confident answer without any verifiable citation must collapse to refusal."""
     _seed_corpus([("Bioequivalence requires a fasting study.", _meta(3, 1, "PSG_333333"))])
     fabricated = "The recommended dose is 100 mg per day [PSG_NOT_REAL, p.99]."
@@ -148,12 +155,12 @@ def test_inv2_refuses_when_answer_has_no_valid_citations(monkeypatch) -> None:
 # ---------- INV-6: Auditability ----------
 
 
-def _row_count(model) -> int:
+def _row_count(model: Any) -> int:
     with session_scope() as s:
         return int(s.scalar(select(func.count()).select_from(model)) or 0)
 
 
-def test_inv6_every_qa_call_logs_one_row(monkeypatch) -> None:
+def test_inv6_every_qa_call_logs_one_row(monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_corpus([("Fasting BE study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
     monkeypatch.setattr(
         qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm("Yes. [PSG_020503, p.3]")
@@ -165,7 +172,7 @@ def test_inv6_every_qa_call_logs_one_row(monkeypatch) -> None:
     assert _row_count(QueryLog) == 2
 
 
-def test_inv6_refusal_also_audited(monkeypatch) -> None:
+def test_inv6_refusal_also_audited(monkeypatch: pytest.MonkeyPatch) -> None:
     init_db()
     assert _row_count(QueryLog) == 0
     qa_mod.ask("Out-of-corpus question with no indexed content.")

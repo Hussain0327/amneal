@@ -33,5 +33,6 @@ def log_query(
         )
         s.add(row)
         s.flush()
-        assert row.id is not None
+        if row.id is None:
+            raise RuntimeError("query_log insert did not produce an id")
         return row.id

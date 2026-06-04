@@ -54,7 +54,8 @@ def _fetch_version_for_listing(appl_no: str) -> tuple[int, int, str | None, str]
         if not candidates:
             return None
         doc = candidates[0]
-        assert doc.id is not None
+        if doc.id is None:
+            raise RuntimeError("psg_document row missing id")
         ver_rows = list(
             s.scalars(
                 select(PsgVersion)
@@ -66,7 +67,8 @@ def _fetch_version_for_listing(appl_no: str) -> tuple[int, int, str | None, str]
         if not ver_rows:
             return None
         v = ver_rows[0]
-        assert v.id is not None
+        if v.id is None:
+            raise RuntimeError("psg_version row missing id")
         return doc.id, v.id, v.diff_summary, v.captured_at.isoformat()
 
 

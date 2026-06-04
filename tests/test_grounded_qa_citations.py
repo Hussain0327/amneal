@@ -7,6 +7,8 @@ unverifiable `[short_name, p.N]` marker. This test pins that behavior.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from config.settings import get_settings  # noqa: F401  (mirrors test_invariants imports)
 
@@ -48,11 +50,11 @@ def _meta(doc_id: int, page: int, short: str = "PSG_020503") -> dict:
     }
 
 
-def _stub_llm(text: str):
+def _stub_llm(text: str) -> Any:
     class _LLM:
         name = "stub"
 
-        def complete(self, *a, **kw):
+        def complete(self, *a: object, **kw: object) -> LLMResponse:
             return LLMResponse(text=text, model="stub")
 
     return _LLM()
@@ -61,7 +63,9 @@ def _stub_llm(text: str):
 # ---------- INV-1: fabricated markers stripped from prose ----------
 
 
-def test_inv1_fabricated_citation_stripped_from_answer(monkeypatch) -> None:
+def test_inv1_fabricated_citation_stripped_from_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A real marker is preserved; a fabricated one is removed from the prose."""
     _seed_corpus(
         [

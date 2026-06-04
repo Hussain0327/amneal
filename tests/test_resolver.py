@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from regwatch.process.embedder import get_embedding_provider
 from regwatch.retrieve.resolver import resolve_product
+from regwatch.store.vector_store import add_chunks, distinct_metadata_values
 
 CORPUS = {
     "albuterol sulfate",
@@ -66,3 +68,25 @@ def test_single_product_corpus_resolves_without_name() -> None:
 
 def test_empty_corpus_is_none() -> None:
     assert resolve_product("anything", products=set()).status == "none"
+
+
+def test_distinct_metadata_cache_invalidates_on_add_chunks() -> None:
+    embedder = get_embedding_provider()
+    add_chunks(
+        ids=["a"],
+        embeddings=embedder.embed(["alpha"]),
+        documents=["alpha"],
+        metadatas=[{"normalized_name": "albuterol sulfate"}],
+    )
+    assert distinct_metadata_values("normalized_name") == {"albuterol sulfate"}
+
+    add_chunks(
+        ids=["b"],
+        embeddings=embedder.embed(["beta"]),
+        documents=["beta"],
+        metadatas=[{"normalized_name": "beclomethasone dipropionate"}],
+    )
+    assert distinct_metadata_values("normalized_name") == {
+        "albuterol sulfate",
+        "beclomethasone dipropionate",
+    }

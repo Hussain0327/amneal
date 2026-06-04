@@ -28,6 +28,7 @@ class Hit:
 
 
 _client: chromadb.api.ClientAPI | None = None
+_metadata_values_cache: dict[str, frozenset[str]] = {}
 
 
 def get_client() -> chromadb.api.ClientAPI:
@@ -56,6 +57,7 @@ def reset_for_tests() -> None:
         with contextlib.suppress(Exception):
             _client.reset()
     _client = None
+    _metadata_values_cache.clear()
 
 
 def add_chunks(
@@ -66,6 +68,7 @@ def add_chunks(
 ) -> None:
     if not ids:
         return
+    _metadata_values_cache.clear()
     coll = get_collection()
     coll.upsert(
         ids=ids,
@@ -109,12 +112,18 @@ def distinct_metadata_values(key: str) -> set[str]:
     """All distinct non-empty string values of one metadata `key` across chunks.
 
     Used by the product resolver to learn which drugs the corpus can answer
-    about. Cheap at POC scale (a few thousand chunks); a full scan otherwise.
+    about. Cached because a full Chroma metadata scan is too expensive once the
+    PSG corpus grows beyond the POC seed set. `add_chunks` and test resets
+    invalidate this cache.
     """
+    cached = _metadata_values_cache.get(key)
+    if cached is not None:
+        return set(cached)
     got = get_collection().get(include=["metadatas"])
     out: set[str] = set()
     for meta in got.get("metadatas") or []:
         value = (meta or {}).get(key)
         if isinstance(value, str) and value:
             out.add(value)
+    _metadata_values_cache[key] = frozenset(out)
     return out

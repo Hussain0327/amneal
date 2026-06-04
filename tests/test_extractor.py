@@ -3,25 +3,34 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
+import pytest
+
+from regwatch.generate.llm import LLMResponse
 from regwatch.process import extractor as ext
 
 
 class _StubLLM:
     name = "stub"
 
-    def __init__(self, payload: dict) -> None:
+    def __init__(self, payload: dict[str, Any]) -> None:
         self.payload = payload
-        self.last_messages: list = []
+        self.last_messages: list[object] = []
 
-    def complete(self, messages, *, temperature=0.0, max_tokens=1024, response_format=None):
-        from regwatch.generate.llm import LLMResponse
-
+    def complete(
+        self,
+        messages: list[object],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+        response_format: str | None = None,
+    ) -> LLMResponse:
         self.last_messages = messages
         return LLMResponse(text=json.dumps(self.payload), model="stub")
 
 
-def test_extractor_drops_fields_without_valid_citation(monkeypatch) -> None:
+def test_extractor_drops_fields_without_valid_citation(monkeypatch: pytest.MonkeyPatch) -> None:
     pages = [
         "I. Introduction\nThis guidance describes bioequivalence study recommendations.",
         "II. Recommendations\n"
@@ -62,7 +71,7 @@ def test_extractor_drops_fields_without_valid_citation(monkeypatch) -> None:
     assert result.fields["study_design"] is None
 
 
-def test_extractor_drops_fabricated_quote(monkeypatch) -> None:
+def test_extractor_drops_fabricated_quote(monkeypatch: pytest.MonkeyPatch) -> None:
     pages = ["I. Real content. The acceptance interval is 80 to 125 percent."]
     payload = {
         "fields": {
@@ -78,13 +87,11 @@ def test_extractor_drops_fabricated_quote(monkeypatch) -> None:
     assert result.fields["additional_notes"] is None
 
 
-def test_extractor_invalid_json_returns_empty(monkeypatch) -> None:
+def test_extractor_invalid_json_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     class _BadLLM:
         name = "bad"
 
-        def complete(self, *a, **kw):
-            from regwatch.generate.llm import LLMResponse
-
+        def complete(self, *a: object, **kw: object) -> LLMResponse:
             return LLMResponse(text="not json at all", model="bad")
 
     monkeypatch.setattr(ext, "get_llm_provider", lambda *a, **k: _BadLLM())

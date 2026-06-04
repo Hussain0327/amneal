@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import httpx
 import openai
+import pytest
 
 from regwatch.generate.llm import (
     LLMMessage,
@@ -107,7 +110,7 @@ def test_chat_mode_uses_chat_completions() -> None:
     assert fake.responses.calls == []
 
 
-def _set_openai(monkeypatch) -> None:
+def _set_openai(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "x")
     monkeypatch.setenv("ROUTER_MODEL", "router-m")
@@ -116,16 +119,16 @@ def _set_openai(monkeypatch) -> None:
     monkeypatch.setenv("LLM_MODEL", "legacy-m")
 
 
-def test_role_selects_model(monkeypatch) -> None:
+def test_role_selects_model(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_openai(monkeypatch)
-    assert get_llm_provider(role="router").model == "router-m"
-    assert get_llm_provider(role="synthesizer").model == "synth-m"
-    assert get_llm_provider(role="extractor").model == "extract-m"
-    assert get_llm_provider().model == "legacy-m"  # default → llm_model
+    assert cast(OpenAIProvider, get_llm_provider(role="router")).model == "router-m"
+    assert cast(OpenAIProvider, get_llm_provider(role="synthesizer")).model == "synth-m"
+    assert cast(OpenAIProvider, get_llm_provider(role="extractor")).model == "extract-m"
+    assert cast(OpenAIProvider, get_llm_provider()).model == "legacy-m"  # default → llm_model
     assert current_model_name(role="extractor") == "extract-m"
 
 
-def test_role_falls_back_to_llm_model_when_unset(monkeypatch) -> None:
+def test_role_falls_back_to_llm_model_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_openai(monkeypatch)
     monkeypatch.setenv("SYNTHESIZER_MODEL", "")  # empty → fall back to llm_model
-    assert get_llm_provider(role="synthesizer").model == "legacy-m"
+    assert cast(OpenAIProvider, get_llm_provider(role="synthesizer")).model == "legacy-m"

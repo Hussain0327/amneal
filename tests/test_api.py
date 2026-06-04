@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from regwatch.api.main import app
@@ -33,9 +34,9 @@ def test_settings_no_secrets() -> None:
     assert "anthropic_api_key" not in body
 
 
-def test_query_refuses_on_empty_corpus(monkeypatch) -> None:
+def test_query_refuses_on_empty_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
     # Empty Chroma → refusal; no LLM should be called.
-    def _bad_llm(*a, **k):
+    def _bad_llm(*a: object, **k: object) -> None:
         raise AssertionError("LLM must not be called when retrieval is empty")
 
     from regwatch.generate import grounded_qa as qa_mod
@@ -82,6 +83,11 @@ def test_watch_latest_returns_empty_when_no_alerts() -> None:
     body = r.json()
     assert body["count"] == 0
     assert body["alerts"] == []
+
+
+def test_watch_latest_rejects_invalid_since() -> None:
+    r = _open().get("/watch/latest", params={"since": "not-a-date"})
+    assert r.status_code == 422
 
 
 def test_assemble_refuses_when_no_matching_psg() -> None:

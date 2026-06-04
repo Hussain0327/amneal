@@ -38,10 +38,18 @@ def test_settings_load() -> None:
 
 
 def test_db_boots_and_round_trips() -> None:
-    from regwatch.store.db import init_db, session_scope
+    from sqlalchemy import inspect, text
+
+    from regwatch.store.db import get_engine, init_db, session_scope
     from regwatch.store.models import Product
 
     init_db()
+    assert "alembic_version" in inspect(get_engine()).get_table_names()
+    with get_engine().connect() as conn:
+        assert (
+            conn.execute(text("select version_num from alembic_version")).scalar_one()
+            == "0001_initial_schema"
+        )
     with session_scope() as s:
         s.add(
             Product(
@@ -62,6 +70,51 @@ def test_db_boots_and_round_trips() -> None:
         rows = list(s2.scalars(stmt))
         assert len(rows) == 1
         assert rows[0].rld_application_number == "021457"
+
+
+def test_init_db_stamps_complete_legacy_schema_without_version_table() -> None:
+    from sqlalchemy import inspect, text
+    from sqlmodel import SQLModel
+
+    from regwatch.store import models  # noqa: F401  (register tables)
+    from regwatch.store.db import get_engine, init_db
+
+    SQLModel.metadata.create_all(get_engine())
+    assert "alembic_version" not in inspect(get_engine()).get_table_names()
+
+    init_db()
+
+    with get_engine().connect() as conn:
+        assert (
+            conn.execute(text("select version_num from alembic_version")).scalar_one()
+            == "0001_initial_schema"
+        )
+
+
+def test_init_db_stamps_complete_legacy_schema_with_empty_version_table() -> None:
+    from sqlalchemy import inspect, text
+    from sqlmodel import SQLModel
+
+    from regwatch.store import models  # noqa: F401  (register tables)
+    from regwatch.store.db import get_engine, init_db
+
+    engine = get_engine()
+    SQLModel.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(
+            text("create table alembic_version " "(version_num varchar(32) not null primary key)")
+        )
+    assert "alembic_version" in inspect(engine).get_table_names()
+    with engine.connect() as conn:
+        assert conn.execute(text("select version_num from alembic_version")).fetchall() == []
+
+    init_db()
+
+    with engine.connect() as conn:
+        assert (
+            conn.execute(text("select version_num from alembic_version")).scalar_one()
+            == "0001_initial_schema"
+        )
 
 
 def test_chroma_round_trip() -> None:

@@ -4,12 +4,37 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
+from alembic.runtime.migration import MigrationContext
 from config.settings import get_settings
-from sqlalchemy import Engine
-from sqlmodel import Session, SQLModel, create_engine
+from sqlalchemy import Engine, inspect
+from sqlmodel import Session, create_engine
 
 _engine: Engine | None = None
+_BASELINE_TABLES = frozenset(
+    {
+        "product",
+        "psg_document",
+        "psg_version",
+        "be_requirement",
+        "query_log",
+    }
+)
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _has_complete_legacy_schema() -> bool:
+    """Detect pre-Alembic DBs that already have the baseline tables."""
+    engine = get_engine()
+    tables = set(inspect(engine).get_table_names())
+    if not tables >= _BASELINE_TABLES:
+        return False
+    with engine.connect() as conn:
+        return MigrationContext.configure(conn).get_current_revision() is None
 
 
 def get_engine() -> Engine:
@@ -23,10 +48,20 @@ def get_engine() -> Engine:
 
 
 def init_db() -> None:
-    """Create tables. Import models so SQLModel.metadata sees them."""
+    """Apply schema migrations for the active SQLite database."""
+    from alembic import command
+    from alembic.config import Config
+
     from regwatch.store import models  # noqa: F401  (registers tables)
 
-    SQLModel.metadata.create_all(get_engine())
+    root = _repo_root()
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{get_settings().sqlite_path.as_posix()}")
+    if _has_complete_legacy_schema():
+        command.stamp(cfg, "head")
+        return
+    command.upgrade(cfg, "head")
 
 
 @contextmanager
