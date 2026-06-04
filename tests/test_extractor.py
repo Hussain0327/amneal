@@ -49,7 +49,7 @@ def test_extractor_drops_fields_without_valid_citation(monkeypatch) -> None:
         }
     }
     stub = _StubLLM(payload)
-    monkeypatch.setattr(ext, "get_llm_provider", lambda: stub)
+    monkeypatch.setattr(ext, "get_llm_provider", lambda *a, **k: stub)
 
     result = ext.extract_be(pages)
     # study_type kept (valid citation)
@@ -73,7 +73,7 @@ def test_extractor_drops_fabricated_quote(monkeypatch) -> None:
         }
     }
     stub = _StubLLM(payload)
-    monkeypatch.setattr(ext, "get_llm_provider", lambda: stub)
+    monkeypatch.setattr(ext, "get_llm_provider", lambda *a, **k: stub)
     result = ext.extract_be(pages)
     assert result.fields["additional_notes"] is None
 
@@ -87,7 +87,7 @@ def test_extractor_invalid_json_returns_empty(monkeypatch) -> None:
 
             return LLMResponse(text="not json at all", model="bad")
 
-    monkeypatch.setattr(ext, "get_llm_provider", lambda: _BadLLM())
+    monkeypatch.setattr(ext, "get_llm_provider", lambda *a, **k: _BadLLM())
     result = ext.extract_be(["page one"])
     assert all(v is None for v in result.fields.values())
     assert result.citations == {}

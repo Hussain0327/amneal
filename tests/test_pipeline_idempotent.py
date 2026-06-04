@@ -80,8 +80,10 @@ def _patch_pipeline(monkeypatch) -> None:
     monkeypatch.setattr(pipeline_mod, "download_pdf", fake_download)
     monkeypatch.setattr(pipeline_mod, "parse_pdf", fake_parse)
     # Patch LLM in extractor + change_detector.
-    monkeypatch.setattr("regwatch.process.extractor.get_llm_provider", lambda: _StubLLM())
-    monkeypatch.setattr("regwatch.process.change_detector.get_llm_provider", lambda: _StubLLM())
+    monkeypatch.setattr("regwatch.process.extractor.get_llm_provider", lambda *a, **k: _StubLLM())
+    monkeypatch.setattr(
+        "regwatch.process.change_detector.get_llm_provider", lambda *a, **k: _StubLLM()
+    )
 
 
 def _listing() -> PsgListing:

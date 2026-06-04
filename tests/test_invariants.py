@@ -81,7 +81,7 @@ def test_inv1_extractor_drops_uncited_field(monkeypatch) -> None:
             "study_type": {"value": "single-dose", "citation": None},  # no citation
         }
     }
-    monkeypatch.setattr(ext, "get_llm_provider", lambda: _stub_llm(json.dumps(payload)))
+    monkeypatch.setattr(ext, "get_llm_provider", lambda *a, **k: _stub_llm(json.dumps(payload)))
     res = ext.extract_be(["any text"])
     assert res.fields["study_type"] is None
     assert "study_type" not in res.citations
@@ -101,7 +101,7 @@ def test_inv1_grounded_answer_has_only_known_citations(monkeypatch) -> None:
         "[PSG_020503, p.3]. The agency also recommends an in vivo fed study "
         "[PSG_FAKE, p.7]."
     )
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda: _stub_llm(answer_text))
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(answer_text))
     result = qa_mod.ask("What study design is recommended?")
     assert not result.refused
     assert {(c.short_name, c.page) for c in result.citations} == {("PSG_020503", 3)}
@@ -115,7 +115,7 @@ def test_inv2_refuses_when_corpus_empty(monkeypatch) -> None:
     init_db()
     called = {"n": 0}
 
-    def _no_llm():
+    def _no_llm(*a, **k):
         called["n"] += 1
         return _stub_llm("This should never run.")
 
@@ -130,7 +130,7 @@ def test_inv2_refuses_when_model_outputs_refusal_string(monkeypatch) -> None:
     """If the model returns the refusal string, the system must refuse."""
     _seed_corpus([("Generic body of content about bioequivalence.", _meta(2, 1, "PSG_222222"))])
     refusal = get_settings().refusal_text
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda: _stub_llm(refusal))
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(refusal))
     result = qa_mod.ask("Some adversarial out-of-corpus question?")
     assert result.refused
     assert result.answer == refusal
@@ -140,7 +140,7 @@ def test_inv2_refuses_when_answer_has_no_valid_citations(monkeypatch) -> None:
     """A confident answer without any verifiable citation must collapse to refusal."""
     _seed_corpus([("Bioequivalence requires a fasting study.", _meta(3, 1, "PSG_333333"))])
     fabricated = "The recommended dose is 100 mg per day [PSG_NOT_REAL, p.99]."
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda: _stub_llm(fabricated))
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(fabricated))
     result = qa_mod.ask("What is the recommended dose?")
     assert result.refused
 
@@ -155,7 +155,9 @@ def _row_count(model) -> int:
 
 def test_inv6_every_qa_call_logs_one_row(monkeypatch) -> None:
     _seed_corpus([("Fasting BE study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda: _stub_llm("Yes. [PSG_020503, p.3]"))
+    monkeypatch.setattr(
+        qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm("Yes. [PSG_020503, p.3]")
+    )
     assert _row_count(QueryLog) == 0
     qa_mod.ask("Is a fasting study recommended?")
     assert _row_count(QueryLog) == 1

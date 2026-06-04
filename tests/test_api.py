@@ -35,7 +35,7 @@ def test_settings_no_secrets() -> None:
 
 def test_query_refuses_on_empty_corpus(monkeypatch) -> None:
     # Empty Chroma → refusal; no LLM should be called.
-    def _bad_llm():
+    def _bad_llm(*a, **k):
         raise AssertionError("LLM must not be called when retrieval is empty")
 
     from regwatch.generate import grounded_qa as qa_mod

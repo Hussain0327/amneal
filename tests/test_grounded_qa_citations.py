@@ -73,7 +73,7 @@ def test_inv1_fabricated_citation_stripped_from_answer(monkeypatch) -> None:
         "A fasting study is recommended [PSG_020503, p.3]. "
         "A fed study is also advised [PSG_FAKE, p.9]."
     )
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda: _stub_llm(answer_text))
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(answer_text))
 
     result = qa_mod.ask("What study design is recommended?")
 

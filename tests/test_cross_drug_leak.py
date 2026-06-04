@@ -69,7 +69,7 @@ def test_beclomethasone_question_cannot_leak_albuterol(monkeypatch) -> None:
     # Answer cites the right drug AND illegally cites albuterol's boilerplate page.
     monkeypatch.setenv("REFUSAL_SCORE_THRESHOLD", "0.0")  # ensure we reach the LLM path
     leaky = "Single actuation content (SAC) [PSG_020911, p.2]. See also [PSG_020503, p.2]."
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda: _stub_llm(leaky))
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(leaky))
 
     result = qa_mod.ask("What type of study does the beclomethasone dipropionate PSG recommend?")
 

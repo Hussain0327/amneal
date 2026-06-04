@@ -112,7 +112,7 @@ def extract_be(pages: list[str]) -> ExtractionResult:
     discarded; we keep only validated fields.
     """
     passages = _passages_for_prompt(pages)
-    provider = get_llm_provider()
+    provider = get_llm_provider(role="extractor")
     response = provider.complete(
         [
             LLMMessage(role="system", content=BE_EXTRACTION_SYSTEM),
@@ -147,4 +147,6 @@ def extract_be(pages: list[str]) -> ExtractionResult:
         total=len(FIELD_NAMES),
         model=response.model,
     )
-    return ExtractionResult(fields=fields, citations=citations, model_name=current_model_name())
+    return ExtractionResult(
+        fields=fields, citations=citations, model_name=current_model_name(role="extractor")
+    )

@@ -23,7 +23,16 @@ class Settings(BaseSettings):
     # ---------- Providers ----------
     embedding_provider: str = "local-bge-small"
     llm_provider: str = "openai"
-    llm_model: str = "gpt-4o-mini"
+    # OpenAI call surface: "responses" (default, GPT-5.x native) or "chat" (legacy
+    # Chat Completions). The LLMProvider.complete() interface is identical either way.
+    openai_api_mode: str = "responses"
+    # Role-specific models. Cheap reasoning model for routing/classification; a more
+    # capable one for grounded synthesis and BE extraction. Each falls back to
+    # llm_model when unset. llm_model is the legacy single-model fallback.
+    llm_model: str = "gpt-5.4-nano"
+    router_model: str = "gpt-5-nano"
+    synthesizer_model: str = "gpt-5.4-nano"
+    extractor_model: str = "gpt-5.4-nano"
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
 

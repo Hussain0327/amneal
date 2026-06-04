@@ -156,7 +156,7 @@ def ask(
 ) -> QAResult:
     """Grounded Q&A entry point — answer with citations, or refuse."""
     s = get_settings()
-    model_name = current_model_name()
+    model_name = current_model_name(role="synthesizer")
     active_filters: dict[str, Any] = dict(filters or {})
 
     # Entity resolution FIRST: pin the product before semantic retrieval so FDA
@@ -205,7 +205,7 @@ def ask(
     )
     system_prompt = GROUNDED_QA_SYSTEM.format(refusal=s.refusal_text)
 
-    provider = get_llm_provider()
+    provider = get_llm_provider(role="synthesizer")
     response = provider.complete(
         [
             LLMMessage(role="system", content=system_prompt),
