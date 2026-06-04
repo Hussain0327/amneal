@@ -213,38 +213,47 @@ def parse_listings(html: str) -> list[PsgListing]:
     return rows
 
 
+# The verified seed corpus, pinned by FDA application number so the ingest is
+# deterministic and reproducible (spec §16). Selection is by appl_no, NOT by name,
+# so FDA naming quirks (e.g. "albuterol" matching "levalbuterol") can never change
+# the corpus. Drug names below are for reference only. Romidepsin is intentionally
+# absent — it has no PSG and is carried as a watchlist must-refuse case instead.
+SEED_APPL_NOS = [
+    "020503",  # albuterol sulfate — inhalation aerosol, metered
+    "214070",  # albuterol sulfate; budesonide — inhalation aerosol (combo)
+    "207921",  # beclomethasone dipropionate — inhalation aerosol, metered
+    "020911",  # beclomethasone dipropionate — inhalation aerosol, metered
+    "021730",  # levalbuterol tartrate — inhalation aerosol, metered
+]
+
+
 def filter_listings(
     rows: list[PsgListing],
     *,
     normalized_names: list[str] | None = None,
     appl_numbers: list[str] | None = None,
 ) -> list[PsgListing]:
-    """Restrict listings to specific drugs or application numbers.
+    """Restrict listings to specific application numbers and/or drug names.
 
-    If `normalized_names` is given, matches by canonical name OR by stripped
-    (salt-free) name OR by substring match — generous because FDA naming is
-    inconsistent.
+    `appl_numbers` is the precise, deterministic selector (exact application-number
+    match) and is preferred for reproducible seeding. `normalized_names` matches a
+    seed term as a WHOLE WORD in the canonical or stripped (salt-free) name — so
+    "beclomethasone" still matches "beclomethasone dipropionate", but "albuterol"
+    no longer pulls "levalbuterol" (which it did under the old substring match).
     """
     if not normalized_names and not appl_numbers:
         return rows
     appl_set = set(appl_numbers or [])
-    name_set = {n.lower() for n in (normalized_names or [])}
+    name_terms = [n.lower().strip() for n in (normalized_names or []) if n.strip()]
 
-    out: list[PsgListing] = []
-    for r in rows:
-        if r.appl_no in appl_set:
-            out.append(r)
-            continue
-        for n in name_set:
-            if (
-                n == r.normalized_name
-                or n == r.stripped_name
-                or n in r.normalized_name
-                or n in r.stripped_name
-            ):
-                out.append(r)
-                break
-    return out
+    def _name_hit(r: PsgListing) -> bool:
+        for term in name_terms:
+            pat = rf"\b{re.escape(term)}\b"
+            if re.search(pat, r.normalized_name) or re.search(pat, r.stripped_name):
+                return True
+        return False
+
+    return [r for r in rows if r.appl_no in appl_set or _name_hit(r)]
 
 
 def download_pdf(url: str, *, client: httpx.Client | None = None) -> tuple[Path, bytes, str]:

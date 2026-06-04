@@ -22,10 +22,16 @@ from typing import Any
 from config.settings import get_settings
 
 from regwatch.common.audit import log_query
+from regwatch.common.citations import (
+    filter_citations,
+    iter_psg_citations,
+    strip_all_citations,
+)
 from regwatch.common.logging import get_logger
 from regwatch.generate.llm import LLMMessage, current_model_name, get_llm_provider
 from regwatch.generate.prompts import GROUNDED_QA_SYSTEM, GROUNDED_QA_USER
 from regwatch.retrieve.reranker import rerank_passages
+from regwatch.retrieve.resolver import resolve_product
 from regwatch.retrieve.retriever import RetrievedPassage, retrieve
 
 log = get_logger(__name__)
@@ -52,9 +58,6 @@ class QAResult:
     retrieved: list[dict[str, Any]]
 
 
-_CITE_RE = re.compile(r"\[([A-Za-z0-9_./-]+),\s*p\.(\d+)\]")
-
-
 def _format_passages(passages: list[RetrievedPassage]) -> str:
     blocks: list[str] = []
     for p in passages:
@@ -75,9 +78,7 @@ def _validate_citations(
     validated: list[Citation] = []
     bad: list[tuple[str, int]] = []
 
-    for m in _CITE_RE.finditer(answer_text):
-        short_name = m.group(1)
-        page = int(m.group(2))
+    for short_name, page in iter_psg_citations(answer_text):
         key = (short_name, page)
         passage = allowed.get(key)
         if passage is None:
@@ -156,9 +157,24 @@ def ask(
     """Grounded Q&A entry point — answer with citations, or refuse."""
     s = get_settings()
     model_name = current_model_name()
+    active_filters: dict[str, Any] = dict(filters or {})
 
-    # Stage 1: wide-net vector search (up to VECTOR_TOP_K).
-    passages = retrieve(question, k=k, filters=filters)
+    # Entity resolution FIRST: pin the product before semantic retrieval so FDA
+    # template boilerplate shared across drugs cannot leak a wrong-drug citation.
+    # Skip only when the caller already pinned the product (API / dossier).
+    if not active_filters.get("normalized_name"):
+        resolution = resolve_product(question)
+        if resolution.status == "resolved":
+            active_filters["normalized_name"] = resolution.normalized_name
+        else:
+            # Ambiguous or unresolvable for a product-specific corpus → never
+            # answer globally (the cross-drug-leak guard): refuse over guessing
+            # the drug. Clarify options are surfaced by the orchestration layer.
+            reason = "ambiguous_product" if resolution.status == "ambiguous" else "no_product"
+            return _refuse(question=question, passages=[], reason=reason, model_name=model_name)
+
+    # Stage 1: wide-net vector search (up to VECTOR_TOP_K), constrained to the product.
+    passages = retrieve(question, k=k, filters=active_filters)
     # Stage 2: optional rerank, then trim to RERANK_TOP_K.
     passages = rerank_passages(question, passages)
     passages = passages[: s.effective_rerank_top_k]
@@ -169,6 +185,17 @@ def ask(
             question=question,
             passages=passages,
             reason="low_top_score",
+            model_name=model_name,
+        )
+
+    # Post-retrieval guard (defense in depth): every passage must be the same
+    # product. The filter guarantees this; this catches a caller that bypassed
+    # the resolver. Mixed products → collapse to refusal rather than cite across.
+    if len({p.normalized_name for p in passages if p.normalized_name}) > 1:
+        return _refuse(
+            question=question,
+            passages=passages,
+            reason="mixed_products",
             model_name=model_name,
         )
 
@@ -204,7 +231,7 @@ def ask(
 
     # INV-1: if the answer has body text but no valid citations, refuse rather
     # than emit an ungrounded answer.
-    answer_body = _CITE_RE.sub("", answer).strip()
+    answer_body = strip_all_citations(answer).strip()
     if answer_body and not citations:
         return _refuse(
             question=question,
@@ -216,13 +243,9 @@ def ask(
     # INV-1: strip any fabricated citation markers from the prose so the
     # rendered answer never shows an unverifiable citation. Valid markers are
     # kept intact; only those whose (short_name, page) is not in the validated
-    # set are removed.
+    # set are removed (compound brackets keep just their valid pairs).
     valid_keys = {(c.short_name, c.page) for c in citations}
-
-    def _strip_bad(m: re.Match[str]) -> str:
-        return m.group(0) if (m.group(1), int(m.group(2))) in valid_keys else ""
-
-    cleaned_answer = _CITE_RE.sub(_strip_bad, answer)
+    cleaned_answer = filter_citations(answer, valid_keys)
     # Tidy whitespace left behind by removed markers.
     cleaned_answer = re.sub(r"\s+([.,;:])", r"\1", cleaned_answer)
     cleaned_answer = re.sub(r"[ \t]{2,}", " ", cleaned_answer).strip()

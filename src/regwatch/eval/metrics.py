@@ -20,8 +20,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from regwatch.common.citations import has_citation
+
 _SENT_RE = re.compile(r"(?<=[.!?])\s+")
-_CITE_RE = re.compile(r"\[([A-Za-z0-9_./-]+),\s*p\.(\d+)\]")
 
 
 @dataclass
@@ -86,7 +87,7 @@ def faithfulness(answer_text: str) -> float:
     sentences = [s.strip() for s in _SENT_RE.split(text) if s.strip()]
     if not sentences:
         return 1.0
-    cited = sum(1 for s in sentences if _CITE_RE.search(s))
+    cited = sum(1 for s in sentences if has_citation(s))
     return cited / len(sentences)
 
 

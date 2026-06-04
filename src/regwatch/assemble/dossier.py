@@ -225,7 +225,12 @@ def build_dossier(
     # Section D — Applicable guidances (retrieval-driven, cited)
     md_lines.append("")
     md_lines.append("## D. Applicable Guidance — Q&A Summary")
-    qa = ask(_applicable_guidance_question(active_ingredient, dosage_form))
+    # Pin the product so the applicable-guidance Q&A can't pull another drug's
+    # PSG chunks (cross-drug-leak guard — INV-1).
+    qa = ask(
+        _applicable_guidance_question(active_ingredient, dosage_form),
+        filters={"normalized_name": canonical_name(active_ingredient)},
+    )
     md_lines.append(qa.answer)
     if qa.citations:
         md_lines.append("")

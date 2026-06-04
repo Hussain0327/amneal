@@ -56,14 +56,18 @@ def cmd_aliases(refresh: bool = typer.Option(False, "--refresh")) -> None:
 
 @app.command("seed")
 def cmd_seed() -> None:
-    """Phase-1 seed: ingest the three verified seed products."""
+    """Phase-1 seed: ingest the verified seed PSGs, pinned by application number."""
     from regwatch.ingest.pipeline import ingest_listings
-    from regwatch.ingest.psg_crawler import fetch_index_html, filter_listings, parse_listings
+    from regwatch.ingest.psg_crawler import (
+        SEED_APPL_NOS,
+        fetch_index_html,
+        filter_listings,
+        parse_listings,
+    )
 
     init_db()
-    seeds = ["albuterol", "beclomethasone", "romidepsin"]
     html = fetch_index_html()
-    listings = filter_listings(parse_listings(html), normalized_names=seeds)
+    listings = filter_listings(parse_listings(html), appl_numbers=SEED_APPL_NOS)
     rprint(f"[cyan]matched {len(listings)} listing(s)[/cyan]")
     stats = ingest_listings(listings)
     rprint(

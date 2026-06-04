@@ -103,3 +103,18 @@ def similarity_search(
 
 def collection_size() -> int:
     return int(get_collection().count())
+
+
+def distinct_metadata_values(key: str) -> set[str]:
+    """All distinct non-empty string values of one metadata `key` across chunks.
+
+    Used by the product resolver to learn which drugs the corpus can answer
+    about. Cheap at POC scale (a few thousand chunks); a full scan otherwise.
+    """
+    got = get_collection().get(include=["metadatas"])
+    out: set[str] = set()
+    for meta in got.get("metadatas") or []:
+        value = (meta or {}).get(key)
+        if isinstance(value, str) and value:
+            out.add(value)
+    return out

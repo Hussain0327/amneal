@@ -1,8 +1,9 @@
-"""Phase-1 seed: ingest the three verified seed products (spec §16).
+"""Phase-1 seed: ingest the verified seed PSGs, pinned by application number (spec §16).
 
-  - Albuterol Sulfate (inhalation aerosol, metered)
-  - Beclomethasone Dipropionate (inhalation aerosol, metered)
-  - Romidepsin (injection)
+The corpus is selected by FDA application number (see SEED_APPL_NOS in
+ingest/psg_crawler.py) for a deterministic, reproducible ingest — albuterol,
+the albuterol/budesonide combo, two beclomethasone PSGs, and levalbuterol.
+Romidepsin has no PSG; it's carried as a watchlist must-refuse case, not here.
 
 Run via:
     uv run python scripts/seed.py
@@ -24,19 +25,22 @@ from rich import print as rprint
 
 from regwatch.common.logging import configure_logging, get_logger
 from regwatch.ingest.pipeline import ingest_listings
-from regwatch.ingest.psg_crawler import fetch_index_html, filter_listings, parse_listings
-
-SEED_NAMES = ["albuterol", "beclomethasone", "romidepsin"]
+from regwatch.ingest.psg_crawler import (
+    SEED_APPL_NOS,
+    fetch_index_html,
+    filter_listings,
+    parse_listings,
+)
 
 
 def main() -> int:
     configure_logging()
     log = get_logger("seed")
-    log.info("seed_start", names=SEED_NAMES)
+    log.info("seed_start", appl_nos=SEED_APPL_NOS)
 
     html = fetch_index_html()
     all_listings = parse_listings(html)
-    seed_listings = filter_listings(all_listings, normalized_names=SEED_NAMES)
+    seed_listings = filter_listings(all_listings, appl_numbers=SEED_APPL_NOS)
 
     rprint(
         f"[cyan]found {len(seed_listings)} seed listings out of {len(all_listings)} total[/cyan]"
