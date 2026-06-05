@@ -33,7 +33,6 @@ from rapidfuzz import fuzz
 from regwatch.common.text_normalize import canonical_name, split_ingredients, stripped_name
 from regwatch.store.vector_store import distinct_metadata_values
 
-
 # region agent log
 _AGENT_DEBUG_LOG_PATH = Path("/Users/hussain/amneal/.cursor/debug-04b0f1.log")
 

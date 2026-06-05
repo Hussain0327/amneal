@@ -7,10 +7,7 @@ Run with:
 
 from __future__ import annotations
 
-import json
 import os
-import time
-from pathlib import Path
 
 import streamlit as st
 from config.settings import get_settings
@@ -22,38 +19,6 @@ from regwatch.watch.alerts import latest_digest_records
 from regwatch.watch.watchlist import list_watchlist
 
 st.set_page_config(page_title="REGWATCH", layout="wide")
-
-
-# region agent log
-_AGENT_DEBUG_LOG_PATH = Path("/Users/hussain/amneal/.cursor/debug-04b0f1.log")
-
-
-def _agent_debug_log(
-    *,
-    run_id: str,
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict[str, object],
-) -> None:
-    payload = {
-        "sessionId": "04b0f1",
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(time.time() * 1000),
-    }
-    try:
-        _AGENT_DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with _AGENT_DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, sort_keys=True) + "\n")
-    except Exception:
-        pass
-
-
-# endregion
 
 
 @st.cache_resource
@@ -100,22 +65,6 @@ def render_ask() -> None:
             dosage_filter = st.text_input("Filter: dosage form (optional)", "")
         submitted = st.form_submit_button("Ask")
 
-    # region agent log
-    _agent_debug_log(
-        run_id="initial",
-        hypothesis_id="H5",
-        location="src/regwatch/ui/app.py:82",
-        message="ask_form_submit_state",
-        data={
-            "submitted": bool(submitted),
-            "typed_blank": not bool(typed.strip()),
-            "had_previous_query": bool(st.session_state.get("ask_query")),
-            "ingredient_filter_set": bool(ingredient_filter.strip()),
-            "dosage_filter_set": bool(dosage_filter.strip()),
-        },
-    )
-    # endregion
-
     if submitted and typed.strip():
         filters: dict[str, str] = {}
         if ingredient_filter.strip():
@@ -131,21 +80,6 @@ def render_ask() -> None:
     if not query:
         return
     filters = st.session_state.get("ask_filters") or {}
-    # region agent log
-    _agent_debug_log(
-        run_id="initial",
-        hypothesis_id="H5",
-        location="src/regwatch/ui/app.py:104",
-        message="ask_active_query_state",
-        data={
-            "submitted": bool(submitted),
-            "typed_blank": not bool(typed.strip()),
-            "query_present": bool(query),
-            "filters_keys": sorted(filters.keys()),
-            "reusing_previous_after_empty_submit": bool(submitted and not typed.strip() and query),
-        },
-    )
-    # endregion
 
     with st.spinner("Thinking..."):
         result = ask(query, filters=filters or None)
