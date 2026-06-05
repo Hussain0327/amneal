@@ -22,47 +22,13 @@ caller should clarify), ``none`` (nothing resolvable → clarify or refuse).
 
 from __future__ import annotations
 
-import json
 import re
-import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from rapidfuzz import fuzz
 
 from regwatch.common.text_normalize import canonical_name, split_ingredients, stripped_name
 from regwatch.store.vector_store import distinct_metadata_values
-
-# region agent log
-_AGENT_DEBUG_LOG_PATH = Path("/Users/hussain/amneal/.cursor/debug-04b0f1.log")
-
-
-def _agent_debug_log(
-    *,
-    run_id: str,
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict[str, object],
-) -> None:
-    payload = {
-        "sessionId": "04b0f1",
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(time.time() * 1000),
-    }
-    try:
-        _AGENT_DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with _AGENT_DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, sort_keys=True) + "\n")
-    except Exception:
-        pass
-
-
-# endregion
 
 
 @dataclass
@@ -127,6 +93,23 @@ _NON_DRUG_WORDS = frozenset(
         "that",
         "drug",
         "fda",
+        # Regulatory-process words — a question about filing/strategy names no
+        # drug, so these must never be fuzzy-matched to one (else a question
+        # like "what submission strategy to file the ANDA?" mis-resolves to a
+        # real product and clarifies instead of refusing — INV-2).
+        "submission",
+        "submissions",
+        "strategy",
+        "strategies",
+        "file",
+        "filing",
+        "anda",
+        "supplement",
+        "amendment",
+        "approval",
+        "internal",
+        "benchmark",
+        "benchmarks",
     }
 )
 
@@ -145,6 +128,20 @@ def _primary_token(ingredient: str) -> str:
 def _product_tokens(normalized_name: str) -> frozenset[str]:
     """The set of primary ingredient tokens for one product."""
     return frozenset(_primary_token(i) for i in split_ingredients(normalized_name) if i.strip())
+
+
+def _full_ingredient_words(normalized_name: str) -> frozenset[str]:
+    """Every salt/hydrate-inclusive word of a product's ingredients, e.g.
+    ``{"beclomethasone", "dipropionate", "monohydrate"}``.
+
+    Used only to break a *primary-token* tie: when several products share a
+    leading ingredient ("beclomethasone dipropionate" vs. "beclomethasone
+    dipropionate monohydrate"), the candidate whose full name the question
+    spells out is the unambiguous match. Conservative by construction — a
+    salt-free or partial mention spells out no full name, so it narrows
+    nothing and the caller still clarifies (never guesses).
+    """
+    return frozenset(t for t in re.split(r"[^a-z]+", normalized_name.lower()) if len(t) >= 3)
 
 
 def _mentions(token: str, question: str) -> bool:
@@ -186,6 +183,12 @@ def resolve_product(
     if len(maximal) == 1:
         return Resolution(status="resolved", normalized_name=maximal[0], by_name=True)
     if len(maximal) >= 2:
+        # Tie-break: if the question spells out the full ingredient name of
+        # exactly one candidate (salts/hydrates included), it unambiguously
+        # means that product — resolve it instead of asking.
+        specific = [n for n in maximal if all(_mentions(w, q) for w in _full_ingredient_words(n))]
+        if len(specific) == 1:
+            return Resolution(status="resolved", normalized_name=specific[0], by_name=True)
         return Resolution(status="ambiguous", candidates=maximal)
     # Nothing matched by name.
     if len(known) == 1:
@@ -280,22 +283,6 @@ def resolve_brand(question: str, *, products: set[str] | None = None, limit: int
         if not gtokens:
             continue
         for name, ntokens in known_tokens.items():
-            # region agent log
-            _agent_debug_log(
-                run_id="initial",
-                hypothesis_id="H6",
-                location="src/regwatch/retrieve/resolver.py:278",
-                message="brand_generic_product_token_match",
-                data={
-                    "generic_tokens": sorted(gtokens),
-                    "product": name,
-                    "product_tokens": sorted(ntokens),
-                    "overlap_tokens": sorted(gtokens & ntokens),
-                    "generic_covers_product": bool(ntokens <= gtokens),
-                    "current_logic_matches": bool(gtokens & ntokens),
-                },
-            )
-            # endregion
             if gtokens & ntokens:
                 matches.add(name)
     return sorted(matches)[:limit]
