@@ -2,10 +2,19 @@
 // response models in src/regwatch/api/main.py exactly — field names are the
 // contract, do not rename without changing the API.
 
-// Default to the same-origin "/api" path that next.config.mjs proxies to the
-// FastAPI backend, so the browser only talks to the Next origin (one tunnel, no
-// CORS). Set NEXT_PUBLIC_API_BASE to have the browser call the API directly.
-export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "/api";
+// Resolve the API base at call time. When the page is served from a REMOTE
+// origin (e.g. a cloudflared tunnel) we ALWAYS use the same-origin "/api" path
+// that next.config.mjs proxies to the backend — a localhost base would point at
+// the visitor's own machine, not the server. NEXT_PUBLIC_API_BASE is honored
+// only when actually running on localhost (for direct-call local dev).
+function apiBase(): string {
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    if (host !== "localhost" && host !== "127.0.0.1") return "/api";
+  }
+  const configured = process.env.NEXT_PUBLIC_API_BASE;
+  return configured && configured.length > 0 ? configured : "/api";
+}
 
 export interface Citation {
   short_name: string;
@@ -64,7 +73,7 @@ export interface PublicSettings {
 }
 
 async function postJSON<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(`${apiBase()}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -76,7 +85,7 @@ async function postJSON<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function getJSON<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`);
+  const res = await fetch(`${apiBase()}${path}`);
   if (!res.ok) {
     throw new Error(`GET ${path} → ${res.status}`);
   }

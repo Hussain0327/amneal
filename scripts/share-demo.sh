@@ -26,10 +26,14 @@ if [ "$NO_TUNNEL" != "1" ]; then
   }
 fi
 
-if [ ! -d web/.next ]; then
-  echo "Building the UI (first run)…"
-  ( cd web && npm install && npm run build )
-fi
+# Always rebuild the UI before sharing. Next bakes NEXT_PUBLIC_* env into the
+# build, so a stale build can serve the wrong API base — rebuilding every run
+# guarantees the served app matches the current code and env.
+echo "Building the UI…"
+( cd web && { [ -d node_modules ] || npm install; } && npm run build ) >/tmp/regwatch-build.log 2>&1 || {
+  echo "UI build failed — see /tmp/regwatch-build.log"
+  exit 1
+}
 
 cleanup() {
   echo
