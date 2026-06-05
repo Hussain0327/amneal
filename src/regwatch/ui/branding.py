@@ -11,11 +11,11 @@ from __future__ import annotations
 import streamlit as st
 
 # Brand palette -------------------------------------------------------------
-GOLD = "#F5B400"          # primary Amneal gold
-GOLD_DEEP = "#D99400"     # darker gold for gradient depth / hovers
-GOLD_SOFT = "#FFF8E6"     # warm sand tint for surfaces
-INK = "#16213A"           # deep navy ink for text
-INK_SOFT = "#5A6478"      # muted ink for captions
+GOLD = "#F5B400"  # primary Amneal gold
+GOLD_DEEP = "#D99400"  # darker gold for gradient depth / hovers
+GOLD_SOFT = "#FFF8E6"  # warm sand tint for surfaces
+INK = "#16213A"  # deep navy ink for text
+INK_SOFT = "#5A6478"  # muted ink for captions
 
 _CSS = f"""
 <style>
