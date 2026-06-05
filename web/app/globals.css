@@ -1,0 +1,98 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --gold: #f5b400;
+  --gold-deep: #d99400;
+  --gold-soft: #fff8e6;
+  --ink: #16213a;
+  --ink-soft: #5a6478;
+}
+
+body {
+  color: var(--ink);
+  background: #ffffff;
+}
+
+@layer components {
+  /* Amneal brush-script wordmark — gold gradient text */
+  .amneal-wordmark {
+    font-family: var(--font-yellowtail), cursive;
+    background: linear-gradient(95deg, var(--gold) 0%, var(--gold-deep) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: var(--gold);
+    line-height: 1;
+    letter-spacing: 0.5px;
+    filter: drop-shadow(0 1px 1px rgba(217, 148, 0, 0.18));
+  }
+
+  /* Solid gold gradient button with dark ink label */
+  .amneal-btn {
+    @apply rounded-lg px-4 py-2 font-semibold text-ink transition disabled:cursor-not-allowed disabled:opacity-60;
+    background: linear-gradient(95deg, var(--gold) 0%, var(--gold-deep) 100%);
+  }
+  .amneal-btn:hover:not(:disabled) {
+    filter: brightness(1.05);
+  }
+  .amneal-btn:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+
+  /* White card with a gold left edge */
+  .amneal-card {
+    @apply rounded-lg border border-gold-soft bg-white p-4;
+    border-left: 4px solid var(--gold);
+    box-shadow: 0 1px 3px rgba(22, 33, 58, 0.05);
+  }
+
+  /* Inputs with a gold focus ring */
+  .amneal-input {
+    @apply w-full rounded-md border border-gray-300 px-3 py-2 outline-none;
+  }
+  .amneal-input:focus {
+    border-color: var(--gold);
+    box-shadow: 0 0 0 2px rgba(245, 180, 0, 0.25);
+  }
+}
+
+/* Minimal prose styling for rendered markdown (no typography plugin needed) */
+.prose-amneal h1 {
+  @apply mb-2 mt-4 text-2xl font-bold text-ink;
+}
+.prose-amneal h2 {
+  @apply mb-2 mt-4 text-xl font-bold text-ink;
+}
+.prose-amneal h3 {
+  @apply mb-1 mt-3 text-lg font-semibold text-ink;
+}
+.prose-amneal p {
+  @apply my-2 leading-relaxed;
+}
+.prose-amneal ul {
+  @apply my-2 list-disc pl-6;
+}
+.prose-amneal ol {
+  @apply my-2 list-decimal pl-6;
+}
+.prose-amneal li {
+  @apply my-1;
+}
+.prose-amneal a {
+  @apply font-medium text-gold-deep underline;
+}
+.prose-amneal code {
+  @apply rounded bg-gold-soft px-1 py-0.5 text-sm;
+}
+.prose-amneal table {
+  @apply my-3 w-full border-collapse text-sm;
+}
+.prose-amneal th,
+.prose-amneal td {
+  @apply border border-gold-soft px-2 py-1 text-left;
+}
+.prose-amneal blockquote {
+  @apply border-l-2 border-gold-soft pl-3 text-ink-soft;
+}

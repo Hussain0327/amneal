@@ -23,6 +23,7 @@ from typing import Any
 
 from config.settings import get_settings
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from regwatch.assemble.dossier import build_dossier
@@ -53,6 +54,15 @@ app = FastAPI(
         "it never authors submission content or renders regulatory judgment."
     ),
     lifespan=_lifespan,
+)
+
+# CORS — the Next.js UI (web/) calls this API from the browser. Allowlist comes
+# from settings; there is no auth layer yet, so the allowlist is the boundary.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=get_settings().cors_allow_origins,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
 )
 
 

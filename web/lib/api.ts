@@ -1,0 +1,108 @@
+// Typed client for the RegWatch FastAPI backend. Types mirror the Pydantic
+// response models in src/regwatch/api/main.py exactly — field names are the
+// contract, do not rename without changing the API.
+
+export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+
+export interface Citation {
+  short_name: string;
+  page: number;
+  chunk_id: string;
+  doc_id: number;
+  version_id: number;
+  source_url: string;
+  snippet: string;
+}
+
+export interface ClarifyOption {
+  label: string;
+  query: string;
+  filters: Record<string, string> | null;
+}
+
+export type QueryStatus = "answer" | "clarify" | "refused";
+
+export interface QueryResponse {
+  answer: string;
+  citations: Citation[];
+  refused: boolean;
+  model_name: string;
+  audit_id: number;
+  status: QueryStatus;
+  interpretation: string | null;
+  clarify: ClarifyOption[];
+}
+
+export interface AssembleResponse {
+  markdown: string;
+  sections: Record<string, unknown>;
+  refused: boolean;
+}
+
+export type AlertRecord = Record<string, unknown>;
+export interface WatchLatest {
+  count: number;
+  alerts: AlertRecord[];
+}
+
+export type ProductRecord = Record<string, unknown>;
+export interface ProductsResponse {
+  count: number;
+  products: ProductRecord[];
+}
+
+export interface PublicSettings {
+  embedding_provider: string;
+  llm_provider: string;
+  llm_model: string;
+  retrieval_top_k: number | null;
+  refusal_score_threshold: number;
+  company_name: string;
+}
+
+async function postJSON<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(`POST ${path} → ${res.status}: ${await res.text()}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+async function getJSON<T>(path: string): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`);
+  if (!res.ok) {
+    throw new Error(`GET ${path} → ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export function askQuery(
+  question: string,
+  filters: Record<string, string> | null = null,
+): Promise<QueryResponse> {
+  return postJSON<QueryResponse>("/query", { question, filters });
+}
+
+export function assemble(
+  active_ingredient: string,
+  dosage_form: string | null = null,
+  rld: string | null = null,
+): Promise<AssembleResponse> {
+  return postJSON<AssembleResponse>("/assemble", { active_ingredient, dosage_form, rld });
+}
+
+export function watchLatest(): Promise<WatchLatest> {
+  return getJSON<WatchLatest>("/watch/latest");
+}
+
+export function listProducts(): Promise<ProductsResponse> {
+  return getJSON<ProductsResponse>("/products");
+}
+
+export function getPublicSettings(): Promise<PublicSettings> {
+  return getJSON<PublicSettings>("/settings");
+}

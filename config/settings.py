@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -91,6 +91,13 @@ class Settings(BaseSettings):
     # ---------- API ----------
     api_host: str = "127.0.0.1"
     api_port: int = 8000
+    # Comma-separated CORS allowlist for the Next.js UI in web/. Defaults to the
+    # Next.js dev server. There is no API auth yet, so keep this tight.
+    cors_allow_origins_csv: str = "http://localhost:3000,http://127.0.0.1:3000"
+
+    @property
+    def cors_allow_origins(self) -> list[str]:
+        return [o.strip() for o in self.cors_allow_origins_csv.split(",") if o.strip()]
 
     # ---------- Refusal ----------
     refusal_text: str = (
