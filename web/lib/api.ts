@@ -2,7 +2,10 @@
 // response models in src/regwatch/api/main.py exactly — field names are the
 // contract, do not rename without changing the API.
 
-export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+// Default to the same-origin "/api" path that next.config.mjs proxies to the
+// FastAPI backend, so the browser only talks to the Next origin (one tunnel, no
+// CORS). Set NEXT_PUBLIC_API_BASE to have the browser call the API directly.
+export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "/api";
 
 export interface Citation {
   short_name: string;
