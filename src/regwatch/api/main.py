@@ -79,12 +79,21 @@ class QueryCitation(BaseModel):
     snippet: str
 
 
+class ClarifyOptionOut(BaseModel):
+    label: str
+    query: str
+    filters: dict[str, Any] | None = None
+
+
 class QueryResponse(BaseModel):
     answer: str
     citations: list[QueryCitation]
     refused: bool
     model_name: str
     audit_id: int
+    status: str = "answer"  # "answer" | "clarify" | "refused"
+    interpretation: str | None = None
+    clarify: list[ClarifyOptionOut] = []
 
 
 @app.post("/query", response_model=QueryResponse)
@@ -96,6 +105,12 @@ def query(req: QueryRequest) -> QueryResponse:
         refused=result.refused,
         model_name=result.model_name,
         audit_id=result.audit_id,
+        status=result.status,
+        interpretation=result.interpretation,
+        clarify=[
+            ClarifyOptionOut(label=o.label, query=o.query, filters=o.filters)
+            for o in result.clarify
+        ],
     )
 
 

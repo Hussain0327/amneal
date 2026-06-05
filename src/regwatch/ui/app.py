@@ -7,7 +7,10 @@ Run with:
 
 from __future__ import annotations
 
+import json
 import os
+import time
+from pathlib import Path
 
 import streamlit as st
 from config.settings import get_settings
@@ -19,6 +22,38 @@ from regwatch.watch.alerts import latest_digest_records
 from regwatch.watch.watchlist import list_watchlist
 
 st.set_page_config(page_title="REGWATCH", layout="wide")
+
+
+# region agent log
+_AGENT_DEBUG_LOG_PATH = Path("/Users/hussain/amneal/.cursor/debug-04b0f1.log")
+
+
+def _agent_debug_log(
+    *,
+    run_id: str,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, object],
+) -> None:
+    payload = {
+        "sessionId": "04b0f1",
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    try:
+        _AGENT_DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _AGENT_DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, sort_keys=True) + "\n")
+    except Exception:
+        pass
+
+
+# endregion
 
 
 @st.cache_resource
@@ -47,11 +82,17 @@ def render_ask() -> None:
     st.header("Ask")
     st.caption(
         "Plain-language Q&A over the FDA guidance corpus. Every claim is cited. "
-        "If the corpus does not contain the answer, the system refuses."
+        "Type a drug name or a question — it'll guide you if it needs more."
     )
 
+    # The active query lives in session_state so clarify buttons (which trigger
+    # their own rerun) can update it without the form being re-submitted.
     with st.form("ask_form"):
-        question = st.text_area("Question", placeholder="What study design is recommended for ...")
+        typed = st.text_area(
+            "Question",
+            value=st.session_state.get("ask_query", ""),
+            placeholder="propranolol   ·   What BE study design is recommended for metformin?",
+        )
         c1, c2 = st.columns(2)
         with c1:
             ingredient_filter = st.text_input("Filter: active ingredient (optional)", "")
@@ -59,20 +100,65 @@ def render_ask() -> None:
             dosage_filter = st.text_input("Filter: dosage form (optional)", "")
         submitted = st.form_submit_button("Ask")
 
-    if not submitted:
-        return
-    if not question.strip():
-        st.warning("Enter a question.")
-        return
+    # region agent log
+    _agent_debug_log(
+        run_id="initial",
+        hypothesis_id="H5",
+        location="src/regwatch/ui/app.py:82",
+        message="ask_form_submit_state",
+        data={
+            "submitted": bool(submitted),
+            "typed_blank": not bool(typed.strip()),
+            "had_previous_query": bool(st.session_state.get("ask_query")),
+            "ingredient_filter_set": bool(ingredient_filter.strip()),
+            "dosage_filter_set": bool(dosage_filter.strip()),
+        },
+    )
+    # endregion
 
-    filters: dict[str, str] = {}
-    if ingredient_filter.strip():
-        filters["normalized_name"] = ingredient_filter.strip().lower()
-    if dosage_filter.strip():
-        filters["dosage_form"] = dosage_filter.strip()
+    if submitted and typed.strip():
+        filters: dict[str, str] = {}
+        if ingredient_filter.strip():
+            filters["normalized_name"] = ingredient_filter.strip().lower()
+        if dosage_filter.strip():
+            filters["dosage_form"] = dosage_filter.strip()
+        st.session_state["ask_query"] = typed.strip()
+        st.session_state["ask_filters"] = filters
+    elif submitted:
+        st.warning("Enter a question.")
+
+    query = st.session_state.get("ask_query")
+    if not query:
+        return
+    filters = st.session_state.get("ask_filters") or {}
+    # region agent log
+    _agent_debug_log(
+        run_id="initial",
+        hypothesis_id="H5",
+        location="src/regwatch/ui/app.py:104",
+        message="ask_active_query_state",
+        data={
+            "submitted": bool(submitted),
+            "typed_blank": not bool(typed.strip()),
+            "query_present": bool(query),
+            "filters_keys": sorted(filters.keys()),
+            "reusing_previous_after_empty_submit": bool(submitted and not typed.strip() and query),
+        },
+    )
+    # endregion
 
     with st.spinner("Thinking..."):
-        result = ask(question, filters=filters or None)
+        result = ask(query, filters=filters or None)
+
+    if result.status == "clarify":
+        st.info(result.interpretation or result.answer)
+        for i, opt in enumerate(result.clarify):
+            # Key on the option target so clicks never collide across clarifies.
+            if st.button(opt.label, key=f"opt::{query}::{i}", use_container_width=True):
+                st.session_state["ask_query"] = opt.query
+                st.session_state["ask_filters"] = opt.filters or {}
+                st.rerun()
+        return
 
     if result.refused:
         st.warning(result.answer)

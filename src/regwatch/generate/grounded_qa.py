@@ -16,10 +16,12 @@ Flow:
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from config.settings import get_settings
+from sqlalchemy import func
+from sqlmodel import select
 
 from regwatch.common.audit import log_query
 from regwatch.common.citations import (
@@ -31,8 +33,10 @@ from regwatch.common.logging import get_logger
 from regwatch.generate.llm import LLMMessage, current_model_name, get_llm_provider
 from regwatch.generate.prompts import GROUNDED_QA_SYSTEM, GROUNDED_QA_USER
 from regwatch.retrieve.reranker import rerank_passages
-from regwatch.retrieve.resolver import resolve_product
+from regwatch.retrieve.resolver import resolve_brand, resolve_product, suggest_products
 from regwatch.retrieve.retriever import RetrievedPassage, retrieve
+from regwatch.store.db import session_scope
+from regwatch.store.models import PsgDocument
 
 log = get_logger(__name__)
 
@@ -49,6 +53,15 @@ class Citation:
 
 
 @dataclass
+class ClarifyOption:
+    """A clickable follow-up: a plain-language label + the query to resubmit."""
+
+    label: str
+    query: str
+    filters: dict[str, Any] | None = None
+
+
+@dataclass
 class QAResult:
     answer: str
     citations: list[Citation]
@@ -56,6 +69,133 @@ class QAResult:
     model_name: str
     audit_id: int
     retrieved: list[dict[str, Any]]
+    # status supersedes the answer/refuse binary: "clarify" means we know the
+    # product but need direction (offer `clarify` options) rather than guess.
+    status: str = "answer"  # "answer" | "clarify" | "refused"
+    interpretation: str | None = None
+    clarify: list[ClarifyOption] = field(default_factory=list)
+
+
+# Filler words that carry no topic; if a question is only these plus the drug
+# name, it's effectively a bare drug name and we should guide, not auto-answer.
+_FILLER = frozenset(
+    {
+        "i",
+        "need",
+        "help",
+        "on",
+        "with",
+        "about",
+        "me",
+        "please",
+        "info",
+        "information",
+        "tell",
+        "the",
+        "a",
+        "an",
+        "for",
+        "of",
+        "what",
+        "whats",
+        "can",
+        "you",
+        "could",
+        "would",
+        "is",
+        "are",
+        "do",
+        "does",
+        "my",
+        "we",
+        "want",
+        "to",
+        "know",
+        "give",
+        "show",
+        "more",
+        "something",
+        "else",
+        "question",
+        "hi",
+        "hello",
+        "regarding",
+        "re",
+        "some",
+        "any",
+        "this",
+        "that",
+        "guidance",
+        "drug",
+        "fda",
+        "anything",
+    }
+)
+
+
+def _looks_vague(question: str, normalized_name: str) -> bool:
+    """True when the question minus the drug name and filler has no real topic.
+
+    Deterministic (no LLM), so the "bare drug name -> clarify" hero path is
+    unit-testable; the live ``model_refusal`` net handles everything subtler.
+    """
+    drug_tokens = {t for t in re.split(r"[^a-z0-9]+", normalized_name.lower()) if t}
+    residual = [
+        t
+        for t in re.split(r"[^a-z0-9]+", question.lower())
+        if t and t not in drug_tokens and t not in _FILLER
+    ]
+    return not residual
+
+
+def _doc_count(normalized_name: str) -> int:
+    with session_scope() as s:
+        return int(
+            s.scalar(
+                select(func.count())
+                .select_from(PsgDocument)
+                .where(PsgDocument.normalized_name == normalized_name)
+            )
+            or 0
+        )
+
+
+def _interpretation_for(normalized_name: str) -> str:
+    n = _doc_count(normalized_name)
+    docs = "document" if n == 1 else "documents"
+    have = (
+        f"FDA has {n} product-specific guidance {docs} for it" if n else "I have its FDA guidance"
+    )
+    return (
+        f"You're asking about {normalized_name.title()}. {have} — " "what would you like to know?"
+    )
+
+
+def build_options(normalized_name: str) -> list[ClarifyOption]:
+    """Plain-language things we can actually answer for a resolved product.
+
+    These are QUESTION TEMPLATES that re-run retrieval — they do not read the
+    (possibly empty) BeRequirement table — so they work on the full catalog.
+    """
+    nm = normalized_name
+    flt = {"normalized_name": nm}
+    return [
+        ClarifyOption(
+            "Recommended bioequivalence (BE) study — how FDA wants a generic shown equivalent",
+            f"What bioequivalence study design does FDA recommend for {nm}?",
+            flt,
+        ),
+        ClarifyOption(
+            "Dissolution method",
+            f"What dissolution method does the FDA guidance recommend for {nm}?",
+            flt,
+        ),
+        ClarifyOption(
+            "Strengths and dosage forms covered",
+            f"What strengths and dosage forms does the FDA guidance cover for {nm}?",
+            flt,
+        ),
+    ]
 
 
 def _format_passages(passages: list[RetrievedPassage]) -> str:
@@ -145,6 +285,41 @@ def _refuse(
             }
             for p in passages
         ],
+        status="refused",
+    )
+
+
+def _clarify(
+    *,
+    question: str,
+    reason: str,
+    model_name: str,
+    interpretation: str,
+    options: list[ClarifyOption],
+) -> QAResult:
+    """Guide instead of guess: we know the product (or a near-match) but need
+    direction. Carries ZERO citations (never fabricates) and logs one audit row
+    (INV-6), exactly like ``_refuse``."""
+    audit_id = log_query(
+        mode="qa",
+        query_text=question,
+        retrieved=[],
+        answer_text=interpretation,
+        citations=[],
+        refused=False,
+        model_name=model_name,
+    )
+    log.info("qa_clarify", reason=reason, audit_id=audit_id, options=len(options))
+    return QAResult(
+        answer=interpretation,
+        citations=[],
+        refused=False,
+        model_name=model_name,
+        audit_id=audit_id,
+        retrieved=[],
+        status="clarify",
+        interpretation=interpretation,
+        clarify=options,
     )
 
 
@@ -154,10 +329,11 @@ def ask(
     filters: dict[str, Any] | None = None,
     k: int | None = None,
 ) -> QAResult:
-    """Grounded Q&A entry point — answer with citations, or refuse."""
+    """Grounded Q&A entry point — answer with citations, clarify, or refuse."""
     s = get_settings()
     model_name = current_model_name(role="synthesizer")
     active_filters: dict[str, Any] = dict(filters or {})
+    resolved_by_name = False
 
     # Entity resolution FIRST: pin the product before semantic retrieval so FDA
     # template boilerplate shared across drugs cannot leak a wrong-drug citation.
@@ -166,12 +342,65 @@ def ask(
         resolution = resolve_product(question)
         if resolution.status == "resolved":
             active_filters["normalized_name"] = resolution.normalized_name
+            resolved_by_name = resolution.by_name
+        elif resolution.status == "ambiguous":
+            # Several products match → ASK which, don't guess (cross-drug guard).
+            return _clarify(
+                question=question,
+                reason="ambiguous_product",
+                model_name=model_name,
+                interpretation="More than one product matches that. Which did you mean?",
+                options=[
+                    ClarifyOption(name.title(), name, {"normalized_name": name})
+                    for name in resolution.candidates
+                ],
+            )
         else:
-            # Ambiguous or unresolvable for a product-specific corpus → never
-            # answer globally (the cross-drug-leak guard): refuse over guessing
-            # the drug. Clarify options are surfaced by the orchestration layer.
-            reason = "ambiguous_product" if resolution.status == "ambiguous" else "no_product"
-            return _refuse(question=question, passages=[], reason=reason, model_name=model_name)
+            # No product named. Offer a high-confidence "did you mean" for genuine
+            # typos, then a brand→generic lookup (Adderall → amphetamine); else
+            # refuse (e.g. romidepsin — absent, a deliberate must-refuse).
+            suggestions = suggest_products(question)
+            if suggestions:
+                return _clarify(
+                    question=question,
+                    reason="did_you_mean",
+                    model_name=model_name,
+                    interpretation="I couldn't find that exact drug. Did you mean:",
+                    options=[
+                        ClarifyOption(name.title(), name, {"normalized_name": name})
+                        for name in suggestions
+                    ],
+                )
+            brand_matches = resolve_brand(question)
+            if brand_matches:
+                return _clarify(
+                    question=question,
+                    reason="brand_lookup",
+                    model_name=model_name,
+                    interpretation=(
+                        "That looks like a brand name. Did you mean its generic ingredient?"
+                    ),
+                    options=[
+                        ClarifyOption(name.title(), name, {"normalized_name": name})
+                        for name in brand_matches
+                    ],
+                )
+            return _refuse(
+                question=question, passages=[], reason="no_product", model_name=model_name
+            )
+
+    resolved_name = active_filters.get("normalized_name")
+
+    # Bare drug name / no real question → guide with options instead of dumping a
+    # default BE answer. Deterministic, pre-LLM (the unit-testable hero path).
+    if resolved_name and resolved_by_name and _looks_vague(question, resolved_name):
+        return _clarify(
+            question=question,
+            reason="vague_input",
+            model_name=model_name,
+            interpretation=_interpretation_for(resolved_name),
+            options=build_options(resolved_name),
+        )
 
     # Stage 1: wide-net vector search (up to VECTOR_TOP_K), constrained to the product.
     passages = retrieve(question, k=k, filters=active_filters)
@@ -218,6 +447,18 @@ def ask(
 
     # LLM-side refusal: it returned the exact refusal sentinel.
     if answer == s.refusal_text or answer.startswith(s.refusal_text):
+        # The user named a real drug but the model couldn't answer this phrasing
+        # (the live net for vague inputs `_looks_vague` didn't catch) → guide.
+        # When the product came from the single-product fallback (no drug named),
+        # a model refusal is a genuine "not covered" → stay refused (INV-2).
+        if resolved_by_name and resolved_name:
+            return _clarify(
+                question=question,
+                reason="model_refusal",
+                model_name=response.model,
+                interpretation=_interpretation_for(resolved_name),
+                options=build_options(resolved_name),
+            )
         return _refuse(
             question=question,
             passages=passages,
