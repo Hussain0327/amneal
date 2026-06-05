@@ -22,6 +22,7 @@ Read these in order if you are new to the project:
 | `DOCKER.md` | Engineers / deployment owners | Documents the Dockerfile, Compose services, embedding modes, and ingest implications. |
 | `PROJECT_SPEC.md` | Engineers / reviewers | Original POC spec, phase plan, and compliance invariants. |
 | `DECISIONS.md` | Engineers / reviewers | Append-only decision log. Read this before changing architecture. |
+| `PROD_READINESS.md` | Engineers / deployment owners | Tracks what stands between the POC and a real production deployment, prioritized and mapped to the tree. |
 | `CLAUDE.md` | Agent operators | Working instructions for Claude Code or similar coding agents. |
 | `typescript-ui-replaces-streamlit-golden-pudding.md` | Product / engineering planning | Future architecture plan for router, handlers, synthesizer, and TypeScript UI. |
 

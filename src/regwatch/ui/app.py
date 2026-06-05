@@ -15,10 +15,12 @@ from config.settings import get_settings
 from regwatch.assemble.dossier import build_dossier
 from regwatch.generate.grounded_qa import ask
 from regwatch.store.db import init_db
+from regwatch.ui.branding import inject_css, render_header, render_sidebar_wordmark
 from regwatch.watch.alerts import latest_digest_records
 from regwatch.watch.watchlist import list_watchlist
 
-st.set_page_config(page_title="REGWATCH", layout="wide")
+st.set_page_config(page_title="Amneal REGWATCH", layout="wide")
+inject_css()
 
 
 @st.cache_resource
@@ -32,7 +34,8 @@ _init_db_once()
 
 def render_sidebar() -> str:
     s = get_settings()
-    st.sidebar.title("REGWATCH")
+    render_sidebar_wordmark()
+    st.sidebar.markdown("**REGWATCH**")
     st.sidebar.caption(
         "Operational POC. Public FDA data only. Surfaces and cites; never authors submissions."
     )
@@ -44,7 +47,7 @@ def render_sidebar() -> str:
 
 
 def render_ask() -> None:
-    st.header("Ask")
+    render_header("REGWATCH · Ask")
     st.caption(
         "Plain-language Q&A over the FDA guidance corpus. Every claim is cited. "
         "Type a drug name or a question — it'll guide you if it needs more."
@@ -113,7 +116,7 @@ def render_ask() -> None:
 
 
 def render_assemble() -> None:
-    st.header("Assemble")
+    render_header("REGWATCH · Assemble")
     st.caption(
         "Build a cited dossier for a target product. "
         "This is a scaffold of what the FDA calls for, not what your team has done."
@@ -148,7 +151,7 @@ def render_assemble() -> None:
 
 
 def render_watch() -> None:
-    st.header("Watch")
+    render_header("REGWATCH · Watch")
     st.caption("Recent alerts from the change feed. Watchlist drives what surfaces here.")
     records = latest_digest_records(limit=100)
     if not records:
