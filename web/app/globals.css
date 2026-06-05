@@ -2,97 +2,545 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ============================================================================
+   REGWATCH — "Federal Register, with a maker's seal"
+   Editorial, authoritative, warm. An FDA guidance tool that looks like a
+   published guidance document: parchment, navy ink, gold as the official accent.
+   ========================================================================== */
+
 :root {
+  /* Paper / surfaces */
+  --paper: #faf6ec;
+  --paper-2: #f4eede;
+  --paper-3: #efe7d3;
+  --edge: #e4d9bf; /* hairline on paper */
+
+  /* Ink */
+  --ink: #16213a; /* brand navy — body + headings */
+  --ink-2: #283450;
+  --ink-soft: #6c7286; /* meta, captions */
+  --ink-faint: #9a9784;
+
+  /* Gold — the official accent. Used for rules, seals, markers; not body text. */
   --gold: #f5b400;
-  --gold-deep: #d99400;
-  --gold-soft: #fff8e6;
-  --ink: #16213a;
-  --ink-soft: #5a6478;
+  --gold-deep: #c98a0c;
+  --gold-ink: #8a5b00; /* legible gold-toned text on paper */
+  --gold-wash: #fcefca;
+
+  /* Serious notice (refusal / stamp) */
+  --oxblood: #7a2e2e;
+  --oxblood-wash: #f3e3df;
+
+  --shadow-soft: 0 1px 2px rgba(22, 33, 58, 0.05), 0 14px 34px -20px rgba(22, 33, 58, 0.28);
+  --shadow-lift: 0 2px 4px rgba(22, 33, 58, 0.06), 0 22px 48px -24px rgba(22, 33, 58, 0.34);
+
+  --maxw: 56rem;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 body {
+  margin: 0;
+  font-family: var(--font-body), ui-sans-serif, system-ui, sans-serif;
   color: var(--ink);
-  background: #ffffff;
+  background-color: var(--paper);
+  /* warm depth: a faint radial light from the upper-left */
+  background-image:
+    radial-gradient(120% 90% at 0% -10%, rgba(245, 180, 0, 0.1) 0%, rgba(245, 180, 0, 0) 42%),
+    radial-gradient(100% 80% at 100% 0%, rgba(22, 33, 58, 0.045) 0%, rgba(22, 33, 58, 0) 38%);
+  background-attachment: fixed;
 }
 
-@layer components {
-  /* Amneal brush-script wordmark — gold gradient text */
-  .amneal-wordmark {
-    font-family: var(--font-yellowtail), cursive;
-    background: linear-gradient(95deg, var(--gold) 0%, var(--gold-deep) 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    color: var(--gold);
-    line-height: 1;
-    letter-spacing: 0.5px;
-    filter: drop-shadow(0 1px 1px rgba(217, 148, 0, 0.18));
-  }
-
-  /* Solid gold gradient button with dark ink label */
-  .amneal-btn {
-    @apply rounded-lg px-4 py-2 font-semibold text-ink transition disabled:cursor-not-allowed disabled:opacity-60;
-    background: linear-gradient(95deg, var(--gold) 0%, var(--gold-deep) 100%);
-  }
-  .amneal-btn:hover:not(:disabled) {
-    filter: brightness(1.05);
-  }
-  .amneal-btn:active:not(:disabled) {
-    transform: translateY(1px);
-  }
-
-  /* White card with a gold left edge */
-  .amneal-card {
-    @apply rounded-lg border border-gold-soft bg-white p-4;
-    border-left: 4px solid var(--gold);
-    box-shadow: 0 1px 3px rgba(22, 33, 58, 0.05);
-  }
-
-  /* Inputs with a gold focus ring */
-  .amneal-input {
-    @apply w-full rounded-md border border-gray-300 px-3 py-2 outline-none;
-  }
-  .amneal-input:focus {
-    border-color: var(--gold);
-    box-shadow: 0 0 0 2px rgba(245, 180, 0, 0.25);
-  }
+/* Paper grain — a whisper of fractal noise over everything */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.04;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
-/* Minimal prose styling for rendered markdown (no typography plugin needed) */
-.prose-amneal h1 {
-  @apply mb-2 mt-4 text-2xl font-bold text-ink;
+/* ---------- Layout shell ---------- */
+.shell {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  min-height: 100vh;
 }
-.prose-amneal h2 {
-  @apply mb-2 mt-4 text-xl font-bold text-ink;
+.canvas {
+  flex: 1;
+  min-width: 0;
+  padding: 3.25rem clamp(1.5rem, 5vw, 4.5rem) 4rem;
 }
-.prose-amneal h3 {
-  @apply mb-1 mt-3 text-lg font-semibold text-ink;
+.measure {
+  max-width: var(--maxw);
 }
-.prose-amneal p {
-  @apply my-2 leading-relaxed;
+
+/* ---------- Typographic primitives ---------- */
+.kicker {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.66rem;
+  font-weight: 500;
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  color: var(--gold-ink);
 }
-.prose-amneal ul {
-  @apply my-2 list-disc pl-6;
+.display {
+  font-family: var(--font-display), Georgia, serif;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.02;
+  color: var(--ink);
 }
-.prose-amneal ol {
-  @apply my-2 list-decimal pl-6;
+.code {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-variant-ligatures: none;
 }
-.prose-amneal li {
-  @apply my-1;
+
+/* The Amneal brush wordmark — gold gradient ink */
+.wordmark {
+  font-family: var(--font-script), cursive;
+  background: linear-gradient(96deg, var(--gold) 0%, var(--gold-deep) 92%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: var(--gold);
+  line-height: 0.9;
+  filter: drop-shadow(0 1px 1px rgba(201, 138, 12, 0.25));
 }
-.prose-amneal a {
-  @apply font-medium text-gold-deep underline;
+
+/* Gold wax-seal emblem (concentric ring + center) */
+.seal {
+  width: 2.1rem;
+  height: 2.1rem;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0) 45%),
+    conic-gradient(from 210deg, var(--gold-deep), var(--gold), var(--gold-deep));
+  box-shadow:
+    inset 0 0 0 2px rgba(255, 255, 255, 0.35),
+    inset 0 0 0 3px var(--gold-deep),
+    0 2px 6px rgba(138, 91, 0, 0.35);
 }
-.prose-amneal code {
-  @apply rounded bg-gold-soft px-1 py-0.5 text-sm;
+.seal::after {
+  content: "RW";
+  font-family: var(--font-mono), monospace;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #3a2600;
 }
-.prose-amneal table {
-  @apply my-3 w-full border-collapse text-sm;
+
+/* ---------- Rules ---------- */
+.rule-gold {
+  height: 2px;
+  border: 0;
+  background: linear-gradient(90deg, var(--gold) 0%, var(--gold-deep) 26%, transparent 100%);
 }
-.prose-amneal th,
-.prose-amneal td {
-  @apply border border-gold-soft px-2 py-1 text-left;
+.hair {
+  border: 0;
+  border-top: 1px solid var(--edge);
 }
-.prose-amneal blockquote {
-  @apply border-l-2 border-gold-soft pl-3 text-ink-soft;
+
+/* ---------- Document card ---------- */
+.doc {
+  position: relative;
+  background: linear-gradient(180deg, #fffdf8, var(--paper-2));
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  box-shadow: var(--shadow-soft);
+}
+.doc--pad {
+  padding: 1.6rem 1.75rem;
+}
+/* a gold spine down the left edge */
+.doc--seal::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: linear-gradient(180deg, var(--gold), var(--gold-deep));
+  border-radius: 3px 0 0 3px;
+}
+
+/* ---------- Fields ---------- */
+.field {
+  width: 100%;
+  font-family: var(--font-body), sans-serif;
+  font-size: 1rem;
+  color: var(--ink);
+  background: #fffdf8;
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  padding: 0.7rem 0.85rem;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.field::placeholder {
+  color: var(--ink-faint);
+}
+.field:focus {
+  outline: none;
+  background: #fff;
+  border-color: var(--gold-deep);
+  box-shadow: 0 0 0 3px rgba(245, 180, 0, 0.18);
+}
+.field--inquiry {
+  font-family: var(--font-display), serif;
+  font-size: 1.4rem;
+  font-weight: 400;
+  line-height: 1.4;
+  padding: 0.4rem 0;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid var(--edge);
+  border-radius: 0;
+  resize: vertical;
+}
+.field--inquiry:focus {
+  background: transparent;
+  box-shadow: none;
+  border-bottom-color: var(--gold-deep);
+}
+
+/* ---------- Buttons ---------- */
+.btn {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #2a1c00;
+  background: linear-gradient(96deg, var(--gold) 0%, var(--gold-deep) 100%);
+  border: 0;
+  border-radius: 2px;
+  padding: 0.72rem 1.4rem;
+  cursor: pointer;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.4) inset, 0 6px 16px -8px rgba(138, 91, 0, 0.7);
+  transition: transform 0.06s ease, filter 0.15s ease, box-shadow 0.15s ease;
+}
+.btn:hover:not(:disabled) {
+  filter: brightness(1.05) saturate(1.05);
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+.btn--ghost {
+  background: transparent;
+  color: var(--gold-ink);
+  box-shadow: inset 0 0 0 1px var(--edge);
+}
+.btn--ghost:hover:not(:disabled) {
+  box-shadow: inset 0 0 0 1px var(--gold-deep);
+  background: var(--gold-wash);
+  filter: none;
+}
+
+/* ---------- Clarify option (an "inquiry continued" card) ---------- */
+.opt {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  width: 100%;
+  text-align: left;
+  background: #fffdf8;
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  padding: 0.85rem 1rem;
+  cursor: pointer;
+  color: var(--ink);
+  font-size: 0.98rem;
+  transition: border-color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
+}
+.opt:hover {
+  border-color: var(--gold-deep);
+  box-shadow: var(--shadow-soft);
+  transform: translateX(2px);
+}
+.opt__no {
+  flex: none;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--gold-ink);
+  width: 1.6rem;
+  height: 1.6rem;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--gold-wash);
+  box-shadow: inset 0 0 0 1px var(--gold-deep);
+}
+.opt__arrow {
+  margin-left: auto;
+  color: var(--gold-deep);
+  transition: transform 0.15s ease;
+}
+.opt:hover .opt__arrow {
+  transform: translateX(3px);
+}
+
+/* ---------- References (the signature: cited answer = published excerpt) ---------- */
+.ref {
+  position: relative;
+  padding: 0.9rem 0 0.9rem 2.4rem;
+  border-top: 1px solid var(--edge);
+}
+.ref:first-child {
+  border-top: 0;
+}
+.ref__no {
+  position: absolute;
+  left: 0;
+  top: 0.95rem;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--gold-ink);
+}
+.ref__src {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+}
+.ref__page {
+  color: var(--ink-soft);
+}
+.ref__quote {
+  margin: 0.4rem 0 0.5rem;
+  padding-left: 0.9rem;
+  border-left: 2px solid var(--gold);
+  font-family: var(--font-display), serif;
+  font-style: italic;
+  font-size: 0.98rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.link {
+  color: var(--gold-ink);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(138, 91, 0, 0.35);
+  transition: border-color 0.15s ease, color 0.15s ease;
+  word-break: break-all;
+}
+.link:hover {
+  color: var(--gold-deep);
+  border-bottom-color: var(--gold-deep);
+}
+
+/* ---------- Stamp (refusal notice) ---------- */
+.stamp {
+  position: relative;
+  border: 1.5px solid var(--oxblood);
+  border-radius: 3px;
+  background: var(--oxblood-wash);
+  padding: 1.2rem 1.4rem 1.2rem 1.4rem;
+  color: #5a2222;
+}
+.stamp__tag {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--oxblood);
+}
+
+/* ---------- Tag / chip ---------- */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+  background: var(--paper-3);
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  padding: 0.15rem 0.5rem;
+}
+button.chip {
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+button.chip:hover {
+  border-color: var(--gold-deep);
+  background: var(--gold-wash);
+  color: var(--ink);
+}
+
+/* ---------- Editorial prose (rendered markdown) ---------- */
+.prose {
+  font-size: 1.04rem;
+  line-height: 1.62;
+  color: var(--ink);
+}
+.prose > :first-child {
+  margin-top: 0;
+}
+.prose h1,
+.prose h2,
+.prose h3 {
+  font-family: var(--font-display), serif;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  margin: 1.4rem 0 0.6rem;
+}
+.prose h1 {
+  font-size: 1.7rem;
+}
+.prose h2 {
+  font-size: 1.35rem;
+}
+.prose h3 {
+  font-size: 1.12rem;
+}
+.prose p {
+  margin: 0.7rem 0;
+}
+.prose ul,
+.prose ol {
+  margin: 0.7rem 0;
+  padding-left: 1.3rem;
+}
+.prose li {
+  margin: 0.3rem 0;
+}
+.prose li::marker {
+  color: var(--gold-deep);
+}
+.prose a {
+  color: var(--gold-ink);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(138, 91, 0, 0.35);
+}
+.prose code {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.86em;
+  background: var(--paper-3);
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  padding: 0.05em 0.32em;
+}
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.92rem;
+}
+.prose th,
+.prose td {
+  border: 1px solid var(--edge);
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+}
+.prose th {
+  background: var(--paper-3);
+  font-family: var(--font-mono), monospace;
+  font-weight: 600;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+}
+.prose blockquote {
+  margin: 0.9rem 0;
+  padding-left: 1rem;
+  border-left: 2px solid var(--gold);
+  font-style: italic;
+  color: var(--ink-2);
+}
+
+/* ---------- Ledger table (Watch) ---------- */
+.ledger {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+.ledger th {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  text-align: left;
+  color: var(--ink-soft);
+  padding: 0.5rem 0.7rem;
+  border-bottom: 2px solid var(--ink);
+}
+.ledger td {
+  padding: 0.5rem 0.7rem;
+  border-bottom: 1px solid var(--edge);
+  vertical-align: top;
+}
+.ledger tr:hover td {
+  background: var(--gold-wash);
+}
+
+/* ---------- Motion: staggered editorial reveal ---------- */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes draw {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+.rise {
+  opacity: 0;
+  animation: rise 0.62s cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+}
+.draw {
+  transform-origin: left;
+  animation: draw 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+}
+.d1 {
+  animation-delay: 0.05s;
+}
+.d2 {
+  animation-delay: 0.14s;
+}
+.d3 {
+  animation-delay: 0.24s;
+}
+.d4 {
+  animation-delay: 0.34s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise,
+  .draw {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
 }

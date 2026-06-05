@@ -1,24 +1,46 @@
 import type { Metadata } from "next";
-import { Inter, Yellowtail } from "next/font/google";
+import { Fraunces, IBM_Plex_Mono, Public_Sans, Yellowtail } from "next/font/google";
 
 import { Sidebar } from "@/components/Sidebar";
 import "./globals.css";
 
-const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
-const yellowtail = Yellowtail({ weight: "400", subsets: ["latin"], variable: "--font-yellowtail" });
+// Editorial display serif — gravitas with warmth (page titles, pull quotes).
+const fraunces = Fraunces({
+  subsets: ["latin"],
+  variable: "--font-display",
+  weight: ["400", "500", "600", "900"],
+  style: ["normal", "italic"],
+});
+// Public Sans — the US government design-system typeface. The right body voice
+// for an FDA-facing tool, and pointedly not Inter.
+const publicSans = Public_Sans({
+  subsets: ["latin"],
+  variable: "--font-body",
+  weight: ["300", "400", "500", "600", "700"],
+});
+// Monospace for the codes this domain runs on: PSG / application / NDC numbers.
+const plexMono = IBM_Plex_Mono({
+  subsets: ["latin"],
+  variable: "--font-mono",
+  weight: ["400", "500", "600"],
+});
+// The Amneal brush wordmark, kept as the brand mark.
+const yellowtail = Yellowtail({ subsets: ["latin"], variable: "--font-script", weight: "400" });
 
 export const metadata: Metadata = {
   title: "Amneal REGWATCH",
-  description: "Operational POC over the FDA guidance corpus. Public data only; cites every claim.",
+  description: "FDA guidance intelligence. Public data only; every claim is cited.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className={`${inter.variable} ${yellowtail.variable} font-sans`}>
-        <div className="flex min-h-screen">
+      <body
+        className={`${fraunces.variable} ${publicSans.variable} ${plexMono.variable} ${yellowtail.variable}`}
+      >
+        <div className="shell">
           <Sidebar />
-          <main className="flex-1 px-8 py-7">{children}</main>
+          <main className="canvas">{children}</main>
         </div>
       </body>
     </html>

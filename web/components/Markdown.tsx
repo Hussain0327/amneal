@@ -3,11 +3,10 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-// Renders model/dossier markdown (headings, lists, tables, links) with the
-// Amneal prose styling defined in globals.css. Links open in a new tab.
+// Renders model/dossier markdown as editorial prose (see .prose in globals.css).
 export function Markdown({ children }: { children: string }) {
   return (
-    <div className="prose-amneal">
+    <div className="prose">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
