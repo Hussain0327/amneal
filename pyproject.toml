@@ -12,7 +12,6 @@ dependencies = [
     "tenacity>=9.0",
     "pdfplumber>=0.11",
     "pypdf>=5.1",
-    "sentence-transformers>=3.3",
     "chromadb>=0.5.20",
     "sqlmodel>=0.0.22",
     "sqlalchemy>=2.0",
@@ -32,6 +31,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+local-embeddings = [
+    "sentence-transformers>=3.3",
+    "torch>=2.4,<3",
+    "transformers<5",
+]
 llm = [
     "openai>=1.55",
     "anthropic>=0.40",
@@ -78,6 +82,16 @@ ignore = ["E501", "B008"]  # E501: line length handled by black; B008: typer.Opt
 [tool.black]
 line-length = 100
 target-version = ["py311"]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.mypy]
 python_version = "3.11"

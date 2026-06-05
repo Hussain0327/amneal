@@ -1,0 +1,96 @@
+services:
+  api:
+    build:
+      context: .
+      args:
+        INSTALL_LOCAL_EMBEDDINGS: ${INSTALL_LOCAL_EMBEDDINGS:-false}
+    image: ${REGWATCH_IMAGE:-regwatch:local}
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATA_DIR: /app/data
+      CHROMA_DIR: /app/data/chroma
+      SQLITE_PATH: /app/data/regwatch.db
+      RAW_PDF_DIR: /app/data/raw
+      PROCESSED_DIR: /app/data/processed
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-echo}
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8000:8000"
+    command: ["uvicorn", "regwatch.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  ui:
+    profiles: ["ui"]
+    image: ${REGWATCH_IMAGE:-regwatch:local}
+    build:
+      context: .
+      args:
+        INSTALL_LOCAL_EMBEDDINGS: ${INSTALL_LOCAL_EMBEDDINGS:-false}
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATA_DIR: /app/data
+      CHROMA_DIR: /app/data/chroma
+      SQLITE_PATH: /app/data/regwatch.db
+      RAW_PDF_DIR: /app/data/raw
+      PROCESSED_DIR: /app/data/processed
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-echo}
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8501:8501"
+    command:
+      [
+        "streamlit",
+        "run",
+        "src/regwatch/ui/app.py",
+        "--server.address",
+        "0.0.0.0",
+        "--server.port",
+        "8501",
+        "--server.headless",
+        "true",
+      ]
+    depends_on:
+      api:
+        condition: service_healthy
+
+  ingest:
+    profiles: ["ingest"]
+    image: ${REGWATCH_IMAGE:-regwatch:local}
+    build:
+      context: .
+      args:
+        INSTALL_LOCAL_EMBEDDINGS: ${INSTALL_LOCAL_EMBEDDINGS:-false}
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATA_DIR: /app/data
+      CHROMA_DIR: /app/data/chroma
+      SQLITE_PATH: /app/data/regwatch.db
+      RAW_PDF_DIR: /app/data/raw
+      PROCESSED_DIR: /app/data/processed
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-echo}
+    volumes:
+      - ./data:/app/data
+    command: ["regwatch", "seed"]

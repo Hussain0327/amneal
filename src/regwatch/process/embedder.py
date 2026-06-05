@@ -31,7 +31,14 @@ class LocalBgeSmallProvider:
     def _ensure_model(self) -> None:
         if self._model is not None:
             return
-        from sentence_transformers import SentenceTransformer
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "EMBEDDING_PROVIDER=local-bge-small requires installing "
+                "`regwatch[local-embeddings]` or running "
+                "`uv sync --extra local-embeddings`."
+            ) from exc
 
         LocalBgeSmallProvider._model = SentenceTransformer("BAAI/bge-small-en-v1.5")
 

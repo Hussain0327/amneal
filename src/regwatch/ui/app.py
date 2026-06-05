@@ -7,6 +7,8 @@ Run with:
 
 from __future__ import annotations
 
+import os
+
 import streamlit as st
 from config.settings import get_settings
 
@@ -21,7 +23,8 @@ st.set_page_config(page_title="REGWATCH", layout="wide")
 
 @st.cache_resource
 def _init_db_once() -> None:
-    init_db()
+    if os.getenv("REGWATCH_DB_INITIALIZED") != "1":
+        init_db()
 
 
 _init_db_once()

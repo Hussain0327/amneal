@@ -30,7 +30,7 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: sync deps
-        run: uv sync --extra dev --extra llm
+        run: uv sync --extra dev --extra llm --extra local-embeddings
 
       - name: ruff
         run: uv run ruff check src tests migrations
@@ -46,3 +46,13 @@ jobs:
 
       - name: eval
         run: uv run python -m regwatch.eval.run_eval --check-thresholds
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: docker build
+        run: docker build -t regwatch:ci .

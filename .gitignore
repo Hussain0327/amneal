@@ -25,5 +25,5 @@ data/
 .idea/
 .vscode/
 
-# private notes (kept locally, not pushed)
-docs/
+# private planning notes (kept locally, not pushed)
+docs/*.txt

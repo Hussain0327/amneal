@@ -15,6 +15,7 @@ Endpoints (per spec §10.16):
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -38,7 +39,8 @@ configure_logging()
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    init_db()
+    if os.getenv("REGWATCH_DB_INITIALIZED") != "1":
+        init_db()
     yield
 
 

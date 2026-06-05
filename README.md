@@ -57,7 +57,7 @@ These are code with tests, not guidelines. See `tests/test_invariants.py`.
 | Language | Python 3.11+ via `uv` |
 | Scrape | `httpx` + `selectolax` (`pdfplumber` primary, `pypdf` fallback) |
 | Chunking | Heading + page-aware recursive splitter, ~1000 tokens, ~150 overlap |
-| Embeddings | Pluggable. Default: local `BAAI/bge-small-en-v1.5` via sentence-transformers |
+| Embeddings | Pluggable. Local `BAAI/bge-small-en-v1.5` via sentence-transformers (`--extra local-embeddings`); Docker defaults to `echo` unless opted into the heavier local model image |
 | Vector store | ChromaDB, persistent on disk |
 | Structured store | SQLite via SQLModel |
 | DB migrations | Alembic baseline + incremental migrations |
@@ -74,7 +74,7 @@ hard-coded in business logic.
 
 ```bash
 # install
-uv sync --extra dev --extra llm
+uv sync --extra dev --extra llm --extra local-embeddings
 
 # copy env, fill in OPENAI_API_KEY
 cp .env.example .env
@@ -105,6 +105,62 @@ uv run python -m regwatch.eval.run_eval
 `regwatch init-db` applies Alembic migrations for the active `SQLITE_PATH`.
 When adding or changing tables, create a new migration under `migrations/versions/`
 instead of relying on `SQLModel.metadata.create_all`.
+
+## Docs
+
+Start with [`docs/README.md`](docs/README.md) for the documentation map.
+Key guides:
+
+- [`docs/NON_TECH_GUIDE.md`](docs/NON_TECH_GUIDE.md) for business and
+  regulatory stakeholders.
+- [`docs/TECH_GUIDE_SIMPLE.md`](docs/TECH_GUIDE_SIMPLE.md) for technical
+  onboarding.
+- [`docs/DOCKER.md`](docs/DOCKER.md) for container setup and ingest notes.
+- [`docs/DECISIONS.md`](docs/DECISIONS.md) for the append-only decision log.
+
+## Docker
+
+Full details are in [`docs/DOCKER.md`](docs/DOCKER.md).
+
+The container image runs the same Python app for API, temporary Streamlit UI,
+and ingest jobs. Startup runs `regwatch init-db`; large ingest runs are separate
+commands so API boot stays fast.
+
+```bash
+# build the shared image
+docker build -t regwatch:local .
+
+# optional heavier image with local sentence-transformer embeddings
+docker build --build-arg INSTALL_LOCAL_EMBEDDINGS=true -t regwatch:local-embeddings .
+
+# API on http://localhost:8000
+docker compose up api
+
+# optional Streamlit UI on http://localhost:8501
+docker compose --profile ui up
+
+# one-shot seed ingest; later this becomes the broad PSG/source sync job
+docker compose --profile ingest run --rm ingest
+```
+
+Compose mounts `./data` into `/app/data` so SQLite, Chroma, raw PDFs, and
+processed files survive restarts. The default Compose image uses
+`EMBEDDING_PROVIDER=echo` to avoid shipping PyTorch/CUDA in the baseline image;
+set `INSTALL_LOCAL_EMBEDDINGS=true` and `EMBEDDING_PROVIDER=local-bge-small`
+in `.env`, then run `docker compose build`, if you want local BGE embeddings
+inside Docker. Do not run broad production ingest with `echo` embeddings.
+Container defaults are:
+
+```
+DATA_DIR=/app/data
+CHROMA_DIR=/app/data/chroma
+SQLITE_PATH=/app/data/regwatch.db
+RAW_PDF_DIR=/app/data/raw
+PROCESSED_DIR=/app/data/processed
+EMBEDDING_PROVIDER=echo
+API_HOST=0.0.0.0
+API_PORT=8000
+```
 
 ## API
 
@@ -183,8 +239,9 @@ Definition of Done passed before moving on.
 
 ## What's not done
 
-- No real prod deployment story. Streamlit is fine for the demo; the
-  production UI is the IT team's call.
+- Docker now gives the project a local/container baseline, but it is not a full
+  production deployment story. Streamlit is fine for the demo; the production UI
+  is the IT team's call.
 - The gold set is 10 items, not 30–50. It needs to be paired with what the
   seed actually ingests, not what was planned to be ingested.
 - LLM-as-judge is not wired into the eval. Current metrics are mechanical
