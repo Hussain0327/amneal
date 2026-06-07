@@ -95,6 +95,7 @@ def _validate_field_citation(
         return None, None
     page = citation.get("page")
     quote = citation.get("quote", "")
+
     if not isinstance(page, int) or page < 1 or page > len(pages):
         log.warning("be_extraction_bad_page", field=field_name, page=page)
         return None, None
@@ -148,5 +149,7 @@ def extract_be(pages: list[str]) -> ExtractionResult:
         model=response.model,
     )
     return ExtractionResult(
-        fields=fields, citations=citations, model_name=current_model_name(role="extractor")
+        fields=fields,
+        citations=citations,
+        model_name=current_model_name(role="extractor"),
     )
