@@ -21,6 +21,8 @@ _BASELINE_TABLES = frozenset(
         "query_log",
     }
 )
+_CURRENT_TABLES = _BASELINE_TABLES | frozenset({"chat_session", "chat_message"})
+_BASELINE_REVISION = "0001_initial_schema"
 
 
 def _repo_root() -> Path:
@@ -32,6 +34,20 @@ def _has_complete_legacy_schema() -> bool:
     engine = get_engine()
     tables = set(inspect(engine).get_table_names())
     if not tables >= _BASELINE_TABLES:
+        return False
+    with engine.connect() as conn:
+        return MigrationContext.configure(conn).get_current_revision() is None
+
+
+def _has_complete_current_schema() -> bool:
+    """Detect DBs created from current SQLModel metadata before Alembic stamping."""
+    engine = get_engine()
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if not tables >= _CURRENT_TABLES:
+        return False
+    query_columns = {c["name"] for c in inspector.get_columns("query_log")}
+    if not {"session_id", "turn_id", "status", "route_json"} <= query_columns:
         return False
     with engine.connect() as conn:
         return MigrationContext.configure(conn).get_current_revision() is None
@@ -58,8 +74,12 @@ def init_db() -> None:
     cfg = Config(str(root / "alembic.ini"))
     cfg.set_main_option("script_location", str(root / "migrations"))
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{get_settings().sqlite_path.as_posix()}")
-    if _has_complete_legacy_schema():
+    if _has_complete_current_schema():
         command.stamp(cfg, "head")
+        return
+    if _has_complete_legacy_schema():
+        command.stamp(cfg, _BASELINE_REVISION)
+        command.upgrade(cfg, "head")
         return
     command.upgrade(cfg, "head")
 

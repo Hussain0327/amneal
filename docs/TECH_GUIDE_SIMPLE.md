@@ -52,13 +52,15 @@ Q&A flow:
 
 ```text
 user question
+  -> create or load chat session
+  -> resolve follow-up context when safe
   -> resolve product/entity
   -> retrieve scoped chunks
   -> refuse if retrieval is weak
   -> call LLM with only retrieved evidence
   -> validate citations
-  -> audit the query
-  -> return answer or refusal
+  -> audit the query with session_id and turn_id
+  -> return answer, summary, clarification, scope warning, or refusal
 ```
 
 ## Folder Map
@@ -77,6 +79,7 @@ src/regwatch/
   ingest/                  crawl FDA PSGs and parse PDFs
   process/                 chunk, embed, extract BE fields, detect changes
   store/                   SQLite models/session and Chroma wrapper
+  common/conversation.py    chat session/message persistence and safe context
   retrieve/                product resolution and vector retrieval
   generate/                prompts, LLM providers, grounded Q&A
   watch/                   watchlist, alias discovery, matching, alerts

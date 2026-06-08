@@ -18,17 +18,25 @@ def log_query(
     citations: list[dict[str, Any]],
     refused: bool,
     model_name: str,
+    session_id: str | None = None,
+    turn_id: str | None = None,
+    status: str | None = None,
+    route_json: dict[str, Any] | None = None,
 ) -> int:
     """Persist a query record and return its id."""
     with session_scope() as s:
         row = QueryLog(
             ts=datetime.now(UTC),
+            session_id=session_id,
+            turn_id=turn_id,
             mode=mode,
             query_text=query_text,
             retrieved_json=retrieved,
             answer_text=answer_text,
             citations_json=citations,
             refused=refused,
+            status=status,
+            route_json=route_json or {},
             model_name=model_name,
         )
         s.add(row)

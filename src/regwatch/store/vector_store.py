@@ -78,6 +78,35 @@ def add_chunks(
     )
 
 
+def delete_chunks_for_doc_except_version(doc_id: int, keep_version_id: int) -> int:
+    """Delete indexed chunks for one PSG document except the current version.
+
+    SQLite remains the version audit store. Chroma is only the current-answer
+    search index, so old chunks for the same PSG document should not remain
+    retrievable after a revision.
+    """
+    coll = get_collection()
+    res = coll.get(
+        where={"doc_id": {"$eq": doc_id}},  # type: ignore[arg-type, dict-item]
+        include=["metadatas"],  # type: ignore[list-item]
+    )
+    ids_to_delete: list[str] = []
+    for chunk_id, meta in zip(res.get("ids") or [], res.get("metadatas") or [], strict=False):
+        raw_version: object = (meta or {}).get("version_id") if isinstance(meta, dict) else None
+        try:
+            version_id = int(raw_version) if isinstance(raw_version, str | int | float) else 0
+        except (TypeError, ValueError):
+            version_id = 0
+        if version_id != keep_version_id:
+            ids_to_delete.append(chunk_id)
+
+    if not ids_to_delete:
+        return 0
+    coll.delete(ids=ids_to_delete)
+    _metadata_values_cache.clear()
+    return len(ids_to_delete)
+
+
 def similarity_search(
     query_embedding: list[float],
     *,

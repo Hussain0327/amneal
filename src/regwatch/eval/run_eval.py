@@ -23,6 +23,7 @@ from rich.table import Table
 
 from regwatch.eval.metrics import GoldItem, Scorecard, evaluate
 from regwatch.generate.grounded_qa import ask
+from regwatch.store.db import init_db
 from regwatch.store.vector_store import collection_size
 
 app = typer.Typer(
@@ -63,7 +64,13 @@ def _print_scorecard(sc: Scorecard) -> None:
     table.add_column("value", justify="right")
     table.add_column("threshold", justify="right")
     table.add_column("status")
-    for key in ("recall_at_k", "citation_precision", "faithfulness", "refusal_accuracy"):
+    for key in (
+        "recall_at_k",
+        "citation_precision",
+        "faithfulness",
+        "fact_recall",
+        "refusal_accuracy",
+    ):
         v = getattr(sc, key)
         thr = THRESHOLDS.get(key)
         status = "—"
@@ -92,6 +99,7 @@ def run(
     ),
     out: Path | None = typer.Option(None, "--out", help="Write scorecard JSON to this path."),
 ) -> None:
+    init_db()
     if collection_size() == 0:
         Console().print(
             "[yellow]Vector store is empty — no eval possible. "

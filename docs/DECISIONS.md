@@ -97,3 +97,10 @@ The eval was RED on the real corpus (`recall@8=0.667, citation_precision=0.000, 
 - **The baseline image defaults to `EMBEDDING_PROVIDER=echo`.** This keeps health checks and local API smoke tests lightweight. Broad PSG ingest must use a real embedding provider, for example `INSTALL_LOCAL_EMBEDDINGS=true` plus `EMBEDDING_PROVIDER=local-bge-small`.
 - **Local embeddings moved behind an optional extra.** `sentence-transformers`, `torch`, and `transformers` now live in `regwatch[local-embeddings]`. This avoids pulling heavy CUDA/NVIDIA packages into the default API image while still allowing a heavier local-embedding build when needed.
 - **CI now builds the Docker image.** The image build is a separate CI job, so container breakage is caught independently of lint/type/test failures.
+
+## Conversational sessions
+
+- **Conversation memory is context, not evidence.** The assistant may carry a safe product filter across turns (for example, `normalized_name=albuterol sulfate`) so follow-ups like "What about dissolution?" work, but every answer still reruns retrieval and validates citations from FDA evidence.
+- **`POST /query` now returns session metadata.** Callers may pass `session_id`; otherwise the backend creates one. Every response returns `session_id`, `turn_id`, status, citations, and audit ID so a future TypeScript UI can render a real chat thread.
+- **Audit rows link to chat turns.** `query_log` now carries `session_id`, `turn_id`, `status`, and `route_json`. `chat_session` and `chat_message` persist the thread and the user/assistant turns.
+- **Response statuses are broader than answer/refuse.** `answer`, `summary`, `clarify`, `scope_warning`, and `refused` allow the assistant to guide users without guessing. Regulatory strategy/submission-drafting asks produce `scope_warning`, not a fabricated answer.

@@ -35,44 +35,9 @@ services:
       retries: 3
       start_period: 30s
 
-  ui:
-    profiles: ["ui"]
-    image: ${REGWATCH_IMAGE:-regwatch:local}
-    build:
-      context: .
-      args:
-        INSTALL_LOCAL_EMBEDDINGS: ${INSTALL_LOCAL_EMBEDDINGS:-false}
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      DATA_DIR: /app/data
-      CHROMA_DIR: /app/data/chroma
-      SQLITE_PATH: /app/data/regwatch.db
-      RAW_PDF_DIR: /app/data/raw
-      PROCESSED_DIR: /app/data/processed
-      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-echo}
-      API_HOST: 0.0.0.0
-      API_PORT: 8000
-    volumes:
-      - ./data:/app/data
-    ports:
-      - "8501:8501"
-    command:
-      [
-        "streamlit",
-        "run",
-        "src/regwatch/ui/app.py",
-        "--server.address",
-        "0.0.0.0",
-        "--server.port",
-        "8501",
-        "--server.headless",
-        "true",
-      ]
-    depends_on:
-      api:
-        condition: service_healthy
+  # The production UI is the Next.js app in web/ (run via scripts/share-demo.sh
+  # or `npm run dev`); it talks to this api service. The old Streamlit POC was
+  # retired — see docs/DECISIONS.md.
 
   ingest:
     profiles: ["ingest"]

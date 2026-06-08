@@ -9,9 +9,10 @@ Read these in order if you are new to the project:
 1. `../README.md` - project overview, current stack, quick start, API surface.
 2. `NON_TECH_GUIDE.md` - plain-English explanation for regulatory and business readers.
 3. `TECH_GUIDE_SIMPLE.md` - simplified technical walkthrough of how the code connects.
-4. `DOCKER.md` - container setup, services, data mounts, and ingest notes.
-5. `PROJECT_SPEC.md` - original proof-of-concept specification and compliance rules.
-6. `DECISIONS.md` - append-only history of important engineering decisions.
+4. `CONVERSATIONAL_SESSIONS.md` - chat sessions, follow-up context, and audit rules.
+5. `DOCKER.md` - container setup, services, data mounts, and ingest notes.
+6. `PROJECT_SPEC.md` - original proof-of-concept specification and compliance rules.
+7. `DECISIONS.md` - append-only history of important engineering decisions.
 
 ## Current Reference Docs
 
@@ -19,6 +20,7 @@ Read these in order if you are new to the project:
 |---|---|---|
 | `NON_TECH_GUIDE.md` | Non-technical stakeholders | Explains what REGWATCH does, what it must not do, and why citations/refusals matter. |
 | `TECH_GUIDE_SIMPLE.md` | Technical readers | Explains folder structure, core flows, and the files to read first. |
+| `CONVERSATIONAL_SESSIONS.md` | Product / engineering / compliance reviewers | Explains session IDs, follow-up context, response statuses, and auditability. |
 | `DOCKER.md` | Engineers / deployment owners | Documents the Dockerfile, Compose services, embedding modes, and ingest implications. |
 | `PROJECT_SPEC.md` | Engineers / reviewers | Original POC spec, phase plan, and compliance invariants. |
 | `DECISIONS.md` | Engineers / reviewers | Append-only decision log. Read this before changing architecture. |

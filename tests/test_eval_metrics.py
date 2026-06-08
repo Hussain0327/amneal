@@ -9,6 +9,7 @@ from regwatch.eval.metrics import (
     GoldItem,
     citation_precision,
     evaluate,
+    fact_recall,
     faithfulness,
     recall_at_k,
 )
@@ -64,6 +65,25 @@ def test_faithfulness_full() -> None:
 def test_faithfulness_partial() -> None:
     text = "Claim A [PSG_001, p.3]. Uncited claim with no source."
     assert faithfulness(text) == 0.5
+
+
+def test_fact_recall_all_present() -> None:
+    text = "Fasting single-dose two-way crossover in vivo study [PSG_001, p.4]."
+    assert fact_recall(text, ["fasting", "single-dose", "two-way crossover", "in vivo"]) == 1.0
+
+
+def test_fact_recall_tolerant_to_hyphen_and_case() -> None:
+    # "single-dose" expected; answer says "SINGLE DOSE" (no hyphen, different case).
+    assert fact_recall("A SINGLE DOSE crossover study.", ["single-dose"]) == 1.0
+
+
+def test_fact_recall_partial() -> None:
+    assert fact_recall("Fasting study only.", ["fasting", "dissolution"]) == 0.5
+
+
+def test_fact_recall_empty_is_one() -> None:
+    # Items with no expected_facts never drag the score down.
+    assert fact_recall("anything at all", []) == 1.0
 
 
 def test_evaluate_runs_through() -> None:

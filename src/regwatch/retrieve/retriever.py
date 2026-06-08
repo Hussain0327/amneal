@@ -13,8 +13,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from config.settings import get_settings
+from sqlalchemy import desc, func, inspect
+from sqlmodel import col, select
 
 from regwatch.process.embedder import get_embedding_provider
+from regwatch.store.db import get_engine, session_scope
+from regwatch.store.models import PsgDocument, PsgVersion
 from regwatch.store.vector_store import Hit, similarity_search
 
 
@@ -60,11 +64,88 @@ def _build_where(filters: dict[str, Any] | None) -> dict[str, Any] | None:
     return {"$and": [{k: v} for k, v in out.items()]}
 
 
+def _and_where(*clauses: dict[str, Any] | None) -> dict[str, Any] | None:
+    active = [c for c in clauses if c]
+    if not active:
+        return None
+    if len(active) == 1:
+        return active[0]
+    flattened: list[dict[str, Any]] = []
+    for clause in active:
+        if set(clause) == {"$and"} and isinstance(clause["$and"], list):
+            flattened.extend(clause["$and"])
+        else:
+            flattened.append(clause)
+    if len(flattened) == 1:
+        return flattened[0]
+    return {"$and": flattened}
+
+
+def _current_version_ids_for_filters(filters: dict[str, Any] | None) -> list[int] | None:
+    """Return current PSG version ids matching filters, or None in vector-only mode.
+
+    Some unit tests seed Chroma directly without a SQLite PSG catalog. In the real
+    app, once `psg_document` exists, normal retrieval must be scoped to the latest
+    `psg_version` rows so superseded chunks cannot be cited.
+    """
+    engine = get_engine()
+    if not inspect(engine).has_table("psg_document") or not inspect(engine).has_table(
+        "psg_version"
+    ):
+        return None
+
+    filters = filters or {}
+    with session_scope() as s:
+        doc_count = int(s.scalar(select(func.count()).select_from(PsgDocument)) or 0)
+        if doc_count == 0:
+            return None
+
+        doc_stmt = select(PsgDocument.id)
+        if filters.get("doc_id"):
+            try:
+                doc_id = int(filters["doc_id"])
+            except (TypeError, ValueError):
+                return []
+            doc_stmt = doc_stmt.where(PsgDocument.id == doc_id)
+        if filters.get("normalized_name"):
+            doc_stmt = doc_stmt.where(
+                PsgDocument.normalized_name == str(filters["normalized_name"])
+            )
+        if filters.get("dosage_form"):
+            doc_stmt = doc_stmt.where(PsgDocument.dosage_form == str(filters["dosage_form"]))
+        if filters.get("route"):
+            doc_stmt = doc_stmt.where(PsgDocument.route == str(filters["route"]))
+        if filters.get("psg_type"):
+            doc_stmt = doc_stmt.where(PsgDocument.psg_type == str(filters["psg_type"]))
+
+        doc_ids = [int(doc_id) for doc_id in s.scalars(doc_stmt) if doc_id is not None]
+        if not doc_ids:
+            return []
+
+        version_rows = s.execute(
+            select(PsgVersion.psg_document_id, PsgVersion.id)
+            .where(col(PsgVersion.psg_document_id).in_(doc_ids))
+            .order_by(
+                col(PsgVersion.psg_document_id),
+                desc(col(PsgVersion.captured_at)),
+                desc(col(PsgVersion.id)),
+            )
+        ).all()
+
+    current: dict[int, int] = {}
+    for doc_id, version_id in version_rows:
+        if doc_id is None or version_id is None:
+            continue
+        current.setdefault(int(doc_id), int(version_id))
+    return list(current.values())
+
+
 def retrieve(
     query: str,
     *,
     k: int | None = None,
     filters: dict[str, Any] | None = None,
+    current_only: bool = True,
 ) -> list[RetrievedPassage]:
     """Stage-1 vector search.
 
@@ -77,6 +158,12 @@ def retrieve(
     embedder = get_embedding_provider()
     qv = embedder.embed([query])[0]
     where = _build_where(filters)
+    if current_only and not (filters or {}).get("version_id"):
+        current_version_ids = _current_version_ids_for_filters(filters)
+        if current_version_ids is not None:
+            if not current_version_ids:
+                return []
+            where = _and_where(where, {"version_id": {"$in": current_version_ids}})
     hits: list[Hit] = similarity_search(qv, k=k, where=where)
 
     passages: list[RetrievedPassage] = []

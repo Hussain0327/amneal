@@ -29,7 +29,15 @@ from regwatch.common.citations import (
     iter_psg_citations,
     strip_all_citations,
 )
+from regwatch.common.conversation import (
+    ensure_session,
+    get_session_filters,
+    new_turn_id,
+    record_message,
+    update_session_filters,
+)
 from regwatch.common.logging import get_logger
+from regwatch.common.text_normalize import canonical_name
 from regwatch.generate.llm import LLMMessage, current_model_name, get_llm_provider
 from regwatch.generate.prompts import GROUNDED_QA_SYSTEM, GROUNDED_QA_USER
 from regwatch.retrieve.reranker import rerank_passages
@@ -74,6 +82,8 @@ class QAResult:
     status: str = "answer"  # "answer" | "clarify" | "refused"
     interpretation: str | None = None
     clarify: list[ClarifyOption] = field(default_factory=list)
+    session_id: str | None = None
+    turn_id: str | None = None
 
 
 # Filler words that carry no topic; if a question is only these plus the drug
@@ -131,6 +141,106 @@ _FILLER = frozenset(
         "anything",
     }
 )
+
+_FOLLOW_UP_PREFIXES = (
+    "what about",
+    "how about",
+    "and what",
+    "also",
+    "what does it",
+    "does it",
+    "what else",
+    "can you also",
+)
+_FOLLOW_UP_PRONOUNS = frozenset({"it", "its", "this", "that", "same"})
+_SUMMARY_TERMS = frozenset({"summarize", "summary", "overview", "recap"})
+_SCOPE_WARNING_PHRASES = (
+    "submission strategy",
+    "filing strategy",
+    "file the anda",
+    "author the anda",
+    "write the anda",
+    "draft the anda",
+    "what should we file",
+    "should we file",
+    "should we submit",
+    "recommend a strategy",
+    "regulatory strategy",
+    "internal benchmarks",
+)
+
+
+def _looks_like_follow_up(question: str) -> bool:
+    q = question.strip().lower()
+    if any(q.startswith(prefix) for prefix in _FOLLOW_UP_PREFIXES):
+        return True
+    tokens = {t for t in re.split(r"[^a-z0-9]+", q) if t}
+    return bool(tokens & _FOLLOW_UP_PRONOUNS) and len(tokens) <= 8
+
+
+def _is_summary_request(question: str) -> bool:
+    tokens = {t for t in re.split(r"[^a-z0-9]+", question.lower()) if t}
+    return bool(tokens & _SUMMARY_TERMS)
+
+
+def _is_scope_warning_request(question: str) -> bool:
+    q = question.lower()
+    return any(phrase in q for phrase in _SCOPE_WARNING_PHRASES)
+
+
+def _audit_retrieved(passages: list[RetrievedPassage]) -> list[dict[str, Any]]:
+    return [
+        {
+            "chunk_id": p.chunk_id,
+            "score": p.score,
+            "doc_id": p.doc_id,
+            "version_id": p.version_id,
+            "page": p.page,
+            "normalized_name": p.normalized_name,
+            "short_name": p.short_name,
+        }
+        for p in passages
+    ]
+
+
+def _route_json(
+    *,
+    filters: dict[str, Any],
+    reason: str,
+    context_applied: bool,
+    response_mode: str,
+) -> dict[str, Any]:
+    return {
+        "route": "psg_scoped_rag",
+        "filters": dict(filters),
+        "reason": reason,
+        "context_applied": context_applied,
+        "response_mode": response_mode,
+    }
+
+
+def _finish_turn(
+    result: QAResult,
+    *,
+    filters: dict[str, Any],
+    route_json: dict[str, Any],
+) -> QAResult:
+    if result.session_id and result.turn_id:
+        record_message(
+            session_id=result.session_id,
+            turn_id=result.turn_id,
+            role="assistant",
+            content=result.answer,
+            status=result.status,
+            model_name=result.model_name,
+            audit_id=result.audit_id,
+            filters=filters,
+            citations=[asdict(c) for c in result.citations],
+            metadata={"retrieved": result.retrieved, "route": route_json},
+        )
+        if result.status in {"answer", "summary", "clarify"} and filters.get("normalized_name"):
+            update_session_filters(result.session_id, filters)
+    return result
 
 
 def _looks_vague(question: str, normalized_name: str) -> bool:
@@ -248,44 +358,38 @@ def _refuse(
     passages: list[RetrievedPassage],
     reason: str,
     model_name: str,
+    session_id: str,
+    turn_id: str,
+    route_json: dict[str, Any],
+    status: str = "refused",
+    answer_text: str | None = None,
 ) -> QAResult:
     s = get_settings()
+    answer = answer_text or s.refusal_text
     audit_id = log_query(
         mode="qa",
         query_text=question,
-        retrieved=[
-            {
-                "chunk_id": p.chunk_id,
-                "score": p.score,
-                "doc_id": p.doc_id,
-                "page": p.page,
-                "normalized_name": p.normalized_name,
-                "short_name": p.short_name,
-            }
-            for p in passages
-        ],
-        answer_text=s.refusal_text,
+        retrieved=_audit_retrieved(passages),
+        answer_text=answer,
         citations=[],
         refused=True,
         model_name=model_name,
+        session_id=session_id,
+        turn_id=turn_id,
+        status=status,
+        route_json=route_json,
     )
     log.info("qa_refused", reason=reason, audit_id=audit_id)
     return QAResult(
-        answer=s.refusal_text,
+        answer=answer,
         citations=[],
         refused=True,
         model_name=model_name,
         audit_id=audit_id,
-        retrieved=[
-            {
-                "chunk_id": p.chunk_id,
-                "score": p.score,
-                "page": p.page,
-                "short_name": p.short_name,
-            }
-            for p in passages
-        ],
-        status="refused",
+        retrieved=_audit_retrieved(passages),
+        status=status,
+        session_id=session_id,
+        turn_id=turn_id,
     )
 
 
@@ -296,6 +400,9 @@ def _clarify(
     model_name: str,
     interpretation: str,
     options: list[ClarifyOption],
+    session_id: str,
+    turn_id: str,
+    route_json: dict[str, Any],
 ) -> QAResult:
     """Guide instead of guess: we know the product (or a near-match) but need
     direction. Carries ZERO citations (never fabricates) and logs one audit row
@@ -308,6 +415,10 @@ def _clarify(
         citations=[],
         refused=False,
         model_name=model_name,
+        session_id=session_id,
+        turn_id=turn_id,
+        status="clarify",
+        route_json=route_json,
     )
     log.info("qa_clarify", reason=reason, audit_id=audit_id, options=len(options))
     return QAResult(
@@ -320,6 +431,35 @@ def _clarify(
         status="clarify",
         interpretation=interpretation,
         clarify=options,
+        session_id=session_id,
+        turn_id=turn_id,
+    )
+
+
+def _scope_warning(
+    *,
+    question: str,
+    model_name: str,
+    session_id: str,
+    turn_id: str,
+    route_json: dict[str, Any],
+) -> QAResult:
+    answer = (
+        "I can help summarize and answer questions from FDA sources, but I cannot "
+        "author submission strategy, recommend what to file, or make a regulatory "
+        "judgment. If you name the product and source area, I can look up the FDA "
+        "evidence and cite what the records say."
+    )
+    return _refuse(
+        question=question,
+        passages=[],
+        reason="scope_warning",
+        model_name=model_name,
+        session_id=session_id,
+        turn_id=turn_id,
+        route_json=route_json,
+        status="scope_warning",
+        answer_text=answer,
     )
 
 
@@ -328,12 +468,57 @@ def ask(
     *,
     filters: dict[str, Any] | None = None,
     k: int | None = None,
+    session_id: str | None = None,
+    user_id: str | None = None,
+    turn_id: str | None = None,
 ) -> QAResult:
     """Grounded Q&A entry point — answer with citations, clarify, or refuse."""
     s = get_settings()
     model_name = current_model_name(role="synthesizer")
+    session_id = ensure_session(session_id, user_id=user_id)
+    turn_id = turn_id or new_turn_id()
+    record_message(
+        session_id=session_id,
+        turn_id=turn_id,
+        role="user",
+        content=question,
+        filters=filters,
+    )
     active_filters: dict[str, Any] = dict(filters or {})
+    # Product-key hardening: a caller (API / dossier / clarify option) may pass a
+    # normalized_name in any casing or salt-order. Canonicalize it to the exact key
+    # the corpus stores (canonical_name) so retrieval's exact-match filter cannot
+    # silently miss and turn a real product into a wrong refusal.
+    if active_filters.get("normalized_name"):
+        active_filters["normalized_name"] = canonical_name(str(active_filters["normalized_name"]))
     resolved_by_name = False
+    context_applied = False
+    response_mode = "summary" if _is_summary_request(question) else "answer"
+
+    route_json = _route_json(
+        filters=active_filters,
+        reason="start",
+        context_applied=context_applied,
+        response_mode=response_mode,
+    )
+    if _is_scope_warning_request(question):
+        route_json = _route_json(
+            filters=active_filters,
+            reason="scope_warning",
+            context_applied=context_applied,
+            response_mode="scope_warning",
+        )
+        return _finish_turn(
+            _scope_warning(
+                question=question,
+                model_name=model_name,
+                session_id=session_id,
+                turn_id=turn_id,
+                route_json=route_json,
+            ),
+            filters=active_filters,
+            route_json=route_json,
+        )
 
     # Entity resolution FIRST: pin the product before semantic retrieval so FDA
     # template boilerplate shared across drugs cannot leak a wrong-drug citation.
@@ -345,64 +530,144 @@ def ask(
             resolved_by_name = resolution.by_name
         elif resolution.status == "ambiguous":
             # Several products match → ASK which, don't guess (cross-drug guard).
-            return _clarify(
-                question=question,
+            route_json = _route_json(
+                filters=active_filters,
                 reason="ambiguous_product",
-                model_name=model_name,
-                interpretation="More than one product matches that. Which did you mean?",
-                options=[
-                    ClarifyOption(name.title(), name, {"normalized_name": name})
-                    for name in resolution.candidates
-                ],
+                context_applied=context_applied,
+                response_mode="clarify",
+            )
+            return _finish_turn(
+                _clarify(
+                    question=question,
+                    reason="ambiguous_product",
+                    model_name=model_name,
+                    interpretation="More than one product matches that. Which did you mean?",
+                    options=[
+                        ClarifyOption(name.title(), name, {"normalized_name": name})
+                        for name in resolution.candidates
+                    ],
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    route_json=route_json,
+                ),
+                filters=active_filters,
+                route_json=route_json,
             )
         else:
-            # No product named. Offer a high-confidence "did you mean" for genuine
-            # typos, then a brand→generic lookup (Adderall → amphetamine); else
-            # refuse (e.g. romidepsin — absent, a deliberate must-refuse).
-            suggestions = suggest_products(question)
-            if suggestions:
-                return _clarify(
-                    question=question,
-                    reason="did_you_mean",
-                    model_name=model_name,
-                    interpretation="I couldn't find that exact drug. Did you mean:",
-                    options=[
-                        ClarifyOption(name.title(), name, {"normalized_name": name})
-                        for name in suggestions
-                    ],
+            session_filters = get_session_filters(session_id)
+            if session_filters.get("normalized_name") and _looks_like_follow_up(question):
+                active_filters.update(session_filters)
+                context_applied = True
+                resolved_by_name = False
+            else:
+                # No product named. Offer a high-confidence "did you mean" for genuine
+                # typos, then a brand→generic lookup (Adderall → amphetamine); else
+                # refuse (e.g. romidepsin — absent, a deliberate must-refuse).
+                suggestions = suggest_products(question)
+                if suggestions:
+                    route_json = _route_json(
+                        filters=active_filters,
+                        reason="did_you_mean",
+                        context_applied=context_applied,
+                        response_mode="clarify",
+                    )
+                    return _finish_turn(
+                        _clarify(
+                            question=question,
+                            reason="did_you_mean",
+                            model_name=model_name,
+                            interpretation="I couldn't find that exact drug. Did you mean:",
+                            options=[
+                                ClarifyOption(name.title(), name, {"normalized_name": name})
+                                for name in suggestions
+                            ],
+                            session_id=session_id,
+                            turn_id=turn_id,
+                            route_json=route_json,
+                        ),
+                        filters=active_filters,
+                        route_json=route_json,
+                    )
+                brand_matches = resolve_brand(question)
+                if brand_matches:
+                    route_json = _route_json(
+                        filters=active_filters,
+                        reason="brand_lookup",
+                        context_applied=context_applied,
+                        response_mode="clarify",
+                    )
+                    return _finish_turn(
+                        _clarify(
+                            question=question,
+                            reason="brand_lookup",
+                            model_name=model_name,
+                            interpretation=(
+                                "That looks like a brand name. Did you mean its generic ingredient?"
+                            ),
+                            options=[
+                                ClarifyOption(name.title(), name, {"normalized_name": name})
+                                for name in brand_matches
+                            ],
+                            session_id=session_id,
+                            turn_id=turn_id,
+                            route_json=route_json,
+                        ),
+                        filters=active_filters,
+                        route_json=route_json,
+                    )
+                route_json = _route_json(
+                    filters=active_filters,
+                    reason="no_product",
+                    context_applied=context_applied,
+                    response_mode="refused",
                 )
-            brand_matches = resolve_brand(question)
-            if brand_matches:
-                return _clarify(
-                    question=question,
-                    reason="brand_lookup",
-                    model_name=model_name,
-                    interpretation=(
-                        "That looks like a brand name. Did you mean its generic ingredient?"
+                return _finish_turn(
+                    _refuse(
+                        question=question,
+                        passages=[],
+                        reason="no_product",
+                        model_name=model_name,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        route_json=route_json,
                     ),
-                    options=[
-                        ClarifyOption(name.title(), name, {"normalized_name": name})
-                        for name in brand_matches
-                    ],
+                    filters=active_filters,
+                    route_json=route_json,
                 )
-            return _refuse(
-                question=question, passages=[], reason="no_product", model_name=model_name
-            )
 
     resolved_name = active_filters.get("normalized_name")
 
     # Bare drug name / no real question → guide with options instead of dumping a
     # default BE answer. Deterministic, pre-LLM (the unit-testable hero path).
     if resolved_name and resolved_by_name and _looks_vague(question, resolved_name):
-        return _clarify(
-            question=question,
+        route_json = _route_json(
+            filters=active_filters,
             reason="vague_input",
-            model_name=model_name,
-            interpretation=_interpretation_for(resolved_name),
-            options=build_options(resolved_name),
+            context_applied=context_applied,
+            response_mode="clarify",
+        )
+        return _finish_turn(
+            _clarify(
+                question=question,
+                reason="vague_input",
+                model_name=model_name,
+                interpretation=_interpretation_for(resolved_name),
+                options=build_options(resolved_name),
+                session_id=session_id,
+                turn_id=turn_id,
+                route_json=route_json,
+            ),
+            filters=active_filters,
+            route_json=route_json,
         )
 
     # Stage 1: wide-net vector search (up to VECTOR_TOP_K), constrained to the product.
+    route_json = _route_json(
+        filters=active_filters,
+        reason="retrieval",
+        context_applied=context_applied,
+        response_mode=response_mode,
+    )
     passages = retrieve(question, k=k, filters=active_filters)
     # Stage 2: optional rerank, then trim to RERANK_TOP_K.
     passages = rerank_passages(question, passages)
@@ -410,22 +675,55 @@ def ask(
 
     # INV-2: if retrieval is weak, refuse before calling the LLM.
     if not passages or passages[0].score < s.refusal_score_threshold:
-        return _refuse(
-            question=question,
-            passages=passages,
+        route_json = _route_json(
+            filters=active_filters,
             reason="low_top_score",
-            model_name=model_name,
+            context_applied=context_applied,
+            response_mode="refused",
+        )
+        return _finish_turn(
+            _refuse(
+                question=question,
+                passages=passages,
+                reason="low_top_score",
+                model_name=model_name,
+                session_id=session_id,
+                turn_id=turn_id,
+                route_json=route_json,
+            ),
+            filters=active_filters,
+            route_json=route_json,
         )
 
     # Post-retrieval guard (defense in depth): every passage must be the same
     # product. The filter guarantees this; this catches a caller that bypassed
-    # the resolver. Mixed products → collapse to refusal rather than cite across.
-    if len({p.normalized_name for p in passages if p.normalized_name}) > 1:
-        return _refuse(
-            question=question,
-            passages=passages,
+    # the resolver. Mixed products → CLARIFY which (offer the distinct products)
+    # rather than cite across them or bluntly refuse — the evidence is unclear,
+    # so ask. Zero citations either way (never fabricates).
+    distinct_products = sorted({p.normalized_name for p in passages if p.normalized_name})
+    if len(distinct_products) > 1:
+        route_json = _route_json(
+            filters=active_filters,
             reason="mixed_products",
-            model_name=model_name,
+            context_applied=context_applied,
+            response_mode="clarify",
+        )
+        return _finish_turn(
+            _clarify(
+                question=question,
+                reason="mixed_products",
+                model_name=model_name,
+                interpretation="These passages span more than one product. Which did you mean?",
+                options=[
+                    ClarifyOption(name.title(), name, {"normalized_name": name})
+                    for name in distinct_products
+                ],
+                session_id=session_id,
+                turn_id=turn_id,
+                route_json=route_json,
+            ),
+            filters=active_filters,
+            route_json=route_json,
         )
 
     user_prompt = GROUNDED_QA_USER.format(
@@ -452,18 +750,44 @@ def ask(
         # When the product came from the single-product fallback (no drug named),
         # a model refusal is a genuine "not covered" → stay refused (INV-2).
         if resolved_by_name and resolved_name:
-            return _clarify(
+            route_json = _route_json(
+                filters=active_filters,
+                reason="model_refusal",
+                context_applied=context_applied,
+                response_mode="clarify",
+            )
+            return _finish_turn(
+                _clarify(
+                    question=question,
+                    reason="model_refusal",
+                    model_name=response.model,
+                    interpretation=_interpretation_for(resolved_name),
+                    options=build_options(resolved_name),
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    route_json=route_json,
+                ),
+                filters=active_filters,
+                route_json=route_json,
+            )
+        route_json = _route_json(
+            filters=active_filters,
+            reason="model_refusal",
+            context_applied=context_applied,
+            response_mode="refused",
+        )
+        return _finish_turn(
+            _refuse(
                 question=question,
+                passages=passages,
                 reason="model_refusal",
                 model_name=response.model,
-                interpretation=_interpretation_for(resolved_name),
-                options=build_options(resolved_name),
-            )
-        return _refuse(
-            question=question,
-            passages=passages,
-            reason="model_refusal",
-            model_name=response.model,
+                session_id=session_id,
+                turn_id=turn_id,
+                route_json=route_json,
+            ),
+            filters=active_filters,
+            route_json=route_json,
         )
 
     citations, bad = _validate_citations(answer, passages)
@@ -474,11 +798,24 @@ def ask(
     # than emit an ungrounded answer.
     answer_body = strip_all_citations(answer).strip()
     if answer_body and not citations:
-        return _refuse(
-            question=question,
-            passages=passages,
+        route_json = _route_json(
+            filters=active_filters,
             reason="no_valid_citations",
-            model_name=response.model,
+            context_applied=context_applied,
+            response_mode="refused",
+        )
+        return _finish_turn(
+            _refuse(
+                question=question,
+                passages=passages,
+                reason="no_valid_citations",
+                model_name=response.model,
+                session_id=session_id,
+                turn_id=turn_id,
+                route_json=route_json,
+            ),
+            filters=active_filters,
+            route_json=route_json,
         )
 
     # INV-1: strip any fabricated citation markers from the prose so the
@@ -494,35 +831,28 @@ def ask(
     audit_id = log_query(
         mode="qa",
         query_text=question,
-        retrieved=[
-            {
-                "chunk_id": p.chunk_id,
-                "score": p.score,
-                "doc_id": p.doc_id,
-                "page": p.page,
-                "normalized_name": p.normalized_name,
-                "short_name": p.short_name,
-            }
-            for p in passages
-        ],
+        retrieved=_audit_retrieved(passages),
         answer_text=cleaned_answer,
         citations=[asdict(c) for c in citations],
         refused=False,
         model_name=response.model,
+        session_id=session_id,
+        turn_id=turn_id,
+        status=response_mode,
+        route_json=route_json,
     )
-    return QAResult(
-        answer=cleaned_answer,
-        citations=citations,
-        refused=False,
-        model_name=response.model,
-        audit_id=audit_id,
-        retrieved=[
-            {
-                "chunk_id": p.chunk_id,
-                "score": p.score,
-                "page": p.page,
-                "short_name": p.short_name,
-            }
-            for p in passages
-        ],
+    return _finish_turn(
+        QAResult(
+            answer=cleaned_answer,
+            citations=citations,
+            refused=False,
+            model_name=response.model,
+            audit_id=audit_id,
+            retrieved=_audit_retrieved(passages),
+            status=response_mode,
+            session_id=session_id,
+            turn_id=turn_id,
+        ),
+        filters=active_filters,
+        route_json=route_json,
     )

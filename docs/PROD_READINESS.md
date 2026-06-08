@@ -17,8 +17,9 @@ Each item notes where it lives in the tree so the work is actionable cold.
 - **Where:** [`src/regwatch/api/main.py`](../src/regwatch/api/main.py)
 - **Gap:** Every endpoint is open. No API key, no authn/authz, no rate limit,
   no CORS policy. `POST /products` mutates the watchlist unauthenticated;
-  `POST /query` / `POST /assemble` invoke the LLM (cost + abuse surface)
-  with no caller identity.
+  `POST /query` / `POST /assemble` invoke the LLM (cost + abuse surface).
+  Chat sessions can now carry optional `user_id`, but there is no trusted auth
+  source enforcing that identity yet.
 - **Done when:** auth layer (API key or OIDC/JWT) on all non-`/health`
   endpoints, per-caller rate limiting, explicit CORS allowlist, and audit
   rows carry the caller identity. Acceptable alternative: documented hard

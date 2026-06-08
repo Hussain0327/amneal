@@ -29,7 +29,7 @@ from regwatch.process.embedder import get_embedding_provider
 from regwatch.process.extractor import extract_be
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
-from regwatch.store.vector_store import add_chunks
+from regwatch.store.vector_store import add_chunks, delete_chunks_for_doc_except_version
 
 log = get_logger(__name__)
 
@@ -202,6 +202,25 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
             ]
             add_chunks(ids=ids, embeddings=embeddings, documents=texts, metadatas=metas)
             log.info("chunks_added", doc_id=doc_id, version_id=version_id, n=len(chunks))
+            try:
+                deleted = delete_chunks_for_doc_except_version(
+                    doc_id=doc_id,
+                    keep_version_id=version_id,
+                )
+                if deleted:
+                    log.info(
+                        "stale_chunks_deleted",
+                        doc_id=doc_id,
+                        keep_version_id=version_id,
+                        n=deleted,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "stale_chunk_cleanup_failed",
+                    doc_id=doc_id,
+                    keep_version_id=version_id,
+                    error=str(exc),
+                )
 
         if extract:
             try:

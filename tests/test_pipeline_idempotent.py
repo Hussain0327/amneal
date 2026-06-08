@@ -14,14 +14,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlmodel import select
+from sqlmodel import col, select
 
 from regwatch.ingest import pipeline as pipeline_mod
 from regwatch.ingest.pdf_parser import ParsedPdf
 from regwatch.ingest.psg_crawler import PsgListing
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
-from regwatch.store.vector_store import collection_size
+from regwatch.store.vector_store import collection_size, get_collection
 
 PAGES = [
     "I. Introduction\nThis Product-Specific Guidance describes the agency's "
@@ -89,6 +89,26 @@ def _patch_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pipeline_mod, "download_pdf", fake_download)
     monkeypatch.setattr(pipeline_mod, "parse_pdf", fake_parse)
     # Patch LLM in extractor + change_detector.
+    monkeypatch.setattr("regwatch.process.extractor.get_llm_provider", lambda *a, **k: _StubLLM())
+    monkeypatch.setattr(
+        "regwatch.process.change_detector.get_llm_provider", lambda *a, **k: _StubLLM()
+    )
+
+
+def _patch_pipeline_state(monkeypatch: pytest.MonkeyPatch, state: dict[str, Any]) -> None:
+    """Patch ingest with mutable pages/hash so tests can simulate a revision."""
+    fake_pdf = b"%PDF-1.4 stub"
+
+    def fake_download(url: str, *, client: object | None = None) -> tuple[Path, bytes, str]:
+        return Path("/tmp/regwatch-test.pdf"), fake_pdf, str(state["hash"])
+
+    def fake_parse(pdf_bytes: bytes) -> ParsedPdf:
+        pages = list(state["pages"])
+        return ParsedPdf(text="\n\f\n".join(pages), pages=pages, engine="stub")
+
+    monkeypatch.setattr("regwatch.ingest.psg_crawler.download_pdf", fake_download)
+    monkeypatch.setattr(pipeline_mod, "download_pdf", fake_download)
+    monkeypatch.setattr(pipeline_mod, "parse_pdf", fake_parse)
     monkeypatch.setattr("regwatch.process.extractor.get_llm_provider", lambda *a, **k: _StubLLM())
     monkeypatch.setattr(
         "regwatch.process.change_detector.get_llm_provider", lambda *a, **k: _StubLLM()
@@ -173,3 +193,42 @@ def test_pipeline_be_fields_all_have_citations(monkeypatch: pytest.MonkeyPatch) 
             cite = citations[field]
             assert "page" in cite and "quote" in cite
             assert isinstance(cite["page"], int) and cite["page"] >= 1
+
+
+def test_revised_ingest_removes_stale_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+    old_pages = [
+        PAGES[0],
+        PAGES[1] + "\nObsolete marker only present in version one.",
+    ]
+    new_pages = [
+        PAGES[0],
+        PAGES[1] + "\nCurrent marker only present in version two.",
+    ]
+    state: dict[str, Any] = {"hash": "old-hash", "pages": old_pages}
+    _patch_pipeline_state(monkeypatch, state)
+    init_db()
+
+    assert pipeline_mod.ingest_listing(_listing()) == "added"
+    state["hash"] = "new-hash"
+    state["pages"] = new_pages
+    assert pipeline_mod.ingest_listing(_listing()) == "revised"
+
+    with session_scope() as s:
+        version_ids = list(s.scalars(select(PsgVersion.id).order_by(col(PsgVersion.id))))
+    assert len(version_ids) == 2
+    latest_version_id = version_ids[-1]
+    assert isinstance(latest_version_id, int)
+
+    indexed = get_collection().get(include=["documents", "metadatas"])
+    metadatas = indexed.get("metadatas") or []
+    documents = indexed.get("documents") or []
+
+    assert metadatas
+    indexed_version_ids: set[int] = set()
+    for meta in metadatas:
+        raw_version: object = (meta or {}).get("version_id") if isinstance(meta, dict) else None
+        if isinstance(raw_version, str | int | float):
+            indexed_version_ids.add(int(raw_version))
+    assert indexed_version_ids == {latest_version_id}
+    assert any("Current marker only present in version two" in doc for doc in documents)
+    assert all("Obsolete marker only present in version one" not in doc for doc in documents)

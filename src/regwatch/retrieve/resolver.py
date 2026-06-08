@@ -148,6 +148,27 @@ def _mentions(token: str, question: str) -> bool:
     return re.search(rf"\b{re.escape(token)}\b", question) is not None
 
 
+# Explicit comparison/contrast markers. A question that compares products names
+# more than one ON PURPOSE; since we answer about a single product at a time
+# (the cross-drug guard), an explicit comparison must clarify which — never
+# silently collapse two products into one. "and"/"with" are deliberately NOT
+# markers: "albuterol sulfate and budesonide" is one combination product.
+_COMPARISON_TOKENS = frozenset({"compare", "comparison", "versus", "vs"})
+_COMPARISON_PHRASES = (
+    "difference between",
+    "differences between",
+    "compared to",
+    "compared with",
+)
+
+
+def _is_comparison(q: str) -> bool:
+    """True if the (already-lowercased) question explicitly compares products."""
+    if any(phrase in q for phrase in _COMPARISON_PHRASES):
+        return True
+    return any(re.search(rf"\b{re.escape(tok)}\b", q) for tok in _COMPARISON_TOKENS)
+
+
 def resolve_product(
     question: str,
     *,
@@ -168,6 +189,14 @@ def resolve_product(
         tokens = _product_tokens(name)
         if tokens and all(_mentions(tok, q) for tok in tokens):
             matched.append((name, tokens))
+
+    # AND/conjunction validation: an EXPLICIT comparison naming 2+ in-corpus
+    # products must clarify — even when one product's ingredient set is a strict
+    # subset of another's (where the subset-collapse below would otherwise pick
+    # the superset). Checked before that collapse for exactly this reason.
+    distinct_matched = sorted({name for name, _ in matched})
+    if _is_comparison(q) and len(distinct_matched) >= 2:
+        return Resolution(status="ambiguous", candidates=distinct_matched)
 
     # Prefer the most specific product: drop any whose ingredient set is a strict
     # subset of another match (so "albuterol sulfate and budesonide" resolves to

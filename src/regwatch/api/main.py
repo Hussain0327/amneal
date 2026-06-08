@@ -77,6 +77,8 @@ class QueryRequest(BaseModel):
     question: str = Field(..., min_length=2)
     filters: dict[str, Any] | None = None
     k: int | None = None
+    session_id: str | None = None
+    user_id: str | None = None
 
 
 class QueryCitation(BaseModel):
@@ -101,20 +103,32 @@ class QueryResponse(BaseModel):
     refused: bool
     model_name: str
     audit_id: int
-    status: str = "answer"  # "answer" | "clarify" | "refused"
+    session_id: str
+    turn_id: str
+    status: str = "answer"  # "answer" | "summary" | "clarify" | "scope_warning" | "refused"
     interpretation: str | None = None
     clarify: list[ClarifyOptionOut] = []
 
 
 @app.post("/query", response_model=QueryResponse)
 def query(req: QueryRequest) -> QueryResponse:
-    result = ask(req.question, filters=req.filters, k=req.k)
+    result = ask(
+        req.question,
+        filters=req.filters,
+        k=req.k,
+        session_id=req.session_id,
+        user_id=req.user_id,
+    )
+    if result.session_id is None or result.turn_id is None:
+        raise HTTPException(status_code=500, detail="query did not produce session metadata")
     return QueryResponse(
         answer=result.answer,
         citations=[QueryCitation(**c.__dict__) for c in result.citations],
         refused=result.refused,
         model_name=result.model_name,
         audit_id=result.audit_id,
+        session_id=result.session_id,
+        turn_id=result.turn_id,
         status=result.status,
         interpretation=result.interpretation,
         clarify=[

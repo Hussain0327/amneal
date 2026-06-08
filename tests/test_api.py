@@ -47,6 +47,17 @@ def test_query_refuses_on_empty_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
     body = r.json()
     assert body["refused"] is True
     assert body["citations"] == []
+    assert body["session_id"]
+    assert body["turn_id"]
+
+    r2 = _open().post(
+        "/query",
+        json={"question": "What about dissolution?", "session_id": body["session_id"]},
+    )
+    assert r2.status_code == 200
+    body2 = r2.json()
+    assert body2["session_id"] == body["session_id"]
+    assert body2["turn_id"] != body["turn_id"]
 
 
 def test_sources_search_accepts_explicit_source_without_network() -> None:

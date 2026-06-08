@@ -9,6 +9,9 @@ later flip a flag — for now everything is mechanical):
                           expected source.
   - faithfulness        : fraction of an answer's sentences that carry at
                           least one citation (proxy for ungroundedness).
+  - fact_recall         : fraction of an item's expected_facts present in the
+                          answer (tolerant substring) — scores answer CONTENT,
+                          not just which pages were cited.
   - refusal_accuracy    : fraction of items whose refuse/answer decision was
                           correct.
 """
@@ -39,6 +42,7 @@ class Scorecard:
     recall_at_k: float = 0.0
     citation_precision: float = 0.0
     faithfulness: float = 0.0
+    fact_recall: float = 0.0
     refusal_accuracy: float = 0.0
     refused_correctly: int = 0
     refused_incorrectly: int = 0
@@ -91,6 +95,26 @@ def faithfulness(answer_text: str) -> float:
     return cited / len(sentences)
 
 
+def _normalize_for_fact(text: str) -> str:
+    """Lowercase, de-hyphenate, collapse whitespace — tolerant matching so
+    'single-dose' matches 'single dose' and casing/spacing never causes a miss."""
+    return re.sub(r"\s+", " ", (text or "").lower().replace("-", " ")).strip()
+
+
+def fact_recall(answer_text: str, expected_facts: list[str]) -> float:
+    """Fraction of expected facts present (tolerant substring) in the answer.
+
+    Scores answer CONTENT, not just citation pages: the gate now checks that the
+    answer actually states the right facts. Empty expected_facts → 1.0 (nothing
+    to miss), so fact-less items never drag a score down.
+    """
+    if not expected_facts:
+        return 1.0
+    hay = _normalize_for_fact(answer_text)
+    matched = sum(1 for f in expected_facts if _normalize_for_fact(f) in hay)
+    return matched / len(expected_facts)
+
+
 def evaluate(
     items: list[GoldItem],
     *,
@@ -100,10 +124,11 @@ def evaluate(
     """Run the gold set through `ask_callable` and produce a Scorecard."""
     if not items:
         return Scorecard()
-    sums = {"recall": 0.0, "precision": 0.0, "faith": 0.0}
+    sums = {"recall": 0.0, "precision": 0.0, "faith": 0.0, "fact": 0.0}
     refusal_correct = 0
     refused_incorrectly = 0
     cited_ungrounded = 0
+    fact_items = 0  # answered items that actually carry expected_facts
     details: list[dict[str, Any]] = []
 
     for it in items:
@@ -144,12 +169,20 @@ def evaluate(
         sums["faith"] += f
         if p < 1.0:
             cited_ungrounded += 1
+        # Expected-fact scoring only over items that carry facts, with its own
+        # denominator (fact_items) so fact-less answered items don't dilute it.
+        fr: float | None = None
+        if it.expected_facts:
+            fr = fact_recall(result.answer, it.expected_facts)
+            sums["fact"] += fr
+            fact_items += 1
         details.append(
             {
                 "q": it.question,
                 "recall": r,
                 "citation_precision": p,
                 "faithfulness": f,
+                "fact_recall": fr,
                 "n_citations": len(citations),
             }
         )
@@ -164,6 +197,7 @@ def evaluate(
         recall_at_k=sums["recall"] / non_refusal,
         citation_precision=sums["precision"] / non_refusal,
         faithfulness=sums["faith"] / non_refusal,
+        fact_recall=sums["fact"] / max(1, fact_items),
         refusal_accuracy=refusal_accuracy,
         refused_correctly=refusal_correct,
         refused_incorrectly=refused_incorrectly,
