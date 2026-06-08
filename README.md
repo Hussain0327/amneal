@@ -24,7 +24,16 @@ encode this.
   method link, and a requirements checklist scaffold.
 - **Ask.** Plain-language Q&A over the corpus. Inline `[short_name, p.N]`
   citations on every claim, exact-string refusal when the corpus does not
-  contain the answer.
+  contain the answer. **Conversational**: `/query` carries a chat session so
+  follow-ups like "What about dissolution?" reuse the prior product — but only
+  the product *filter* carries over, never prior chat text as evidence; every
+  answer re-retrieves and re-validates citations. When a question names no
+  product (or names several), it **clarifies** with clickable options instead
+  of guessing; regulatory-strategy asks get a `scope_warning`, not a guess.
+
+The product is **resolved before retrieval** and retrieval is **constrained to
+the current PSG version**, so shared FDA boilerplate can't leak a wrong-drug or
+a superseded citation. See [`docs/CONVERSATIONAL_SESSIONS.md`](docs/CONVERSATIONAL_SESSIONS.md).
 
 ## Non-goals
 
@@ -48,7 +57,8 @@ These are code with tests, not guidelines. See `tests/test_invariants.py`.
 | INV-3 | Operational only — no authoring, no judgment | Prompt design + structural grep against `api/` for forbidden endpoint names |
 | INV-4 | Never report a run that didn't happen | `watch/alerts.py` skips any match whose `psg_version` is not in the DB |
 | INV-5 | Verified provenance only | `WatchlistEntry.__post_init__` rejects sources outside `{drugsfda, anda_letter, manual}` |
-| INV-6 | Every query is audited | `common/audit.py` writes a `query_log` row on every Q&A path |
+| INV-6 | Every query is audited | `common/audit.py` writes a `query_log` row on every Q&A path (now with `session_id`/`turn_id`/`status`/`route_json`) |
+| INV-9 | PSG answers are always product-resolved and ingredient-filtered — no cross-drug citation can survive | `retrieve/resolver.py` resolves the product before retrieval; `generate/grounded_qa.py` forces a `normalized_name` filter; `tests/test_cross_drug_leak.py` |
 
 ## Stack
 
@@ -63,8 +73,8 @@ These are code with tests, not guidelines. See `tests/test_invariants.py`.
 | DB migrations | Alembic baseline + incremental migrations |
 | Retrieval | Two-stage. Stage 1: `VECTOR_TOP_K=50` (wide). Stage 2: rerank → `RERANK_TOP_K=8`. Reranker off by default; when off, stage 2 is `passages[:rerank_top_k]` |
 | LLM | Pluggable behind `LLMProvider`. OpenAI via the **Responses API** (`OPENAI_API_MODE=responses`, default; `chat` falls back to Chat Completions). Role-specific models: router `gpt-5-nano` (reasoning), synthesizer + extractor `gpt-5.4-nano`, each falling back to `LLM_MODEL`. `anthropic` and `echo` (test-only) also supported |
-| API | FastAPI |
-| UI | Streamlit (POC) |
+| API | FastAPI. `POST /query` is conversational — accepts/returns `session_id`+`turn_id`, with response `status` ∈ `answer`/`summary`/`clarify`/`scope_warning`/`refused` |
+| UI | **Next.js 14 (App Router, TypeScript) in `regwatch/frontend/`** — Ask / Assemble / Watch. Talks to the API through a same-origin `/api` proxy. (The earlier Streamlit POC was retired.) |
 | Tooling | ruff, black, mypy strict on `src/`, pytest |
 
 The LLM provider, model, and reranker are all behind interfaces. Nothing is
@@ -86,7 +96,8 @@ uv run regwatch init-db
 # discover sponsor-name aliases from Drugs@FDA (no guessing)
 uv run regwatch aliases --refresh
 
-# seed the three verified seed products (Albuterol, Beclomethasone, Romidepsin)
+# seed the verified seed PSGs (by application number — albuterol, levalbuterol,
+# beclomethasone, albuterol+budesonide); `regwatch ingest-all` loads the full catalog
 uv run regwatch seed
 
 # tests (smoke + invariants + eval metrics)
@@ -95,12 +106,16 @@ uv run pytest -q
 # API
 uv run uvicorn regwatch.api.main:app --reload
 
-# UI (separate terminal)
-uv run streamlit run src/regwatch/ui/app.py
+# UI — the Next.js app in regwatch/frontend/ (separate terminal)
+cd regwatch/frontend && npm install && npm run dev      # http://localhost:3000
 
-# eval scorecard
+# eval scorecard (deterministic gate also runs inside `uv run pytest`)
 uv run python -m regwatch.eval.run_eval
 ```
+
+To share the whole app (API + UI) over one public link, run
+`./scripts/share-demo.sh` — it builds and starts both and opens a cloudflared
+tunnel. The UI proxies `/api/*` to the backend, so only one origin is exposed.
 
 `regwatch init-db` applies Alembic migrations for the active `SQLITE_PATH`.
 When adding or changing tables, create a new migration under `migrations/versions/`
@@ -115,16 +130,21 @@ Key guides:
   regulatory stakeholders.
 - [`docs/TECH_GUIDE_SIMPLE.md`](docs/TECH_GUIDE_SIMPLE.md) for technical
   onboarding.
+- [`docs/CONVERSATIONAL_SESSIONS.md`](docs/CONVERSATIONAL_SESSIONS.md) for the
+  chat-session / follow-up model.
 - [`docs/DOCKER.md`](docs/DOCKER.md) for container setup and ingest notes.
+- [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md) for the POC→production path.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) for the append-only decision log.
 
 ## Docker
 
 Full details are in [`docs/DOCKER.md`](docs/DOCKER.md).
 
-The container image runs the same Python app for API, temporary Streamlit UI,
-and ingest jobs. Startup runs `regwatch init-db`; large ingest runs are separate
-commands so API boot stays fast.
+The container image runs the same Python app for the API and ingest jobs.
+Startup runs `regwatch init-db`; large ingest runs are separate commands so API
+boot stays fast. The `regwatch/frontend/` Next.js UI is run separately
+(`npm run dev`, or `./scripts/share-demo.sh`); it is not part of the compose
+stack today.
 
 ```bash
 # build the shared image
@@ -135,9 +155,6 @@ docker build --build-arg INSTALL_LOCAL_EMBEDDINGS=true -t regwatch:local-embeddi
 
 # API on http://localhost:8000
 docker compose up api
-
-# optional Streamlit UI on http://localhost:8501
-docker compose --profile ui up
 
 # one-shot seed ingest; later this becomes the broad PSG/source sync job
 docker compose --profile ingest run --rm ingest
@@ -165,7 +182,11 @@ API_PORT=8000
 ## API
 
 ```
-POST  /query        grounded Q&A — {answer, citations[], refused}
+POST  /query        grounded, conversational Q&A
+                    in:  {question, filters?, k?, session_id?, user_id?}
+                    out: {answer, citations[], refused, status, interpretation,
+                          clarify[], model_name, audit_id, session_id, turn_id}
+                    status ∈ answer | summary | clarify | scope_warning | refused
 POST  /sources/search structured FDA source lookup — {routed_sources[], records[]}
 POST  /assemble     cited dossier for {active_ingredient, dosage_form?, rld?}
 GET   /watch/latest matched changes since cursor
@@ -174,6 +195,9 @@ POST  /products     add a manual product (INV-5 enforced)
 GET   /health       liveness
 GET   /settings     non-secret config
 ```
+
+CORS is allow-listed via `CORS_ALLOW_ORIGINS_CSV` (defaults to the Next.js dev
+origins). There is no auth layer yet — see [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md).
 
 OpenAPI docs at `/docs`. Every response is reproducible in Postman without
 internal access.
@@ -194,14 +218,20 @@ INV-5 rejects anything else, including model memory.
 
 ## Eval
 
-`src/regwatch/eval/gold_set.jsonl` ships small (10 items: 6 real + 4
-must-refuse). Production rollout expands to 30–50 per spec §10.11.
+Two layers:
 
-Thresholds (failed-CI when below): `recall@k ≥ 0.90`,
-`citation_precision ≥ 0.95`, `refusal_accuracy ≥ 0.95`.
-
-`run_eval.py` exits clean when the vector store is empty, so a fresh
-checkout's CI passes; gates only fire once a seed has run.
+- **`uv run python -m regwatch.eval.run_eval`** scores the gold set
+  (`src/regwatch/eval/gold_set.jsonl`, 11 items: 6 real + 5 must-refuse) against
+  the live corpus. Hard gates (fail CI when below): `recall@k ≥ 0.90`,
+  `citation_precision ≥ 0.95`, `refusal_accuracy ≥ 0.95`. `faithfulness` and
+  `fact_recall` (fraction of an item's `expected_facts` present in the answer)
+  are printed for observability. It exits clean on an empty store so a fresh
+  checkout passes; the real gate only fires once a seed has run.
+- **`tests/test_eval_gate.py`** is a deterministic, offline gate that seeds a
+  fixed corpus and a faithful LLM stub, so the full pipeline (resolve → filter →
+  retrieve → cite → refuse) is graded on every `uv run pytest` — including
+  `faithfulness` and `fact_recall` hard-gated at 1.0 — and fires in CI where the
+  live `run_eval` no-ops on an empty corpus.
 
 ## Layout
 
@@ -218,9 +248,11 @@ src/regwatch/
   assemble/               dossier
   eval/                   metrics, run_eval, gold_set.jsonl
   api/                    FastAPI surface
-  ui/                     Streamlit POC
-  common/                 logging, audit, text_normalize
-tests/                    smoke, invariants (INV-1..6), per-module
+  common/                 logging, audit, citations, text_normalize, conversation (chat sessions)
+regwatch/
+  backend/                backend workspace docs; source stays in src/regwatch
+  frontend/               Next.js (App Router, TS) UI — Ask / Assemble / Watch
+tests/                    smoke, invariants (INV-1..6, INV-9), eval gate, per-module
 ```
 
 ## Build phases
@@ -234,27 +266,27 @@ Definition of Done passed before moving on.
 | 1 | PSG crawler + PDF parser + chunker + embedder + cited BE extraction, idempotent |
 | 2 | Two-stage retrieval + grounded Q&A with citations + refusal + audit |
 | 3 | Drugs@FDA watchlist, alias discovery, fuzzy matcher, version diff, JSONL digest |
-| 4 | Dossier builder + FastAPI + Streamlit |
+| 4 | Dossier builder + FastAPI |
 | 5 | Eval harness + gold set + CI thresholds |
+| 6+ | Next.js UI (`regwatch/frontend/`), OpenAI Responses API + role-specific models, conversational sessions, current-version retrieval, entity-resolution hardening, deterministic eval gate |
 
 ## What's not done
 
-- Docker now gives the project a local/container baseline, but it is not a full
-  production deployment story. Streamlit is fine for the demo; the production UI
-  is the IT team's call.
-- The gold set is 10 items, not 30–50. It needs to be paired with what the
-  seed actually ingests, not what was planned to be ingested.
-- LLM-as-judge is not wired into the eval. Current metrics are mechanical
-  (exact `(short_name, page)` matches). Good for the POC, will undercount
-  semantically-equivalent answers.
+- **No auth.** Every endpoint is open and CORS is the only boundary. Auth +
+  rate limiting are the top blocker before any external exposure.
+- **Datastores are single-node** (SQLite + on-disk Chroma); no HA, pooling, or
+  backup/restore. Migrations still run on app boot rather than as a deploy step.
+- The gold set is 11 items, not the spec's 30–50, and scoring is mechanical
+  (`(short_name, page)` + `expected_facts` substrings). LLM-as-judge is not wired.
 - The cross-encoder reranker exists as a hook but is off by default. Turn
   on with `RERANKER_ENABLED=true` and tune `VECTOR_TOP_K` upward.
 - Auto scheduling via APScheduler is a stub. POC runs ingest on demand.
-- FDA source handlers have started, but prod still needs persisted source
-  tables, freshness metadata, caching, and answer synthesis across structured
-  source results. Current source lookup supports PSG, Orange Book Products.txt,
-  Drugs@FDA, Drug Shortages, NDC, and REMS entry parsing as handler-level
-  evidence, not a full multi-source answer graph.
+- FDA source handlers exist (`sources/`: PSG, Orange Book, Drugs@FDA, Shortages,
+  NDC, REMS) but are live-HTTP only — no persisted source tables, freshness
+  metadata, caching, or cross-source answer synthesis yet.
+
+See [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md) for the full,
+prioritized path from POC to production.
 
 ## License
 

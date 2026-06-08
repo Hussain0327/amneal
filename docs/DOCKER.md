@@ -3,8 +3,10 @@
 This document records the Docker work added to REGWATCH and how to use it.
 
 The goal of this pass was not Kubernetes or full production deployment. The
-goal was a reliable local/container baseline that can run the Python API, the
-temporary Streamlit UI, and ingest jobs without changing the application code.
+goal was a reliable local/container baseline that can run the Python API and
+ingest jobs without changing the application code. The UI is the Next.js app in
+`regwatch/frontend/` and is run separately (see the project `README.md`); it is
+not part of the compose stack today.
 
 ## What Was Added
 
@@ -12,29 +14,26 @@ temporary Streamlit UI, and ingest jobs without changing the application code.
 |---|---|
 | `Dockerfile` | Builds the shared Python application image. |
 | `.dockerignore` | Keeps secrets, local data, docs, caches, and local tooling out of the image context. |
-| `compose.yaml` | Defines API, optional UI, and one-shot ingest services. |
+| `compose.yaml` | Defines the API and one-shot ingest services. |
 | `docker/entrypoint.sh` | Creates container data directories and runs `regwatch init-db` before app start. |
 | `.github/workflows/ci.yml` | Adds a Docker image build check in CI. |
 | `pyproject.toml` / `uv.lock` | Moves heavy local embedding dependencies behind the `local-embeddings` extra. |
 | `src/regwatch/api/main.py` | Avoids running DB initialization twice when the entrypoint already ran it. |
-| `src/regwatch/ui/app.py` | Same DB initialization guard for Streamlit. |
 | `src/regwatch/process/embedder.py` | Gives a clear error if local embeddings are requested without installing the extra. |
 
 ## Container Shape
 
-One image is reused for three jobs:
+One image is reused for two jobs:
 
 1. API service
-2. Streamlit UI service
-3. Ingest service
+2. Ingest service
 
-The API and UI are long-running services. Ingest is intentionally a separate
-one-shot command so a large 30-minute data load does not block API startup.
+The API is a long-running service. Ingest is intentionally a separate one-shot
+command so a large 30-minute data load does not block API startup.
 
 ```text
 docker image: regwatch:local
   -> api     -> uvicorn regwatch.api.main:app
-  -> ui      -> streamlit run src/regwatch/ui/app.py
   -> ingest  -> regwatch seed
 ```
 
@@ -50,12 +49,6 @@ Run the API:
 
 ```bash
 docker compose up api
-```
-
-Run the optional Streamlit UI:
-
-```bash
-docker compose --profile ui up
 ```
 
 Run the current one-shot seed ingest:
@@ -160,9 +153,8 @@ Then it exports:
 REGWATCH_DB_INITIALIZED=1
 ```
 
-FastAPI and Streamlit check that marker and skip their own duplicate
-`init_db()` call. This prevents startup from doing the same migration/init work
-twice.
+FastAPI checks that marker and skips its own duplicate `init_db()` call. This
+prevents startup from doing the same migration/init work twice.
 
 ## Health Check
 
@@ -188,26 +180,25 @@ This Docker pass verified:
 - formatting and type checks
 - full pytest suite
 
-The eval gate still has one existing non-Docker failure in the local seeded
-data: the beclomethasone gold question is refused, so refusal accuracy is below
-threshold. Retrieval and citation precision remain green. That should be fixed
-in the retrieval/eval path, not in Docker.
+The eval gate is green: `recall@k`, `citation_precision`, and `refusal_accuracy`
+all meet threshold on the seeded corpus, and a deterministic offline eval gate
+(`tests/test_eval_gate.py`) runs inside `uv run pytest`.
 
-## How This Affects The Future TypeScript UI
+## The Next.js UI
 
-The future TypeScript UI can be added as a separate service without changing
-the API image.
+The UI is the Next.js app in `regwatch/frontend/` and runs as its own process —
+it is not in the compose stack today. It talks to the API through a same-origin
+`/api` proxy (`regwatch/frontend/next.config.mjs`), so a single public link
+(e.g. `scripts/share-demo.sh`) can expose the whole app without a second tunnel
+or a public API URL.
 
-Expected future shape:
+If/when it is containerized, the expected shape is:
 
 ```text
 api container      -> FastAPI / Python evidence service
-web container      -> Next.js / TypeScript UI
+web container      -> Next.js / TypeScript UI (proxies /api -> api)
 ingest container   -> scheduled or one-shot FDA data loads
 ```
-
-When the TypeScript UI lands, the Streamlit service can be removed or kept as an
-internal demo-only profile.
 
 ## Large Ingest Notes
 

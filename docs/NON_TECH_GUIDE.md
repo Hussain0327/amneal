@@ -228,6 +228,8 @@ The log records:
 - citations
 - whether the system refused
 - model name
+- the chat session and turn it belonged to, and the response type
+  (answer / summary / clarify / scope warning / refused)
 
 This matters because a reviewer may ask:
 
@@ -245,12 +247,12 @@ developer's laptop setup.
 The current Docker setup can run:
 
 - the API
-- the temporary Streamlit UI
 - a separate ingest job for loading FDA data
 
-This is useful groundwork, but it is not the same as a full production
-deployment. Production still needs security, hosting, backups, monitoring, and
-an approved way to manage secrets.
+(The web UI is a separate Next.js app under `regwatch/frontend/` and is run on
+its own.) This is useful groundwork, but it is not the same as a full
+production deployment. Production still needs security, hosting, backups,
+monitoring, and an approved way to manage secrets.
 
 ## Important Current Limitations
 
@@ -259,7 +261,8 @@ This is still a proof of concept.
 Important limitations:
 
 - It has a Docker/container baseline, but it is not a full production deployment.
-- The UI is currently Streamlit, which is fine for a demo but not ideal for production.
+- The UI is a Next.js web app (Ask / Assemble / Watch). It is functional for a
+  demo; it still needs the production hardening below (auth, hosting, etc.).
 - Most current work focuses on PSGs.
 - Other FDA databases still need stronger structured loaders and handlers.
 - The model provider supports OpenAI Responses API, but the final in-house or

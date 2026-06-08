@@ -32,7 +32,7 @@ export interface ClarifyOption {
   filters: Record<string, string> | null;
 }
 
-export type QueryStatus = "answer" | "clarify" | "refused";
+export type QueryStatus = "answer" | "summary" | "clarify" | "scope_warning" | "refused";
 
 export interface QueryResponse {
   answer: string;
@@ -40,6 +40,8 @@ export interface QueryResponse {
   refused: boolean;
   model_name: string;
   audit_id: number;
+  session_id: string;
+  turn_id: string;
   status: QueryStatus;
   interpretation: string | null;
   clarify: ClarifyOption[];
@@ -95,8 +97,9 @@ async function getJSON<T>(path: string): Promise<T> {
 export function askQuery(
   question: string,
   filters: Record<string, string> | null = null,
+  session_id: string | null = null,
 ): Promise<QueryResponse> {
-  return postJSON<QueryResponse>("/query", { question, filters });
+  return postJSON<QueryResponse>("/query", { question, filters, session_id });
 }
 
 export function assemble(

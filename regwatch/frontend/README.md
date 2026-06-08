@@ -1,4 +1,4 @@
-# RegWatch Web (Next.js)
+# REGWATCH Frontend Workspace
 
 Next.js (App Router, TypeScript) UI for RegWatch — replaces the Streamlit POC
 feature-for-feature (Ask / Assemble / Watch) on the Amneal brand. It is a thin
@@ -10,7 +10,7 @@ client over the FastAPI backend; all logic and compliance live in the API.
 # 1) Start the API (from the repo root)
 uv run uvicorn regwatch.api.main:app --reload      # http://localhost:8000
 
-# 2) Start the UI (from web/)
+# 2) Start the UI (from regwatch/frontend/)
 cp .env.local.example .env.local                    # NEXT_PUBLIC_API_BASE
 npm install
 npm run dev                                          # http://localhost:3000
@@ -43,7 +43,7 @@ Manual equivalent, in three terminals:
 
 ```bash
 uv run uvicorn regwatch.api.main:app --port 8000        # 1) API
-cd web && npm run build && npm run start                # 2) UI (:3000, proxies /api → :8000)
+cd regwatch/frontend && npm run build && npm run start  # 2) UI (:3000, proxies /api → :8000)
 cloudflared tunnel --url http://localhost:3000          # 3) public link
 ```
 

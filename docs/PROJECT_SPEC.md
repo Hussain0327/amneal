@@ -4,6 +4,15 @@
 Spec author persona: Principal Software Engineer. Audience: Claude Code (implementer).
 Status: v1.0, build-ready. Rename the codename freely.
 
+> **Note — this is the original build spec.** It is preserved as the foundational
+> design document. Where the shipped implementation has since evolved, the
+> current-state docs win: the UI is now **Next.js** in `regwatch/frontend/` (the
+> Streamlit references below are retired), the OpenAI provider uses the
+> **Responses API** with role-specific models, and conversational sessions,
+> current-version retrieval, and entity-resolution hardening have been added. See
+> the root `README.md`, `docs/DECISIONS.md`, and `docs/PROD_READINESS.md` for what
+> is true today.
+
 ---
 
 ## 0. How to read this spec

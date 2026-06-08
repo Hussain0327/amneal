@@ -56,8 +56,9 @@ app = FastAPI(
     lifespan=_lifespan,
 )
 
-# CORS — the Next.js UI (web/) calls this API from the browser. Allowlist comes
-# from settings; there is no auth layer yet, so the allowlist is the boundary.
+# CORS — the Next.js UI (regwatch/frontend/) calls this API from the browser.
+# Allowlist comes from settings; there is no auth layer yet, so the allowlist is
+# the boundary.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_allow_origins,

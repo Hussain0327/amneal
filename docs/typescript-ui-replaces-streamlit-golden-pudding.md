@@ -4,6 +4,9 @@
 > need to do before we start" reference for the full rebuild. Execution happens in
 > later, approved passes — sequenced below with the **eval gate as the hard
 > checkpoint between every phase**.
+>
+> Current path note: the Next.js UI now lives in `regwatch/frontend/`, not the
+> originally planned `web/` path used later in this document.
 
 ---
 

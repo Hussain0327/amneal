@@ -104,3 +104,25 @@ The eval was RED on the real corpus (`recall@8=0.667, citation_precision=0.000, 
 - **`POST /query` now returns session metadata.** Callers may pass `session_id`; otherwise the backend creates one. Every response returns `session_id`, `turn_id`, status, citations, and audit ID so a future TypeScript UI can render a real chat thread.
 - **Audit rows link to chat turns.** `query_log` now carries `session_id`, `turn_id`, `status`, and `route_json`. `chat_session` and `chat_message` persist the thread and the user/assistant turns.
 - **Response statuses are broader than answer/refuse.** `answer`, `summary`, `clarify`, `scope_warning`, and `refused` allow the assistant to guide users without guessing. Regulatory strategy/submission-drafting asks produce `scope_warning`, not a fabricated answer.
+
+## Frontend/backend workspace split
+
+- **Backend source stays in `src/regwatch`.** `regwatch/backend/` is a workspace for backend deployment notes and future API-adjacent assets, not a second Python package. No `regwatch/backend/__init__.py` should be added.
+- **TypeScript UI moved to `regwatch/frontend/`.** The Next.js App Router app now lives beside the backend workspace and keeps its same `/api/*` proxy to FastAPI.
+- **Demo sharing follows the new path.** `scripts/share-demo.sh` builds and starts the UI from `regwatch/frontend/`, while FastAPI still runs `regwatch.api.main:app` from the canonical Python package.
+
+## Streamlit POC retired
+
+- **The Streamlit POC (`src/regwatch/ui/`) is removed; the Next.js app is the UI.** Once the TypeScript UI reached parity (Ask / Assemble / Watch, clickable clarify options, cited sources), the parallel Streamlit surface was retired rather than maintained as a second UI. Deleted `ui/app.py` + `ui/branding.py`, dropped the `streamlit` dependency from `pyproject.toml`/`uv.lock`, and removed the `ui` service (port 8501) from `compose.yaml`. Nothing imported `regwatch.ui`, so it was a pure subtraction. The UI runs as its own process; it is not in the compose stack today. (This supersedes the Phase-4 "UI (Streamlit)" and Docker-baseline "optional Streamlit UI" notes above.)
+
+## Entity-resolution hardening
+
+- **Product keys are canonicalized at the filter boundary.** A caller-supplied `normalized_name` filter (API / clarify option) is run through `canonical_name()` in `grounded_qa.ask()`, so a casing/salt-order variant ("Albuterol Sulfate") no longer misses Chroma's exact-match `$eq` filter and turns a real product into a wrong refusal.
+- **Explicit comparisons clarify instead of collapsing.** `resolve_product()` detects comparison markers (`compare`/`comparison`/`versus`/`vs`/`difference between`/`compared to`; deliberately NOT `and`/`with`, which denote a single combination product) and, when 2+ distinct products are named, returns `ambiguous` before the subset-collapse — so "compare X vs the X+Y combo" asks which rather than silently picking the superset.
+- **Mixed-product evidence clarifies, it does not refuse.** The post-retrieval guard in `ask()` now offers the distinct products found (clickable clarify) instead of a blunt refusal when evidence spans more than one product. Zero citations on the clarify path, one audit row (INV-6) — unchanged.
+
+## Eval upgrade — fact scoring + a CI gate that actually fires
+
+- **`fact_recall` scores answer content.** New metric = fraction of a gold item's `expected_facts` present (tolerant substring: lowercased, de-hyphenated) in the answer. The gold set already carried `expected_facts`; they were never scored. The gate now checks the answer states the right facts, not just that it cited the right pages.
+- **A deterministic, offline eval gate runs in CI.** `tests/test_eval_gate.py` seeds a fixed echo-embedded corpus and a faithful LLM stub, drives the real `grounded_qa.ask()` pipeline, and hard-gates `recall@k`/`citation_precision`/`refusal_accuracy`/`faithfulness`/`fact_recall`. Because it runs inside `uv run pytest`, the gate fires in CI — where the live `run_eval --check-thresholds` no-ops on the empty fresh-checkout corpus.
+- **`faithfulness`/`fact_recall` stay observability-only on the live `run_eval`.** Measured real-corpus `faithfulness` is ~0.59 (the per-sentence-citation metric is strict for prose, per the Phase-5 note), so hard-gating it on the non-deterministic live model would be flaky. They print on the scorecard; the deterministic pytest gate is where they have teeth.

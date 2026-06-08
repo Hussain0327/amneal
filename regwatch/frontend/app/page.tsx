@@ -18,6 +18,7 @@ export default function AskPage() {
   const [ingredient, setIngredient] = useState("");
   const [dosage, setDosage] = useState("");
   const [result, setResult] = useState<QueryResponse | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -25,7 +26,9 @@ export default function AskPage() {
     setLoading(true);
     setError(null);
     try {
-      setResult(await askQuery(q, filters));
+      const next = await askQuery(q, filters, sessionId);
+      setResult(next);
+      setSessionId(next.session_id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setResult(null);
@@ -227,6 +230,7 @@ function ResultView({
         </summary>
         <p className="code mt-2" style={{ fontSize: "0.72rem", color: "var(--ink-soft)" }}>
           model {result.model_name} · audit #{result.audit_id} · status {result.status}
+          {" · "}session {result.session_id} · turn {result.turn_id}
         </p>
         <pre
           className="code mt-2"

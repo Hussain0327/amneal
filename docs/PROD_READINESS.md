@@ -15,8 +15,9 @@ Each item notes where it lives in the tree so the work is actionable cold.
 
 ### 1. API authentication & authorization
 - **Where:** [`src/regwatch/api/main.py`](../src/regwatch/api/main.py)
-- **Gap:** Every endpoint is open. No API key, no authn/authz, no rate limit,
-  no CORS policy. `POST /products` mutates the watchlist unauthenticated;
+- **Gap:** Every endpoint is open. No API key, no authn/authz, no rate limit.
+  CORS is allow-listed (`CORS_ALLOW_ORIGINS_CSV`), but an allowlist is not auth.
+  `POST /products` mutates the watchlist unauthenticated;
   `POST /query` / `POST /assemble` invoke the LLM (cost + abuse surface).
   Chat sessions can now carry optional `user_id`, but there is no trusted auth
   source enforcing that identity yet.
@@ -42,12 +43,15 @@ Each item notes where it lives in the tree so the work is actionable cold.
 - **Done when:** Alembic `upgrade head` is an explicit, gated deploy/CI step;
   app boot only verifies schema version and refuses to start on mismatch.
 
-### 4. Production UI decision + build
-- **Where:** Streamlit POC at [`src/regwatch/ui/app.py`](../src/regwatch/ui/app.py);
-  no `web/` dir exists despite the locked Next.js plan.
-- **Gap:** No production UI. Plan locks Next.js App Router in `web/`.
-- **Done when:** either `web/` Next.js app is built, or "Streamlit for v1" is
-  explicitly accepted and logged in [`DECISIONS.md`](DECISIONS.md).
+### 4. Production UI deployment + hardening
+- **Where:** Next.js UI at [`regwatch/frontend/`](../regwatch/frontend/);
+  Python backend source remains [`src/regwatch/`](../src/regwatch/).
+- **Gap:** The TypeScript UI exists for Ask / Assemble / Watch, but it is not
+  containerized, authenticated, load-tested, or deployed behind a production
+  gateway.
+- **Done when:** the UI is deployed behind the approved auth/gateway path; API
+  origin/proxy behavior is documented for that environment; and Streamlit is
+  explicitly retired or kept internal-only.
 
 ### 5. ⚪ LLM provider + data-handling decision (D1)
 - **Where:** `llm_provider="openai"` default,
@@ -80,10 +84,14 @@ Each item notes where it lives in the tree so the work is actionable cold.
   that didn't happen).
 
 ### 8. Eval hardening
-- **Where:** [`src/regwatch/eval/`](../src/regwatch/eval/), `gold_set.jsonl`.
-- **Gap:** gold set is 10 items (spec §10.11 wants 30–50); scoring is
-  mechanical `(short_name, page)` matching; LLM-as-judge not wired, so
-  semantically-equivalent answers undercount.
+- **Where:** [`src/regwatch/eval/`](../src/regwatch/eval/), `gold_set.jsonl`,
+  `tests/test_eval_gate.py`.
+- **Have:** a deterministic, offline eval gate (`tests/test_eval_gate.py`) that
+  fires in CI on every `uv run pytest`; `fact_recall` scores answer content
+  (`expected_facts`), and `faithfulness`/`fact_recall` print on `run_eval`.
+- **Gap:** gold set is 11 items (spec §10.11 wants 30–50); live-corpus scoring
+  is still mechanical `(short_name, page)` + `expected_facts` substrings;
+  LLM-as-judge not wired, so semantically-equivalent answers undercount.
 - **Done when:** gold set expanded to 30–50 paired to what the seed actually
   ingests; LLM-as-judge added alongside mechanical metrics; thresholds
   (`recall@k≥0.90`, `citation_precision≥0.95`, `refusal_accuracy≥0.95`) hold.
@@ -118,8 +126,13 @@ Each item notes where it lives in the tree so the work is actionable cold.
 - Alembic migration baseline + incremental migrations.
 - CI: ruff, black, mypy strict, pytest, eval thresholds, docker build, on a
   3.11/3.12 matrix.
-- Docker baseline (API / UI / ingest profiles) with persistent `./data` mount.
+- Frontend CI: `npm ci`, `npm run lint`, and `npm run build` for
+  `regwatch/frontend`.
+- Docker baseline (API + ingest services) with persistent `./data` mount; the
+  Next.js UI (`regwatch/frontend/`) runs as its own process.
 - Read-only `/settings` endpoint that never leaks secrets.
+- Entity-resolution hardening (canonicalized product key, comparison→clarify,
+  mixed-product→clarify) and conversational sessions with conversational audit.
 
 ---
 

@@ -17,6 +17,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+FRONTEND_DIR="regwatch/frontend"
 NO_TUNNEL="${SHARE_NO_TUNNEL:-0}"
 
 if [ "$NO_TUNNEL" != "1" ]; then
@@ -30,7 +31,7 @@ fi
 # build, so a stale build can serve the wrong API base — rebuilding every run
 # guarantees the served app matches the current code and env.
 echo "Building the UI…"
-( cd web && { [ -d node_modules ] || npm install; } && npm run build ) >/tmp/regwatch-build.log 2>&1 || {
+( cd "$FRONTEND_DIR" && { [ -d node_modules ] || npm install; } && npm run build ) >/tmp/regwatch-build.log 2>&1 || {
   echo "UI build failed — see /tmp/regwatch-build.log"
   exit 1
 }
@@ -72,7 +73,7 @@ wait_for "http://127.0.0.1:8000/health" "API" 90 || {
 
 # 2) UI second, once the API is reachable.
 echo "Starting UI on :3000…"
-( cd web && npm run start ) >/tmp/regwatch-ui.log 2>&1 &
+( cd "$FRONTEND_DIR" && npm run start ) >/tmp/regwatch-ui.log 2>&1 &
 UI_PID=$!
 wait_for "http://127.0.0.1:3000/api/health" "UI (proxying to API)" 60 || {
   echo "UI failed to start — see /tmp/regwatch-ui.log"

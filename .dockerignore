@@ -19,6 +19,12 @@ docs/
 *.log
 .DS_Store
 
+node_modules/
+.next/
+out/
+build/
+*.tsbuildinfo
+
 .env
 .env.local
 .env.*.local

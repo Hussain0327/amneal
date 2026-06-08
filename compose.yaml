@@ -35,9 +35,9 @@ services:
       retries: 3
       start_period: 30s
 
-  # The production UI is the Next.js app in web/ (run via scripts/share-demo.sh
-  # or `npm run dev`); it talks to this api service. The old Streamlit POC was
-  # retired — see docs/DECISIONS.md.
+  # The production UI is the Next.js app in regwatch/frontend/ (run via
+  # scripts/share-demo.sh or `npm run dev`); it talks to this api service. The
+  # old Streamlit POC was retired — see docs/DECISIONS.md.
 
   ingest:
     profiles: ["ingest"]

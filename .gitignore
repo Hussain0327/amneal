@@ -16,6 +16,13 @@ data/
 *.log
 .DS_Store
 
+# frontend build/install artifacts
+node_modules/
+.next/
+out/
+build/
+*.tsbuildinfo
+
 # env / secrets
 .env
 .env.local

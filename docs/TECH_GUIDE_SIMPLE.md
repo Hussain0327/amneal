@@ -17,15 +17,15 @@ The current app is a Python proof of concept.
 Main stack:
 
 - Python 3.11+
-- FastAPI API
-- Streamlit demo UI
+- FastAPI API (conversational `POST /query` with session/turn IDs)
+- Next.js (App Router, TypeScript) UI in `regwatch/frontend/`
 - SQLite through SQLModel
 - Chroma vector store
 - `httpx` and `selectolax` for FDA crawling
 - `pdfplumber` and `pypdf` for PDF parsing
-- pluggable LLM providers
+- pluggable LLM providers (OpenAI Responses API, role-specific models)
 - pluggable embedding providers
-- Docker / Compose for local container runs
+- Docker / Compose for the local API + ingest baseline
 - pytest, ruff, black, mypy
 
 ## High-Level Flow
@@ -85,18 +85,20 @@ src/regwatch/
   watch/                   watchlist, alias discovery, matching, alerts
   assemble/                product dossier builder
   api/                     FastAPI endpoints
-  ui/                      Streamlit proof-of-concept UI
-  eval/                    gold set and metrics
-  common/                  citations, audit, logging, text normalization
+  eval/                    gold set, metrics, deterministic eval gate
+  common/                  citations, audit, logging, text normalization, conversation (chat sessions)
 
-tests/                     unit, integration, invariant tests
+regwatch/
+  backend/                 backend workspace docs; source stays in src/regwatch
+  frontend/                Next.js (App Router, TypeScript) UI — Ask / Assemble / Watch
+tests/                     unit, integration, invariant, eval-gate tests
 docs/                      specs, decisions, plans, onboarding docs
 ```
 
 Top-level Docker files:
 
 - `Dockerfile`: builds the shared Python app image.
-- `compose.yaml`: runs API, optional UI, and ingest services.
+- `compose.yaml`: runs the API and ingest services (the UI runs separately).
 - `.dockerignore`: keeps local data, secrets, docs, and caches out of the image.
 
 ## The Core Data Model
@@ -283,12 +285,15 @@ Defines the LLM provider interface.
 
 Current providers:
 
-- OpenAI
+- OpenAI — uses the **Responses API** by default (`OPENAI_API_MODE=responses`;
+  `chat` falls back to Chat Completions), with role-specific models: router
+  `gpt-5-nano`, synthesizer + extractor `gpt-5.4-nano`, each falling back to
+  `LLM_MODEL`.
 - Anthropic
 - echo for tests
 
-Current OpenAI implementation still uses Chat Completions. The planned next
-step is migrating it to Responses API and adding role-specific models.
+Business logic always calls `get_llm_provider(role=...)`; no model name is
+hard-coded.
 
 ### `generate/grounded_qa.py`
 
@@ -369,24 +374,26 @@ It is a research scaffold, not submission content.
 FastAPI exposes:
 
 - `GET /health`
-- `POST /query`
+- `POST /query` — conversational; accepts `session_id`/`user_id`, returns
+  `session_id`/`turn_id`/`status` (`answer`/`summary`/`clarify`/`scope_warning`/`refused`)
+- `POST /sources/search`
 - `POST /assemble`
 - `GET /watch/latest`
 - `GET /products`
 - `POST /products`
 - `GET /settings`
 
-### `ui/app.py`
+CORS is allow-listed via `CORS_ALLOW_ORIGINS_CSV` (defaults to the Next.js dev
+origins). No auth layer yet.
 
-Streamlit proof-of-concept UI.
+### `regwatch/frontend/` (Next.js, TypeScript)
 
-Pages:
-
-- Ask
-- Assemble
-- Watch
-
-Production UI is expected to move to TypeScript/Next.js later.
+The production UI is the Next.js App Router app in `regwatch/frontend/` —
+pages Ask / Assemble / Watch, a typed client in `regwatch/frontend/lib/api.ts`
+mirroring the Pydantic models, and a same-origin `/api` proxy
+(`regwatch/frontend/next.config.mjs`) so one origin exposes the whole app. Run
+it with `cd regwatch/frontend && npm run dev`, or use `scripts/share-demo.sh`
+to start API + UI behind one public link.
 
 ## Eval
 
@@ -401,10 +408,15 @@ Metrics:
 - retrieval recall
 - citation precision
 - faithfulness proxy
+- `fact_recall` — fraction of a gold item's `expected_facts` present in the
+  answer (scores answer content, not just which pages were cited)
 - refusal accuracy
 
-The eval is intentionally mechanical and auditable. It does not yet use an
-LLM-as-judge.
+`run_eval.py` scores the gold set against the live corpus (and no-ops on an
+empty store). `tests/test_eval_gate.py` is a deterministic, offline gate: it
+seeds a fixed corpus and a faithful LLM stub and hard-gates every metric, so the
+gate fires inside `uv run pytest` (and therefore in CI). The eval is
+intentionally mechanical and auditable; it does not yet use an LLM-as-judge.
 
 ## Tests
 
@@ -436,18 +448,14 @@ The LLM is not trusted by itself. The code checks its output.
 
 ## Current Model Provider State
 
-Current state:
+Current state (this is implemented, not planned):
 
-- OpenAI provider uses Chat Completions.
-- A single `LLM_MODEL` setting is used.
-- Default model is currently `gpt-4o-mini`.
-
-Planned next step:
-
-- migrate OpenAI provider to Responses API
-- add role-specific model settings
-- use `gpt-5-nano` for router/classification/entity disambiguation
-- use `gpt-5.4-nano` for final answer synthesis and BE extraction
+- OpenAI provider uses the **Responses API** by default
+  (`OPENAI_API_MODE=responses`); `chat` falls back to Chat Completions.
+- Role-specific models, each falling back to `LLM_MODEL`:
+  - `gpt-5-nano` (reasoning) for the router/classification role
+  - `gpt-5.4-nano` for answer synthesis and BE extraction
+- Reasoning models that reject `temperature` are retried without it.
 
 ## Future Architecture
 
@@ -465,7 +473,9 @@ Question
   -> audit
 ```
 
-Future source handlers:
+Source handlers (these exist today in `src/regwatch/sources/` with a rules-first
+router, reachable via `POST /sources/search`, but are not yet persisted, cached,
+or synthesized into the main `/query` answer path):
 
 - PSG: scoped RAG over PDF chunks
 - Orange Book: structured lookup
@@ -489,7 +499,7 @@ uv run regwatch aliases --refresh
 uv run regwatch seed
 uv run python -m regwatch.eval.run_eval
 uv run uvicorn regwatch.api.main:app --reload
-uv run streamlit run src/regwatch/ui/app.py
+cd regwatch/frontend && npm install && npm run dev      # Next.js UI on http://localhost:3000
 ```
 
 ## What To Ignore At First

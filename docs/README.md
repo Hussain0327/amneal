@@ -25,8 +25,10 @@ Read these in order if you are new to the project:
 | `PROJECT_SPEC.md` | Engineers / reviewers | Original POC spec, phase plan, and compliance invariants. |
 | `DECISIONS.md` | Engineers / reviewers | Append-only decision log. Read this before changing architecture. |
 | `PROD_READINESS.md` | Engineers / deployment owners | Tracks what stands between the POC and a real production deployment, prioritized and mapped to the tree. |
+| `../regwatch/backend/README.md` | Backend engineers | Explains why backend source remains in `src/regwatch` and how to run the FastAPI API. |
+| `../regwatch/frontend/README.md` | Frontend engineers | Explains how to run the Next.js UI and how it proxies to the API. |
 | `CLAUDE.md` | Agent operators | Working instructions for Claude Code or similar coding agents. |
-| `typescript-ui-replaces-streamlit-golden-pudding.md` | Product / engineering planning | Future architecture plan for router, handlers, synthesizer, and TypeScript UI. |
+| `typescript-ui-replaces-streamlit-golden-pudding.md` | Historical planning | The original Next.js-replaces-Streamlit plan — now realized (the UI lives in `regwatch/frontend/` and Streamlit is retired). Kept as a planning artifact. |
 
 ## Historical Notes
 
