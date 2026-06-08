@@ -34,3 +34,6 @@ build/
 
 # private planning notes (kept locally, not pushed)
 docs/*.txt
+
+# office docs / local working files (not source — kept locally, not pushed)
+*.docx
