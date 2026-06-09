@@ -44,6 +44,9 @@ jobs:
       - name: pytest
         run: uv run pytest -q
 
+      - name: seed vector store
+        run: uv run regwatch seed
+
       - name: eval
         run: uv run python -m regwatch.eval.run_eval --check-thresholds
 
