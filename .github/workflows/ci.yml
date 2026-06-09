@@ -32,7 +32,7 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: sync deps
-        run: uv sync --extra dev --extra llm --extra local-embeddings
+        run: uv sync --extra dev --extra llm --extra local-embeddings --extra orchestration
 
       - name: ruff
         run: uv run ruff check src tests migrations
@@ -67,6 +67,12 @@ jobs:
 
       - name: docker build
         run: docker build -t regwatch:ci .
+
+      - name: compose config
+        run: docker compose config --quiet
+
+      - name: frontend docker build
+        run: docker build -t regwatch-web:ci regwatch/frontend
 
   frontend:
     runs-on: ubuntu-latest

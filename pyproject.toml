@@ -39,6 +39,11 @@ llm = [
     "openai>=1.55",
     "anthropic>=0.40",
 ]
+orchestration = [
+    "dagster>=1.13,<1.14",
+    "dagster-webserver>=1.13,<1.14",
+    "dagster-postgres>=0.29,<0.30",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

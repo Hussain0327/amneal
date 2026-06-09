@@ -2,39 +2,48 @@
 
 This document records the Docker work added to REGWATCH and how to use it.
 
-The goal of this pass was not Kubernetes or full production deployment. The
-goal was a reliable local/container baseline that can run the Python API and
-ingest jobs without changing the application code. The UI is the Next.js app in
-`regwatch/frontend/` and is run separately (see the project `README.md`); it is
-not part of the compose stack today.
+The goal is not Kubernetes or full production deployment yet. The goal is a
+reliable local/container baseline that can run the Python API, Next.js UI,
+ingest jobs, and Dagster orchestration without changing the core application
+code.
 
 ## What Was Added
 
 | File | Purpose |
 |---|---|
 | `Dockerfile` | Builds the shared Python application image. |
+| `regwatch/frontend/Dockerfile` | Builds the local Next.js UI image. |
 | `.dockerignore` | Keeps secrets, local data, docs, caches, and local tooling out of the image context. |
-| `compose.yaml` | Defines the API and one-shot ingest services. |
+| `compose.yaml` | Defines the API, UI, one-shot ingest, and Dagster services. |
 | `docker/entrypoint.sh` | Creates container data directories and runs `regwatch init-db` before app start. |
+| `docker/dagster/` | Dagster instance and workspace configuration for Compose. |
 | `.github/workflows/ci.yml` | Adds a Docker image build check in CI. |
-| `pyproject.toml` / `uv.lock` | Moves heavy local embedding dependencies behind the `local-embeddings` extra. |
+| `pyproject.toml` / `uv.lock` | Moves heavy local embedding dependencies behind the `local-embeddings` extra and Dagster behind the `orchestration` extra. |
 | `src/regwatch/api/main.py` | Avoids running DB initialization twice when the entrypoint already ran it. |
 | `src/regwatch/process/embedder.py` | Gives a clear error if local embeddings are requested without installing the extra. |
 
 ## Container Shape
 
-One image is reused for two jobs:
+One Python image is reused for app and orchestration jobs:
 
 1. API service
 2. Ingest service
+3. Dagster code server, webserver, and daemon
 
 The API is a long-running service. Ingest is intentionally a separate one-shot
-command so a large 30-minute data load does not block API startup.
+command so a large 30-minute data load does not block API startup. Dagster V1
+wraps the existing `regwatch seed` CLI as a manual `seed_corpus_job`.
 
 ```text
 docker image: regwatch:local
-  -> api     -> uvicorn regwatch.api.main:app
-  -> ingest  -> regwatch seed
+  -> api                -> uvicorn regwatch.api.main:app
+  -> ingest             -> regwatch seed
+  -> dagster-code       -> dagster code-server
+  -> dagster-webserver  -> dagster UI
+  -> dagster-daemon     -> Dagster run/schedule daemon
+
+docker image: regwatch-web:local
+  -> web                -> npm run dev
 ```
 
 ## Quick Commands
@@ -51,6 +60,20 @@ Run the API:
 docker compose up api
 ```
 
+Run the full local stack:
+
+```bash
+docker compose up --build api web dagster-postgres dagster-code dagster-webserver dagster-daemon
+```
+
+Local endpoints:
+
+```text
+UI:      http://localhost:3000
+API:     http://localhost:8000
+Dagster: http://localhost:3001
+```
+
 Run the current one-shot seed ingest:
 
 ```bash
@@ -63,6 +86,12 @@ Validate Compose syntax:
 docker compose config --quiet
 ```
 
+Run the seed corpus from Dagster:
+
+1. Open `http://localhost:3001`.
+2. Select `seed_corpus_job`.
+3. Launch materialization/run manually.
+
 ## Data Persistence
 
 Compose mounts the host `./data` directory into the container at `/app/data`.
@@ -73,6 +102,11 @@ That means these survive container restarts:
 - Chroma vector store
 - raw PDF files
 - processed output files
+- Dagster compute logs and local artifact storage
+
+Dagster's run, event, and schedule metadata uses the `dagster-postgres` service
+and the named `dagster-postgres` Docker volume. REGWATCH application data stays
+in `./data`.
 
 Container defaults:
 
@@ -84,6 +118,7 @@ RAW_PDF_DIR=/app/data/raw
 PROCESSED_DIR=/app/data/processed
 API_HOST=0.0.0.0
 API_PORT=8000
+DAGSTER_HOME=/app/data/dagster/home
 ```
 
 ## Embedding Modes
@@ -186,18 +221,18 @@ all meet threshold on the seeded corpus, and a deterministic offline eval gate
 
 ## The Next.js UI
 
-The UI is the Next.js app in `regwatch/frontend/` and runs as its own process —
-it is not in the compose stack today. It talks to the API through a same-origin
-`/api` proxy (`regwatch/frontend/next.config.mjs`), so a single public link
-(e.g. `scripts/share-demo.sh`) can expose the whole app without a second tunnel
-or a public API URL.
+The UI is the Next.js app in `regwatch/frontend/` and now runs as the Compose
+`web` service. It talks to the API through a same-origin `/api` proxy
+(`regwatch/frontend/next.config.mjs`). In Compose, `API_PROXY_TARGET` is set to
+`http://api:8000`, so browser traffic still only talks to the Next.js origin.
 
-If/when it is containerized, the expected shape is:
+The local container shape is:
 
 ```text
 api container      -> FastAPI / Python evidence service
 web container      -> Next.js / TypeScript UI (proxies /api -> api)
 ingest container   -> scheduled or one-shot FDA data loads
+dagster containers -> orchestration UI, code location, daemon, metadata DB
 ```
 
 ## Large Ingest Notes
@@ -216,7 +251,7 @@ Needed next:
 - retry/backoff per FDA source
 - explicit prevention of broad ingest with test embeddings
 - eventually a scheduled job or orchestrated worker instead of manual
-  `docker compose run`
+  `docker compose run` or manual Dagster launches
 
 ## Not Done Yet
 
@@ -234,3 +269,4 @@ Still needed:
 - image vulnerability scan
 - Kubernetes manifests or Helm chart, if the hosting decision requires them
 - decision on SQLite/Chroma vs Postgres/pgvector or managed vector storage
+- automatic Dagster schedules, once the manual seed job is validated

@@ -1,20 +1,33 @@
+x-regwatch-build: &regwatch-build
+  context: .
+  args:
+    INSTALL_LOCAL_EMBEDDINGS: ${INSTALL_LOCAL_EMBEDDINGS:-false}
+
+x-regwatch-environment: &regwatch-environment
+  DATA_DIR: /app/data
+  CHROMA_DIR: /app/data/chroma
+  SQLITE_PATH: /app/data/regwatch.db
+  RAW_PDF_DIR: /app/data/raw
+  PROCESSED_DIR: /app/data/processed
+  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-echo}
+
+x-dagster-environment: &dagster-environment
+  DAGSTER_CONFIG_DIR: /app/dagster_config
+  DAGSTER_HOME: /app/data/dagster/home
+  DAGSTER_POSTGRES_USER: ${DAGSTER_POSTGRES_USER:-dagster}
+  DAGSTER_POSTGRES_PASSWORD: ${DAGSTER_POSTGRES_PASSWORD:-dagster}
+  DAGSTER_POSTGRES_DB: ${DAGSTER_POSTGRES_DB:-dagster}
+  DAGSTER_POSTGRES_HOST: dagster-postgres
+
 services:
   api:
-    build:
-      context: .
-      args:
-        INSTALL_LOCAL_EMBEDDINGS: ${INSTALL_LOCAL_EMBEDDINGS:-false}
+    build: *regwatch-build
     image: ${REGWATCH_IMAGE:-regwatch:local}
     env_file:
       - path: .env
         required: false
     environment:
-      DATA_DIR: /app/data
-      CHROMA_DIR: /app/data/chroma
-      SQLITE_PATH: /app/data/regwatch.db
-      RAW_PDF_DIR: /app/data/raw
-      PROCESSED_DIR: /app/data/processed
-      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-echo}
+      <<: *regwatch-environment
       API_HOST: 0.0.0.0
       API_PORT: 8000
     volumes:
@@ -35,27 +48,133 @@ services:
       retries: 3
       start_period: 30s
 
-  # The production UI is the Next.js app in regwatch/frontend/ (run via
-  # scripts/share-demo.sh or `npm run dev`); it talks to this api service. The
-  # old Streamlit POC was retired — see docs/DECISIONS.md.
+  web:
+    build:
+      context: ./regwatch/frontend
+    image: ${REGWATCH_WEB_IMAGE:-regwatch-web:local}
+    environment:
+      API_PROXY_TARGET: http://api:8000
+      NEXT_TELEMETRY_DISABLED: "1"
+    volumes:
+      - ./regwatch/frontend:/app
+      - web-node-modules:/app/node_modules
+    ports:
+      - "3000:3000"
+    command: ["npm", "run", "dev", "--", "--hostname", "0.0.0.0"]
+    depends_on:
+      api:
+        condition: service_healthy
 
   ingest:
     profiles: ["ingest"]
     image: ${REGWATCH_IMAGE:-regwatch:local}
-    build:
-      context: .
-      args:
-        INSTALL_LOCAL_EMBEDDINGS: ${INSTALL_LOCAL_EMBEDDINGS:-false}
+    build: *regwatch-build
     env_file:
       - path: .env
         required: false
     environment:
-      DATA_DIR: /app/data
-      CHROMA_DIR: /app/data/chroma
-      SQLITE_PATH: /app/data/regwatch.db
-      RAW_PDF_DIR: /app/data/raw
-      PROCESSED_DIR: /app/data/processed
-      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-echo}
+      <<: *regwatch-environment
     volumes:
       - ./data:/app/data
     command: ["regwatch", "seed"]
+
+  dagster-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DAGSTER_POSTGRES_USER:-dagster}
+      POSTGRES_PASSWORD: ${DAGSTER_POSTGRES_PASSWORD:-dagster}
+      POSTGRES_DB: ${DAGSTER_POSTGRES_DB:-dagster}
+    volumes:
+      - dagster-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 8s
+      retries: 5
+
+  dagster-code:
+    image: ${REGWATCH_IMAGE:-regwatch:local}
+    build: *regwatch-build
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: [*regwatch-environment, *dagster-environment]
+      REGWATCH_INIT_DB: "false"
+    volumes:
+      - ./data:/app/data
+    expose:
+      - "4000"
+    command:
+      [
+        "dagster",
+        "code-server",
+        "start",
+        "-h",
+        "0.0.0.0",
+        "-p",
+        "4000",
+        "-m",
+        "regwatch.orchestration.definitions",
+      ]
+    healthcheck:
+      test: ["CMD", "dagster", "api", "grpc-health-check", "-p", "4000"]
+      interval: 10s
+      timeout: 8s
+      retries: 20
+      start_period: 20s
+    depends_on:
+      dagster-postgres:
+        condition: service_healthy
+
+  dagster-webserver:
+    image: ${REGWATCH_IMAGE:-regwatch:local}
+    build: *regwatch-build
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: [*regwatch-environment, *dagster-environment]
+      REGWATCH_INIT_DB: "false"
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "3001:3000"
+    command:
+      [
+        "dagster-webserver",
+        "-h",
+        "0.0.0.0",
+        "-p",
+        "3000",
+        "-w",
+        "/app/data/dagster/home/workspace.yaml",
+      ]
+    depends_on:
+      dagster-postgres:
+        condition: service_healthy
+      dagster-code:
+        condition: service_healthy
+
+  dagster-daemon:
+    image: ${REGWATCH_IMAGE:-regwatch:local}
+    build: *regwatch-build
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: [*regwatch-environment, *dagster-environment]
+      REGWATCH_INIT_DB: "false"
+    volumes:
+      - ./data:/app/data
+    command: ["dagster-daemon", "run", "-w", "/app/data/dagster/home/workspace.yaml"]
+    restart: on-failure
+    depends_on:
+      dagster-postgres:
+        condition: service_healthy
+      dagster-code:
+        condition: service_healthy
+
+volumes:
+  dagster-postgres:
+  web-node-modules:

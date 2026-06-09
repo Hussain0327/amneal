@@ -75,6 +75,7 @@ These are code with tests, not guidelines. See `tests/test_invariants.py`.
 | LLM | Pluggable behind `LLMProvider`. OpenAI via the **Responses API** (`OPENAI_API_MODE=responses`, default; `chat` falls back to Chat Completions). Role-specific models: router `gpt-5-nano` (reasoning), synthesizer + extractor `gpt-5.4-nano`, each falling back to `LLM_MODEL`. `anthropic` and `echo` (test-only) also supported |
 | API | FastAPI. `POST /query` is conversational — accepts/returns `session_id`+`turn_id`, with response `status` ∈ `answer`/`summary`/`clarify`/`scope_warning`/`refused` |
 | UI | **Next.js 14 (App Router, TypeScript) in `regwatch/frontend/`** — Ask / Assemble / Watch. Talks to the API through a same-origin `/api` proxy. (The earlier Streamlit POC was retired.) |
+| Orchestration | Dagster OSS in Docker Compose. V1 exposes a manual `seed_corpus_job` over the existing `regwatch seed` CLI |
 | Tooling | ruff, black, mypy strict on `src/`, pytest |
 
 The LLM provider, model, and reranker are all behind interfaces. Nothing is
@@ -140,11 +141,10 @@ Key guides:
 
 Full details are in [`docs/DOCKER.md`](docs/DOCKER.md).
 
-The container image runs the same Python app for the API and ingest jobs.
-Startup runs `regwatch init-db`; large ingest runs are separate commands so API
-boot stays fast. The `regwatch/frontend/` Next.js UI is run separately
-(`npm run dev`, or `./scripts/share-demo.sh`); it is not part of the compose
-stack today.
+The container image runs the same Python app for the API, ingest jobs, and
+Dagster code location. Startup runs `regwatch init-db`; large ingest runs are
+separate commands so API boot stays fast. Compose also runs the Next.js UI and a
+local Dagster OSS deployment.
 
 ```bash
 # build the shared image
@@ -155,6 +155,12 @@ docker build --build-arg INSTALL_LOCAL_EMBEDDINGS=true -t regwatch:local-embeddi
 
 # API on http://localhost:8000
 docker compose up api
+
+# full local stack:
+# - UI:      http://localhost:3000
+# - API:     http://localhost:8000
+# - Dagster: http://localhost:3001
+docker compose up --build api web dagster-postgres dagster-code dagster-webserver dagster-daemon
 
 # one-shot seed ingest; later this becomes the broad PSG/source sync job
 docker compose --profile ingest run --rm ingest
@@ -178,6 +184,10 @@ EMBEDDING_PROVIDER=echo
 API_HOST=0.0.0.0
 API_PORT=8000
 ```
+
+Dagster uses its own Postgres service for run/event/schedule metadata and keeps
+app data in `./data`. The initial Dagster pipeline is manual-first: open
+`http://localhost:3001` and launch `seed_corpus_job`.
 
 ## API
 
