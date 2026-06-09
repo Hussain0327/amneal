@@ -11,6 +11,8 @@ permissions:
 jobs:
   lint-type-test:
     runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     strategy:
       fail-fast: false
       matrix:
@@ -45,10 +47,16 @@ jobs:
         run: uv run pytest -q
 
       - name: seed vector store
+        if: env.OPENAI_API_KEY != ''
         run: uv run regwatch seed
 
       - name: eval
+        if: env.OPENAI_API_KEY != ''
         run: uv run python -m regwatch.eval.run_eval --check-thresholds
+
+      - name: eval skipped
+        if: env.OPENAI_API_KEY == ''
+        run: echo "Skipping live eval because OPENAI_API_KEY is not configured; pytest runs the deterministic eval gate."
 
   docker-build:
     runs-on: ubuntu-latest
