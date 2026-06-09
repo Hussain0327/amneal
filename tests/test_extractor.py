@@ -101,7 +101,11 @@ def test_extractor_binds_quote_to_claimed_page(monkeypatch: pytest.MonkeyPatch) 
 
     # (a) Correct page -> kept.
     correct = _StubLLM(
-        {"fields": {"study_type": {"value": "Fasting and fed", "citation": {"page": 2, "quote": quote}}}}
+        {
+            "fields": {
+                "study_type": {"value": "Fasting and fed", "citation": {"page": 2, "quote": quote}}
+            }
+        }
     )
     monkeypatch.setattr(ext, "get_llm_provider", lambda *a, **k: correct)
     kept = ext.extract_be(pages)
@@ -110,7 +114,11 @@ def test_extractor_binds_quote_to_claimed_page(monkeypatch: pytest.MonkeyPatch) 
 
     # (b) Same quote cited to the wrong page (1) -> rejected, field dropped.
     wrong = _StubLLM(
-        {"fields": {"study_type": {"value": "Fasting and fed", "citation": {"page": 1, "quote": quote}}}}
+        {
+            "fields": {
+                "study_type": {"value": "Fasting and fed", "citation": {"page": 1, "quote": quote}}
+            }
+        }
     )
     monkeypatch.setattr(ext, "get_llm_provider", lambda *a, **k: wrong)
     dropped = ext.extract_be(pages)
