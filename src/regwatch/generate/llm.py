@@ -149,7 +149,7 @@ class OpenAIProvider:
             resp = client.responses.create(temperature=temperature, **kwargs)
         except openai.BadRequestError as exc:
             # Reasoning models (e.g. gpt-5-nano) reject `temperature`; retry without it.
-            if "temperature" in str(exc).lower():
+            if getattr(exc, "param", None) == "temperature":
                 resp = client.responses.create(**kwargs)
             else:
                 raise

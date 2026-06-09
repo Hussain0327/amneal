@@ -5,16 +5,18 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 import respx
 
+from regwatch.sources import router as router_mod
 from regwatch.sources.drugsfda import DRUGSFDA_ENDPOINT, DrugsFdaHandler
 from regwatch.sources.ndc import NDC_ENDPOINT, NdcHandler
 from regwatch.sources.orange_book import OrangeBookHandler, parse_products_text
 from regwatch.sources.psg import PsgHandler
 from regwatch.sources.rems import RemsHandler, parse_rems_rows
-from regwatch.sources.router import route_sources
+from regwatch.sources.router import route_sources, search_sources
 from regwatch.sources.shortages import SHORTAGES_ENDPOINT, ShortagesHandler
-from regwatch.sources.types import SourceKind, SourceQuery
+from regwatch.sources.types import SourceKind, SourceQuery, SourceRecord
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import PsgDocument, PsgVersion
 
@@ -33,6 +35,53 @@ def test_route_sources_uses_obvious_rules() -> None:
     assert route_sources(SourceQuery(query_text="What TE code is in the Orange Book?")) == [
         SourceKind.ORANGE_BOOK
     ]
+
+
+def test_route_sources_rs_requires_domain_context() -> None:
+    assert route_sources(SourceQuery(query_text="rs.")) == [
+        SourceKind.DRUGSFDA,
+        SourceKind.ORANGE_BOOK,
+        SourceKind.PSG,
+    ]
+    assert route_sources(
+        SourceQuery(query_text="What is the RS?", active_ingredient="albuterol sulfate")
+    ) == [SourceKind.ORANGE_BOOK]
+
+
+def test_search_sources_continues_when_one_handler_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BoomHandler:
+        def search(self, query: SourceQuery, *, client: httpx.Client | None = None) -> list:
+            raise httpx.TimeoutException("boom")
+
+    class _OkHandler:
+        def search(
+            self,
+            query: SourceQuery,
+            *,
+            client: httpx.Client | None = None,
+        ) -> list[SourceRecord]:
+            return [
+                SourceRecord(
+                    source=SourceKind.PSG,
+                    title="ok",
+                    source_url="https://example.invalid",
+                    identifiers={},
+                    fields={},
+                )
+            ]
+
+    monkeypatch.setitem(router_mod._HANDLERS, SourceKind.REMS, _BoomHandler())
+    monkeypatch.setitem(router_mod._HANDLERS, SourceKind.PSG, _OkHandler())
+
+    routed, records = search_sources(
+        SourceQuery(query_text="rems psg"),
+        sources=[SourceKind.REMS, SourceKind.PSG],
+    )
+
+    assert routed == [SourceKind.REMS, SourceKind.PSG]
+    assert [r.source for r in records] == [SourceKind.PSG]
 
 
 def test_parse_orange_book_products_text() -> None:
@@ -57,6 +106,7 @@ def test_psg_handler_returns_local_structured_rows() -> None:
     init_db()
     with session_scope() as s:
         doc = PsgDocument(
+            appl_no="020503",
             active_ingredient="Albuterol Sulfate",
             normalized_name="albuterol sulfate",
             dosage_form="Aerosol, Metered",
@@ -82,6 +132,7 @@ def test_psg_handler_returns_local_structured_rows() -> None:
     records = PsgHandler().search(SourceQuery(active_ingredient="albuterol sulfate"))
     assert len(records) == 1
     assert records[0].source == SourceKind.PSG
+    assert records[0].identifiers["appl_no"] == "020503"
     assert records[0].fields["psg_type"] == "draft"
     assert records[0].fields["latest_diff_summary"] == "Initial capture."
 
@@ -163,6 +214,10 @@ def test_shortages_handler_maps_openfda_shortage() -> None:
     assert records[0].fields["status"] == "Current"
 
 
+def test_shortages_dosage_form_alone_does_not_query() -> None:
+    assert ShortagesHandler().search(SourceQuery(dosage_form="tablet")) == []
+
+
 def test_rems_parser_and_handler_return_structured_rows() -> None:
     html = """
     <table>
@@ -183,3 +238,15 @@ def test_rems_parser_and_handler_return_structured_rows() -> None:
     assert records[0].source == SourceKind.REMS
     assert records[0].identifiers["application_number"] == "NDA019758"
     assert records[0].source_url.endswith("/drugsatfda_docs/rems/clozapine.pdf")
+
+
+def test_rems_identifier_requires_application_shaped_value() -> None:
+    html = """
+    <table>
+      <tr><th>Application Number</th><th>Drug Name</th></tr>
+      <tr><td>Clozapine</td><td>NDA019758</td></tr>
+    </table>
+    """
+    records = RemsHandler(html=html).search(SourceQuery(brand_name="Clozapine"))
+    assert len(records) == 1
+    assert "application_number" not in records[0].identifiers

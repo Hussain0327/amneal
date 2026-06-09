@@ -48,7 +48,7 @@ def test_db_boots_and_round_trips() -> None:
     with get_engine().connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0002_chat_sessions"
+            == "0003_psg_document_appl_no"
         )
     with session_scope() as s:
         s.add(
@@ -87,7 +87,7 @@ def test_init_db_stamps_complete_legacy_schema_without_version_table() -> None:
     with get_engine().connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0002_chat_sessions"
+            == "0003_psg_document_appl_no"
         )
 
 
@@ -113,7 +113,7 @@ def test_init_db_stamps_complete_legacy_schema_with_empty_version_table() -> Non
     with engine.connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0002_chat_sessions"
+            == "0003_psg_document_appl_no"
         )
 
 
@@ -169,6 +169,7 @@ def test_llm_provider_openai_requires_key(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("OPENAI_API_KEY", "")
     import config.settings as cs
 
+    cs.get_settings.cache_clear()
     cs.settings = cs.get_settings()
     from regwatch.generate.llm import get_llm_provider
 

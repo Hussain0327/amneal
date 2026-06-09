@@ -31,6 +31,7 @@ def test_compound_with_three_sources() -> None:
 
 def test_non_citation_brackets_ignored() -> None:
     assert list(iter_psg_citations("see [appendix] and [note 4]")) == []
+    assert list(iter_psg_citations("see [Table 1, p.3]")) == []
     assert has_citation("see [appendix]") is False
     assert has_citation("here [PSG_020503, p.3]") is True
 
@@ -41,12 +42,12 @@ def test_strip_all_citations_keeps_prose() -> None:
 
 
 def test_filter_drops_disallowed_pairs_in_compound() -> None:
-    text = "Per guidance [PSG_020503, p.4; PSG_FAKE, p.9]."
+    text = "Per guidance [PSG_020503, p.4; PSG_999999, p.9]."
     out = filter_citations(text, allowed={("PSG_020503", 4)})
-    assert "PSG_FAKE" not in out
+    assert "PSG_999999" not in out
     assert "[PSG_020503, p.4]" in out
 
 
 def test_filter_removes_fully_disallowed_bracket() -> None:
-    text = "Claim [PSG_FAKE, p.1]."
+    text = "Claim [PSG_999999, p.1]."
     assert filter_citations(text, allowed=set()) == "Claim ."

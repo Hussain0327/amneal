@@ -13,14 +13,21 @@ export default function WatchPage() {
   const [alerts, setAlerts] = useState<AlertRecord[] | null>(null);
   const [products, setProducts] = useState<ProductRecord[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [productError, setProductError] = useState<string | null>(null);
 
   useEffect(() => {
     watchLatest()
       .then((d) => setAlerts(d.alerts))
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+      .catch((e) => {
+        setAlerts([]);
+        setError(e instanceof Error ? e.message : String(e));
+      });
     listProducts()
       .then((d) => setProducts(d.products))
-      .catch(() => setProducts([]));
+      .catch((e) => {
+        setProducts([]);
+        setProductError(e instanceof Error ? e.message : String(e));
+      });
   }, []);
 
   return (
@@ -99,6 +106,11 @@ export default function WatchPage() {
           </span>
         </div>
         <div className="mt-3">
+          {productError && (
+            <p className="mb-3 code" style={{ color: "var(--oxblood)", fontSize: "0.82rem" }}>
+              {productError}
+            </p>
+          )}
           <WatchlistTable products={products} />
         </div>
       </section>
@@ -114,7 +126,16 @@ function WatchlistTable({ products }: { products: ProductRecord[] | null }) {
         Watchlist is empty. Add products via the API or <span className="code">regwatch watchlist add</span>.
       </p>
     );
-  const columns = Array.from(new Set(products.flatMap((p) => Object.keys(p))));
+  const columns: Array<keyof ProductRecord> = [
+    "active_ingredient",
+    "dosage_form",
+    "route",
+    "rld_name",
+    "rld_application_number",
+    "company_status",
+    "source",
+    "source_url",
+  ];
   return (
     <div className="doc" style={{ overflow: "auto" }}>
       <table className="ledger">

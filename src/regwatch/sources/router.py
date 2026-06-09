@@ -7,6 +7,7 @@ from collections.abc import Iterable
 
 import httpx
 
+from regwatch.common.logging import get_logger
 from regwatch.sources.drugsfda import DrugsFdaHandler
 from regwatch.sources.ndc import NdcHandler
 from regwatch.sources.orange_book import OrangeBookHandler
@@ -17,6 +18,8 @@ from regwatch.sources.types import SourceHandler, SourceKind, SourceQuery, Sourc
 
 NDC_PATTERN = re.compile(r"\b\d{4,5}-\d{3,4}(?:-\d{1,2})?\b")
 APP_PATTERN = re.compile(r"\b(?:NDA|ANDA|BLA)?\s*\d{5,6}\b", re.IGNORECASE)
+RS_PATTERN = re.compile(r"\brs\b", re.IGNORECASE)
+log = get_logger(__name__)
 
 
 def route_sources(
@@ -52,7 +55,7 @@ def route_sources(
         or "te code" in text
         or "rld" in text
         or "reference standard" in text
-        or "rs" in text.split()
+        or _mentions_reference_standard(text, query)
     ):
         routed.append(SourceKind.ORANGE_BOOK)
     if (
@@ -89,20 +92,45 @@ def search_sources(
     routed = route_sources(query, requested=sources)
     records: list[SourceRecord] = []
     for source in routed:
-        records.extend(_handler_for(source).search(query, client=client))
+        try:
+            records.extend(_handler_for(source).search(query, client=client))
+        except Exception as exc:
+            log.warning(
+                "source_search_failed",
+                source=source.value,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
     return routed, records
 
 
+_HANDLERS: dict[SourceKind, SourceHandler] = {
+    SourceKind.PSG: PsgHandler(),
+    SourceKind.ORANGE_BOOK: OrangeBookHandler(),
+    SourceKind.DRUGSFDA: DrugsFdaHandler(),
+    SourceKind.SHORTAGE: ShortagesHandler(),
+    SourceKind.NDC: NdcHandler(),
+    SourceKind.REMS: RemsHandler(),
+}
+
+
 def _handler_for(source: SourceKind) -> SourceHandler:
-    handlers: dict[SourceKind, SourceHandler] = {
-        SourceKind.PSG: PsgHandler(),
-        SourceKind.ORANGE_BOOK: OrangeBookHandler(),
-        SourceKind.DRUGSFDA: DrugsFdaHandler(),
-        SourceKind.SHORTAGE: ShortagesHandler(),
-        SourceKind.NDC: NdcHandler(),
-        SourceKind.REMS: RemsHandler(),
-    }
-    return handlers[source]
+    return _HANDLERS[source]
+
+
+def _mentions_reference_standard(text: str, query: SourceQuery) -> bool:
+    if not RS_PATTERN.search(text):
+        return False
+    return bool(
+        query.active_ingredient
+        or query.brand_name
+        or query.application_number
+        or "orange book" in text
+        or "reference standard" in text
+        or "therapeutic equivalence" in text
+        or "rld" in text
+        or "te code" in text
+    )
 
 
 def _dedupe(sources: Iterable[SourceKind]) -> list[SourceKind]:

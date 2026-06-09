@@ -102,12 +102,13 @@ def test_inv1_grounded_answer_has_only_known_citations(
     answer_text = (
         "A fasting bioequivalence study with 36 subjects is recommended "
         "[PSG_020503, p.3]. The agency also recommends an in vivo fed study "
-        "[PSG_FAKE, p.7]."
+        "[PSG_999999, p.7]."
     )
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(answer_text))
     result = qa_mod.ask("What study design is recommended?")
     assert not result.refused
     assert {(c.short_name, c.page) for c in result.citations} == {("PSG_020503", 3)}
+    assert "[PSG_999999, p.7]" not in result.answer
 
 
 # ---------- INV-2: Refuse over guess ----------
@@ -146,7 +147,7 @@ def test_inv2_refuses_when_answer_has_no_valid_citations(
 ) -> None:
     """A confident answer without any verifiable citation must collapse to refusal."""
     _seed_corpus([("Bioequivalence requires a fasting study.", _meta(3, 1, "PSG_333333"))])
-    fabricated = "The recommended dose is 100 mg per day [PSG_NOT_REAL, p.99]."
+    fabricated = "The recommended dose is 100 mg per day [PSG_999999, p.99]."
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(fabricated))
     result = qa_mod.ask("What is the recommended dose?")
     assert result.refused

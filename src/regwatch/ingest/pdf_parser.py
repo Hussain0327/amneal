@@ -7,7 +7,6 @@ which engine produced it, so downstream code never special-cases.
 
 from __future__ import annotations
 
-import contextlib
 import io
 import re
 from dataclasses import dataclass
@@ -68,8 +67,14 @@ def _try_pypdf(pdf_bytes: bytes) -> ParsedPdf | None:
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
         for p in reader.pages:
-            with contextlib.suppress(Exception):
-                pages.append(_normalize(p.extract_text() or ""))
+            try:
+                txt = p.extract_text() or ""
+            except Exception as exc:
+                # Append an empty page rather than dropping it, so page indices stay
+                # 1:1 with the PDF — a dropped page would shift every later citation.
+                log.warning("pypdf_page_failed", page=len(pages) + 1, error=str(exc))
+                txt = ""
+            pages.append(_normalize(txt))
     except Exception as exc:
         log.warning("pypdf_failed", error=str(exc))
         return None

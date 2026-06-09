@@ -72,6 +72,9 @@ def test_beclomethasone_question_cannot_leak_albuterol(
     _seed()
     # Answer cites the right drug AND illegally cites albuterol's boilerplate page.
     monkeypatch.setenv("REFUSAL_SCORE_THRESHOLD", "0.0")  # ensure we reach the LLM path
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
     leaky = "Single actuation content (SAC) [PSG_020911, p.2]. See also [PSG_020503, p.2]."
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(leaky))
 

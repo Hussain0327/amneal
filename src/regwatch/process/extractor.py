@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 from regwatch.common.logging import get_logger
@@ -54,28 +55,34 @@ def _passages_for_prompt(pages: list[str], max_chars: int = 18_000) -> str:
     return "\n".join(parts)
 
 
-_QUOTE_RE_CACHE: dict[str, re.Pattern[str]] = {}
+def _quote_appears_on_page(quote: str, pages: list[str], page: int) -> bool:
+    """Quote must verbatim appear (modulo whitespace) on the CLAIMED page only.
 
-
-def _quote_appears_in_pages(quote: str, pages: list[str]) -> bool:
-    """Quote must verbatim appear (modulo whitespace) in the page text."""
+    `page` is 1-indexed and must already be range-checked by the caller. We
+    search ONLY pages[page-1] so a quote cited to the wrong page is rejected
+    even if it appears elsewhere in the document (INV-1: provenance must point
+    at the page the quote actually came from).
+    """
     if not quote:
+        return False
+    if not isinstance(page, int) or page < 1 or page > len(pages):
         return False
     needle = re.sub(r"\s+", " ", quote).strip().lower()
     if not needle:
         return False
-    cache_key = needle
-    pat = _QUOTE_RE_CACHE.get(cache_key)
+    pat = _quote_pattern(needle)
     if pat is None:
-        # Build a tolerant regex: any whitespace becomes \s+
-        parts = [re.escape(tok) for tok in needle.split(" ") if tok]
-        if not parts:
-            return False
-        pat = re.compile(r"\s+".join(parts), flags=re.IGNORECASE)
-        _QUOTE_RE_CACHE[cache_key] = pat
-    haystack = " ".join(pages).lower()
-    haystack = re.sub(r"\s+", " ", haystack)
+        return False
+    haystack = re.sub(r"\s+", " ", pages[page - 1].lower())
     return pat.search(haystack) is not None
+
+
+@lru_cache(maxsize=2048)
+def _quote_pattern(needle: str) -> re.Pattern[str] | None:
+    parts = [re.escape(tok) for tok in needle.split(" ") if tok]
+    if not parts:
+        return None
+    return re.compile(r"\s+".join(parts), flags=re.IGNORECASE)
 
 
 def _validate_field_citation(
@@ -99,7 +106,7 @@ def _validate_field_citation(
     if not isinstance(page, int) or page < 1 or page > len(pages):
         log.warning("be_extraction_bad_page", field=field_name, page=page)
         return None, None
-    if not _quote_appears_in_pages(quote, pages):
+    if not _quote_appears_on_page(quote, pages, page):
         log.warning("be_extraction_quote_not_found", field=field_name, quote=quote[:80])
         return None, None
     return value, {"page": page, "quote": quote}

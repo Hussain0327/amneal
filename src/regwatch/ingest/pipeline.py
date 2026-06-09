@@ -2,8 +2,8 @@
 
 Given a `PsgListing`, the pipeline:
   1. Downloads the PDF (cached on disk).
-  2. Upserts the `psg_document` row keyed on `(normalized_name, dosage_form,
-     route, appl_no)`. Idempotent.
+  2. Upserts the `psg_document` row keyed on the FDA application number
+     (`appl_no`) — the canonical PSG identity. Idempotent.
   3. If the new content hash differs from the latest `psg_version`, creates a
      new version row, regenerates chunks (in Chroma), regenerates the
      `be_requirement` extraction. Idempotent on re-run.
@@ -44,20 +44,19 @@ class IngestStats:
 
 
 def _upsert_psg_document(listing: PsgListing, content_hash: str, pdf_path: str) -> tuple[int, bool]:
-    """Upsert psg_document. Returns (id, is_new)."""
+    """Upsert psg_document keyed on the FDA application number. Returns (id, is_new)."""
     rld_or_rs_key = ",".join(sorted(listing.rld_or_rs_numbers))
     with session_scope() as s:
-        stmt = (
-            select(PsgDocument)
-            .where(PsgDocument.normalized_name == listing.normalized_name)
-            .where(PsgDocument.dosage_form == listing.dosage_form)
-            .where(PsgDocument.route == listing.route)
-            .where(PsgDocument.rld_or_rs_number == rld_or_rs_key)
-        )
+        stmt = select(PsgDocument).where(PsgDocument.appl_no == listing.appl_no)
         rows = list(s.scalars(stmt))
         if rows:
             doc = rows[0]
             doc.last_seen_at = datetime.now(UTC)
+            doc.active_ingredient = listing.active_ingredient
+            doc.normalized_name = listing.normalized_name
+            doc.dosage_form = listing.dosage_form
+            doc.route = listing.route
+            doc.rld_or_rs_number = rld_or_rs_key
             doc.content_hash = content_hash
             doc.recommended_date = listing.recommended_date
             doc.psg_type = listing.psg_type
@@ -69,6 +68,7 @@ def _upsert_psg_document(listing: PsgListing, content_hash: str, pdf_path: str) 
                 raise RuntimeError("psg_document upsert did not produce an id")
             return doc.id, False
         doc = PsgDocument(
+            appl_no=listing.appl_no,
             active_ingredient=listing.active_ingredient,
             normalized_name=listing.normalized_name,
             dosage_form=listing.dosage_form,
@@ -133,16 +133,25 @@ def _save_be_requirement(
         be = BeRequirement(
             psg_document_id=psg_document_id,
             version_id=version_id,
-            study_type=fields.get("study_type"),  # type: ignore[arg-type]
-            study_design=fields.get("study_design"),  # type: ignore[arg-type]
-            strengths=fields.get("strengths"),  # type: ignore[arg-type]
-            dissolution=fields.get("dissolution"),  # type: ignore[arg-type]
-            waiver_conditions=fields.get("waiver_conditions"),  # type: ignore[arg-type]
-            additional_notes=fields.get("additional_notes"),  # type: ignore[arg-type]
+            study_type=_scalar_text(fields.get("study_type")),
+            study_design=_scalar_text(fields.get("study_design")),
+            strengths=_scalar_text(fields.get("strengths")),
+            dissolution=_scalar_text(fields.get("dissolution")),
+            waiver_conditions=_scalar_text(fields.get("waiver_conditions")),
+            additional_notes=_scalar_text(fields.get("additional_notes")),
             fields_json=dict(fields),
             citations_json=dict(citations),
         )
         s.add(be)
+
+
+def _scalar_text(value: object) -> str | None:
+    if value in (None, "", []):
+        return None
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in value if item not in (None, "")]
+        return ", ".join(part for part in parts if part) or None
+    return str(value)
 
 
 def _chunk_metadata_base(doc_id: int, version_id: int, listing: PsgListing) -> dict[str, object]:
@@ -215,7 +224,7 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
                         n=deleted,
                     )
             except Exception as exc:
-                log.warning(
+                log.error(
                     "stale_chunk_cleanup_failed",
                     doc_id=doc_id,
                     keep_version_id=version_id,

@@ -43,6 +43,7 @@ def _persist_version(appl_no: str = "020503", diff: str | None = "init") -> None
     init_db()
     with session_scope() as s:
         doc = PsgDocument(
+            appl_no=appl_no,
             active_ingredient="Albuterol Sulfate",
             normalized_name="albuterol sulfate",
             dosage_form="Aerosol, Metered",

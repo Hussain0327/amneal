@@ -89,9 +89,8 @@ def _current_version_ids_for_filters(filters: dict[str, Any] | None) -> list[int
     `psg_version` rows so superseded chunks cannot be cited.
     """
     engine = get_engine()
-    if not inspect(engine).has_table("psg_document") or not inspect(engine).has_table(
-        "psg_version"
-    ):
+    inspector = inspect(engine)
+    if not inspector.has_table("psg_document") or not inspector.has_table("psg_version"):
         return None
 
     filters = filters or {}
@@ -154,7 +153,9 @@ def retrieve(
     VECTOR_TOP_K for the wide-net stage.
     """
     s = get_settings()
-    k = k or s.vector_top_k
+    k = k if k is not None else s.vector_top_k
+    if k <= 0:
+        return []
     embedder = get_embedding_provider()
     qv = embedder.embed([query])[0]
     where = _build_where(filters)

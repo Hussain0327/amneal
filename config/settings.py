@@ -6,6 +6,7 @@ demos, environments, or experiments lives here.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 
 from pydantic import field_validator
@@ -112,12 +113,12 @@ class Settings(BaseSettings):
         self.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
 
 
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Construct settings on each call so tests can monkeypatch env."""
+    """Return cached settings; tests clear the cache after monkeypatching env."""
     s = Settings()  # type: ignore[call-arg]
     return s
 
 
-# Default instance for convenience; tests that monkeypatch env should call
-# get_settings() explicitly after patching.
+# Default instance for convenience; tests that monkeypatch env clear get_settings() first.
 settings = get_settings()

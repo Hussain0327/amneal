@@ -188,15 +188,18 @@ def evaluate(
         )
 
     n = len(items)
-    non_refusal = max(1, n - sum(1 for it in items if it.must_refuse) - refused_incorrectly)
     refusal_expected = sum(1 for it in items if it.must_refuse)
+    # Denominate content metrics over ALL answerable items (n - must_refuse), so a
+    # wrongly-refused answerable item scores recall/precision/faithfulness 0 rather
+    # than being dropped from the denominator — otherwise over-refusal is masked.
+    answerable = max(1, n - refusal_expected)
     correct_non_refusals = (n - refusal_expected) - refused_incorrectly
     refusal_accuracy = (refusal_correct + correct_non_refusals) / n
     return Scorecard(
         n=n,
-        recall_at_k=sums["recall"] / non_refusal,
-        citation_precision=sums["precision"] / non_refusal,
-        faithfulness=sums["faith"] / non_refusal,
+        recall_at_k=sums["recall"] / answerable,
+        citation_precision=sums["precision"] / answerable,
+        faithfulness=sums["faith"] / answerable,
         fact_recall=sums["fact"] / max(1, fact_items),
         refusal_accuracy=refusal_accuracy,
         refused_correctly=refusal_correct,

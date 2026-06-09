@@ -144,6 +144,43 @@ def _row_count(model: Any) -> int:
         return int(s.scalar(select(func.count()).select_from(model)) or 0)
 
 
+def test_save_be_requirement_coerces_list_scalars() -> None:
+    init_db()
+    with session_scope() as s:
+        doc = PsgDocument(
+            appl_no="020503",
+            active_ingredient="Albuterol Sulfate",
+            normalized_name="albuterol sulfate",
+            dosage_form="Aerosol, Metered",
+            route="Inhalation",
+            rld_or_rs_number="020503",
+            psg_type="draft",
+            source_url="https://example.invalid/PSG_020503.pdf",
+            content_hash="hash",
+        )
+        s.add(doc)
+        s.flush()
+        assert doc.id is not None
+        version = PsgVersion(psg_document_id=doc.id, content_hash="hash")
+        s.add(version)
+        s.flush()
+        assert version.id is not None
+        doc_id = doc.id
+        version_id = version.id
+
+    pipeline_mod._save_be_requirement(
+        doc_id,
+        version_id,
+        fields={"strengths": ["10 mg", "20 mg"], "study_type": "fasting"},
+        citations={},
+    )
+
+    with session_scope() as s:
+        row = s.scalars(select(BeRequirement)).one()
+        assert row.strengths == "10 mg, 20 mg"
+        assert dict(row.fields_json)["strengths"] == ["10 mg", "20 mg"]
+
+
 def test_pipeline_idempotent_run_twice(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_pipeline(monkeypatch)
     init_db()

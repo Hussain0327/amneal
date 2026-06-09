@@ -36,6 +36,7 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     # Force settings + storage modules to re-init for the test.
     import config.settings as cs
 
+    cs.get_settings.cache_clear()
     cs.settings = cs.get_settings()
     db_module.reset_for_tests()
     vs_module.reset_for_tests()

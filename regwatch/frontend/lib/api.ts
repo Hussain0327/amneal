@@ -53,13 +53,37 @@ export interface AssembleResponse {
   refused: boolean;
 }
 
-export type AlertRecord = Record<string, unknown>;
+export interface AlertRecord {
+  product_id: number;
+  active_ingredient: string;
+  listing_appl_no: string;
+  listing_psg_type: string;
+  psg_document_id: number;
+  psg_version_id: number;
+  captured_at: string;
+  diff_summary: string | null;
+  confidence: number;
+  rationale: string;
+  source_url: string;
+}
 export interface WatchLatest {
   count: number;
   alerts: AlertRecord[];
 }
 
-export type ProductRecord = Record<string, unknown>;
+export interface ProductRecord {
+  id: number | null;
+  active_ingredient: string;
+  normalized_name: string;
+  stripped_name: string;
+  dosage_form: string | null;
+  route: string | null;
+  rld_name: string | null;
+  rld_application_number: string | null;
+  company_status: string | null;
+  source: string;
+  source_url: string | null;
+}
 export interface ProductsResponse {
   count: number;
   products: ProductRecord[];

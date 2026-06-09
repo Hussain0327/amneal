@@ -68,7 +68,6 @@ def add_chunks(
 ) -> None:
     if not ids:
         return
-    _metadata_values_cache.clear()
     coll = get_collection()
     coll.upsert(
         ids=ids,
@@ -76,6 +75,7 @@ def add_chunks(
         documents=documents,
         metadatas=metadatas,  # type: ignore[arg-type]
     )
+    _metadata_values_cache.clear()
 
 
 def delete_chunks_for_doc_except_version(doc_id: int, keep_version_id: int) -> int:

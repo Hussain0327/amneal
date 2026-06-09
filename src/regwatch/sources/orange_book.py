@@ -16,7 +16,7 @@ import httpx
 from config.settings import get_settings
 
 from regwatch.common.text_normalize import canonical_name
-from regwatch.sources._utils import clean_application_number, clean_text
+from regwatch.sources._utils import clean_application_number, clean_text, owned_client
 from regwatch.sources.types import SourceKind, SourceQuery, SourceRecord
 
 ORANGE_BOOK_ZIP_URL = "https://www.fda.gov/media/76860/download"
@@ -91,18 +91,13 @@ def parse_products_text(text: str) -> list[dict[str, str]]:
 
 def _fetch_products_text(client: httpx.Client | None) -> str:
     s = get_settings()
-    owned = client is None
-    active_client = client or httpx.Client(
-        timeout=s.http_timeout_s,
-        headers={"User-Agent": s.user_agent},
-    )
-    try:
+    with owned_client(
+        client,
+        lambda: httpx.Client(timeout=s.http_timeout_s, headers={"User-Agent": s.user_agent}),
+    ) as active_client:
         resp = active_client.get(ORANGE_BOOK_ZIP_URL)
         resp.raise_for_status()
         return _products_text_from_zip(resp.content)
-    finally:
-        if owned:
-            active_client.close()
 
 
 def _products_text_from_zip(content: bytes) -> str:

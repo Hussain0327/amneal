@@ -88,6 +88,9 @@ def test_noncanonical_filter_is_canonicalized(monkeypatch: pytest.MonkeyPatch) -
     # A title-case filter from the API must match the stored canonical key
     # ("albuterol sulfate"), not silently miss the exact-match Chroma filter.
     monkeypatch.setenv("REFUSAL_SCORE_THRESHOLD", "0.0")  # isolate from echo-embedding score
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
     _seed_one("albuterol sulfate", "020503")
     r = qa_mod.ask(
         "What study design does the PSG recommend?",

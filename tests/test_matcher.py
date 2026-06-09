@@ -58,6 +58,17 @@ def test_fuzzy_handles_minor_typos() -> None:
     assert m[0].confidence > 0.85
 
 
+def test_fuzzy_emits_all_products_above_threshold() -> None:
+    m = match_listings(
+        [_listing("Beclomethasone Dipropionate")],
+        [
+            _product("Beclometasone Dipropionate", prod_id=1),
+            _product("Beclomethasone Diproprionate", prod_id=2),
+        ],
+    )
+    assert {x.product["id"] for x in m if x.rationale == "fuzzy"} == {1, 2}
+
+
 def test_combination_component_match() -> None:
     # Combo PSG; product is only one component.
     m = match_listings(

@@ -75,7 +75,7 @@ def test_inv1_fabricated_citation_stripped_from_answer(
     )
     answer_text = (
         "A fasting study is recommended [PSG_020503, p.3]. "
-        "A fed study is also advised [PSG_FAKE, p.9]."
+        "A fed study is also advised [PSG_999999, p.9]."
     )
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(answer_text))
 
@@ -83,5 +83,5 @@ def test_inv1_fabricated_citation_stripped_from_answer(
 
     assert not result.refused
     assert {(c.short_name, c.page) for c in result.citations} == {("PSG_020503", 3)}
-    assert "[PSG_FAKE, p.9]" not in result.answer
+    assert "[PSG_999999, p.9]" not in result.answer
     assert "[PSG_020503, p.3]" in result.answer

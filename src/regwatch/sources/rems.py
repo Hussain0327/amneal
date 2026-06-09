@@ -16,7 +16,7 @@ from config.settings import get_settings
 from selectolax.parser import HTMLParser
 
 from regwatch.common.text_normalize import canonical_name
-from regwatch.sources._utils import clean_application_number, clean_text
+from regwatch.sources._utils import clean_application_number, clean_text, owned_client
 from regwatch.sources.types import SourceKind, SourceQuery, SourceRecord
 
 REMS_INDEX_URL = "https://www.accessdata.fda.gov/scripts/cder/rems/index.cfm"
@@ -73,29 +73,20 @@ def parse_rems_rows(html: str) -> list[dict[str, str]]:
 
 def _fetch_rems_html(client: httpx.Client | None) -> str:
     s = get_settings()
-    owned = client is None
-    active_client = client or httpx.Client(
-        timeout=s.http_timeout_s, headers={"User-Agent": s.user_agent}
-    )
-    try:
+    with owned_client(
+        client,
+        lambda: httpx.Client(timeout=s.http_timeout_s, headers={"User-Agent": s.user_agent}),
+    ) as active_client:
         resp = active_client.get(REMS_INDEX_URL)
         resp.raise_for_status()
         return resp.text
-    finally:
-        if owned:
-            active_client.close()
 
 
 def _record(row: dict[str, str]) -> SourceRecord:
     title = row.get("drug_name") or row.get("rems_name") or row.get("col_1") or "REMS record"
     source_url = next((v for k, v in row.items() if k.endswith("_url")), REMS_INDEX_URL)
-    identifiers = {
-        k: v
-        for k, v in {
-            "application_number": row.get("application_number") or row.get("application_no"),
-        }.items()
-        if v
-    }
+    app_no = clean_application_number(row.get("application_number") or row.get("application_no"))
+    identifiers = {"application_number": app_no} if app_no else {}
     return SourceRecord(
         source=SourceKind.REMS,
         title=f"REMS: {title}",

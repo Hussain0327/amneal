@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Lock
 
 from alembic.runtime.migration import MigrationContext
 from config.settings import get_settings
@@ -12,6 +13,7 @@ from sqlalchemy import Engine, inspect
 from sqlmodel import Session, create_engine
 
 _engine: Engine | None = None
+_engine_lock = Lock()
 _BASELINE_TABLES = frozenset(
     {
         "product",
@@ -56,10 +58,12 @@ def _has_complete_current_schema() -> bool:
 def get_engine() -> Engine:
     global _engine
     if _engine is None:
-        s = get_settings()
-        s.ensure_dirs()
-        url = f"sqlite:///{s.sqlite_path.as_posix()}"
-        _engine = create_engine(url, echo=False)
+        with _engine_lock:
+            if _engine is None:
+                s = get_settings()
+                s.ensure_dirs()
+                url = f"sqlite:///{s.sqlite_path.as_posix()}"
+                _engine = create_engine(url, echo=False)
     return _engine
 
 

@@ -26,9 +26,10 @@ class _Resp:
 
 
 class _Responses:
-    def __init__(self, reject_temperature: bool = False) -> None:
+    def __init__(self, reject_temperature: bool = False, message_only: bool = False) -> None:
         self.calls: list[dict] = []
         self.reject_temperature = reject_temperature
+        self.message_only = message_only
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
@@ -37,7 +38,7 @@ class _Responses:
             raise openai.BadRequestError(
                 "Unsupported parameter: 'temperature' is not supported with this model.",
                 response=httpx.Response(400, request=req),
-                body=None,
+                body=None if self.message_only else {"param": "temperature"},
             )
         return _Resp()
 
@@ -57,8 +58,8 @@ class _Chat:
 
 
 class _FakeClient:
-    def __init__(self, reject_temperature: bool = False) -> None:
-        self.responses = _Responses(reject_temperature)
+    def __init__(self, reject_temperature: bool = False, message_only: bool = False) -> None:
+        self.responses = _Responses(reject_temperature, message_only)
         self.chat = _Chat()
 
 
@@ -100,6 +101,13 @@ def test_temperature_retry_on_reasoning_model() -> None:
     assert r.text == "pong"
 
 
+def test_temperature_retry_uses_structured_param_not_message() -> None:
+    fake = _FakeClient(reject_temperature=True, message_only=True)
+    with pytest.raises(openai.BadRequestError):
+        _provider(fake).complete([LLMMessage("user", "hi")], temperature=0.0)
+    assert len(fake.responses.calls) == 1
+
+
 def test_chat_mode_uses_chat_completions() -> None:
     fake = _FakeClient()
     # In chat mode, the responses surface must be untouched; chat.create raises.
@@ -117,6 +125,9 @@ def _set_openai(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SYNTHESIZER_MODEL", "synth-m")
     monkeypatch.setenv("EXTRACTOR_MODEL", "extract-m")
     monkeypatch.setenv("LLM_MODEL", "legacy-m")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
 
 
 def test_role_selects_model(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -131,4 +142,7 @@ def test_role_selects_model(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_role_falls_back_to_llm_model_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_openai(monkeypatch)
     monkeypatch.setenv("SYNTHESIZER_MODEL", "")  # empty → fall back to llm_model
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
     assert cast(OpenAIProvider, get_llm_provider(role="synthesizer")).model == "legacy-m"

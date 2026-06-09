@@ -185,6 +185,9 @@ def test_eval_gate_passes_on_deterministic_corpus(monkeypatch: pytest.MonkeyPatc
     # item never spuriously refuses. Must-refuse items refuse via the resolver,
     # before retrieval, so this does not weaken them.
     monkeypatch.setenv("REFUSAL_SCORE_THRESHOLD", "0.0")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _FaithfulStub())
     _seed()
 

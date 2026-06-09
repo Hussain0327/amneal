@@ -102,9 +102,10 @@ def match_listings(listings: list[PsgListing], products: list[dict[str, Any]]) -
                 continue
 
         # 4. Fuzzy match (rapidfuzz token_sort_ratio) — conservative threshold.
-        best_score: float = 0.0
-        best_prod: dict[str, Any] | None = None
+        fuzzy_hits: dict[int, tuple[dict[str, Any], float]] = {}
+        fallback_hits: list[tuple[dict[str, Any], float]] = []
         for prod in products:
+            prod_best = 0.0
             for key in (
                 canonical_name(prod.get("active_ingredient", "")),
                 stripped_name(prod.get("active_ingredient", "")),
@@ -112,15 +113,22 @@ def match_listings(listings: list[PsgListing], products: list[dict[str, Any]]) -
                 if not key:
                     continue
                 score = fuzz.token_sort_ratio(listing_strip, key)
-                if score > best_score:
-                    best_score = score
-                    best_prod = prod
-        if best_prod is not None and best_score >= FUZZY_THRESHOLD:
+                prod_best = max(prod_best, float(score))
+            if prod_best < FUZZY_THRESHOLD:
+                continue
+            prod_id = prod.get("id")
+            if isinstance(prod_id, int):
+                prior = fuzzy_hits.get(prod_id)
+                if prior is None or prod_best > prior[1]:
+                    fuzzy_hits[prod_id] = (prod, prod_best)
+            else:
+                fallback_hits.append((prod, prod_best))
+        for prod, score in [*fuzzy_hits.values(), *fallback_hits]:
             matches.append(
                 WatchMatch(
                     listing=li,
-                    product=best_prod,
-                    confidence=best_score / 100.0,
+                    product=prod,
+                    confidence=score / 100.0,
                     rationale="fuzzy",
                 )
             )

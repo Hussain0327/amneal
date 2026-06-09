@@ -87,6 +87,37 @@ def test_extractor_drops_fabricated_quote(monkeypatch: pytest.MonkeyPatch) -> No
     assert result.fields["additional_notes"] is None
 
 
+def test_extractor_binds_quote_to_claimed_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A quote must appear on its CITED page, not merely somewhere in the doc.
+
+    The same verbatim quote lives on page 2. Citing it to page 2 keeps the
+    field; citing it to page 1 (where it does not appear) drops it (INV-1).
+    """
+    pages = [
+        "I. Introduction. This guidance describes general recommendations.",
+        "II. Recommendations. Two studies are recommended: a fasting study and a fed study.",
+    ]
+    quote = "Two studies are recommended: a fasting study and a fed study"
+
+    # (a) Correct page -> kept.
+    correct = _StubLLM(
+        {"fields": {"study_type": {"value": "Fasting and fed", "citation": {"page": 2, "quote": quote}}}}
+    )
+    monkeypatch.setattr(ext, "get_llm_provider", lambda *a, **k: correct)
+    kept = ext.extract_be(pages)
+    assert kept.fields["study_type"] == "Fasting and fed"
+    assert kept.citations["study_type"]["page"] == 2
+
+    # (b) Same quote cited to the wrong page (1) -> rejected, field dropped.
+    wrong = _StubLLM(
+        {"fields": {"study_type": {"value": "Fasting and fed", "citation": {"page": 1, "quote": quote}}}}
+    )
+    monkeypatch.setattr(ext, "get_llm_provider", lambda *a, **k: wrong)
+    dropped = ext.extract_be(pages)
+    assert dropped.fields["study_type"] is None
+    assert "study_type" not in dropped.citations
+
+
 def test_extractor_invalid_json_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     class _BadLLM:
         name = "bad"

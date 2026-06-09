@@ -49,11 +49,9 @@ class Alert:
 def _fetch_version_for_listing(appl_no: str) -> tuple[int, int, str | None, str] | None:
     """Return (doc_id, latest_version_id, diff_summary, captured_at_iso) or None."""
     with session_scope() as s:
-        doc_rows = list(s.scalars(select(PsgDocument).where(PsgDocument.normalized_name != "")))
-        candidates = [d for d in doc_rows if (d.source_url or "").endswith(f"PSG_{appl_no}.pdf")]
-        if not candidates:
+        doc = s.scalars(select(PsgDocument).where(PsgDocument.appl_no == appl_no)).first()
+        if doc is None:
             return None
-        doc = candidates[0]
         if doc.id is None:
             raise RuntimeError("psg_document row missing id")
         ver_rows = list(

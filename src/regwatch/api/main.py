@@ -77,7 +77,7 @@ def health() -> dict[str, str]:
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=2)
     filters: dict[str, Any] | None = None
-    k: int | None = None
+    k: int | None = Field(None, ge=1)
     session_id: str | None = None
     user_id: str | None = None
 

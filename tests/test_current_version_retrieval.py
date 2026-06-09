@@ -87,3 +87,7 @@ def test_retrieve_filters_out_stale_psg_versions_even_if_chunks_remain() -> None
     assert passages
     assert {p.version_id for p in passages} == {current_version_id}
     assert all("Obsolete PSG text" not in p.text for p in passages)
+
+
+def test_retrieve_respects_explicit_zero_k() -> None:
+    assert retrieve("anything", k=0) == []

@@ -366,10 +366,11 @@ def _refuse(
 ) -> QAResult:
     s = get_settings()
     answer = answer_text or s.refusal_text
+    audited = _audit_retrieved(passages)
     audit_id = log_query(
         mode="qa",
         query_text=question,
-        retrieved=_audit_retrieved(passages),
+        retrieved=audited,
         answer_text=answer,
         citations=[],
         refused=True,
@@ -386,7 +387,7 @@ def _refuse(
         refused=True,
         model_name=model_name,
         audit_id=audit_id,
-        retrieved=_audit_retrieved(passages),
+        retrieved=audited,
         status=status,
         session_id=session_id,
         turn_id=turn_id,
@@ -475,15 +476,22 @@ def ask(
     """Grounded Q&A entry point — answer with citations, clarify, or refuse."""
     s = get_settings()
     model_name = current_model_name(role="synthesizer")
-    session_id = ensure_session(session_id, user_id=user_id)
-    turn_id = turn_id or new_turn_id()
-    record_message(
-        session_id=session_id,
-        turn_id=turn_id,
-        role="user",
-        content=question,
-        filters=filters,
-    )
+    # Session bookkeeping is best-effort: a DB hiccup here must never stop the query
+    # from being processed and audited (INV-6). Degrade to a fresh id on failure.
+    try:
+        session_id = ensure_session(session_id, user_id=user_id)
+        turn_id = turn_id or new_turn_id()
+        record_message(
+            session_id=session_id,
+            turn_id=turn_id,
+            role="user",
+            content=question,
+            filters=filters,
+        )
+    except Exception:
+        log.warning("session_setup_failed", exc_info=True)
+        turn_id = turn_id or new_turn_id()
+        session_id = session_id or turn_id
     active_filters: dict[str, Any] = dict(filters or {})
     # Product-key hardening: a caller (API / dossier / clarify option) may pass a
     # normalized_name in any casing or salt-order. Canonicalize it to the exact key
@@ -556,7 +564,11 @@ def ask(
         else:
             session_filters = get_session_filters(session_id)
             if session_filters.get("normalized_name") and _looks_like_follow_up(question):
-                active_filters.update(session_filters)
+                # Carry ONLY the product across turns. Propagating doc_id/dosage_form/
+                # psg_type from a prior turn would silently over-narrow retrieval.
+                active_filters["normalized_name"] = canonical_name(
+                    str(session_filters["normalized_name"])
+                )
                 context_applied = True
                 resolved_by_name = False
             else:
@@ -745,6 +757,10 @@ def ask(
 
     # LLM-side refusal: it returned the exact refusal sentinel.
     if answer == s.refusal_text or answer.startswith(s.refusal_text):
+        if answer != s.refusal_text:
+            # Model appended prose after the sentinel (told not to). We still refuse
+            # (the safe direction), but flag the deviation so it's visible in the log.
+            log.warning("qa_refusal_prefix_match", trailing=answer[len(s.refusal_text) :][:200])
         # The user named a real drug but the model couldn't answer this phrasing
         # (the live net for vague inputs `_looks_vague` didn't catch) → guide.
         # When the product came from the single-product fallback (no drug named),

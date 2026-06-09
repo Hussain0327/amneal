@@ -105,7 +105,10 @@ def run(
             "[yellow]Vector store is empty — no eval possible. "
             "Run `uv run regwatch seed` first.[/yellow]"
         )
-        # Skip with a clean exit so CI without seeded data doesn't fail.
+        # A gating run must NOT pass silently on an unseeded store; only a
+        # non-gating (observability) run exits clean.
+        if check_thresholds:
+            sys.exit(2)
         return
 
     items = _load_gold(gold)

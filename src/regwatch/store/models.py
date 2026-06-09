@@ -43,6 +43,7 @@ class PsgDocument(SQLModel, table=True):
     normalized_name: str = Field(index=True)
     dosage_form: str | None = None
     route: str | None = None
+    appl_no: str | None = Field(default=None, index=True, unique=True)
     rld_or_rs_number: str | None = None
     psg_type: str  # draft | final
     recommended_date: str | None = None  # ISO date

@@ -7,6 +7,7 @@ vectors. Swappable via config — business logic never references a model name.
 from __future__ import annotations
 
 import hashlib
+from collections import OrderedDict
 from typing import ClassVar, Protocol
 
 from config.settings import get_settings
@@ -26,7 +27,8 @@ class LocalBgeSmallProvider:
     dim = 384
 
     _model: ClassVar[object | None] = None
-    _cache: ClassVar[dict[str, list[float]]] = {}
+    _cache: ClassVar[OrderedDict[str, list[float]]] = OrderedDict()
+    _cache_max_size: ClassVar[int] = 4096
 
     def _ensure_model(self) -> None:
         if self._model is not None:
@@ -50,6 +52,8 @@ class LocalBgeSmallProvider:
         for i, t in enumerate(texts):
             key = hashlib.sha256(t.encode("utf-8")).hexdigest()
             cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
             out.append(cached if cached is not None else [])
             if cached is None:
                 misses.append((i, key))
@@ -65,6 +69,9 @@ class LocalBgeSmallProvider:
             ).tolist()
             for (i, key), v in zip(misses, vecs, strict=False):
                 self._cache[key] = v
+                self._cache.move_to_end(key)
+                while len(self._cache) > self._cache_max_size:
+                    self._cache.popitem(last=False)
                 out[i] = v
         return out
 

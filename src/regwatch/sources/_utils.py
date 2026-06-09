@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
-from collections.abc import Iterable
+import time
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import httpx
@@ -64,6 +67,19 @@ def get_openfda_client() -> httpx.Client:
     return httpx.Client(timeout=s.http_timeout_s, headers={"User-Agent": s.user_agent})
 
 
+@contextmanager
+def owned_client(
+    client: httpx.Client | None,
+    factory: Callable[[], httpx.Client],
+) -> Iterator[httpx.Client]:
+    active_client = client or factory()
+    try:
+        yield active_client
+    finally:
+        if client is None:
+            active_client.close()
+
+
 def openfda_params(search: str, limit: int) -> dict[str, Any]:
     s = get_settings()
     params: dict[str, Any] = {"search": search, "limit": limit}
@@ -79,27 +95,39 @@ def fetch_openfda_results(
     limit: int,
     client: httpx.Client | None = None,
 ) -> list[dict[str, Any]]:
-    owned = client is None
-    active_client = client or get_openfda_client()
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    try:
+    with owned_client(client, get_openfda_client) as active_client:
         for search in searches:
             if len(out) >= limit:
                 break
-            resp = active_client.get(endpoint, params=openfda_params(search, limit))
+            resp = _openfda_get_with_retry(active_client, endpoint, openfda_params(search, limit))
             if resp.status_code == 404:
                 continue
             resp.raise_for_status()
             for row in resp.json().get("results") or []:
-                key = repr(row)
+                key = json.dumps(row, sort_keys=True, default=str)
                 if key in seen:
                     continue
                 seen.add(key)
                 out.append(row)
                 if len(out) >= limit:
                     break
-    finally:
-        if owned:
-            active_client.close()
     return out
+
+
+def _openfda_get_with_retry(
+    client: httpx.Client,
+    endpoint: str,
+    params: dict[str, Any],
+    *,
+    attempts: int = 3,
+) -> httpx.Response:
+    for attempt in range(attempts):
+        resp = client.get(endpoint, params=params)
+        if resp.status_code != 429 and resp.status_code < 500:
+            return resp
+        if attempt == attempts - 1:
+            return resp
+        time.sleep(0.5 * (2**attempt))
+    return resp

@@ -60,6 +60,11 @@ def test_query_refuses_on_empty_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body2["turn_id"] != body["turn_id"]
 
 
+def test_query_rejects_zero_k() -> None:
+    r = _open().post("/query", json={"question": "Does this exist?", "k": 0})
+    assert r.status_code == 422
+
+
 def test_sources_search_accepts_explicit_source_without_network() -> None:
     r = _open().post(
         "/sources/search",

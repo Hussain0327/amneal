@@ -17,7 +17,9 @@ import re
 from collections.abc import Iterator
 
 # A single source token inside a bracket: short_name + page, e.g. "PSG_020503, p.4".
-_PAIR = re.compile(r"([A-Za-z0-9_./-]+)\s*,\s*p\.\s*(\d+)", re.IGNORECASE)
+# Keep the token source-shaped so prose like "[Table 1, p.3]" is not treated as
+# a citation and stripped from the answer.
+_PAIR = re.compile(r"((?:PSG_|OB_)?\d{3,})\s*,\s*p\.\s*(\d+)", re.IGNORECASE)
 
 # Any bracketed run with no nested brackets. We treat a bracket as a citation
 # only if it contains at least one _PAIR, so prose like "[see appendix]" is

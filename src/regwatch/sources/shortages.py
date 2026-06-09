@@ -36,7 +36,11 @@ class ShortagesHandler:
             limit=query.limit,
             client=client,
         )
-        return [_record(row) for row in rows]
+        records = [_record(row) for row in rows]
+        if query.dosage_form:
+            want = query.dosage_form.strip().lower()
+            records = [r for r in records if want in (r.fields.get("dosage_form") or "").lower()]
+        return records
 
 
 def _searches(query: SourceQuery) -> list[str]:
@@ -49,8 +53,9 @@ def _searches(query: SourceQuery) -> list[str]:
     if query.brand_name:
         term = quote_term(query.brand_name)
         searches.extend([f"brand_name:{term}", f"openfda.brand_name:{term}"])
-    if query.dosage_form:
-        searches.append(f"dosage_form:{quote_term(query.dosage_form)}")
+    # dosage_form is intentionally NOT a standalone search term: on openFDA it would
+    # match every shortage of that form (a false-positive flood). It is applied as a
+    # post-filter in `search()` instead, mirroring the orange_book/psg handlers.
     return searches
 
 

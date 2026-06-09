@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-from sqlalchemy import desc
-from sqlmodel import select
+from sqlalchemy import desc, or_
+from sqlmodel import col, select
 
 from regwatch.common.text_normalize import canonical_name, stripped_name
 from regwatch.sources._utils import clean_application_number
@@ -30,9 +30,47 @@ class PsgHandler:
         ingredient_stripped = stripped_name(query.active_ingredient or query.query_text)
         records: list[SourceRecord] = []
         with session_scope() as s:
-            rows = list(s.scalars(select(PsgDocument)))
+            stmt = select(PsgDocument)
+            if app_no:
+                stmt = stmt.where(
+                    or_(
+                        col(PsgDocument.appl_no) == app_no,
+                        col(PsgDocument.rld_or_rs_number).contains(app_no),
+                    )
+                )
+            if query.active_ingredient:
+                stmt = stmt.where(
+                    or_(
+                        col(PsgDocument.normalized_name) == ingredient,
+                        col(PsgDocument.active_ingredient).ilike(f"%{query.active_ingredient}%"),
+                    )
+                )
+            if query.dosage_form:
+                stmt = stmt.where(
+                    or_(
+                        col(PsgDocument.dosage_form).is_(None),
+                        col(PsgDocument.dosage_form).ilike(f"%{query.dosage_form}%"),
+                    )
+                )
+            rows = list(s.scalars(stmt.limit(query.limit * 5)))
+            doc_ids = [doc.id for doc in rows if doc.id is not None]
+            latest_versions: dict[int, PsgVersion] = {}
+            if doc_ids:
+                version_rows = list(
+                    s.scalars(
+                        select(PsgVersion)
+                        .where(col(PsgVersion.psg_document_id).in_(doc_ids))
+                        .order_by(
+                            col(PsgVersion.psg_document_id),
+                            desc(col(PsgVersion.captured_at)),
+                            desc(col(PsgVersion.id)),
+                        )
+                    )
+                )
+                for version_row in version_rows:
+                    latest_versions.setdefault(version_row.psg_document_id, version_row)
             for doc in rows:
-                if app_no and app_no not in (doc.rld_or_rs_number or ""):
+                if app_no and app_no not in (doc.rld_or_rs_number or "") and doc.appl_no != app_no:
                     continue
                 if query.active_ingredient and not (
                     doc.normalized_name == ingredient
@@ -45,12 +83,7 @@ class PsgHandler:
                     and query.dosage_form.lower() not in doc.dosage_form.lower()
                 ):
                     continue
-                version = s.scalars(
-                    select(PsgVersion)
-                    .where(PsgVersion.psg_document_id == doc.id)
-                    .order_by(desc(PsgVersion.captured_at), desc(PsgVersion.id))  # type: ignore[arg-type]
-                    .limit(1)
-                ).first()
+                version = latest_versions.get(doc.id or 0)
                 records.append(_record_from_doc(doc, version))
                 if len(records) >= query.limit:
                     break
@@ -65,6 +98,8 @@ def _record_from_doc(doc: PsgDocument, version: PsgVersion | None) -> SourceReco
         identifiers["psg_version_id"] = str(version.id)
     if doc.rld_or_rs_number:
         identifiers["rld_or_rs_number"] = doc.rld_or_rs_number
+    if doc.appl_no:
+        identifiers["appl_no"] = doc.appl_no
     fields: dict[str, Any] = {
         "active_ingredient": doc.active_ingredient,
         "normalized_name": doc.normalized_name,

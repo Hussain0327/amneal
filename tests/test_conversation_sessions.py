@@ -82,6 +82,9 @@ def test_follow_up_uses_session_product_context_without_cross_drug_leak(
 ) -> None:
     _seed_two_inhalation_drugs()
     monkeypatch.setenv("REFUSAL_SCORE_THRESHOLD", "0.0")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _LeakyLLM())
 
     first = qa_mod.ask("What BE study does FDA recommend for albuterol sulfate?")
