@@ -232,6 +232,48 @@ def test_pipeline_be_fields_all_have_citations(monkeypatch: pytest.MonkeyPatch) 
             assert isinstance(cite["page"], int) and cite["page"] >= 1
 
 
+def test_failed_extraction_is_backfilled_on_next_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A transient extractor outage on first ingest must not permanently drop citations.
+
+    INV-1: missing extraction == missing citations. The first run swallows the
+    extractor failure (still returns successfully, zero be_requirement rows). The
+    second run — same content, so "unchanged" — must detect the missing row and
+    backfill exactly one BeRequirement for the latest version rather than skipping.
+    """
+    _patch_pipeline(monkeypatch)
+    init_db()
+
+    def boom(_pages: list[str]) -> Any:
+        raise RuntimeError("extractor outage")
+
+    # First run: extractor is down. Ingest still succeeds, but no BE row is written.
+    monkeypatch.setattr(pipeline_mod, "extract_be", boom)
+    assert pipeline_mod.ingest_listing(_listing()) == "added"
+    assert _row_count(PsgDocument) == 1
+    assert _row_count(PsgVersion) == 1
+    assert _row_count(BeRequirement) == 0
+
+    # Second run: same content (so "unchanged") with a healthy extractor restored.
+    # The missing BE row for the latest version must be backfilled exactly once.
+    monkeypatch.undo()
+    _patch_pipeline(monkeypatch)
+    assert pipeline_mod.ingest_listing(_listing()) == "unchanged"
+    assert _row_count(PsgDocument) == 1
+    assert _row_count(PsgVersion) == 1
+    assert _row_count(BeRequirement) == 1
+
+    with session_scope() as s:
+        be_version_id = s.scalars(select(BeRequirement.version_id)).one()
+        latest_version_id = s.scalars(
+            select(PsgVersion.id).order_by(col(PsgVersion.id).desc())
+        ).first()
+    assert be_version_id == latest_version_id
+
+    # A third run with a healthy extractor must NOT create a duplicate BE row.
+    assert pipeline_mod.ingest_listing(_listing()) == "unchanged"
+    assert _row_count(BeRequirement) == 1
+
+
 def test_revised_ingest_removes_stale_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
     old_pages = [
         PAGES[0],

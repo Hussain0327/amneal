@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import csv
 import io
+import time
 import zipfile
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -40,6 +42,34 @@ PRODUCT_COLUMNS = {
 }
 
 
+@dataclass(frozen=True)
+class _ProductsCache:
+    """Cached Orange Book products text plus the wall-clock fetch time.
+
+    ``monotonic_at`` drives TTL expiry (immune to clock changes); ``fetched_at``
+    is the auditable wall-clock timestamp of the underlying download. It is
+    stored but not yet read: the Gate-2 OB cache will surface ``fetched_at`` as
+    source freshness/provenance (INV-5), so it is intentional forward-looking
+    state, not dead state.
+    """
+
+    text: str
+    fetched_at: float
+    monotonic_at: float
+
+
+# Module-level in-process cache. Shared across handler instances so repeated
+# queries within the TTL reuse a single download/unzip/parse. Not thread-safe;
+# a benign re-fetch on a race is acceptable for this in-process cache.
+_PRODUCTS_CACHE: _ProductsCache | None = None
+
+
+def reset_products_cache() -> None:
+    """Clear the cached Orange Book products text (for deterministic tests)."""
+    global _PRODUCTS_CACHE
+    _PRODUCTS_CACHE = None
+
+
 class OrangeBookHandler:
     source = SourceKind.ORANGE_BOOK
 
@@ -52,7 +82,7 @@ class OrangeBookHandler:
         *,
         client: httpx.Client | None = None,
     ) -> list[SourceRecord]:
-        rows = parse_products_text(self._products_text or _fetch_products_text(client))
+        rows = parse_products_text(self._products_text or _cached_products_text(client))
         records: list[SourceRecord] = []
         app_no = _orange_book_app_no(query.application_number)
         ingredient = canonical_name(query.active_ingredient or "")
@@ -87,6 +117,27 @@ def parse_products_text(text: str) -> list[dict[str, str]]:
         if normalized:
             out.append(normalized)
     return out
+
+
+def _cached_products_text(client: httpx.Client | None) -> str:
+    """Return Orange Book products text, reusing a fresh in-process cache.
+
+    Cache-aside: on a hit within the TTL, return the cached text with NO network
+    call. On a miss (cold or expired), fetch once and repopulate the cache with
+    an auditable wall-clock ``fetched_at`` timestamp.
+    """
+    global _PRODUCTS_CACHE
+    ttl = get_settings().orange_book_cache_ttl_s
+    cached = _PRODUCTS_CACHE
+    if cached is not None and ttl > 0 and (time.monotonic() - cached.monotonic_at) < ttl:
+        return cached.text
+    text = _fetch_products_text(client)
+    _PRODUCTS_CACHE = _ProductsCache(
+        text=text,
+        fetched_at=time.time(),
+        monotonic_at=time.monotonic(),
+    )
+    return text
 
 
 def _fetch_products_text(client: httpx.Client | None) -> str:

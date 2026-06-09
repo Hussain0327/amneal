@@ -22,9 +22,11 @@ from config.settings import get_settings
 from sqlalchemy import desc
 from sqlmodel import select
 
+from regwatch.common.audit import log_query
 from regwatch.common.logging import get_logger
 from regwatch.common.text_normalize import canonical_name, stripped_name
 from regwatch.generate.grounded_qa import ask
+from regwatch.generate.llm import current_model_name
 from regwatch.store.db import session_scope
 from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
 
@@ -170,6 +172,14 @@ def _checklist_from_be_fields(fields: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
+def _assemble_query_text(active_ingredient: str, dosage_form: str | None, rld: str | None) -> str:
+    """Human-readable record of the assemble inputs for the audit log (INV-6)."""
+    parts = [f"assemble active_ingredient={active_ingredient}"]
+    parts.append(f"dosage_form={dosage_form or 'n/a'}")
+    parts.append(f"rld={rld or 'n/a'}")
+    return " ".join(parts)
+
+
 def build_dossier(
     *,
     active_ingredient: str,
@@ -177,15 +187,37 @@ def build_dossier(
     rld: str | None,
 ) -> dict[str, Any]:
     """Assemble a cited dossier. If no matching PSG is in our store, refuses."""
+    # INV-6: every assemble — refused or not — must leave a durable audit row.
+    model_name = current_model_name(role="synthesizer")
+    query_text = _assemble_query_text(active_ingredient, dosage_form, rld)
+    route_json: dict[str, Any] = {
+        "route": "assemble_dossier",
+        "active_ingredient": active_ingredient,
+        "dosage_form": dosage_form,
+        "rld": rld,
+    }
+
     psg_matches = _find_matching_psgs(active_ingredient, dosage_form)
     if not psg_matches:
+        markdown = (
+            f"# {active_ingredient} dossier\n\n"
+            f"No PSG for this product is present in the current corpus. "
+            f"Run `uv run regwatch seed` (or a broader ingest) and retry. "
+            f"This system never invents PSG content."
+        )
+        log_query(
+            mode="assemble",
+            query_text=query_text,
+            retrieved=[],
+            answer_text=markdown,
+            citations=[],
+            refused=True,
+            model_name=model_name,
+            status="refused",
+            route_json={**route_json, "reason": "no_matching_psg"},
+        )
         return {
-            "markdown": (
-                f"# {active_ingredient} dossier\n\n"
-                f"No PSG for this product is present in the current corpus. "
-                f"Run `uv run regwatch seed` (or a broader ingest) and retry. "
-                f"This system never invents PSG content."
-            ),
+            "markdown": markdown,
             "sections": {"matched_psgs": []},
             "refused": True,
         }
@@ -277,13 +309,26 @@ def build_dossier(
         for item in _checklist_from_be_fields(be["fields"]):
             md_lines.append(f"- [ ] {item['item']} ({item['field']})")
 
+    markdown = "\n".join(md_lines)
+    qa_citations = [dict(c.__dict__) for c in qa.citations]
+    log_query(
+        mode="assemble",
+        query_text=query_text,
+        retrieved=qa.retrieved,
+        answer_text=markdown,
+        citations=qa_citations,
+        refused=False,
+        model_name=model_name,
+        status="assembled",
+        route_json={**route_json, "reason": "assembled", "matched_psgs": len(psgs_section)},
+    )
     return {
-        "markdown": "\n".join(md_lines),
+        "markdown": markdown,
         "sections": {
             "matched_psgs": psgs_section,
             "rld_label": rld_label,
             "qa_answer": qa.answer,
-            "qa_citations": [c.__dict__ for c in qa.citations],
+            "qa_citations": qa_citations,
             "qa_refused": qa.refused,
         },
         "refused": False,

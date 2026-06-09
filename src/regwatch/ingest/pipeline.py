@@ -101,6 +101,31 @@ def _latest_version_hash(psg_document_id: int) -> str | None:
         return rows[0] if rows else None
 
 
+def _latest_version_id(psg_document_id: int) -> int | None:
+    """Return only the most recent version id for a doc, to avoid detached instances."""
+    with session_scope() as s:
+        rows = list(
+            s.scalars(
+                select(PsgVersion.id)
+                .where(PsgVersion.psg_document_id == psg_document_id)
+                .order_by(desc(PsgVersion.captured_at))  # type: ignore[arg-type]
+                .limit(1)
+            )
+        )
+        return rows[0] if rows else None
+
+
+def _be_requirement_exists(version_id: int) -> bool:
+    """True iff at least one be_requirement row is attached to this version."""
+    with session_scope() as s:
+        rows = list(
+            s.scalars(
+                select(BeRequirement.id).where(BeRequirement.version_id == version_id).limit(1)
+            )
+        )
+        return bool(rows)
+
+
 def _insert_version(
     psg_document_id: int,
     content_hash: str,
@@ -154,6 +179,29 @@ def _scalar_text(value: object) -> str | None:
     return str(value)
 
 
+def _extract_and_save_be(doc_id: int, version_id: int, pages: list[str], appl_no: str) -> None:
+    """Run BE extraction for a version and persist it. Failures are logged, not raised.
+
+    Swallowing a transient extractor outage keeps ingest durable; the missing
+    row is detected and backfilled on the next run (see ingest_listing) so a
+    one-time outage never permanently drops citations (INV-1).
+    """
+    try:
+        extraction = extract_be(pages)
+        _save_be_requirement(
+            psg_document_id=doc_id,
+            version_id=version_id,
+            fields=extraction.fields,
+            citations=extraction.citations,
+        )
+    except Exception as exc:
+        log.warning(
+            "be_extraction_skipped",
+            appl_no=appl_no,
+            error=str(exc),
+        )
+
+
 def _chunk_metadata_base(doc_id: int, version_id: int, listing: PsgListing) -> dict[str, object]:
     return {
         "doc_id": doc_id,
@@ -182,6 +230,16 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
         doc_id, is_new = _upsert_psg_document(listing, content_hash, str(path))
         latest_hash = _latest_version_hash(doc_id)
         if latest_hash == content_hash:
+            # Content is unchanged, but a prior run may have failed BE extraction
+            # (e.g. a transient extractor outage) and left the latest version with
+            # no be_requirement row. Because the hash matches forever, that gap is
+            # never closed by the normal path — so backfill it here rather than
+            # silently skipping (missing extraction == missing citations, INV-1).
+            if extract:
+                latest_version_id = _latest_version_id(doc_id)
+                if latest_version_id is not None and not _be_requirement_exists(latest_version_id):
+                    parsed = parse_pdf(pdf_bytes)
+                    _extract_and_save_be(doc_id, latest_version_id, parsed.pages, listing.appl_no)
             return "unchanged"
 
         parsed = parse_pdf(pdf_bytes)
@@ -232,20 +290,7 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
                 )
 
         if extract:
-            try:
-                extraction = extract_be(parsed.pages)
-                _save_be_requirement(
-                    psg_document_id=doc_id,
-                    version_id=version_id,
-                    fields=extraction.fields,
-                    citations=extraction.citations,
-                )
-            except Exception as exc:
-                log.warning(
-                    "be_extraction_skipped",
-                    appl_no=listing.appl_no,
-                    error=str(exc),
-                )
+            _extract_and_save_be(doc_id, version_id, parsed.pages, listing.appl_no)
 
         return "added" if is_new else "revised"
     except Exception as exc:

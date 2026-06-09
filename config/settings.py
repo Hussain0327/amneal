@@ -88,6 +88,10 @@ class Settings(BaseSettings):
     http_timeout_s: float = 30.0
     crawl_concurrency: int = 4
     crawl_min_interval_ms: int = 250
+    # In-process cache-aside TTL for the Orange Book products ZIP. The ~50k-row
+    # file changes at most monthly, so a day-long TTL avoids re-downloading and
+    # re-parsing on every query. Set to 0 to disable caching.
+    orange_book_cache_ttl_s: float = 86_400.0
 
     # ---------- API ----------
     api_host: str = "127.0.0.1"

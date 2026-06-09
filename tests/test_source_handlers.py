@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import zipfile
 from datetime import UTC, datetime
 
 import httpx
@@ -11,7 +13,12 @@ import respx
 from regwatch.sources import router as router_mod
 from regwatch.sources.drugsfda import DRUGSFDA_ENDPOINT, DrugsFdaHandler
 from regwatch.sources.ndc import NDC_ENDPOINT, NdcHandler
-from regwatch.sources.orange_book import OrangeBookHandler, parse_products_text
+from regwatch.sources.orange_book import (
+    ORANGE_BOOK_ZIP_URL,
+    OrangeBookHandler,
+    parse_products_text,
+    reset_products_cache,
+)
 from regwatch.sources.psg import PsgHandler
 from regwatch.sources.rems import RemsHandler, parse_rems_rows
 from regwatch.sources.router import route_sources, search_sources
@@ -100,6 +107,49 @@ def test_orange_book_handler_filters_by_application_number() -> None:
     assert records[0].source == SourceKind.ORANGE_BOOK
     assert records[0].identifiers["application_number"] == "020503"
     assert records[0].fields["te_code"] == "AB"
+
+
+def _orange_book_zip_bytes() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr("products.txt", ORANGE_PRODUCTS)
+    return buffer.getvalue()
+
+
+def test_orange_book_handler_caches_zip_across_searches() -> None:
+    reset_products_cache()
+    try:
+        zip_bytes = _orange_book_zip_bytes()
+        with respx.mock(assert_all_called=True) as mock:
+            route = mock.get(ORANGE_BOOK_ZIP_URL).mock(
+                return_value=httpx.Response(200, content=zip_bytes)
+            )
+            handler = OrangeBookHandler()
+            first = handler.search(SourceQuery(application_number="NDA020503"))
+            second = handler.search(SourceQuery(application_number="NDA020503"))
+
+        # Second search must be a cache hit: exactly one network fetch total.
+        assert route.call_count == 1
+        assert len(first) == 1
+        assert len(second) == 1
+        assert first[0].fields["te_code"] == second[0].fields["te_code"] == "AB"
+    finally:
+        reset_products_cache()
+
+
+def test_orange_book_handler_injected_text_bypasses_cache() -> None:
+    reset_products_cache()
+    try:
+        with respx.mock(assert_all_called=False) as mock:
+            route = mock.get(ORANGE_BOOK_ZIP_URL).mock(return_value=httpx.Response(500))
+            records = OrangeBookHandler(products_text=ORANGE_PRODUCTS).search(
+                SourceQuery(application_number="NDA020503")
+            )
+        # Pre-supplied text must never touch the network or the cache.
+        assert route.call_count == 0
+        assert len(records) == 1
+    finally:
+        reset_products_cache()
 
 
 def test_psg_handler_returns_local_structured_rows() -> None:
