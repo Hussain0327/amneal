@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from config.settings import get_settings
 from fastapi.testclient import TestClient
 
 from regwatch.api.main import app
@@ -85,6 +86,40 @@ def test_settings_no_secrets() -> None:
     assert "embedding_provider" in body
     assert "openai_api_key" not in body
     assert "anthropic_api_key" not in body
+
+
+def test_cors_allowlist() -> None:
+    c = _open()
+    allowed_origin = get_settings().cors_allow_origins[0]
+    blocked_origin = "https://not-allowed.example"
+
+    allowed_preflight = c.options(
+        "/query",
+        headers={
+            "Origin": allowed_origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert allowed_preflight.status_code == 200
+    assert allowed_preflight.headers["access-control-allow-origin"] == allowed_origin
+
+    blocked_preflight = c.options(
+        "/query",
+        headers={
+            "Origin": blocked_origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert blocked_preflight.status_code == 400
+    assert "access-control-allow-origin" not in blocked_preflight.headers
+
+    allowed_simple = c.get("/health", headers={"Origin": allowed_origin})
+    assert allowed_simple.headers["access-control-allow-origin"] == allowed_origin
+
+    blocked_simple = c.get("/health", headers={"Origin": blocked_origin})
+    assert "access-control-allow-origin" not in blocked_simple.headers
 
 
 def test_query_refuses_on_empty_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
