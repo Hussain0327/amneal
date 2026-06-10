@@ -127,5 +127,39 @@ def cmd_ingest_all(
     raise typer.Exit(code=0 if stats.errors == 0 else 2)
 
 
+@app.command("watch")
+def cmd_watch(
+    extract: bool = typer.Option(
+        True,
+        "--extract/--no-extract",
+        help="Run per-PSG LLM BE extraction (paid) for matched PSGs. --no-extract "
+        "is free/local and still detects changes and emits alerts.",
+    ),
+) -> None:
+    """Run the Watch pipeline: crawl → match watchlist → ingest matches → alert → digest.
+
+    Alerts are emitted ONLY for matched PSGs this run actually ingested as
+    added or revised (INV-4): an unchanged PSG never alerts, so re-running
+    twice in a row writes an empty second digest instead of duplicates.
+    """
+    from regwatch.watch.run import run_watch
+
+    init_db()
+    result = run_watch(extract=extract)
+    rprint(
+        {
+            "listings": result.listings,
+            "matched": result.matched,
+            "added": result.stats.added,
+            "revised": result.stats.revised,
+            "unchanged": result.stats.unchanged,
+            "errors": result.stats.errors,
+            "alerts": len(result.alerts),
+            "digest": str(result.digest_path),
+        }
+    )
+    raise typer.Exit(code=0 if result.stats.errors == 0 else 2)
+
+
 if __name__ == "__main__":
     app()

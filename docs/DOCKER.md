@@ -154,6 +154,15 @@ docker compose --profile ingest run --rm ingest
 
 Do not load the full 2,000+ PSG corpus with `EMBEDDING_PROVIDER=echo`.
 
+This is now enforced at startup: when an `echo` embedding/LLM provider faces a
+**non-empty** Chroma corpus, the API refuses to boot with a `RuntimeError`
+explaining the fix (switch to a real provider, or set
+`REGWATCH_ALLOW_TEST_PROVIDERS=1` for tests/CI). A fresh stack with an empty
+corpus still boots on `echo`, so the ingest service can seed it — but the next
+`api` start after that ingest will fail fast unless the providers are real. If
+your mounted `./data` already contains a seeded corpus, set real providers (or
+the override) before `docker compose up api`.
+
 ## Why Local Embeddings Became Optional
 
 The first Docker build pulled large CUDA/NVIDIA packages through the
@@ -199,11 +208,19 @@ Compose checks:
 GET http://127.0.0.1:8000/health
 ```
 
-The verified smoke test returned:
+`/health` now returns component diagnostics — a superset of the original
+`{"status":"ok"}`, so the Compose healthcheck is unchanged:
 
 ```json
-{"status":"ok"}
+{"status":"ok","components":{"db":{"ok":true},"chroma":{"ok":true,"corpus_count":123},
+ "llm":{"provider":"openai","key_present":true},"embedding":{"provider":"local-bge-small"}},
+ "warnings":[]}
 ```
+
+It returns HTTP 503 with `"status":"unhealthy"` only when the DB or Chroma is
+actually unreachable. An empty corpus is healthy (with a warning) so a fresh
+stack can boot and the ingest service can seed it. Key presence is reported as
+a boolean only — never a value.
 
 ## Current Verification
 

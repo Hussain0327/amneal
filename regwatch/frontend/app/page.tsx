@@ -177,6 +177,20 @@ function ResultView({
     );
   }
 
+  if (result.status === "scope_warning") {
+    return (
+      <section className="mt-10 rise">
+        <div className="stamp doc--seal">
+          <div className="stamp__tag">Out of scope</div>
+          <p style={{ margin: "0.5rem 0 0", fontSize: "1.02rem", lineHeight: 1.55 }}>{result.answer}</p>
+        </div>
+        <p className="code mt-3" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
+          audit #{result.audit_id} · {result.model_name}
+        </p>
+      </section>
+    );
+  }
+
   if (result.refused) {
     return (
       <section className="mt-10 rise">

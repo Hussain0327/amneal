@@ -75,7 +75,7 @@ These are code with tests, not guidelines. See `tests/test_invariants.py`.
 | LLM | Pluggable behind `LLMProvider`. OpenAI via the **Responses API** (`OPENAI_API_MODE=responses`, default; `chat` falls back to Chat Completions). Role-specific models: router `gpt-5-nano` (reasoning), synthesizer + extractor `gpt-5.4-nano`, each falling back to `LLM_MODEL`. `anthropic` and `echo` (test-only) also supported |
 | API | FastAPI. `POST /query` is conversational — accepts/returns `session_id`+`turn_id`, with response `status` ∈ `answer`/`summary`/`clarify`/`scope_warning`/`refused` |
 | UI | **Next.js 14 (App Router, TypeScript) in `regwatch/frontend/`** — Ask / Assemble / Watch. Talks to the API through a same-origin `/api` proxy. (The earlier Streamlit POC was retired.) |
-| Orchestration | Dagster OSS in Docker Compose. V1 exposes a manual `seed_corpus_job` over the existing `regwatch seed` CLI |
+| Orchestration | Dagster OSS in Docker Compose. Manual `seed_corpus_job` over `regwatch seed`, plus `watch_digest_job` over `regwatch watch` with a daily 06:00 UTC schedule (`watch_daily_schedule`) |
 | Tooling | ruff, black, mypy strict on `src/`, pytest |
 
 The LLM provider, model, and reranker are all behind interfaces. Nothing is
@@ -186,8 +186,9 @@ API_PORT=8000
 ```
 
 Dagster uses its own Postgres service for run/event/schedule metadata and keeps
-app data in `./data`. The initial Dagster pipeline is manual-first: open
-`http://localhost:3001` and launch `seed_corpus_job`.
+app data in `./data`. `seed_corpus_job` is manual-first (open
+`http://localhost:3001` and launch it); `watch_digest_job` wraps `regwatch watch`
+and runs daily at 06:00 UTC via `watch_daily_schedule` when the daemon is up.
 
 ## API
 
@@ -202,7 +203,8 @@ POST  /assemble     cited dossier for {active_ingredient, dosage_form?, rld?}
 GET   /watch/latest matched changes since cursor
 GET   /products     watchlist
 POST  /products     add a manual product (INV-5 enforced)
-GET   /health       liveness
+GET   /health       liveness + component diagnostics (db, chroma, llm, embedding);
+                    503 when db or chroma is unreachable
 GET   /settings     non-secret config
 ```
 
@@ -231,8 +233,8 @@ INV-5 rejects anything else, including model memory.
 Two layers:
 
 - **`uv run python -m regwatch.eval.run_eval`** scores the gold set
-  (`src/regwatch/eval/gold_set.jsonl`, 11 items: 6 real + 5 must-refuse) against
-  the live corpus. Hard gates (fail CI when below): `recall@k ≥ 0.90`,
+  (`src/regwatch/eval/gold_set.jsonl`, 12 items: 6 real + 5 must-refuse +
+  1 must-clarify) against the live corpus. Hard gates (fail CI when below): `recall@k ≥ 0.90`,
   `citation_precision ≥ 0.95`, `refusal_accuracy ≥ 0.95`. `faithfulness` and
   `fact_recall` (fraction of an item's `expected_facts` present in the answer)
   are printed for observability. It exits clean on an empty store so a fresh
@@ -286,11 +288,13 @@ Definition of Done passed before moving on.
   rate limiting are the top blocker before any external exposure.
 - **Datastores are single-node** (SQLite + on-disk Chroma); no HA, pooling, or
   backup/restore. Migrations still run on app boot rather than as a deploy step.
-- The gold set is 11 items, not the spec's 30–50, and scoring is mechanical
+- The gold set is 12 items, not the spec's 30–50, and scoring is mechanical
   (`(short_name, page)` + `expected_facts` substrings). LLM-as-judge is not wired.
 - The cross-encoder reranker exists as a hook but is off by default. Turn
   on with `RERANKER_ENABLED=true` and tune `VECTOR_TOP_K` upward.
-- Auto scheduling via APScheduler is a stub. POC runs ingest on demand.
+- Scheduling covers only the watch pipeline (`regwatch watch`, daily via the
+  Dagster schedule). Broad corpus ingest (`regwatch ingest-all`) is still run
+  on demand.
 - FDA source handlers exist (`sources/`: PSG, Orange Book, Drugs@FDA, Shortages,
   NDC, REMS) but are live-HTTP only — no persisted source tables, freshness
   metadata, caching, or cross-source answer synthesis yet.

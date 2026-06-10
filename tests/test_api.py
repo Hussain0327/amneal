@@ -22,7 +22,60 @@ def _open() -> TestClient:
 def test_health() -> None:
     r = _open().get("/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    body = r.json()
+    assert body["status"] == "ok"
+    components = body["components"]
+    assert components["db"] == {"ok": True}
+    assert components["chroma"]["ok"] is True
+    assert components["chroma"]["corpus_count"] == 0
+    assert components["llm"] == {"provider": "echo", "key_present": True}
+    assert components["embedding"] == {"provider": "echo"}
+    assert body["allow_test_providers"] is True  # conftest opt-in
+    assert any("empty" in w for w in body["warnings"])
+    assert any("echo" in w for w in body["warnings"])
+
+
+def test_health_no_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Mirror the /settings discipline: key PRESENCE only, never a value.
+    import config.settings as cs
+
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-secret-do-not-leak")
+    cs.get_settings.cache_clear()
+    r = _open().get("/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["components"]["llm"] == {"provider": "openai", "key_present": True}
+    assert "sk-test-secret-do-not-leak" not in r.text
+    assert "openai_api_key" not in r.text
+
+
+def test_health_unhealthy_when_chroma_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    from regwatch.api import main as api_main
+
+    def _down() -> int:
+        raise RuntimeError("chroma down")
+
+    monkeypatch.setattr(api_main, "collection_size", _down)
+    r = _open().get("/health")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["status"] == "unhealthy"
+    assert body["components"]["chroma"]["ok"] is False
+
+
+def test_health_unhealthy_when_db_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    from regwatch.api import main as api_main
+
+    def _down() -> object:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(api_main, "get_engine", _down)
+    r = _open().get("/health")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["status"] == "unhealthy"
+    assert body["components"]["db"]["ok"] is False
 
 
 def test_settings_no_secrets() -> None:

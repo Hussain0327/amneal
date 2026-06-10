@@ -9,7 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     extractor_model: str = "gpt-5.4-nano"
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
+    # Test-grade `echo` providers against a real (non-empty) corpus are an
+    # invisible quality degradation; the API refuses to boot unless this is set.
+    allow_test_providers: bool = Field(
+        default=False, validation_alias="REGWATCH_ALLOW_TEST_PROVIDERS"
+    )
 
     # ---------- openFDA ----------
     openfda_api_key: str | None = None

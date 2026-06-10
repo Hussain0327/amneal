@@ -61,7 +61,8 @@ export default function WatchPage() {
 
         {alerts && alerts.length === 0 && (
           <p className="mt-3" style={{ color: "var(--ink-soft)", fontSize: "0.95rem" }}>
-            No alerts yet. Run an ingest cycle and let the matcher build alerts against your watchlist.
+            No alerts yet. Run <span className="code">regwatch watch</span> to crawl the feed and build alerts
+            against your watchlist.
           </p>
         )}
 
@@ -123,7 +124,7 @@ function WatchlistTable({ products }: { products: ProductRecord[] | null }) {
   if (products.length === 0)
     return (
       <p style={{ color: "var(--ink-soft)", fontSize: "0.9rem" }}>
-        Watchlist is empty. Add products via the API or <span className="code">regwatch watchlist add</span>.
+        Watchlist is empty. Add products via the API: <span className="code">POST /products</span>.
       </p>
     );
   const columns: Array<keyof ProductRecord> = [

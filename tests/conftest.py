@@ -22,6 +22,9 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     # Network-free providers by default.
     monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
     monkeypatch.setenv("LLM_PROVIDER", "echo")
+    # The API fail-fast guard rejects echo providers over a non-empty corpus;
+    # tests run echo against seeded corpora on purpose, so opt in explicitly.
+    monkeypatch.setenv("REGWATCH_ALLOW_TEST_PROVIDERS", "1")
     # Pydantic-settings would otherwise load real keys from `.env`; clear them
     # so tests run from a clean slate regardless of the host's .env.
     monkeypatch.setenv("OPENAI_API_KEY", "")

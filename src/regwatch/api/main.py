@@ -10,7 +10,7 @@ Endpoints (per spec §10.16):
     GET   /watch/latest — recent alerts
     GET   /products     — list watchlist
     POST  /products     — add manual product
-    GET   /health       — liveness
+    GET   /health       — liveness + component diagnostics
 """
 
 from __future__ import annotations
@@ -21,27 +21,54 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-from config.settings import get_settings
-from fastapi import FastAPI, HTTPException
+from config.settings import Settings, get_settings
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
 from regwatch.assemble.dossier import build_dossier
 from regwatch.common.logging import configure_logging
 from regwatch.generate.grounded_qa import ask
 from regwatch.sources.router import search_sources
 from regwatch.sources.types import SourceKind, SourceQuery
-from regwatch.store.db import init_db
+from regwatch.store.db import get_engine, init_db
+from regwatch.store.vector_store import collection_size
 from regwatch.watch.alerts import latest_digest_records
 from regwatch.watch.watchlist import ALLOWED_SOURCES, add_manual_product, list_watchlist
 
 configure_logging()
 
 
+def _guard_test_providers(s: Settings) -> None:
+    """Fail fast when test-grade echo providers face a real corpus.
+
+    Echo embeddings are hash noise — retrieval silently degrades while
+    citations still validate. An empty corpus is fine (fresh checkout, the
+    pre-seed boot of a Docker stack); a seeded one is not, unless the
+    operator opted in explicitly (tests/CI).
+    """
+    if s.allow_test_providers:
+        return
+    if s.embedding_provider != "echo" and s.llm_provider != "echo":
+        return
+    if collection_size() == 0:
+        return
+    raise RuntimeError(
+        "Test-grade 'echo' provider configured "
+        f"(EMBEDDING_PROVIDER={s.embedding_provider}, LLM_PROVIDER={s.llm_provider}) "
+        "against a non-empty vector corpus — retrieval quality would silently degrade. "
+        "Fix: set EMBEDDING_PROVIDER=local-bge-small (for Docker also "
+        "INSTALL_LOCAL_EMBEDDINGS=true) and a real LLM_PROVIDER, or set "
+        "REGWATCH_ALLOW_TEST_PROVIDERS=1 to explicitly allow test providers."
+    )
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if os.getenv("REGWATCH_DB_INITIALIZED") != "1":
         init_db()
+    _guard_test_providers(get_settings())
     yield
 
 
@@ -68,9 +95,61 @@ app.add_middleware(
 
 
 # ---------- /health ----------
+def _db_component() -> dict[str, Any]:
+    try:
+        with get_engine().connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _chroma_component() -> dict[str, Any]:
+    try:
+        return {"ok": True, "corpus_count": collection_size()}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _llm_key_present(s: Settings) -> bool:
+    if s.llm_provider == "openai":
+        return bool(s.openai_api_key)
+    if s.llm_provider == "anthropic":
+        return bool(s.anthropic_api_key)
+    return True  # echo needs no key
+
+
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health(response: Response) -> dict[str, Any]:
+    """Diagnose the stack: db, chroma, providers. Superset of {"status": "ok"}.
+
+    503 only when the DB or Chroma is unreachable. An empty corpus is healthy
+    (with a warning) so a fresh stack can boot and the ingest service can seed.
+    """
+    s = get_settings()
+    db = _db_component()
+    chroma = _chroma_component()
+    warnings: list[str] = []
+    if chroma["ok"] and chroma["corpus_count"] == 0:
+        warnings.append("corpus is empty — run `regwatch seed` (or the compose ingest profile)")
+    if s.embedding_provider == "echo" or s.llm_provider == "echo":
+        warnings.append("test-grade 'echo' provider in use — retrieval quality is degraded")
+    body: dict[str, Any] = {
+        "status": "ok",
+        "components": {
+            "db": db,
+            "chroma": chroma,
+            "llm": {"provider": s.llm_provider, "key_present": _llm_key_present(s)},
+            "embedding": {"provider": s.embedding_provider},
+        },
+        "warnings": warnings,
+    }
+    if s.allow_test_providers:
+        body["allow_test_providers"] = True
+    if not (db["ok"] and chroma["ok"]):
+        body["status"] = "unhealthy"
+        response.status_code = 503
+    return body
 
 
 # ---------- /query ----------

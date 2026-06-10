@@ -101,14 +101,19 @@ def build_alerts(matches: list[WatchMatch]) -> list[Alert]:
     return alerts
 
 
+def digest_path(when: date | None = None) -> Path:
+    """The digest file path for a given date (computed, NOT written)."""
+    s = get_settings()
+    when = when or datetime.now(UTC).date()
+    return s.processed_dir / "alerts" / f"digest-{when.isoformat()}.jsonl"
+
+
 def write_digest(alerts: list[Alert], *, when: date | None = None) -> Path:
     """Write the alerts to a JSONL digest file in `data/processed/alerts/`."""
     s = get_settings()
     s.ensure_dirs()
-    when = when or datetime.now(UTC).date()
-    out_dir = s.processed_dir / "alerts"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"digest-{when.isoformat()}.jsonl"
+    path = digest_path(when)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
         for a in alerts:
             fh.write(json.dumps(asdict(a)) + "\n")

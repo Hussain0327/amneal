@@ -15,10 +15,10 @@ def _tail(text: str, max_chars: int = 4_000) -> str:
     return text[-max_chars:]
 
 
-@dg.asset(group_name="ingest", compute_kind="regwatch-cli")
-def seed_corpus(context: AssetExecutionContext) -> dg.MaterializeResult[Any]:
-    """Seed the verified PSG corpus through the existing REGWATCH CLI."""
-    command = ["regwatch", "seed"]
+def _run_cli(
+    context: AssetExecutionContext, command: list[str], *, failure: str
+) -> dg.MaterializeResult[Any]:
+    """Run a REGWATCH CLI command as a Dagster asset materialization."""
     env = os.environ.copy()
     env.setdefault("REGWATCH_INIT_DB", "false")
 
@@ -35,7 +35,7 @@ def seed_corpus(context: AssetExecutionContext) -> dg.MaterializeResult[Any]:
         context.log.warning(result.stderr)
     if result.returncode != 0:
         raise dg.Failure(
-            description="regwatch seed failed",
+            description=failure,
             metadata={
                 "command": dg.MetadataValue.text(" ".join(command)),
                 "exit_code": result.returncode,
@@ -54,9 +54,32 @@ def seed_corpus(context: AssetExecutionContext) -> dg.MaterializeResult[Any]:
     )
 
 
+@dg.asset(group_name="ingest", compute_kind="regwatch-cli")
+def seed_corpus(context: AssetExecutionContext) -> dg.MaterializeResult[Any]:
+    """Seed the verified PSG corpus through the existing REGWATCH CLI."""
+    return _run_cli(context, ["regwatch", "seed"], failure="regwatch seed failed")
+
+
+@dg.asset(group_name="watch", compute_kind="regwatch-cli")
+def watch_digest(context: AssetExecutionContext) -> dg.MaterializeResult[Any]:
+    """Run the Watch pipeline (crawl → match → ingest matched → alert → digest)."""
+    return _run_cli(context, ["regwatch", "watch"], failure="regwatch watch failed")
+
+
 seed_corpus_job = dg.define_asset_job("seed_corpus_job", selection=[seed_corpus])
 
+watch_digest_job = dg.define_asset_job("watch_digest_job", selection=[watch_digest])
+
+watch_daily_schedule = dg.ScheduleDefinition(
+    name="watch_daily_schedule",
+    job=watch_digest_job,
+    cron_schedule="0 6 * * *",
+    execution_timezone="UTC",
+    default_status=dg.DefaultScheduleStatus.RUNNING,
+)
+
 defs = dg.Definitions(
-    assets=[seed_corpus],
-    jobs=[seed_corpus_job],
+    assets=[seed_corpus, watch_digest],
+    jobs=[seed_corpus_job, watch_digest_job],
+    schedules=[watch_daily_schedule],
 )

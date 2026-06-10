@@ -87,3 +87,16 @@ def test_digest_round_trip(tmp_path: Path) -> None:
     records = latest_digest_records()
     assert records
     assert records[0]["listing_appl_no"] == "020503"
+
+
+def test_empty_digest_round_trip(tmp_path: Path) -> None:
+    """A no-change watch run writes an EMPTY digest; the UI feed reads zero alerts.
+
+    This is the chosen semantics for `regwatch watch`: the empty file is the
+    truthful record of the latest run, so GET /watch/latest reports zero alerts
+    instead of re-surfacing a stale digest as current.
+    """
+    path = write_digest([])
+    assert path.exists()
+    assert path.read_text(encoding="utf-8") == ""
+    assert latest_digest_records() == []
