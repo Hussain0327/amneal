@@ -45,6 +45,7 @@ from regwatch.retrieve.resolver import resolve_brand, resolve_product, suggest_p
 from regwatch.retrieve.retriever import RetrievedPassage, retrieve
 from regwatch.store.db import session_scope
 from regwatch.store.models import PsgDocument
+from regwatch.store.queries import current_dosage_form_routes
 
 log = get_logger(__name__)
 
@@ -80,6 +81,10 @@ class QAResult:
     # status supersedes the answer/refuse binary: "clarify" means we know the
     # product but need direction (offer `clarify` options) rather than guess.
     status: str = "answer"  # "answer" | "clarify" | "refused"
+    # The route reason behind the status (e.g. "multi_form", "no_product",
+    # "retrieval") — surfaced so callers/eval can tell WHY we clarified or
+    # refused, not just that we did. Mirrors route_json["reason"].
+    reason: str | None = None
     interpretation: str | None = None
     clarify: list[ClarifyOption] = field(default_factory=list)
     session_id: str | None = None
@@ -129,6 +134,9 @@ _FILLER = frozenset(
         "question",
         "hi",
         "hello",
+        "hey",
+        "thanks",
+        "thank",
         "regarding",
         "re",
         "some",
@@ -308,6 +316,68 @@ def build_options(normalized_name: str) -> list[ClarifyOption]:
     ]
 
 
+def _combo_label(normalized_name: str, dosage_form: str, route: str) -> str:
+    """Human-readable combo label, e.g. ``Estradiol — Gel, Metered (Transdermal)``."""
+    return f"{normalized_name.title()} — {dosage_form} ({route})"
+
+
+def build_form_options(
+    normalized_name: str, combos: list[tuple[str, str]], question: str
+) -> list[ClarifyOption]:
+    """One clickable option per (dosage_form, route) combo of a multi-form drug.
+
+    Each option re-runs the SAME question (so the user's intent survives the
+    extra hop) but pins ``dosage_form`` + ``route`` alongside ``normalized_name``
+    so retrieval is constrained to a single form — the citation can no longer be
+    to the wrong-form PSG. Filters round-trip verbatim through the API/UI.
+    """
+    options: list[ClarifyOption] = []
+    for dosage_form, route in combos:
+        options.append(
+            ClarifyOption(
+                _combo_label(normalized_name, dosage_form, route),
+                question,
+                {
+                    "normalized_name": normalized_name,
+                    "dosage_form": dosage_form,
+                    "route": route,
+                },
+            )
+        )
+    return options
+
+
+def _form_match_tokens(value: str) -> set[str]:
+    """Significant form/route tokens for whole-word matching (drop short connectors)."""
+    return {t for t in re.split(r"[^a-z0-9]+", value.lower()) if len(t) > 2}
+
+
+def _combo_from_question(question: str, combos: list[tuple[str, str]]) -> tuple[str, str] | None:
+    """Pin a single (dosage_form, route) combo when the question names it unambiguously.
+
+    Scores each combo by how many of its significant dosage_form/route tokens appear
+    as whole words in the question; returns the uniquely best-matching combo (score
+    > 0 and strictly ahead of the runner-up), else None. So "albuterol sulfate
+    inhalation aerosol" pins (Aerosol, Metered)/(Inhalation) instead of paying a
+    pointless clarify hop, while a form-silent or ambiguous question still clarifies.
+    """
+    q_tokens = {t for t in re.split(r"[^a-z0-9]+", question.lower()) if t}
+    scored = sorted(
+        (
+            (len((_form_match_tokens(form) | _form_match_tokens(route)) & q_tokens), (form, route))
+            for form, route in combos
+        ),
+        key=lambda x: x[0],
+        reverse=True,
+    )
+    best_score, best_combo = scored[0]
+    if best_score == 0:
+        return None
+    if len(scored) > 1 and scored[1][0] == best_score:
+        return None  # two combos match the question equally well — still ambiguous
+    return best_combo
+
+
 def _format_passages(passages: list[RetrievedPassage]) -> str:
     blocks: list[str] = []
     for p in passages:
@@ -389,6 +459,7 @@ def _refuse(
         audit_id=audit_id,
         retrieved=audited,
         status=status,
+        reason=reason,
         session_id=session_id,
         turn_id=turn_id,
     )
@@ -430,6 +501,7 @@ def _clarify(
         audit_id=audit_id,
         retrieved=[],
         status="clarify",
+        reason=reason,
         interpretation=interpretation,
         clarify=options,
         session_id=session_id,
@@ -564,8 +636,9 @@ def ask(
         else:
             session_filters = get_session_filters(session_id)
             if session_filters.get("normalized_name") and _looks_like_follow_up(question):
-                # Carry ONLY the product across turns. Propagating doc_id/dosage_form/
-                # psg_type from a prior turn would silently over-narrow retrieval.
+                # Carry the product across turns (the chosen dosage_form/route are
+                # carried just below, after resolved_name is set, so the same logic
+                # also covers the single-product-corpus fallback path).
                 active_filters["normalized_name"] = canonical_name(
                     str(session_filters["normalized_name"])
                 )
@@ -649,9 +722,32 @@ def ask(
 
     resolved_name = active_filters.get("normalized_name")
 
+    # Multi-form session carry-over: a follow-up that didn't itself pin a form
+    # inherits the dosage_form/route the user already chose for THIS product (via
+    # a prior multi-form clarify). Done here — after resolution — so it also covers
+    # the single-product-corpus fallback, where the resolver re-pins the product
+    # and the `none`-branch carry-over above never runs. Without it the next
+    # "What about dissolution?" would re-trigger the multi-form clarify.
+    if (
+        resolved_name
+        and not active_filters.get("dosage_form")
+        and not active_filters.get("route")
+        and _looks_like_follow_up(question)
+    ):
+        session_filters = get_session_filters(session_id)
+        if session_filters.get("normalized_name") == resolved_name:
+            for key in ("dosage_form", "route"):
+                if session_filters.get(key):
+                    active_filters[key] = session_filters[key]
+                    context_applied = True
+
     # Bare drug name / no real question → guide with options instead of dumping a
-    # default BE answer. Deterministic, pre-LLM (the unit-testable hero path).
-    if resolved_name and resolved_by_name and _looks_vague(question, resolved_name):
+    # default BE answer. Fires however the product was pinned — named in the
+    # question, an API/UI filter, or session carry-over — so a no-topic input
+    # ("Hello" with an Active-ingredient filter) never reaches the synthesizer
+    # and comes back as a cited greeting. Deterministic, pre-LLM (the
+    # unit-testable hero path).
+    if resolved_name and _looks_vague(question, resolved_name):
         route_json = _route_json(
             filters=active_filters,
             reason="vague_input",
@@ -672,6 +768,54 @@ def ask(
             filters=active_filters,
             route_json=route_json,
         )
+
+    # Multi-form guard (pre-retrieval): the resolver pins only normalized_name, but
+    # ~1 in 5 drugs span multiple dosage forms/routes (e.g. estradiol: transdermal
+    # gel/spray vs. vaginal tablet/insert). Blending those into one LLM context lets
+    # a wrong-form PSG be cited as if it answered the question — and the blend is
+    # invisible because citation labels are appl-number-only. So once a product is
+    # resolved (by name OR by an API/UI filter), enumerate its CURRENT documents'
+    # distinct (dosage_form, route) combos, honoring any form/route already pinned;
+    # if more than one remains, CLARIFY which form before retrieving. One audit row.
+    if resolved_name:
+        combos = current_dosage_form_routes(
+            resolved_name,
+            dosage_form=active_filters.get("dosage_form"),
+            route=active_filters.get("route"),
+        )
+        if len(combos) > 1:
+            # Before clarifying, honor a form the QUESTION already names: if exactly
+            # one combo's dosage_form/route tokens uniquely match the question text,
+            # pin it and proceed — a form-explicit question shouldn't pay a clarify
+            # hop (and on the full catalog it would otherwise flip answerable items
+            # to clarify). Only a form-silent or ambiguous question clarifies.
+            pinned = _combo_from_question(question, combos)
+            if pinned is not None:
+                active_filters["dosage_form"], active_filters["route"] = pinned
+            else:
+                route_json = _route_json(
+                    filters=active_filters,
+                    reason="multi_form",
+                    context_applied=context_applied,
+                    response_mode="clarify",
+                )
+                return _finish_turn(
+                    _clarify(
+                        question=question,
+                        reason="multi_form",
+                        model_name=model_name,
+                        interpretation=(
+                            f"{resolved_name.title()} has FDA guidance for more than one "
+                            "dosage form. Which form did you mean?"
+                        ),
+                        options=build_form_options(resolved_name, combos, question),
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        route_json=route_json,
+                    ),
+                    filters=active_filters,
+                    route_json=route_json,
+                )
 
     # Stage 1: wide-net vector search (up to VECTOR_TOP_K), constrained to the product.
     route_json = _route_json(
@@ -730,6 +874,42 @@ def ask(
                     ClarifyOption(name.title(), name, {"normalized_name": name})
                     for name in distinct_products
                 ],
+                session_id=session_id,
+                turn_id=turn_id,
+                route_json=route_json,
+            ),
+            filters=active_filters,
+            route_json=route_json,
+        )
+
+    # Same defense in depth for dosage form: even within one product, passages must
+    # not blend distinct (dosage_form, route) combos (the wrong-form-citation bug).
+    # The pre-retrieval guard normally catches this; this backstops a caller that
+    # bypassed it. Offer one option per combo, pinning form+route. Skipped when a
+    # passage is missing form/route metadata (a half-known combo would split docs
+    # that are answerable together — e.g. same-combo beclomethasone docs).
+    passage_combos = {
+        (str(p.metadata.get("dosage_form")), str(p.metadata.get("route")))
+        for p in passages
+        if p.metadata.get("dosage_form") and p.metadata.get("route")
+    }
+    one_product = distinct_products[0] if distinct_products else resolved_name
+    if one_product and len(passage_combos) > 1:
+        route_json = _route_json(
+            filters=active_filters,
+            reason="multi_form",
+            context_applied=context_applied,
+            response_mode="clarify",
+        )
+        return _finish_turn(
+            _clarify(
+                question=question,
+                reason="multi_form",
+                model_name=model_name,
+                interpretation=(
+                    "These passages span more than one dosage form. Which form did you mean?"
+                ),
+                options=build_form_options(one_product, sorted(passage_combos), question),
                 session_id=session_id,
                 turn_id=turn_id,
                 route_json=route_json,
@@ -866,6 +1046,7 @@ def ask(
             audit_id=audit_id,
             retrieved=_audit_retrieved(passages),
             status=response_mode,
+            reason=route_json.get("reason"),
             session_id=session_id,
             turn_id=turn_id,
         ),

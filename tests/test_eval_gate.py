@@ -25,7 +25,8 @@ from regwatch.eval.metrics import GoldItem, evaluate
 from regwatch.generate import grounded_qa as qa_mod
 from regwatch.generate.llm import LLMResponse
 from regwatch.process.embedder import get_embedding_provider
-from regwatch.store.db import init_db
+from regwatch.store.db import init_db, session_scope
+from regwatch.store.models import PsgDocument, PsgVersion
 from regwatch.store.vector_store import add_chunks
 
 pytestmark = pytest.mark.invariants
@@ -200,3 +201,81 @@ def test_eval_gate_passes_on_deterministic_corpus(monkeypatch: pytest.MonkeyPatc
     # regression in grounding or fact coverage trips the gate.
     assert sc.faithfulness == 1.0, sc.details
     assert sc.fact_recall == 1.0, sc.details
+
+
+# Synthetic two-form drug — one normalized_name, two distinct (dosage_form, route)
+# combos. Seeded into BOTH the SQL catalog (psg_document + psg_version, which the
+# pre-retrieval multi-form guard enumerates) and Chroma. A BE-study question must
+# CLARIFY which form rather than blend both into one LLM context (the wrong-form
+# citation bug). Gated offline forever — no network, no API key.
+_TWO_FORM_ROWS = [
+    ("syntheticol oral tablet bioequivalence study guidance", "Tablet", "Oral", 1),
+    ("syntheticol transdermal patch bioequivalence study guidance", "Patch", "Transdermal", 2),
+]
+
+
+def _seed_two_form_drug() -> None:
+    init_db()
+    with session_scope() as s:
+        for idx, (_, form, route, _page) in enumerate(_TWO_FORM_ROWS):
+            doc = PsgDocument(
+                active_ingredient="Syntheticol",
+                normalized_name="syntheticol",
+                dosage_form=form,
+                route=route,
+                appl_no=f"99900{idx}",
+                psg_type="draft",
+                recommended_date="2026-01-01",
+                source_url=f"http://example/PSG_99900{idx}.pdf",
+                content_hash=f"hash-99900{idx}",
+            )
+            s.add(doc)
+            s.flush()
+            assert doc.id is not None
+            s.add(PsgVersion(psg_document_id=doc.id, content_hash=f"hash-99900{idx}"))
+
+    emb = get_embedding_provider()
+    texts = [t for t, _, _, _ in _TWO_FORM_ROWS]
+    add_chunks(
+        ids=[f"syntheticol-{i}" for i in range(len(_TWO_FORM_ROWS))],
+        embeddings=emb.embed(texts),
+        documents=texts,
+        metadatas=[
+            {
+                "doc_id": idx + 1,
+                "version_id": idx + 1,
+                "page": page,
+                "normalized_name": "syntheticol",
+                "appl_no": f"99900{idx}",
+                "source_url": f"http://example/PSG_99900{idx}.pdf",
+                "section_path": "",
+                "dosage_form": form,
+                "route": route,
+                "psg_type": "draft",
+            }
+            for idx, (_, form, route, page) in enumerate(_TWO_FORM_ROWS)
+        ],
+    )
+
+
+def test_eval_gate_clarifies_on_multiform_drug(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REFUSAL_SCORE_THRESHOLD", "0.0")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _FaithfulStub())
+    _seed_two_form_drug()
+
+    gold = [
+        GoldItem(
+            question="What bioequivalence study design does FDA recommend for syntheticol?",
+            expected_sources=[],
+            must_clarify=True,
+        )
+    ]
+    sc = evaluate(gold, ask_callable=lambda q: qa_mod.ask(q))
+
+    # The must_clarify item folds into refusal_accuracy (decision accuracy); it is
+    # correct iff the system clarified rather than blending the two forms.
+    assert sc.clarified_correctly == 1, sc.details
+    assert sc.refusal_accuracy >= 0.95, sc.details

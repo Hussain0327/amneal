@@ -52,6 +52,7 @@ def _load_gold(path: Path) -> list[GoldItem]:
                     expected_sources=row.get("expected_sources") or [],
                     expected_facts=row.get("expected_facts") or [],
                     must_refuse=bool(row.get("must_refuse", False)),
+                    must_clarify=bool(row.get("must_clarify", False)),
                 )
             )
     return items
@@ -80,9 +81,19 @@ def _print_scorecard(sc: Scorecard) -> None:
     console.print(table)
     console.print(
         f"refused_correctly={sc.refused_correctly}  "
+        f"clarified_correctly={sc.clarified_correctly}  "
         f"refused_incorrectly={sc.refused_incorrectly}  "
         f"cited_ungrounded={sc.cited_ungrounded}"
     )
+    if sc.skipped:
+        # Loud, explicit — never a silent pass. These items asserted multi-form
+        # clarify behavior on a product the seeded corpus does not contain.
+        absent = [d["q"] for d in sc.details if d.get("skipped")]
+        console.print(
+            f"[yellow]skipped {sc.skipped} must_clarify item(s) absent from the "
+            f"seeded corpus (excluded from refusal_accuracy; still hard-gated "
+            f"offline in the deterministic eval gate): {absent}[/yellow]"
+        )
 
 
 @app.command()

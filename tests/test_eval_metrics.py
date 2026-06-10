@@ -27,6 +27,11 @@ class _FakeCit:
 
 
 @dataclass
+class _FakeOpt:
+    filters: dict[str, Any]
+
+
+@dataclass
 class _FakeResult:
     answer: str
     citations: list[_FakeCit]
@@ -34,6 +39,9 @@ class _FakeResult:
     model_name: str = "stub"
     audit_id: int = 0
     retrieved: list[dict[str, Any]] = field(default_factory=list)
+    status: str = "answer"
+    reason: str | None = None
+    clarify: list[_FakeOpt] = field(default_factory=list)
 
 
 def test_recall_at_k_match() -> None:
@@ -144,3 +152,84 @@ def test_refusal_accuracy_penalizes_wrong_refusals() -> None:
     assert sc.refused_incorrectly == 1
     # (refusal_correct=0 + (n=2 - refusal_expected=0 - refused_incorrectly=1)) / n=2
     assert sc.refusal_accuracy == 0.5
+
+
+def test_must_clarify_scored_only_for_multiform_clarify() -> None:
+    # A multi-form clarify (reason "multi_form", options pin form+route) is the only
+    # clarify that satisfies a must_clarify expectation.
+    gold = [GoldItem(question="estradiol", expected_sources=[], must_clarify=True)]
+
+    def _ask(_q: str) -> _FakeResult:
+        return _FakeResult(
+            answer="which form?",
+            citations=[],
+            refused=False,
+            status="clarify",
+            reason="multi_form",
+            clarify=[
+                _FakeOpt(
+                    {"normalized_name": "estradiol", "dosage_form": "Gel", "route": "Transdermal"}
+                ),
+                _FakeOpt(
+                    {"normalized_name": "estradiol", "dosage_form": "Tablet", "route": "Vaginal"}
+                ),
+            ],
+        )
+
+    sc = evaluate(gold, ask_callable=_ask)
+    assert sc.clarified_correctly == 1
+    assert sc.refusal_accuracy == 1.0
+    assert sc.skipped == 0
+
+
+def test_must_clarify_wrong_clarify_reason_not_counted() -> None:
+    # A did_you_mean clarify (typo suggestion) must NOT satisfy a multi-form
+    # expectation, even though status == "clarify".
+    gold = [GoldItem(question="albuteral", expected_sources=[], must_clarify=True)]
+
+    def _ask(_q: str) -> _FakeResult:
+        return _FakeResult(
+            answer="did you mean albuterol?",
+            citations=[],
+            refused=False,
+            status="clarify",
+            reason="did_you_mean",
+            clarify=[_FakeOpt({"normalized_name": "albuterol sulfate"})],
+        )
+
+    sc = evaluate(gold, ask_callable=_ask)
+    assert sc.clarified_correctly == 0
+    assert sc.refusal_accuracy == 0.0  # n=1, decision_expected=1, skipped=0
+    assert sc.skipped == 0
+
+
+def test_must_clarify_absent_product_is_skipped() -> None:
+    # A must_clarify item whose product is absent from the corpus refuses with reason
+    # "no_product" → it is SKIPPED (excluded from the denominator), not scored as a
+    # wrong decision. The one answerable item still scores normally.
+    gold = [
+        GoldItem(question="q1", expected_sources=[{"short_name": "PSG_001", "page": 3}]),
+        GoldItem(question="estradiol", expected_sources=[], must_clarify=True),
+    ]
+
+    def _ask(q: str) -> _FakeResult:
+        if q == "q1":
+            return _FakeResult(
+                answer="Foo [PSG_001, p.3].",
+                citations=[_FakeCit("PSG_001", 3)],
+                refused=False,
+                retrieved=[{"short_name": "PSG_001", "page": 3, "doc_id": 1}],
+            )
+        return _FakeResult(
+            answer="refused",
+            citations=[],
+            refused=True,
+            status="refused",
+            reason="no_product",
+        )
+
+    sc = evaluate(gold, ask_callable=_ask)
+    assert sc.skipped == 1
+    assert sc.clarified_correctly == 0
+    # Skipped item is out of the denominator: only the answered item scores.
+    assert sc.refusal_accuracy == 1.0

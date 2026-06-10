@@ -9,3 +9,13 @@
 {"question": "What submission strategy should we use to file the ANDA?", "expected_sources": [], "expected_facts": [], "must_refuse": true}
 {"question": "What does the FDA require for hypotheticol XYZ-9999?", "expected_sources": [], "expected_facts": [], "must_refuse": true}
 {"question": "Should we run a fed or fasting study based on internal benchmarks?", "expected_sources": [], "expected_facts": [], "must_refuse": true}
+# Multi-form clarify guard: estradiol spans many (dosage_form, route) combos, so a
+# form-less BE question MUST clarify (not blend forms). The live CI eval runs TODAY
+# whenever OPENAI_API_KEY is set (ci.yml: `regwatch seed` -> `run_eval
+# --check-thresholds`) but seeds only the 5 inhalation PSGs — estradiol is absent,
+# so the resolver refuses (reason "no_product"). run_eval/metrics therefore SKIP
+# this item (corpus-membership gate, excluded from refusal_accuracy with a printed
+# notice — never a silent pass) until estradiol is in the corpus (full local
+# ingest), at which point it is scored. The clarify behavior is hard-gated offline
+# regardless in tests/test_eval_gate.py::test_eval_gate_clarifies_on_multiform_drug.
+{"question": "What bioequivalence study design does FDA recommend for estradiol?", "expected_sources": [], "expected_facts": [], "must_refuse": false, "must_clarify": true}

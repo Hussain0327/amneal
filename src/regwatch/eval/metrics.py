@@ -34,6 +34,11 @@ class GoldItem:
     expected_sources: list[dict[str, Any]]
     expected_facts: list[str] = field(default_factory=list)
     must_refuse: bool = False
+    # A must_clarify item is correct iff the system asks (status "clarify") rather
+    # than guessing — e.g. a multi-form drug that must not blend dosage forms. It
+    # folds into refusal_accuracy (the decision-accuracy bucket) like must_refuse,
+    # and like must_refuse it does not contribute to recall/precision/faithfulness.
+    must_clarify: bool = False
 
 
 @dataclass
@@ -45,8 +50,14 @@ class Scorecard:
     fact_recall: float = 0.0
     refusal_accuracy: float = 0.0
     refused_correctly: int = 0
+    clarified_correctly: int = 0
     refused_incorrectly: int = 0
     cited_ungrounded: int = 0
+    # must_clarify items whose product is absent from the seeded corpus: not
+    # scorable on this corpus (the resolver refuses), so they are excluded from
+    # the denominator with a notice rather than counted as a wrong decision. Never
+    # a silent pass — the offline gate still hard-gates the clarify behavior.
+    skipped: int = 0
     details: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -126,8 +137,10 @@ def evaluate(
         return Scorecard()
     sums = {"recall": 0.0, "precision": 0.0, "faith": 0.0, "fact": 0.0}
     refusal_correct = 0
+    clarify_correct = 0
     refused_incorrectly = 0
     cited_ungrounded = 0
+    skipped = 0  # must_clarify items whose product is absent from the corpus
     fact_items = 0  # answered items that actually carry expected_facts
     details: list[dict[str, Any]] = []
 
@@ -136,7 +149,8 @@ def evaluate(
         retrieved = result.retrieved
         citations = [c.__dict__ for c in result.citations]
 
-        # Refusal accounting
+        # Decision accounting (refuse/clarify items don't contribute to
+        # recall/precision/faithfulness — they assert WHICH decision is correct).
         if it.must_refuse:
             if result.refused:
                 refusal_correct += 1
@@ -147,7 +161,50 @@ def evaluate(
                     "refused": result.refused,
                 }
             )
-            # Refusal-expected items don't contribute to recall/precision/faithfulness.
+            continue
+        if it.must_clarify:
+            reason = getattr(result, "reason", None)
+            # Corpus-membership gate: a must_clarify item asserts multi-form behavior
+            # on a specific product. If that product is absent from the seeded corpus
+            # the resolver refuses with reason "no_product" — the item is not testable
+            # here, so SKIP it (excluded from the denominator) with an explicit notice
+            # rather than scoring it as a wrong decision. This can ONLY fire when the
+            # product is genuinely absent: a present multi-form drug clarifies before
+            # retrieval, and any other refusal reason still counts against the score,
+            # so a real regression is never masked. The clarify behavior itself is
+            # hard-gated offline (tests/test_eval_gate.py).
+            if result.status == "refused" and reason == "no_product":
+                skipped += 1
+                details.append(
+                    {
+                        "q": it.question,
+                        "must_clarify": True,
+                        "status": result.status,
+                        "reason": reason,
+                        "skipped": "product_absent_from_corpus",
+                    }
+                )
+                continue
+            # Reason-aware scoring: a clarify is correct for a must_clarify item only
+            # when it is the MULTI-FORM clarify (not an unrelated did_you_mean /
+            # brand_lookup / vague_input clarify) AND every option pins a concrete
+            # (dosage_form, route) — i.e. the multi-form guard actually fired.
+            options = getattr(result, "clarify", []) or []
+            form_pinned = bool(options) and all(
+                o.filters and o.filters.get("dosage_form") and o.filters.get("route")
+                for o in options
+            )
+            if result.status == "clarify" and reason == "multi_form" and form_pinned:
+                clarify_correct += 1
+            details.append(
+                {
+                    "q": it.question,
+                    "must_clarify": True,
+                    "status": result.status,
+                    "reason": reason,
+                    "form_pinned": form_pinned,
+                }
+            )
             continue
         if result.refused:
             refused_incorrectly += 1
@@ -188,13 +245,20 @@ def evaluate(
         )
 
     n = len(items)
-    refusal_expected = sum(1 for it in items if it.must_refuse)
-    # Denominate content metrics over ALL answerable items (n - must_refuse), so a
-    # wrongly-refused answerable item scores recall/precision/faithfulness 0 rather
-    # than being dropped from the denominator — otherwise over-refusal is masked.
-    answerable = max(1, n - refusal_expected)
-    correct_non_refusals = (n - refusal_expected) - refused_incorrectly
-    refusal_accuracy = (refusal_correct + correct_non_refusals) / n
+    decision_expected = sum(1 for it in items if it.must_refuse or it.must_clarify)
+    # Denominate content metrics over ALL answerable items (those that should be
+    # answered with citations), so a wrongly-refused answerable item scores
+    # recall/precision/faithfulness 0 rather than being dropped — otherwise
+    # over-refusal is masked. must_clarify joins must_refuse in this exclusion.
+    # (Skipped items are must_clarify, so they are already outside `answerable`.)
+    answerable = max(1, n - decision_expected)
+    correct_non_refusals = (n - decision_expected) - refused_incorrectly
+    # refusal_accuracy is the decision-accuracy bucket: a must_refuse that refused,
+    # a must_clarify that clarified, and an answerable item that answered all count.
+    # Corpus-absent must_clarify items are excluded from the denominator (they are
+    # not scorable here), so they neither pass nor fail the gate.
+    scored = max(1, n - skipped)
+    refusal_accuracy = (refusal_correct + clarify_correct + correct_non_refusals) / scored
     return Scorecard(
         n=n,
         recall_at_k=sums["recall"] / answerable,
@@ -203,7 +267,9 @@ def evaluate(
         fact_recall=sums["fact"] / max(1, fact_items),
         refusal_accuracy=refusal_accuracy,
         refused_correctly=refusal_correct,
+        clarified_correctly=clarify_correct,
         refused_incorrectly=refused_incorrectly,
         cited_ungrounded=cited_ungrounded,
+        skipped=skipped,
         details=details,
     )

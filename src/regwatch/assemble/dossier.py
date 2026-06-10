@@ -279,17 +279,43 @@ def build_dossier(
     md_lines.append("")
     md_lines.append("## D. Applicable Guidance — Q&A Summary")
     # Pin the product so the applicable-guidance Q&A can't pull another drug's
-    # PSG chunks (cross-drug-leak guard — INV-1).
+    # PSG chunks (cross-drug-leak guard — INV-1). For a multi-form drug, also pin
+    # the matched documents' exact (dosage_form, route) when they agree on one, so
+    # the Q&A's multi-form guard doesn't start clarifying inside a dossier — the
+    # dossier already knows the form it's building for.
+    qa_filters: dict[str, Any] = {"normalized_name": canonical_name(active_ingredient)}
+    matched_combos = {
+        (p["dosage_form"], p["route"])
+        for p in psg_matches
+        if p.get("dosage_form") and p.get("route")
+    }
+    if len(matched_combos) == 1:
+        form, route = next(iter(matched_combos))
+        qa_filters["dosage_form"] = form
+        qa_filters["route"] = route
     qa = ask(
         _applicable_guidance_question(active_ingredient, dosage_form),
-        filters={"normalized_name": canonical_name(active_ingredient)},
+        filters=qa_filters,
     )
-    md_lines.append(qa.answer)
-    if qa.citations:
-        md_lines.append("")
-        md_lines.append("### Sources")
-        for c in qa.citations:
-            md_lines.append(f"- {c.short_name}, p.{c.page}: {c.source_url}")
+    if qa.status == "clarify":
+        # The product spans more than one (dosage_form, route) combo and no single
+        # form was pinned, so the inner Q&A asked WHICH form. A dossier is a
+        # non-interactive document — never embed that dangling clarify prompt as
+        # Section D content. State the forms explicitly and direct the reader to
+        # rebuild per form instead of blending them (INV-1 / INV-5).
+        forms = ", ".join(sorted(f"{form} ({route})" for form, route in matched_combos))
+        md_lines.append(
+            f"_{active_ingredient} has FDA guidance for more than one dosage form "
+            f"({forms}). Rebuild this dossier with a specific dosage form to get "
+            f"form-specific guidance — forms are not blended._"
+        )
+    else:
+        md_lines.append(qa.answer)
+        if qa.citations:
+            md_lines.append("")
+            md_lines.append("### Sources")
+            for c in qa.citations:
+                md_lines.append(f"- {c.short_name}, p.{c.page}: {c.source_url}")
 
     # Section E — Dissolution methods link
     md_lines.append("")
@@ -330,6 +356,10 @@ def build_dossier(
             "qa_answer": qa.answer,
             "qa_citations": qa_citations,
             "qa_refused": qa.refused,
+            # Surface the inner Q&A status so API callers can detect a multi-form
+            # ambiguity ("clarify") rather than silently treating Section D's note
+            # as a normal answer.
+            "qa_status": qa.status,
         },
         "refused": False,
     }

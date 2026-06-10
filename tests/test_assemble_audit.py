@@ -4,6 +4,11 @@
 and relied solely on the inner `ask()` (mode="qa") on the success path, so no
 row was ever written under mode="assemble". These tests lock that both paths
 now audit under the correct mode.
+
+Also locks the dossier→Q&A filter handoff for multi-form drugs: when the
+matched PSGs agree on one (dosage_form, route) combo the dossier pins it on the
+inner ask() (no clarify inside a dossier); when they disagree it pins only the
+product and never invents a form (INV-5).
 """
 
 from __future__ import annotations
@@ -108,3 +113,117 @@ def test_successful_assemble_writes_assemble_query_log(
     assert row["model_name"]
     # The assembled markdown is captured as the audit answer text.
     assert row["answer_text"] == result["markdown"]
+
+
+def _seed_multiform_estradiol() -> None:
+    """Two estradiol PSG docs in DIFFERENT (dosage_form, route) combos."""
+    with session_scope() as s:
+        for appl, form, route in (
+            ("020001", "Gel", "Transdermal"),
+            ("020002", "Tablet", "Vaginal"),
+        ):
+            s.add(
+                PsgDocument(
+                    active_ingredient="Estradiol",
+                    normalized_name="estradiol",
+                    dosage_form=form,
+                    route=route,
+                    appl_no=appl,
+                    psg_type="draft",
+                    recommended_date="2020-01-01",
+                    source_url=f"http://example/PSG_{appl}.pdf",
+                    content_hash=f"hash-{appl}",
+                )
+            )
+
+
+def _capture_ask(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Stub the inner Q&A, recording the filters the dossier pins on it."""
+    captured: list[dict[str, Any]] = []
+
+    def _fake_ask(question: str, *, filters: dict[str, Any] | None = None, **_kw: Any) -> QAResult:
+        captured.append(dict(filters or {}))
+        return QAResult(
+            answer="BE study guidance.",
+            citations=[],
+            refused=False,
+            model_name="echo-model",
+            audit_id=1,
+            retrieved=[],
+            status="answer",
+        )
+
+    monkeypatch.setattr(dossier_mod, "ask", _fake_ask)
+    monkeypatch.setattr(dossier_mod, "_fetch_rld_label", lambda *a, **k: None)
+    return captured
+
+
+def test_dossier_pins_single_matched_combo_on_inner_qa(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Multi-form drug, but the requested dosage form narrows the matched PSGs to
+    # ONE (dosage_form, route) combo → the dossier pins it on the inner ask() so
+    # the Q&A's multi-form guard doesn't start clarifying inside a dossier.
+    init_db()
+    _seed_multiform_estradiol()
+    captured = _capture_ask(monkeypatch)
+
+    result = build_dossier(active_ingredient="Estradiol", dosage_form="Gel", rld=None)
+
+    assert result["refused"] is False
+    assert captured == [
+        {"normalized_name": "estradiol", "dosage_form": "Gel", "route": "Transdermal"}
+    ]
+
+
+def test_dossier_does_not_pin_form_when_combos_disagree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No dosage form requested and the matched PSGs span TWO combos → the dossier
+    # must not invent one (INV-5); it pins only the product and lets the inner
+    # Q&A's multi-form guard surface the ambiguity honestly.
+    init_db()
+    _seed_multiform_estradiol()
+    captured = _capture_ask(monkeypatch)
+
+    result = build_dossier(active_ingredient="Estradiol", dosage_form=None, rld=None)
+
+    assert result["refused"] is False
+    assert captured == [{"normalized_name": "estradiol"}]
+
+
+def test_dossier_renders_per_form_note_when_inner_qa_clarifies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Multi-form drug, no form requested → the inner Q&A clarifies (status
+    # "clarify"). A dossier is non-interactive: it must NOT embed the dangling
+    # clarify prompt as Section D content. Instead it states the forms explicitly
+    # and surfaces qa_status so callers can detect the ambiguity.
+    init_db()
+    _seed_multiform_estradiol()
+
+    clarify_result = QAResult(
+        answer="Estradiol has FDA guidance for more than one dosage form. "
+        "Which form did you mean?",
+        citations=[],
+        refused=False,
+        model_name="echo-model",
+        audit_id=1,
+        retrieved=[],
+        status="clarify",
+        reason="multi_form",
+    )
+    monkeypatch.setattr(dossier_mod, "ask", lambda *a, **k: clarify_result)
+    monkeypatch.setattr(dossier_mod, "_fetch_rld_label", lambda *a, **k: None)
+
+    result = build_dossier(active_ingredient="Estradiol", dosage_form=None, rld=None)
+
+    assert result["refused"] is False
+    # The interactive clarify question is NOT embedded as document content.
+    assert "Which form did you mean?" not in result["markdown"]
+    # The forms are stated explicitly so the document is self-describing.
+    assert "Gel (Transdermal)" in result["markdown"]
+    assert "Tablet (Vaginal)" in result["markdown"]
+    # API callers can detect the multi-form ambiguity instead of treating the note
+    # as a normal answer.
+    assert result["sections"]["qa_status"] == "clarify"
