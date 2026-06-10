@@ -10,9 +10,11 @@
 # Copy the printed https://….trycloudflare.com URL and send it to your manager.
 # Press Ctrl-C to tear everything down.
 #
-# CAUTION: the link is OPEN (no auth) and every query spends your OpenAI key
-# while the tunnel is live. Share it only with the manager and Ctrl-C when done.
-# The URL changes every time you start the tunnel.
+# The app is login-gated (DB-backed session cookie): visitors land on /login
+# and need credentials you provision first with
+#   uv run regwatch create-user manager@example.com --name "Manager"
+# Every query still spends your OpenAI key while the tunnel is live, so Ctrl-C
+# when done. The URL changes every time you start the tunnel.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -25,6 +27,14 @@ if [ "$NO_TUNNEL" != "1" ]; then
     echo "cloudflared not found. Install it with:  brew install cloudflared"
     exit 1
   }
+fi
+
+# The UI is login-gated, so a tunnel link dead-ends at /login until at least
+# one user exists. list-users prints a python-repr dict: {'count': N, ...}.
+if uv run regwatch list-users 2>/dev/null | grep -q "'count': 0"; then
+  echo "No users exist yet — the shared link would stop at the login page."
+  echo "Create one first:  uv run regwatch create-user manager@example.com --name \"Manager\""
+  exit 1
 fi
 
 # Always rebuild the UI before sharing. Next bakes NEXT_PUBLIC_* env into the
@@ -90,5 +100,7 @@ if [ "$NO_TUNNEL" = "1" ]; then
 else
   echo
   echo "=== Public link — send this to your manager (Ctrl-C here to stop) ==="
+  echo "    The manager signs in with the credentials you provisioned"
+  echo "    (uv run regwatch create-user …)."
   cloudflared tunnel --url http://localhost:3000
 fi

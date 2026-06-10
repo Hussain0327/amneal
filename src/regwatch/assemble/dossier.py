@@ -185,6 +185,7 @@ def build_dossier(
     active_ingredient: str,
     dosage_form: str | None,
     rld: str | None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Assemble a cited dossier. If no matching PSG is in our store, refuses."""
     # INV-6: every assemble — refused or not — must leave a durable audit row.
@@ -213,6 +214,7 @@ def build_dossier(
             citations=[],
             refused=True,
             model_name=model_name,
+            user_id=user_id,
             status="refused",
             route_json={**route_json, "reason": "no_matching_psg"},
         )
@@ -293,9 +295,16 @@ def build_dossier(
         form, route = next(iter(matched_combos))
         qa_filters["dosage_form"] = form
         qa_filters["route"] = route
+    # user_id rides along so the inner Q&A's audit row carries caller identity
+    # too — every log_query from an authenticated request is attributed (INV-6).
+    # bind_session=False keeps that attribution audit-only: the synthetic BE
+    # question's ChatSession stays unowned, so it never shows up as a phantom
+    # conversation in the caller's /sessions history.
     qa = ask(
         _applicable_guidance_question(active_ingredient, dosage_form),
         filters=qa_filters,
+        user_id=user_id,
+        bind_session=False,
     )
     if qa.status == "clarify":
         # The product spans more than one (dosage_form, route) combo and no single
@@ -345,6 +354,7 @@ def build_dossier(
         citations=qa_citations,
         refused=False,
         model_name=model_name,
+        user_id=user_id,
         status="assembled",
         route_json={**route_json, "reason": "assembled", "matched_psgs": len(psgs_section)},
     )

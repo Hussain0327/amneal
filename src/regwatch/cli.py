@@ -45,6 +45,125 @@ def cmd_status() -> None:
     )
 
 
+def _prompt_password() -> str:
+    # Prompted, never a flag/argv: a password argument would leak into shell
+    # history and `ps` output.
+    return str(typer.prompt("Password", hide_input=True, confirmation_prompt=True))
+
+
+def _require_user_row(email: str) -> str:
+    """Normalize the email; exit 2 when no such user exists."""
+    from sqlmodel import select
+
+    from regwatch.store.db import session_scope
+    from regwatch.store.models import User
+
+    normalized = email.strip().lower()
+    with session_scope() as s:
+        row = s.scalars(select(User).where(User.email == normalized)).first()
+        if row is None:
+            rprint(f"[red]error[/red] no user with email {normalized!r}")
+            raise typer.Exit(code=2)
+    return normalized
+
+
+@app.command("create-user")
+def cmd_create_user(
+    email: str = typer.Argument(..., help="Login email (stored lowercased)."),
+    name: str = typer.Option(..., "--name", help="Display name."),
+    role: str = typer.Option("analyst", "--role", help="analyst | admin"),
+) -> None:
+    """Provision a login. The password is prompted, never passed as an argument."""
+    from sqlmodel import select
+
+    from regwatch.auth.passwords import hash_password
+    from regwatch.store.db import session_scope
+    from regwatch.store.models import User
+
+    if role not in {"analyst", "admin"}:
+        rprint("[red]error[/red] role must be 'analyst' or 'admin'")
+        raise typer.Exit(code=2)
+    password = _prompt_password()
+    init_db()
+    normalized = email.strip().lower()
+    with session_scope() as s:
+        if s.scalars(select(User).where(User.email == normalized)).first() is not None:
+            rprint(f"[red]error[/red] user {normalized!r} already exists")
+            raise typer.Exit(code=2)
+        s.add(
+            User(
+                email=normalized,
+                password_hash=hash_password(password),
+                display_name=name,
+                role=role,
+            )
+        )
+    rprint(f"[green]ok[/green] created {normalized} ({role})")
+
+
+@app.command("list-users")
+def cmd_list_users() -> None:
+    """List users (never prints password hashes)."""
+    from sqlmodel import select
+
+    from regwatch.store.db import session_scope
+    from regwatch.store.models import User
+
+    init_db()
+    with session_scope() as s:
+        users = [
+            {
+                "id": u.id,
+                "email": u.email,
+                "display_name": u.display_name,
+                "role": u.role,
+                "is_active": u.is_active,
+            }
+            for u in s.scalars(select(User))
+        ]
+    rprint({"count": len(users), "users": users})
+
+
+@app.command("set-password")
+def cmd_set_password(email: str = typer.Argument(...)) -> None:
+    """Set a user's password (prompted) and revoke their active sessions."""
+    from sqlmodel import select
+
+    from regwatch.auth.passwords import hash_password
+    from regwatch.store.db import session_scope
+    from regwatch.store.models import AuthSession, User
+
+    init_db()
+    normalized = _require_user_row(email)
+    password = _prompt_password()
+    with session_scope() as s:
+        row = s.scalars(select(User).where(User.email == normalized)).one()
+        row.password_hash = hash_password(password)
+        s.add(row)
+        for sess in s.scalars(select(AuthSession).where(AuthSession.user_id == row.id)):
+            s.delete(sess)
+    rprint(f"[green]ok[/green] password updated for {normalized} (sessions revoked)")
+
+
+@app.command("deactivate-user")
+def cmd_deactivate_user(email: str = typer.Argument(...)) -> None:
+    """Deactivate a login and revoke their active sessions."""
+    from sqlmodel import select
+
+    from regwatch.store.db import session_scope
+    from regwatch.store.models import AuthSession, User
+
+    init_db()
+    normalized = _require_user_row(email)
+    with session_scope() as s:
+        row = s.scalars(select(User).where(User.email == normalized)).one()
+        row.is_active = False
+        s.add(row)
+        for sess in s.scalars(select(AuthSession).where(AuthSession.user_id == row.id)):
+            s.delete(sess)
+    rprint(f"[green]ok[/green] deactivated {normalized}")
+
+
 @app.command("aliases")
 def cmd_aliases(refresh: bool = typer.Option(False, "--refresh")) -> None:
     """Discover applicant-name aliases from Drugs@FDA (no guessing)."""

@@ -1,4 +1,9 @@
-"""FastAPI surface tests — every endpoint reachable, schema correct."""
+"""FastAPI surface tests — every endpoint reachable, schema correct.
+
+Protected endpoints go through the `auth_client` fixture (a logged-in
+TestClient); only /health and CORS preflights stay anonymous here. The 401
+behavior itself is locked down in tests/test_auth.py.
+"""
 
 from __future__ import annotations
 
@@ -9,12 +14,8 @@ from fastapi.testclient import TestClient
 from regwatch.api.main import app
 
 
-def _client() -> TestClient:
-    # `with TestClient(app)` triggers lifespan → init_db on the per-test DB.
-    return TestClient(app)
-
-
 def _open() -> TestClient:
+    # `with TestClient(app)` triggers lifespan → init_db on the per-test DB.
     c = TestClient(app)
     c.__enter__()
     return c
@@ -79,8 +80,8 @@ def test_health_unhealthy_when_db_unreachable(monkeypatch: pytest.MonkeyPatch) -
     assert body["components"]["db"]["ok"] is False
 
 
-def test_settings_no_secrets() -> None:
-    r = _open().get("/settings")
+def test_settings_no_secrets(auth_client: TestClient) -> None:
+    r = auth_client.get("/settings")
     assert r.status_code == 200
     body = r.json()
     assert "embedding_provider" in body
@@ -103,6 +104,8 @@ def test_cors_allowlist() -> None:
     )
     assert allowed_preflight.status_code == 200
     assert allowed_preflight.headers["access-control-allow-origin"] == allowed_origin
+    # The browser only sends the session cookie cross-origin when this is set.
+    assert allowed_preflight.headers["access-control-allow-credentials"] == "true"
 
     blocked_preflight = c.options(
         "/query",
@@ -122,7 +125,9 @@ def test_cors_allowlist() -> None:
     assert "access-control-allow-origin" not in blocked_simple.headers
 
 
-def test_query_refuses_on_empty_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_query_refuses_on_empty_corpus(
+    monkeypatch: pytest.MonkeyPatch, auth_client: TestClient
+) -> None:
     # Empty Chroma → refusal; no LLM should be called.
     def _bad_llm(*a: object, **k: object) -> None:
         raise AssertionError("LLM must not be called when retrieval is empty")
@@ -130,7 +135,7 @@ def test_query_refuses_on_empty_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
     from regwatch.generate import grounded_qa as qa_mod
 
     monkeypatch.setattr(qa_mod, "get_llm_provider", _bad_llm)
-    r = _open().post("/query", json={"question": "Does this exist?"})
+    r = auth_client.post("/query", json={"question": "Does this exist?"})
     assert r.status_code == 200
     body = r.json()
     assert body["refused"] is True
@@ -138,7 +143,7 @@ def test_query_refuses_on_empty_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body["session_id"]
     assert body["turn_id"]
 
-    r2 = _open().post(
+    r2 = auth_client.post(
         "/query",
         json={"question": "What about dissolution?", "session_id": body["session_id"]},
     )
@@ -148,13 +153,15 @@ def test_query_refuses_on_empty_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body2["turn_id"] != body["turn_id"]
 
 
-def test_query_rejects_zero_k() -> None:
-    r = _open().post("/query", json={"question": "Does this exist?", "k": 0})
+def test_query_rejects_zero_k(auth_client: TestClient) -> None:
+    r = auth_client.post("/query", json={"question": "Does this exist?", "k": 0})
     assert r.status_code == 422
 
 
-def test_sources_search_accepts_explicit_source_without_network() -> None:
-    r = _open().post(
+def test_sources_search_accepts_explicit_source_without_network(
+    auth_client: TestClient,
+) -> None:
+    r = auth_client.post(
         "/sources/search",
         json={"query_text": "show PSG rows", "sources": ["psg"]},
     )
@@ -164,17 +171,16 @@ def test_sources_search_accepts_explicit_source_without_network() -> None:
     assert body["records"] == []
 
 
-def test_create_product_rejects_bad_source() -> None:
-    r = _open().post(
+def test_create_product_rejects_bad_source(auth_client: TestClient) -> None:
+    r = auth_client.post(
         "/products",
         json={"active_ingredient": "Foo", "source": "model_memory"},
     )
     assert r.status_code == 422
 
 
-def test_create_and_list_product() -> None:
-    c = _open()
-    c.post(
+def test_create_and_list_product(auth_client: TestClient) -> None:
+    auth_client.post(
         "/products",
         json={
             "active_ingredient": "Romidepsin",
@@ -187,26 +193,26 @@ def test_create_and_list_product() -> None:
             "source_url": "file://internal/approval.pdf",
         },
     )
-    listing = c.get("/products").json()
+    listing = auth_client.get("/products").json()
     assert listing["count"] >= 1
     assert any(p["active_ingredient"] == "Romidepsin" for p in listing["products"])
 
 
-def test_watch_latest_returns_empty_when_no_alerts() -> None:
-    r = _open().get("/watch/latest")
+def test_watch_latest_returns_empty_when_no_alerts(auth_client: TestClient) -> None:
+    r = auth_client.get("/watch/latest")
     assert r.status_code == 200
     body = r.json()
     assert body["count"] == 0
     assert body["alerts"] == []
 
 
-def test_watch_latest_rejects_invalid_since() -> None:
-    r = _open().get("/watch/latest", params={"since": "not-a-date"})
+def test_watch_latest_rejects_invalid_since(auth_client: TestClient) -> None:
+    r = auth_client.get("/watch/latest", params={"since": "not-a-date"})
     assert r.status_code == 422
 
 
-def test_assemble_refuses_when_no_matching_psg() -> None:
-    r = _open().post(
+def test_assemble_refuses_when_no_matching_psg(auth_client: TestClient) -> None:
+    r = auth_client.post(
         "/assemble",
         json={"active_ingredient": "Imaginary Drug XYZ"},
     )

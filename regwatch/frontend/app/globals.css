@@ -470,6 +470,90 @@ button.chip:hover {
   color: var(--ink-2);
 }
 
+/* ---------- History (sidebar sessions) ---------- */
+.hist {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  border-radius: 2px;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+.hist:hover {
+  background: #fffdf8;
+}
+.hist--active {
+  background: #fffdf8;
+  box-shadow: inset 3px 0 0 var(--gold);
+}
+.hist__main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.42rem 0.2rem 0.42rem 0.65rem;
+  text-decoration: none;
+  color: var(--ink-2);
+}
+.hist--active .hist__main {
+  color: var(--ink);
+}
+.hist__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8rem;
+}
+.hist__time {
+  flex: none;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.62rem;
+  color: var(--ink-faint);
+}
+.hist__del {
+  flex: none;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  color: var(--ink-faint);
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 0.3rem 0.5rem 0.3rem 0.2rem;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+.hist:hover .hist__del,
+.hist__del:focus-visible {
+  opacity: 1;
+}
+.hist__del:hover {
+  color: var(--oxblood);
+}
+.hist__confirm {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.42rem 0.65rem;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.68rem;
+  color: var(--oxblood);
+}
+.hist__confirm button {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.hist__confirm button:hover {
+  color: var(--oxblood);
+}
+
 /* ---------- Ledger table (Watch) ---------- */
 .ledger {
   width: 100%;

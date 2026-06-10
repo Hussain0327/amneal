@@ -98,24 +98,129 @@ export interface PublicSettings {
   company_name: string;
 }
 
-async function postJSON<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${apiBase()}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+export interface User {
+  id: number;
+  email: string;
+  display_name: string;
+  role: string;
+}
+
+export interface SessionSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+}
+
+export interface ChatMessage {
+  id: string;
+  turn_id: string;
+  role: "user" | "assistant";
+  content: string;
+  status: string | null;
+  citations: Citation[];
+  created_at: string;
+}
+
+export interface SessionDetail {
+  session: { id: string; title: string; created_at: string; updated_at: string };
+  messages: ChatMessage[];
+}
+
+export class ApiError extends Error {
+  readonly status: number;
+  readonly detail: string;
+  constructor(status: number, detail: string) {
+    super(detail);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+// AuthProvider registers a callback here, so a 401 from ANY protected call
+// (everything except /auth/login) drops client auth state in one place; the
+// provider then routes to /login.
+let onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  onUnauthorized = handler;
+}
+
+async function handle<T>(res: Response, method: string, path: string, gate: boolean): Promise<T> {
+  if (res.status === 401 && gate) {
+    onUnauthorized?.();
+    throw new ApiError(401, "authentication required");
+  }
   if (!res.ok) {
-    throw new Error(`POST ${path} → ${res.status}: ${await res.text()}`);
+    let detail = "";
+    try {
+      const body = (await res.json()) as { detail?: unknown };
+      if (typeof body.detail === "string") detail = body.detail;
+    } catch {
+      // non-JSON error body
+    }
+    throw new ApiError(res.status, detail || `${method} ${path} → ${res.status}`);
+  }
+  if (res.status === 204) {
+    return undefined as unknown as T;
   }
   return res.json() as Promise<T>;
 }
 
+// credentials: "include" — auth rides in the HttpOnly session cookie. The
+// same-origin /api proxy would include it by default, but the direct-call dev
+// mode (NEXT_PUBLIC_API_BASE on localhost) is cross-origin and would silently
+// drop the cookie without this; the backend's CORS allows credentials.
+async function postJSON<T>(path: string, body: unknown, gate = true): Promise<T> {
+  const res = await fetch(`${apiBase()}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    credentials: "include",
+  });
+  return handle<T>(res, "POST", path, gate);
+}
+
 async function getJSON<T>(path: string): Promise<T> {
-  const res = await fetch(`${apiBase()}${path}`);
-  if (!res.ok) {
-    throw new Error(`GET ${path} → ${res.status}`);
-  }
-  return res.json() as Promise<T>;
+  const res = await fetch(`${apiBase()}${path}`, { credentials: "include" });
+  return handle<T>(res, "GET", path, true);
+}
+
+async function deleteJSON(path: string): Promise<void> {
+  const res = await fetch(`${apiBase()}${path}`, { method: "DELETE", credentials: "include" });
+  await handle<void>(res, "DELETE", path, true);
+}
+
+export async function login(email: string, password: string): Promise<User> {
+  // gate=false: a 401 here means bad credentials, not an expired session.
+  const data = await postJSON<{ user: User }>("/auth/login", { email, password }, false);
+  return data.user;
+}
+
+export async function logout(): Promise<void> {
+  const res = await fetch(`${apiBase()}/auth/logout`, {
+    method: "POST",
+    credentials: "include",
+  });
+  await handle<void>(res, "POST", "/auth/logout", false);
+}
+
+export async function me(): Promise<User> {
+  const data = await getJSON<{ user: User }>("/auth/me");
+  return data.user;
+}
+
+export function listSessions(): Promise<{ sessions: SessionSummary[] }> {
+  return getJSON<{ sessions: SessionSummary[] }>("/sessions");
+}
+
+export function getSession(sessionId: string): Promise<SessionDetail> {
+  return getJSON<SessionDetail>(`/sessions/${encodeURIComponent(sessionId)}`);
+}
+
+export function deleteSession(sessionId: string): Promise<void> {
+  return deleteJSON(`/sessions/${encodeURIComponent(sessionId)}`);
 }
 
 export function askQuery(

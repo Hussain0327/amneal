@@ -30,6 +30,7 @@ from regwatch.common.citations import (
     strip_all_citations,
 )
 from regwatch.common.conversation import (
+    SessionOwnershipError,
     ensure_session,
     get_session_filters,
     new_turn_id,
@@ -430,6 +431,7 @@ def _refuse(
     model_name: str,
     session_id: str,
     turn_id: str,
+    user_id: str | None,
     route_json: dict[str, Any],
     status: str = "refused",
     answer_text: str | None = None,
@@ -447,6 +449,7 @@ def _refuse(
         model_name=model_name,
         session_id=session_id,
         turn_id=turn_id,
+        user_id=user_id,
         status=status,
         route_json=route_json,
     )
@@ -474,6 +477,7 @@ def _clarify(
     options: list[ClarifyOption],
     session_id: str,
     turn_id: str,
+    user_id: str | None,
     route_json: dict[str, Any],
 ) -> QAResult:
     """Guide instead of guess: we know the product (or a near-match) but need
@@ -489,6 +493,7 @@ def _clarify(
         model_name=model_name,
         session_id=session_id,
         turn_id=turn_id,
+        user_id=user_id,
         status="clarify",
         route_json=route_json,
     )
@@ -515,6 +520,7 @@ def _scope_warning(
     model_name: str,
     session_id: str,
     turn_id: str,
+    user_id: str | None,
     route_json: dict[str, Any],
 ) -> QAResult:
     answer = (
@@ -530,6 +536,7 @@ def _scope_warning(
         model_name=model_name,
         session_id=session_id,
         turn_id=turn_id,
+        user_id=user_id,
         route_json=route_json,
         status="scope_warning",
         answer_text=answer,
@@ -544,14 +551,21 @@ def ask(
     session_id: str | None = None,
     user_id: str | None = None,
     turn_id: str | None = None,
+    bind_session: bool = True,
 ) -> QAResult:
-    """Grounded Q&A entry point — answer with citations, clarify, or refuse."""
+    """Grounded Q&A entry point — answer with citations, clarify, or refuse.
+
+    ``bind_session=False`` keeps ``user_id`` as audit-only attribution (INV-6):
+    the bookkeeping ChatSession stays unowned (user_id NULL) and so invisible
+    to /sessions — for internal callers like the dossier, whose synthetic Q&A
+    must not appear in the caller's chat history.
+    """
     s = get_settings()
     model_name = current_model_name(role="synthesizer")
     # Session bookkeeping is best-effort: a DB hiccup here must never stop the query
     # from being processed and audited (INV-6). Degrade to a fresh id on failure.
     try:
-        session_id = ensure_session(session_id, user_id=user_id)
+        session_id = ensure_session(session_id, user_id=user_id if bind_session else None)
         turn_id = turn_id or new_turn_id()
         record_message(
             session_id=session_id,
@@ -560,10 +574,18 @@ def ask(
             content=question,
             filters=filters,
         )
+    except SessionOwnershipError:
+        # Lost an ownership race after the API's pre-check — abort rather than
+        # write this caller's turns into another user's session (the API maps
+        # this to its ownership 404).
+        raise
     except Exception:
         log.warning("session_setup_failed", exc_info=True)
         turn_id = turn_id or new_turn_id()
-        session_id = session_id or turn_id
+        # Degrade to a FRESH id, never the requested one: after a failed bind
+        # (e.g. a lost create race on a client-chosen id) the requested session
+        # may belong to someone else, so later writes must not target it.
+        session_id = turn_id
     active_filters: dict[str, Any] = dict(filters or {})
     # Product-key hardening: a caller (API / dossier / clarify option) may pass a
     # normalized_name in any casing or salt-order. Canonicalize it to the exact key
@@ -594,6 +616,7 @@ def ask(
                 model_name=model_name,
                 session_id=session_id,
                 turn_id=turn_id,
+                user_id=user_id,
                 route_json=route_json,
             ),
             filters=active_filters,
@@ -628,6 +651,7 @@ def ask(
                     ],
                     session_id=session_id,
                     turn_id=turn_id,
+                    user_id=user_id,
                     route_json=route_json,
                 ),
                 filters=active_filters,
@@ -668,6 +692,7 @@ def ask(
                             ],
                             session_id=session_id,
                             turn_id=turn_id,
+                            user_id=user_id,
                             route_json=route_json,
                         ),
                         filters=active_filters,
@@ -695,6 +720,7 @@ def ask(
                             ],
                             session_id=session_id,
                             turn_id=turn_id,
+                            user_id=user_id,
                             route_json=route_json,
                         ),
                         filters=active_filters,
@@ -714,6 +740,7 @@ def ask(
                         model_name=model_name,
                         session_id=session_id,
                         turn_id=turn_id,
+                        user_id=user_id,
                         route_json=route_json,
                     ),
                     filters=active_filters,
@@ -763,6 +790,7 @@ def ask(
                 options=build_options(resolved_name),
                 session_id=session_id,
                 turn_id=turn_id,
+                user_id=user_id,
                 route_json=route_json,
             ),
             filters=active_filters,
@@ -811,6 +839,7 @@ def ask(
                         options=build_form_options(resolved_name, combos, question),
                         session_id=session_id,
                         turn_id=turn_id,
+                        user_id=user_id,
                         route_json=route_json,
                     ),
                     filters=active_filters,
@@ -845,6 +874,7 @@ def ask(
                 model_name=model_name,
                 session_id=session_id,
                 turn_id=turn_id,
+                user_id=user_id,
                 route_json=route_json,
             ),
             filters=active_filters,
@@ -876,6 +906,7 @@ def ask(
                 ],
                 session_id=session_id,
                 turn_id=turn_id,
+                user_id=user_id,
                 route_json=route_json,
             ),
             filters=active_filters,
@@ -912,6 +943,7 @@ def ask(
                 options=build_form_options(one_product, sorted(passage_combos), question),
                 session_id=session_id,
                 turn_id=turn_id,
+                user_id=user_id,
                 route_json=route_json,
             ),
             filters=active_filters,
@@ -961,6 +993,7 @@ def ask(
                     options=build_options(resolved_name),
                     session_id=session_id,
                     turn_id=turn_id,
+                    user_id=user_id,
                     route_json=route_json,
                 ),
                 filters=active_filters,
@@ -980,6 +1013,7 @@ def ask(
                 model_name=response.model,
                 session_id=session_id,
                 turn_id=turn_id,
+                user_id=user_id,
                 route_json=route_json,
             ),
             filters=active_filters,
@@ -1008,6 +1042,7 @@ def ask(
                 model_name=response.model,
                 session_id=session_id,
                 turn_id=turn_id,
+                user_id=user_id,
                 route_json=route_json,
             ),
             filters=active_filters,
@@ -1034,6 +1069,7 @@ def ask(
         model_name=response.model,
         session_id=session_id,
         turn_id=turn_id,
+        user_id=user_id,
         status=response_mode,
         route_json=route_json,
     )

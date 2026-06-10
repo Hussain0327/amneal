@@ -14,9 +14,14 @@ Request fields:
 
 - `question`: the user's message.
 - `session_id`: optional existing chat thread ID. If omitted, the backend creates one.
-- `user_id`: optional caller identity from the future auth layer or gateway.
+  The thread must belong to the caller; another user's `session_id` returns 404.
 - `filters`: optional explicit evidence filters. Explicit filters win over session memory.
 - `k`: optional retrieval width override.
+
+Caller identity is not a request field: it comes from the `regwatch_session`
+auth cookie (see the Auth section in the top-level README). Sessions are bound
+to the authenticated user, and `GET /sessions` / `GET /sessions/{id}` /
+`DELETE /sessions/{id}` expose only the caller's own threads.
 
 Response fields now include:
 

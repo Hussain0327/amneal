@@ -101,8 +101,18 @@ class Settings(BaseSettings):
     # ---------- API ----------
     api_host: str = "127.0.0.1"
     api_port: int = 8000
-    # Comma-separated CORS allowlist for the Next.js UI in web/. Defaults to the
-    # Next.js dev server. There is no API auth yet, so keep this tight.
+    # ---------- Auth ----------
+    # Cookie-session auth: opaque tokens in an HttpOnly cookie; the DB stores
+    # only the sha256 of the token. Secure stays False for the localhost pilot
+    # (no TLS); set true the moment the API sits behind HTTPS.
+    auth_cookie_secure: bool = False
+    auth_session_ttl_hours: int = 72
+    # Per-user requests/minute on POST /query and POST /assemble. 0 disables.
+    rate_limit_per_minute: int = 30
+    # Comma-separated CORS allowlist for the Next.js UI in regwatch/frontend/.
+    # Defaults to the Next.js dev server. With allow_credentials=True on the
+    # API, this allowlist is what stops other origins from riding the HttpOnly
+    # session cookie — keep it tight.
     cors_allow_origins_csv: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     @property

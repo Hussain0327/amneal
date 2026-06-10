@@ -104,6 +104,9 @@ uv run regwatch seed
 # tests (smoke + invariants + eval metrics)
 uv run pytest -q
 
+# create a login (password is prompted — never passed as an argument)
+uv run regwatch create-user analyst@example.com --name "Analyst"
+
 # API
 uv run uvicorn regwatch.api.main:app --reload
 
@@ -193,26 +196,58 @@ and runs daily at 06:00 UTC via `watch_daily_schedule` when the daemon is up.
 ## API
 
 ```
-POST  /query        grounded, conversational Q&A
-                    in:  {question, filters?, k?, session_id?, user_id?}
-                    out: {answer, citations[], refused, status, interpretation,
-                          clarify[], model_name, audit_id, session_id, turn_id}
-                    status ∈ answer | summary | clarify | scope_warning | refused
-POST  /sources/search structured FDA source lookup — {routed_sources[], records[]}
-POST  /assemble     cited dossier for {active_ingredient, dosage_form?, rld?}
-GET   /watch/latest matched changes since cursor
-GET   /products     watchlist
-POST  /products     add a manual product (INV-5 enforced)
-GET   /health       liveness + component diagnostics (db, chroma, llm, embedding);
-                    503 when db or chroma is unreachable
-GET   /settings     non-secret config
+POST   /auth/login   {email, password} → {user} + HttpOnly session cookie
+POST   /auth/logout  revoke the session, clear the cookie (204, never errors)
+GET    /auth/me      current user, or 401
+POST   /query        grounded, conversational Q&A (auth)
+                     in:  {question, filters?, k?, session_id?}
+                     out: {answer, citations[], refused, status, interpretation,
+                           clarify[], model_name, audit_id, session_id, turn_id}
+                     status ∈ answer | summary | clarify | scope_warning | refused
+POST   /sources/search structured FDA source lookup — {routed_sources[], records[]} (auth)
+POST   /assemble     cited dossier for {active_ingredient, dosage_form?, rld?} (auth)
+GET    /watch/latest matched changes since cursor (auth)
+GET    /products     watchlist (auth)
+POST   /products     add a manual product (INV-5 enforced) (auth)
+GET    /sessions     the caller's chat sessions, updated_at desc (auth)
+GET    /sessions/{id} one session + its messages, created_at asc (auth)
+DELETE /sessions/{id} delete a session and its messages (auth)
+GET    /health       liveness + component diagnostics (db, chroma, llm, embedding);
+                     503 when db or chroma is unreachable (open)
+GET    /settings     non-secret config (auth)
 ```
 
-CORS is allow-listed via `CORS_ALLOW_ORIGINS_CSV` (defaults to the Next.js dev
-origins). There is no auth layer yet — see [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md).
+The auto-docs routes (`/docs`, `/redoc`, `/openapi.json`) are disabled — they
+register outside the auth wall and would disclose the API surface to anonymous
+visitors. Every response is reproducible in Postman from a `.env`, a
+provisioned user, and a running instance.
 
-OpenAPI docs at `/docs`. Every response is reproducible in Postman without
-internal access.
+### Auth
+
+Every endpoint except `GET /health` requires a login. Sessions are DB-backed
+opaque tokens carried in an HttpOnly `regwatch_session` cookie (SameSite=Lax;
+the DB stores only the token's sha256; passwords are bcrypt-hashed). Users are
+provisioned from the CLI — there is no self-signup:
+
+```bash
+uv run regwatch create-user analyst@example.com --name "Analyst"  # password prompted
+uv run regwatch list-users
+uv run regwatch set-password analyst@example.com
+uv run regwatch deactivate-user analyst@example.com
+```
+
+Chat history is per-user: `GET /sessions` lists only the caller's sessions,
+and a `session_id` owned by someone else 404s (existence is never confirmed).
+Audit rows in `query_log` carry the caller's `user_id` (INV-6). `POST /query`
+and `POST /assemble` share a per-user rate limit (`RATE_LIMIT_PER_MINUTE`,
+default 30; 0 disables); logins are capped at 10/email/minute. Cookie knobs:
+`AUTH_COOKIE_SECURE` (default false for the http://localhost pilot — set true
+behind TLS) and `AUTH_SESSION_TTL_HOURS` (default 72).
+
+CORS is allow-listed via `CORS_ALLOW_ORIGINS_CSV` (defaults to the Next.js dev
+origins) with credentials enabled so the browser sends the session cookie.
+TLS termination and the OIDC/SSO question remain environment work — see
+[`docs/PROD_READINESS.md`](docs/PROD_READINESS.md).
 
 ## Watchlist sources
 
@@ -260,7 +295,8 @@ src/regwatch/
   assemble/               dossier
   eval/                   metrics, run_eval, gold_set.jsonl
   api/                    FastAPI surface
-  common/                 logging, audit, citations, text_normalize, conversation (chat sessions)
+  auth/                   passwords (bcrypt), DB-backed cookie sessions, require_user dep
+  common/                 logging, audit, citations, text_normalize, conversation, ratelimit
 regwatch/
   backend/                backend workspace docs; source stays in src/regwatch
   frontend/               Next.js (App Router, TS) UI — Ask / Assemble / Watch
@@ -284,8 +320,9 @@ Definition of Done passed before moving on.
 
 ## What's not done
 
-- **No auth.** Every endpoint is open and CORS is the only boundary. Auth +
-  rate limiting are the top blocker before any external exposure.
+- **Auth is app-layer only.** Cookie-session auth, CLI-provisioned users,
+  per-user chat history, and per-user rate limiting exist, but TLS, OIDC/SSO,
+  and a production gateway are still environment work before external exposure.
 - **Datastores are single-node** (SQLite + on-disk Chroma); no HA, pooling, or
   backup/restore. Migrations still run on app boot rather than as a deploy step.
 - The gold set is 12 items, not the spec's 30–50, and scoring is mechanical

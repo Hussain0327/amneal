@@ -17,6 +17,10 @@ from regwatch.store.models import ChatMessage, ChatSession
 SESSION_FILTER_KEYS = frozenset({"normalized_name", "dosage_form", "route", "psg_type", "doc_id"})
 
 
+class SessionOwnershipError(RuntimeError):
+    """A caller tried to bind a chat session owned by a different user."""
+
+
 def new_turn_id() -> str:
     return str(uuid4())
 
@@ -31,7 +35,13 @@ def _safe_filters(filters: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def ensure_session(session_id: str | None = None, *, user_id: str | None = None) -> str:
-    """Return an existing or newly-created session id."""
+    """Return an existing or newly-created session id.
+
+    Raises SessionOwnershipError when the row already belongs to a different
+    user — the last line of defense when an API-level ownership check loses a
+    race to a concurrent adopter, so a lost race aborts instead of writing
+    this caller's turns into another user's session.
+    """
     sid = session_id or str(uuid4())
     now = datetime.now(UTC)
     with session_scope() as s:
@@ -39,6 +49,8 @@ def ensure_session(session_id: str | None = None, *, user_id: str | None = None)
         if row is None:
             row = ChatSession(id=sid, user_id=user_id, created_at=now, updated_at=now)
         else:
+            if user_id and row.user_id and row.user_id != user_id:
+                raise SessionOwnershipError(sid)
             if user_id and row.user_id is None:
                 row.user_id = user_id
             row.updated_at = now
@@ -64,7 +76,10 @@ def update_session_filters(session_id: str | None, filters: dict[str, Any] | Non
     with session_scope() as s:
         row = s.get(ChatSession, session_id)
         if row is None:
-            row = ChatSession(id=session_id, created_at=now)
+            # Session deleted mid-flight (DELETE /sessions during a slow turn).
+            # Never resurrect it: a recreated row would be owner-less and thus
+            # adoptable by any authenticated user who knows the id.
+            return
         row.active_filters_json = safe
         row.updated_at = now
         s.add(row)

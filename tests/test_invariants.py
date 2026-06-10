@@ -187,6 +187,19 @@ def test_inv6_refusal_also_audited(monkeypatch: pytest.MonkeyPatch) -> None:
     assert rows[0][2] == get_settings().refusal_text
 
 
+def test_inv6_authenticated_query_records_user_attribution() -> None:
+    """INV-6 extension: audit rows from an authenticated caller carry user identity."""
+    from tests.conftest import create_user, login_client
+
+    user_id = create_user()
+    client = login_client()
+    r = client.post("/query", json={"question": "Out-of-corpus attribution check?"})
+    assert r.status_code == 200
+    with session_scope() as s:
+        attributions = [row.user_id for row in s.scalars(select(QueryLog))]
+    assert attributions == [str(user_id)]
+
+
 # ---------- INV-3, INV-4, INV-5: structural placeholders ----------
 
 

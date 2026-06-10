@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import func
 from sqlmodel import col, select
 
+from regwatch.common.conversation import update_session_filters
 from regwatch.generate import grounded_qa as qa_mod
 from regwatch.generate.llm import LLMResponse
 from regwatch.process.embedder import get_embedding_provider
@@ -133,6 +134,17 @@ def test_follow_up_uses_session_product_context_without_cross_drug_leak(
     )
     assert all(log["retrieved_json"] for log in logs)
     assert all(log["citations_json"] for log in logs)
+
+
+def test_update_session_filters_never_resurrects_deleted_sessions() -> None:
+    # DELETE /sessions can land while a turn is still in flight; the turn's
+    # closing filter update must not recreate the row — a recreated session
+    # would be owner-less (user_id NULL) and thus adoptable by any
+    # authenticated user who knows the id.
+    init_db()
+    update_session_filters("deleted-mid-flight", {"normalized_name": "albuterol sulfate"})
+    with session_scope() as s:
+        assert s.get(ChatSession, "deleted-mid-flight") is None
 
 
 def test_scope_warning_is_conversational_and_audited() -> None:

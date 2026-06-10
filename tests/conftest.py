@@ -12,9 +12,64 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
+from regwatch.common import ratelimit
 from regwatch.store import db as db_module
 from regwatch.store import vector_store as vs_module
+
+DEFAULT_USER_EMAIL = "analyst@example.com"
+DEFAULT_USER_PASSWORD = "correct-horse-battery-staple"
+
+
+def create_user(
+    email: str = DEFAULT_USER_EMAIL,
+    password: str = DEFAULT_USER_PASSWORD,
+    *,
+    display_name: str = "Test Analyst",
+    role: str = "analyst",
+    is_active: bool = True,
+) -> int:
+    """Insert a user directly (the CLI path is covered by its own tests)."""
+    from regwatch.auth.passwords import hash_password
+    from regwatch.store.db import init_db, session_scope
+    from regwatch.store.models import User
+
+    init_db()
+    with session_scope() as s:
+        row = User(
+            email=email.lower(),
+            password_hash=hash_password(password),
+            display_name=display_name,
+            role=role,
+            is_active=is_active,
+        )
+        s.add(row)
+        s.flush()
+        assert row.id is not None
+        return row.id
+
+
+def login_client(
+    email: str = DEFAULT_USER_EMAIL, password: str = DEFAULT_USER_PASSWORD
+) -> TestClient:
+    """A TestClient logged in through POST /auth/login (httpx keeps the cookie)."""
+    from regwatch.api.main import app
+
+    client = TestClient(app)
+    client.__enter__()  # lifespan → init_db on the per-test DB
+    response = client.post("/auth/login", json={"email": email, "password": password})
+    assert response.status_code == 200, response.text
+    return client
+
+
+@pytest.fixture
+def auth_client() -> Iterator[TestClient]:
+    """An authenticated TestClient for a freshly created default user."""
+    create_user()
+    client = login_client()
+    yield client
+    client.__exit__(None, None, None)
 
 
 @pytest.fixture(autouse=True)
@@ -22,6 +77,8 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     # Network-free providers by default.
     monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
     monkeypatch.setenv("LLM_PROVIDER", "echo")
+    # Rate limiting off by default; rate-limit tests opt in explicitly.
+    monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "0")
     # The API fail-fast guard rejects echo providers over a non-empty corpus;
     # tests run echo against seeded corpora on purpose, so opt in explicitly.
     monkeypatch.setenv("REGWATCH_ALLOW_TEST_PROVIDERS", "1")
@@ -43,6 +100,9 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     cs.settings = cs.get_settings()
     db_module.reset_for_tests()
     vs_module.reset_for_tests()
+    # The in-memory rate limiters are process-global; clear them so one test's
+    # logins cannot 429 the next test (the login guard is always on).
+    ratelimit.reset_for_tests()
     # Also clear any cached env that pydantic-settings stashed in process.
     yield
     # Cleanup (Chroma keeps a file lock; reset clears it).

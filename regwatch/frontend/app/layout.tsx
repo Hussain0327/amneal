@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Fraunces, IBM_Plex_Mono, Public_Sans, Yellowtail } from "next/font/google";
 
-import { Sidebar } from "@/components/Sidebar";
+import { AuthProvider } from "@/components/AuthProvider";
 import "./globals.css";
 
 // Editorial display serif — gravitas with warmth (page titles, pull quotes).
@@ -38,10 +38,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body
         className={`${fraunces.variable} ${publicSans.variable} ${plexMono.variable} ${yellowtail.variable}`}
       >
-        <div className="shell">
-          <Sidebar />
-          <main className="canvas">{children}</main>
-        </div>
+        {/* The shell (sidebar + canvas) lives behind the auth gate. */}
+        <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
   );

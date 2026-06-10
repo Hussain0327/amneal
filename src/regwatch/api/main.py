@@ -4,13 +4,20 @@ This is the clean boundary the IT/AI team will wrap or replace. Every
 response is reproducible in Postman from a `.env` and a running instance.
 
 Endpoints (per spec §10.16):
-    POST  /query        — grounded Q&A
-    POST  /sources/search — structured FDA source lookup
-    POST  /assemble     — build a cited dossier for a target product
-    GET   /watch/latest — recent alerts
-    GET   /products     — list watchlist
-    POST  /products     — add manual product
-    GET   /health       — liveness + component diagnostics
+    POST   /auth/login     — issue a session cookie
+    POST   /auth/logout    — revoke the session cookie
+    GET    /auth/me        — current user
+    POST   /query          — grounded Q&A (auth)
+    POST   /sources/search — structured FDA source lookup (auth)
+    POST   /assemble       — build a cited dossier for a target product (auth)
+    GET    /watch/latest   — recent alerts (auth)
+    GET    /products       — list watchlist (auth)
+    POST   /products       — add manual product (auth)
+    GET    /sessions       — the caller's chat sessions (auth)
+    GET    /sessions/{id}  — one chat session with messages (auth)
+    DELETE /sessions/{id}  — delete a chat session (auth)
+    GET    /settings       — non-secret config (auth)
+    GET    /health         — liveness + component diagnostics (open)
 """
 
 from __future__ import annotations
@@ -22,17 +29,23 @@ from datetime import UTC, datetime
 from typing import Any
 
 from config.settings import Settings, get_settings
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import func, text, update
+from sqlmodel import Session, col, select
 
 from regwatch.assemble.dossier import build_dossier
+from regwatch.auth.deps import SESSION_COOKIE, require_user
+from regwatch.auth.sessions import authenticate, create_session, revoke_token
+from regwatch.common.conversation import SessionOwnershipError
 from regwatch.common.logging import configure_logging
+from regwatch.common.ratelimit import LOGIN_ATTEMPTS_PER_MINUTE, login_limiter, query_limiter
 from regwatch.generate.grounded_qa import ask
 from regwatch.sources.router import search_sources
 from regwatch.sources.types import SourceKind, SourceQuery
-from regwatch.store.db import get_engine, init_db
+from regwatch.store.db import get_engine, init_db, session_scope
+from regwatch.store.models import ChatMessage, ChatSession, User
 from regwatch.store.vector_store import collection_size
 from regwatch.watch.alerts import latest_digest_records
 from regwatch.watch.watchlist import ALLOWED_SOURCES, add_manual_product, list_watchlist
@@ -81,17 +94,32 @@ app = FastAPI(
         "it never authors submission content or renders regulatory judgment."
     ),
     lifespan=_lifespan,
+    # The contract opens exactly one unauthenticated endpoint (GET /health).
+    # FastAPI's default docs routes register at app level — outside the
+    # `protected` router — so they would disclose the full API surface (every
+    # route, schema, and the session-cookie name) to anonymous visitors via
+    # the UI's /api proxy. Off for the pilot.
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 # CORS — the Next.js UI (regwatch/frontend/) calls this API from the browser.
-# Allowlist comes from settings; there is no auth layer yet, so the allowlist is
-# the boundary.
+# Allowlist comes from settings. allow_credentials lets the browser send the
+# HttpOnly session cookie; the explicit origin allowlist is what keeps that safe.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_allow_origins,
-    allow_methods=["GET", "POST"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
+
+# Single authorization chokepoint: every endpoint except GET /health and the
+# /auth routes is registered on this router, so its router-level dependency
+# makes an accidentally-unauthenticated route impossible.
+auth_router = APIRouter(prefix="/auth", tags=["auth"])
+protected = APIRouter(dependencies=[Depends(require_user)])
 
 
 # ---------- /health ----------
@@ -152,13 +180,83 @@ def health(response: Response) -> dict[str, Any]:
     return body
 
 
+# ---------- /auth ----------
+class LoginRequest(BaseModel):
+    # max_length bounds the rate limiter's per-key memory — the limiter key
+    # embeds the email — and RFC 5321 caps addresses at 254 chars anyway.
+    email: str = Field(..., max_length=254)
+    password: str = Field(..., max_length=256)
+
+
+class UserOut(BaseModel):
+    id: int
+    email: str
+    display_name: str
+    role: str
+
+
+class AuthUserResponse(BaseModel):
+    user: UserOut
+
+
+def _user_out(user: User) -> UserOut:
+    if user.id is None:  # pragma: no cover — auth only ever returns persisted users
+        raise HTTPException(status_code=401, detail="authentication required")
+    return UserOut(id=user.id, email=user.email, display_name=user.display_name, role=user.role)
+
+
+@auth_router.post("/login", response_model=AuthUserResponse)
+def login(req: LoginRequest, response: Response) -> AuthUserResponse:
+    email = req.email.strip().lower()
+    if not login_limiter.allow(f"login:{email}", LOGIN_ATTEMPTS_PER_MINUTE):
+        raise HTTPException(status_code=429, detail="rate limit exceeded")
+    user = authenticate(req.email, req.password)
+    if user is None or user.id is None:
+        # One message for unknown email / wrong password / inactive user;
+        # authenticate() burns a bcrypt verify in every branch (uniform timing).
+        raise HTTPException(status_code=401, detail="invalid email or password")
+    s = get_settings()
+    token, _ = create_session(user.id)  # always a fresh row — no session fixation
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=token,
+        max_age=s.auth_session_ttl_hours * 3600,
+        httponly=True,
+        samesite="lax",
+        secure=s.auth_cookie_secure,
+        path="/",
+    )
+    return AuthUserResponse(user=_user_out(user))
+
+
+@auth_router.post("/logout", status_code=204)
+def logout(
+    response: Response,
+    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> None:
+    """Revoke the server-side session and clear the cookie. Never errors."""
+    if session_token:
+        revoke_token(session_token)
+    response.delete_cookie(SESSION_COOKIE, path="/")
+
+
+@auth_router.get("/me", response_model=AuthUserResponse)
+def me(user: User = Depends(require_user)) -> AuthUserResponse:
+    return AuthUserResponse(user=_user_out(user))
+
+
+def _enforce_query_rate_limit(user: User) -> None:
+    limit = get_settings().rate_limit_per_minute
+    if not query_limiter.allow(f"user:{user.id}", limit):
+        raise HTTPException(status_code=429, detail="rate limit exceeded")
+
+
 # ---------- /query ----------
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=2)
     filters: dict[str, Any] | None = None
     k: int | None = Field(None, ge=1)
     session_id: str | None = None
-    user_id: str | None = None
 
 
 class QueryCitation(BaseModel):
@@ -190,15 +288,50 @@ class QueryResponse(BaseModel):
     clarify: list[ClarifyOptionOut] = []
 
 
-@app.post("/query", response_model=QueryResponse)
-def query(req: QueryRequest) -> QueryResponse:
-    result = ask(
-        req.question,
-        filters=req.filters,
-        k=req.k,
-        session_id=req.session_id,
-        user_id=req.user_id,
-    )
+def _authorize_session_access(session_id: str, user_id: str) -> None:
+    """Enforce chat-session ownership before ask() touches it.
+
+    Missing row → proceed (ask() creates it bound to the caller). NULL owner
+    (legacy demo data) → adopt it via a conditional UPDATE, so two requests
+    racing on the same legacy session cannot both win — the loser re-reads the
+    committed owner and 404s. Another user's row → 404, not 403, so the
+    response does not confirm the session exists.
+    """
+    with session_scope() as s:
+        row = s.get(ChatSession, session_id)
+        if row is None:
+            return
+        owner = row.user_id
+        if owner is None:
+            s.execute(
+                update(ChatSession)
+                .where(col(ChatSession.id) == session_id, col(ChatSession.user_id).is_(None))
+                .values(user_id=user_id)
+            )
+            s.expire(row)
+            owner = row.user_id  # re-read: ours when we won the race, else the winner's
+        if owner != user_id:
+            raise HTTPException(status_code=404, detail="session not found")
+
+
+@protected.post("/query", response_model=QueryResponse)
+def query(req: QueryRequest, user: User = Depends(require_user)) -> QueryResponse:
+    _enforce_query_rate_limit(user)
+    user_id = str(user.id)
+    if req.session_id:
+        _authorize_session_access(req.session_id, user_id)
+    try:
+        result = ask(
+            req.question,
+            filters=req.filters,
+            k=req.k,
+            session_id=req.session_id,
+            user_id=user_id,
+        )
+    except SessionOwnershipError as exc:
+        # An ownership race lost after the pre-check above — same 404 as any
+        # other foreign session, never confirming the session exists.
+        raise HTTPException(status_code=404, detail="session not found") from exc
     if result.session_id is None or result.turn_id is None:
         raise HTTPException(status_code=500, detail="query did not produce session metadata")
     return QueryResponse(
@@ -244,7 +377,7 @@ class SourceSearchResponse(BaseModel):
     records: list[SourceRecordResponse]
 
 
-@app.post("/sources/search", response_model=SourceSearchResponse)
+@protected.post("/sources/search", response_model=SourceSearchResponse)
 def sources_search(req: SourceSearchRequest) -> SourceSearchResponse:
     routed, records = search_sources(
         SourceQuery(
@@ -287,12 +420,14 @@ class AssembleResponse(BaseModel):
     refused: bool
 
 
-@app.post("/assemble", response_model=AssembleResponse)
-def assemble(req: AssembleRequest) -> AssembleResponse:
+@protected.post("/assemble", response_model=AssembleResponse)
+def assemble(req: AssembleRequest, user: User = Depends(require_user)) -> AssembleResponse:
+    _enforce_query_rate_limit(user)
     dossier = build_dossier(
         active_ingredient=req.active_ingredient,
         dosage_form=req.dosage_form,
         rld=req.rld,
+        user_id=str(user.id),
     )
     return AssembleResponse(**dossier)
 
@@ -314,7 +449,7 @@ def _record_captured_at(record: dict[str, Any]) -> datetime | None:
         return None
 
 
-@app.get("/watch/latest")
+@protected.get("/watch/latest")
 def watch_latest(since: datetime | None = None) -> dict[str, Any]:
     records = latest_digest_records(limit=200)
     if since:
@@ -339,13 +474,13 @@ class ProductCreate(BaseModel):
     source_url: str | None = None
 
 
-@app.get("/products")
+@protected.get("/products")
 def list_products() -> dict[str, Any]:
     items = list_watchlist()
     return {"count": len(items), "products": items}
 
 
-@app.post("/products", status_code=201)
+@protected.post("/products", status_code=201)
 def create_product(req: ProductCreate) -> dict[str, Any]:
     if req.source not in ALLOWED_SOURCES:
         raise HTTPException(
@@ -365,8 +500,100 @@ def create_product(req: ProductCreate) -> dict[str, Any]:
     return {"added": added, "products": list_watchlist()}
 
 
+# ---------- /sessions (per-user chat history) ----------
+def _session_title(s: Session, row: ChatSession) -> str:
+    if row.title:
+        return row.title
+    first = s.scalars(
+        select(ChatMessage)
+        .where(ChatMessage.session_id == row.id, ChatMessage.role == "user")
+        .order_by(col(ChatMessage.created_at).asc())
+        .limit(1)
+    ).first()
+    if first is not None and first.content:
+        return first.content[:60]
+    return "(untitled)"
+
+
+def _owned_session_or_404(s: Session, session_id: str, user_id: str) -> ChatSession:
+    """NULL-user legacy sessions stay invisible here until adopted via /query."""
+    row = s.get(ChatSession, session_id)
+    if row is None or row.user_id != user_id:
+        raise HTTPException(status_code=404, detail="session not found")
+    return row
+
+
+@protected.get("/sessions")
+def list_sessions(user: User = Depends(require_user)) -> dict[str, Any]:
+    user_id = str(user.id)
+    with session_scope() as s:
+        rows = s.scalars(
+            select(ChatSession)
+            .where(ChatSession.user_id == user_id)
+            .order_by(col(ChatSession.updated_at).desc())
+        ).all()
+        sessions = [
+            {
+                "id": row.id,
+                "title": _session_title(s, row),
+                "created_at": row.created_at.isoformat(),
+                "updated_at": row.updated_at.isoformat(),
+                "message_count": int(
+                    s.scalar(
+                        select(func.count())
+                        .select_from(ChatMessage)
+                        .where(ChatMessage.session_id == row.id)
+                    )
+                    or 0
+                ),
+            }
+            for row in rows
+        ]
+    return {"sessions": sessions}
+
+
+@protected.get("/sessions/{session_id}")
+def get_session(session_id: str, user: User = Depends(require_user)) -> dict[str, Any]:
+    with session_scope() as s:
+        row = _owned_session_or_404(s, session_id, str(user.id))
+        messages = s.scalars(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session_id)
+            .order_by(col(ChatMessage.created_at).asc())
+        ).all()
+        return {
+            "session": {
+                "id": row.id,
+                "title": _session_title(s, row),
+                "created_at": row.created_at.isoformat(),
+                "updated_at": row.updated_at.isoformat(),
+            },
+            "messages": [
+                {
+                    "id": m.id,
+                    "turn_id": m.turn_id,
+                    "role": m.role,
+                    "content": m.content,
+                    "status": m.status,
+                    "citations": list(m.citations_json or []),
+                    "created_at": m.created_at.isoformat(),
+                }
+                for m in messages
+            ],
+        }
+
+
+@protected.delete("/sessions/{session_id}", status_code=204)
+def delete_session(session_id: str, user: User = Depends(require_user)) -> None:
+    with session_scope() as s:
+        row = _owned_session_or_404(s, session_id, str(user.id))
+        for m in s.scalars(select(ChatMessage).where(ChatMessage.session_id == session_id)):
+            s.delete(m)
+        s.delete(row)
+
+
 # ---------- /settings (read-only, no secrets) ----------
-@app.get("/settings")
+@protected.get("/settings")
 def get_public_settings() -> dict[str, Any]:
     s = get_settings()
     return {
@@ -377,3 +604,7 @@ def get_public_settings() -> dict[str, Any]:
         "refusal_score_threshold": s.refusal_score_threshold,
         "company_name": s.company_name,
     }
+
+
+app.include_router(auth_router)
+app.include_router(protected)

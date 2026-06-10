@@ -243,6 +243,13 @@ The UI is the Next.js app in `regwatch/frontend/` and now runs as the Compose
 (`regwatch/frontend/next.config.mjs`). In Compose, `API_PROXY_TARGET` is set to
 `http://api:8000`, so browser traffic still only talks to the Next.js origin.
 
+The UI is login-gated and a fresh stack has zero users, so provision one
+before opening it (the password is prompted, never passed as an argument):
+
+```bash
+docker compose run --rm api regwatch create-user analyst@example.com --name "Analyst"
+```
+
 The local container shape is:
 
 ```text
@@ -277,7 +284,8 @@ This is not a full production deployment story yet.
 Still needed:
 
 - secrets injection policy
-- auth and authorization
+- SSO / gateway-level auth in front of the app-layer login
+  (cookie-session auth shipped; see `docs/PROD_READINESS.md` #1)
 - TLS termination
 - deployment target decision
 - backup and restore plan for `data/`

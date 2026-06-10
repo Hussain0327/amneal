@@ -23,7 +23,9 @@ _BASELINE_TABLES = frozenset(
         "query_log",
     }
 )
-_CURRENT_TABLES = _BASELINE_TABLES | frozenset({"chat_session", "chat_message"})
+_CURRENT_TABLES = _BASELINE_TABLES | frozenset(
+    {"chat_session", "chat_message", "user", "auth_session"}
+)
 _BASELINE_REVISION = "0001_initial_schema"
 
 
@@ -49,7 +51,7 @@ def _has_complete_current_schema() -> bool:
     if not tables >= _CURRENT_TABLES:
         return False
     query_columns = {c["name"] for c in inspector.get_columns("query_log")}
-    if not {"session_id", "turn_id", "status", "route_json"} <= query_columns:
+    if not {"session_id", "turn_id", "status", "route_json", "user_id"} <= query_columns:
         return False
     with engine.connect() as conn:
         return MigrationContext.configure(conn).get_current_revision() is None

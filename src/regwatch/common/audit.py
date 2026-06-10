@@ -20,6 +20,7 @@ def log_query(
     model_name: str,
     session_id: str | None = None,
     turn_id: str | None = None,
+    user_id: str | None = None,
     status: str | None = None,
     route_json: dict[str, Any] | None = None,
 ) -> int:
@@ -29,6 +30,7 @@ def log_query(
             ts=datetime.now(UTC),
             session_id=session_id,
             turn_id=turn_id,
+            user_id=user_id,
             mode=mode,
             query_text=query_text,
             retrieved_json=retrieved,

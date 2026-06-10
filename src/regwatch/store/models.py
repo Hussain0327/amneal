@@ -86,6 +86,33 @@ class BeRequirement(SQLModel, table=True):
     citations_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
 
 
+class User(SQLModel, table=True):
+    """An authenticated analyst. Accounts are provisioned via the CLI — no self-signup."""
+
+    __tablename__ = "user"
+
+    id: int | None = Field(default=None, primary_key=True)
+    email: str = Field(index=True, unique=True)  # stored lowercased
+    password_hash: str  # bcrypt
+    display_name: str
+    role: str = Field(default="analyst")  # analyst | admin
+    is_active: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class AuthSession(SQLModel, table=True):
+    """A server-side login session. Only the sha256 of the cookie token is stored."""
+
+    __tablename__ = "auth_session"
+
+    id: int | None = Field(default=None, primary_key=True)
+    token_hash: str = Field(index=True, unique=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    expires_at: datetime
+    last_seen_at: datetime | None = None
+
+
 class QueryLog(SQLModel, table=True):
     """Every query, its retrieved sources, the answer, and whether it refused (INV-6)."""
 
@@ -95,6 +122,7 @@ class QueryLog(SQLModel, table=True):
     ts: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
     session_id: str | None = Field(default=None, index=True)
     turn_id: str | None = Field(default=None, index=True)
+    user_id: str | None = Field(default=None, index=True)
     mode: str  # qa | assemble | watch
     query_text: str
     retrieved_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))

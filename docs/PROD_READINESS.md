@@ -13,19 +13,24 @@ Each item notes where it lives in the tree so the work is actionable cold.
 
 ## 🔴 Blocking — must land before any external exposure
 
-### 1. API authentication & authorization
-- **Where:** [`src/regwatch/api/main.py`](../src/regwatch/api/main.py)
-- **Gap:** Every endpoint is open. No API key, no authn/authz, no rate limit.
-  CORS is allow-listed (`CORS_ALLOW_ORIGINS_CSV`), but an allowlist is not auth.
-  `POST /products` mutates the watchlist unauthenticated;
-  `POST /query` / `POST /assemble` invoke the LLM (cost + abuse surface).
-  Chat sessions can now carry optional `user_id`, but there is no trusted auth
-  source enforcing that identity yet.
-- **Done when:** auth layer (API key or OIDC/JWT) on all non-`/health`
-  endpoints, per-caller rate limiting, explicit CORS allowlist, and audit
-  rows carry the caller identity. Acceptable alternative: documented hard
-  requirement that the IT team's gateway terminates auth and the app is never
-  directly reachable.
+### 1. API authentication & authorization 🟡 (app layer landed Jun 10 2026 — gateway/TLS remain)
+- **Where:** [`src/regwatch/api/main.py`](../src/regwatch/api/main.py),
+  [`src/regwatch/auth/`](../src/regwatch/auth/),
+  [`src/regwatch/common/ratelimit.py`](../src/regwatch/common/ratelimit.py)
+- **Now in place:** cookie-session auth on every endpoint except `GET /health`
+  — DB-backed opaque tokens (sha256 at rest), bcrypt passwords, CLI-provisioned
+  users (`regwatch create-user` / `set-password` / `deactivate-user`); per-user
+  chat history with ownership enforcement (a foreign `session_id` 404s); audit
+  rows carry the caller identity (`query_log.user_id`, INV-6); per-user rate
+  limiting on `POST /query` / `POST /assemble` (`RATE_LIMIT_PER_MINUTE`) plus a
+  fixed 10/email/minute login brute-force cap; CORS allowlist with credentials.
+- **Remaining gap:** everything below the app layer is environment work — TLS
+  termination (then `AUTH_COOKIE_SECURE=true`), OIDC/SSO against the corporate
+  IdP, and a gateway so the app is never directly reachable. The rate limiter
+  is in-memory/per-process; multi-replica deployments need gateway limiting.
+- **Done when:** the IT gateway terminates TLS + enterprise auth in front of
+  the app (or the cookie-session layer is formally accepted as the pilot
+  boundary), and distributed rate limiting is owned by that gateway.
 
 ### 2. Production-grade datastores
 - **Where:** SQLite at [`config/settings.py:81`](../config/settings.py),
