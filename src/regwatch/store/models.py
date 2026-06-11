@@ -189,6 +189,7 @@ class ObPatent(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     appl_no: str = Field(index=True)
     product_no: str | None = None
+    appl_type: str | None = Field(default=None, index=True)
     patent_no: str = Field(index=True)
     patent_expire_date: str | None = None
     drug_substance_flag: str | None = None
@@ -208,6 +209,7 @@ class ObExclusivity(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     appl_no: str = Field(index=True)
     product_no: str | None = None
+    appl_type: str | None = Field(default=None, index=True)
     exclusivity_code: str = Field(index=True)
     exclusivity_date: str | None = None
     source_url: str | None = None

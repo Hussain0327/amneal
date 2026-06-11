@@ -9,10 +9,28 @@ from sqlalchemy import desc, or_
 from sqlmodel import col, select
 
 from regwatch.common.text_normalize import canonical_name, stripped_name
-from regwatch.sources._utils import clean_application_number
+from regwatch.sources._utils import APPLICATION_PREFIXES, clean_application_number
 from regwatch.sources.types import SourceKind, SourceQuery, SourceRecord
 from regwatch.store.db import session_scope
 from regwatch.store.models import PsgDocument, PsgVersion
+
+
+def _bare_app_no(value: str | None) -> str | None:
+    """The store's bare-digit form of an application number.
+
+    ``PsgDocument.appl_no``/``rld_or_rs_number`` hold bare six-digit values
+    (the crawler extracts digits only), so a prefixed query — "NDA020503" or
+    the advertised "N020503", which ``clean_application_number`` normalizes to
+    "NDA020503" — must be stripped back to digits or it silently matches
+    nothing. Mirrors ``orange_book._orange_book_app_no``.
+    """
+    cleaned = clean_application_number(value)
+    if cleaned is None:
+        return None
+    for prefix in APPLICATION_PREFIXES:
+        if cleaned.startswith(prefix):
+            return cleaned.removeprefix(prefix)
+    return cleaned
 
 
 class PsgHandler:
@@ -25,7 +43,7 @@ class PsgHandler:
         client: httpx.Client | None = None,
     ) -> list[SourceRecord]:
         del client
-        app_no = clean_application_number(query.application_number)
+        app_no = _bare_app_no(query.application_number)
         ingredient = canonical_name(query.active_ingredient or query.query_text)
         ingredient_stripped = stripped_name(query.active_ingredient or query.query_text)
         records: list[SourceRecord] = []

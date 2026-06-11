@@ -51,9 +51,14 @@ def route_sources(
         routed.append(SourceKind.SHORTAGE)
     if "rems" in text or "risk evaluation" in text or "mitigation strategy" in text:
         routed.append(SourceKind.REMS)
-    # DailyMed routes only on explicit labeling cues so existing defaults
-    # (the fallback triple below) are untouched.
-    if "dailymed" in text or "structured product label" in text or SPL_PATTERN.search(text):
+    # DailyMed routes only on an explicit labeling cue AND a structured
+    # application number: DailyMedHandler queries spls.json by application
+    # number alone, so without one the cue would exclusive-route the query to
+    # a guaranteed-empty handler. A labeling-cue query with no application
+    # number falls through to the other cues / default triple instead.
+    if query.application_number and (
+        "dailymed" in text or "structured product label" in text or SPL_PATTERN.search(text)
+    ):
         routed.append(SourceKind.DAILYMED)
     if (
         "orange book" in text

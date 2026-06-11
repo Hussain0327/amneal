@@ -61,9 +61,6 @@ export default function WhitepaperPage() {
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
-  // The inputs the visible result was built from, so the .docx call always
-  // matches the rendered paper even if the form has been edited since.
-  const [built, setBuilt] = useState<{ rld: string; appl: string } | null>(null);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -76,10 +73,8 @@ export default function WhitepaperPage() {
     setDownloadError(null);
     try {
       setResult(await buildWhitepaper(r, a));
-      setBuilt({ rld: r, appl: a });
     } catch (er) {
       setResult(null);
-      setBuilt(null);
       if (er instanceof ApiError && er.status === 422) {
         setResolveError(er.detail || "The reference product and application number could not be resolved.");
       } else {
@@ -90,12 +85,15 @@ export default function WhitepaperPage() {
     }
   }
 
+  // The .docx is rendered server-side FROM this exact result object (no
+  // re-populate), so the download always matches the rendered paper even if
+  // the form has been edited since.
   async function onDownload() {
-    if (!built || downloading) return;
+    if (!result || downloading) return;
     setDownloading(true);
     setDownloadError(null);
     try {
-      await downloadWhitepaperDocx(built.rld, built.appl);
+      await downloadWhitepaperDocx(result);
     } catch (er) {
       setDownloadError(er instanceof Error ? er.message : String(er));
     } finally {
@@ -174,6 +172,8 @@ export default function WhitepaperPage() {
             <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
               audit #{result.audit_id}
             </span>
+            {/* Only rendered once a result exists — the docx call sends that
+                result verbatim, so there is never a button without one. */}
             <button className="btn" onClick={() => void onDownload()} disabled={downloading}>
               {downloading ? "Preparing…" : "Download .docx"}
             </button>
@@ -348,7 +348,9 @@ function Cell({ cell }: { cell: WhitepaperCell }) {
           <span className="wp-absent">verified absent</span>
         </p>
       ) : (
-        <p className="wp-cell__value">{cell.value ?? "—"}</p>
+        // An empty/whitespace value reads the same as null: an em-dash, never
+        // a blank line passing for a populated cell.
+        <p className="wp-cell__value">{cell.value?.trim() ? cell.value : "—"}</p>
       )}
 
       {cell.note && cell.status !== "analyst_input_required" && <p className="wp-cell__note">{cell.note}</p>}

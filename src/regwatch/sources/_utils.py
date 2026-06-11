@@ -14,24 +14,45 @@ from config.settings import get_settings
 
 APPLICATION_PREFIXES = ("NDA", "ANDA", "BLA")
 
+# Single-letter application-type prefixes (the UI advertises "N020503").
+_SINGLE_LETTER_TYPES = {"N": "NDA", "A": "ANDA", "B": "BLA"}
+
+# Prefixed form after separator stripping: full or single-letter type, optional
+# leading zeros, 1-6 digits. Equivalent to matching the raw input against
+# ^(NDA|ANDA|BLA|[NAB])[\s#]*0*(\d{1,6})$ case-insensitively.
+_PREFIXED_APP_NO_RE = re.compile(r"(NDA|ANDA|BLA|[NAB])0*(\d{1,6})")
+
 
 def clean_text(value: object) -> str:
     return " ".join(str(value or "").split())
 
 
 def clean_application_number(value: str | None) -> str | None:
+    """Normalize an application number to ``NDA######`` or bare six digits.
+
+    Accepts the long prefixes (NDA/ANDA/BLA) and the single-letter forms
+    (N/A/B, mapped to NDA/ANDA/BLA) with any spacing or punctuation between
+    prefix and digits ("NDA #022549", "N020503"). Bare digits stay bare —
+    callers that need expansion use :func:`application_number_candidates`.
+    """
     if not value:
         return None
     raw = re.sub(r"[^A-Za-z0-9]", "", value).upper()
-    for prefix in APPLICATION_PREFIXES:
-        if raw.startswith(prefix):
-            digits = re.sub(r"\D", "", raw.removeprefix(prefix))
-            return f"{prefix}{digits.zfill(6)}" if digits else raw
+    match = _PREFIXED_APP_NO_RE.fullmatch(raw)
+    if match:
+        prefix = _SINGLE_LETTER_TYPES.get(match.group(1), match.group(1))
+        return f"{prefix}{match.group(2).zfill(6)}"
     digits = re.sub(r"\D", "", raw)
     return digits.zfill(6) if digits else None
 
 
 def application_number_candidates(value: str | None) -> list[str]:
+    """Prefixed candidates for a possibly-bare application number.
+
+    A prefixed input — long or single-letter — yields exactly its own
+    application; only genuinely bare digits expand to the NDA/ANDA/BLA triple
+    (plus the bare form for sources that key on digits alone).
+    """
     cleaned = clean_application_number(value)
     if not cleaned:
         return []

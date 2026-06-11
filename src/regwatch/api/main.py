@@ -11,7 +11,7 @@ Endpoints (per spec §10.16):
     POST   /sources/search — structured FDA source lookup (auth)
     POST   /assemble       — build a cited dossier for a target product (auth)
     POST   /whitepaper     — populate the CRA White Paper (RLD + appl no) (auth)
-    POST   /whitepaper/docx — the filled CRA White Paper Word document (auth)
+    POST   /whitepaper/docx — render a returned /whitepaper result as .docx (auth)
     GET    /watch/latest   — recent alerts (auth)
     GET    /products       — list watchlist (auth)
     POST   /products       — add manual product (auth)
@@ -25,6 +25,7 @@ Endpoints (per spec §10.16):
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -40,6 +41,7 @@ from sqlmodel import Session, col, select
 from regwatch.assemble.dossier import build_dossier
 from regwatch.auth.deps import SESSION_COOKIE, require_user
 from regwatch.auth.sessions import authenticate, create_session, revoke_token
+from regwatch.common.audit import log_query
 from regwatch.common.conversation import SessionOwnershipError
 from regwatch.common.logging import configure_logging
 from regwatch.common.ratelimit import LOGIN_ATTEMPTS_PER_MINUTE, login_limiter, query_limiter
@@ -47,7 +49,7 @@ from regwatch.generate.grounded_qa import ask
 from regwatch.sources.router import search_sources
 from regwatch.sources.types import SourceKind, SourceQuery
 from regwatch.store.db import get_engine, init_db, session_scope
-from regwatch.store.models import ChatMessage, ChatSession, User
+from regwatch.store.models import ChatMessage, ChatSession, QueryLog, User
 from regwatch.store.vector_store import collection_size
 from regwatch.watch.alerts import latest_digest_records
 from regwatch.watch.watchlist import ALLOWED_SOURCES, add_manual_product, list_watchlist
@@ -456,16 +458,119 @@ def whitepaper(req: WhitepaperRequest, user: User = Depends(require_user)) -> di
         raise HTTPException(status_code=422, detail=exc.detail) from exc
 
 
+class WhitepaperDocxRequest(BaseModel):
+    """Body: the EXACT JSON object a previous POST /whitepaper returned."""
+
+    result: dict[str, Any]
+
+
+_DOCX_RESULT_DETAIL = (
+    "result must be the exact JSON object returned by POST /whitepaper "
+    "({spine, sections, warnings, audit_id})"
+)
+_DOCX_CELL_KEYS = ("id", "label", "status")
+
+# What /whitepaper actually returns: six digits, optionally NDA/ANDA/BLA-
+# prefixed. The value is interpolated into the Content-Disposition filename
+# (and the audit row), so anything looser — CR/LF, quotes, path characters —
+# is rejected rather than trusted into a response header.
+_DOCX_APPL_NO_RE = re.compile(r"^[A-Z]{0,4}\d{6}$")
+
+
+def _validated_docx_result(result: dict[str, Any]) -> tuple[int, str]:
+    """Minimal shape check before rendering: (audit_id, application_number).
+
+    The docx is rendered verbatim from this payload — no re-populate — so the
+    shape the writer dereferences must hold, and nothing else is trusted.
+    """
+
+    def reject(why: str) -> HTTPException:
+        return HTTPException(status_code=422, detail=f"{_DOCX_RESULT_DETAIL}: {why}")
+
+    audit_id = result.get("audit_id")
+    if not isinstance(audit_id, int) or isinstance(audit_id, bool):
+        raise reject("audit_id must be an integer")
+    spine = result.get("spine")
+    if not isinstance(spine, dict):
+        raise reject("spine must be an object")
+    appl_no = spine.get("application_number")
+    if not isinstance(appl_no, str) or not _DOCX_APPL_NO_RE.fullmatch(appl_no):
+        raise reject(
+            "spine.application_number must be an FDA application number "
+            "(six digits, optional NDA/ANDA/BLA prefix)"
+        )
+    sections = result.get("sections")
+    if not isinstance(sections, list) or not sections:
+        raise reject("sections must be a non-empty list")
+    for section in sections:
+        if not isinstance(section, dict) or not isinstance(section.get("cells"), list):
+            raise reject("every section must be an object with a cells list")
+        for cell in section["cells"]:
+            if not isinstance(cell, dict):
+                raise reject("every cell must be an object")
+            if any(not isinstance(cell.get(key), str) for key in _DOCX_CELL_KEYS):
+                raise reject("every cell must carry string id, label, and status")
+            if cell.get("value") is not None and not isinstance(cell["value"], str):
+                raise reject("cell value must be a string or null")
+            evidence = cell.get("evidence")
+            if not isinstance(evidence, list) or any(not isinstance(ev, dict) for ev in evidence):
+                raise reject("every cell must carry an evidence list of objects")
+    return audit_id, appl_no
+
+
+def _require_owned_whitepaper_audit(audit_id: int, user_id: str) -> None:
+    """The audit row must be the caller's own successful white-paper run.
+
+    One uniform 422 for fabricated, foreign, or non-whitepaper ids — the
+    response never confirms that someone else's audit row exists.
+    """
+    with session_scope() as s:
+        row = s.get(QueryLog, audit_id)
+        if (
+            row is None
+            or row.mode != "whitepaper"
+            or row.status != "populated"
+            or row.user_id != user_id
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"audit_id {audit_id} does not reference one of your white-paper runs — "
+                    "re-run POST /whitepaper and send its result verbatim"
+                ),
+            )
+
+
 @protected.post("/whitepaper/docx")
-def whitepaper_docx(req: WhitepaperRequest, user: User = Depends(require_user)) -> Response:
-    """Same body as POST /whitepaper, returning the filled Word document."""
+def whitepaper_docx(req: WhitepaperDocxRequest, user: User = Depends(require_user)) -> Response:
+    """Render the Word document FROM a previously returned /whitepaper result.
+
+    No re-populate: zero live fetches, zero LLM calls — the .docx is rendered
+    from the exact JSON the analyst reviewed, after verifying result.audit_id
+    is the caller's own white-paper audit row. Writes one lightweight audit row
+    (mode="whitepaper", docx_render) and keeps the /query rate limiter.
+    """
     _enforce_query_rate_limit(user)
-    try:
-        result = build_whitepaper(req.rld_name, req.application_number, user_id=str(user.id))
-    except SpineResolutionError as exc:
-        raise HTTPException(status_code=422, detail=exc.detail) from exc
-    data = write_whitepaper_docx(result, template_path=get_settings().whitepaper_template_path)
-    appl_no = result["spine"]["application_number"]
+    audit_id, appl_no = _validated_docx_result(req.result)
+    _require_owned_whitepaper_audit(audit_id, str(user.id))
+    data = write_whitepaper_docx(req.result, template_path=get_settings().whitepaper_template_path)
+    log_query(
+        mode="whitepaper",
+        query_text=f"whitepaper docx application_number={appl_no!r}",
+        retrieved=[],
+        answer_text=f"Rendered the white-paper .docx from audit #{audit_id} (no re-population).",
+        citations=[],
+        refused=False,
+        model_name="(docx-render)",
+        user_id=str(user.id),
+        status="docx_rendered",
+        route_json={
+            "route": "whitepaper",
+            "reason": "docx_render",
+            "source_audit_id": audit_id,
+            "application_number": appl_no,
+        },
+    )
     return Response(
         content=data,
         media_type=docx_media_type(),

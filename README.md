@@ -222,7 +222,9 @@ POST   /assemble     cited dossier for {active_ingredient, dosage_form?, rld?} (
 POST   /whitepaper   populate the CRA White Paper for {rld_name, application_number} (auth)
                      out: {spine, sections[{title, cells[]}], warnings[], audit_id}
                      422 {detail} when the spine cannot resolve or name≠number
-POST   /whitepaper/docx  same body → the filled Word document (.docx attachment) (auth)
+POST   /whitepaper/docx  body {"result": <exact JSON from POST /whitepaper>} → the filled
+                     Word document (.docx attachment) (auth; renders from the
+                     reviewed result — no re-populate, no live fetches)
 GET    /watch/latest matched changes since cursor (auth)
 GET    /products     watchlist (auth)
 POST   /products     add a manual product (INV-5 enforced) (auth)

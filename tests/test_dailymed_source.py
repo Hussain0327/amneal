@@ -121,6 +121,97 @@ def test_resolve_setid_never_queries_bare_digits() -> None:
     assert queried == ["NDA020503", "ANDA020503", "BLA020503"]
 
 
+def test_resolve_setid_prefixed_input_queries_exactly_that_application() -> None:
+    """Contract C1: a prefixed input (the populator always sends one) queries
+    EXACTLY that application — never the NDA→ANDA→BLA expansion, which could
+    silently return another application's SPL."""
+    with respx.mock(assert_all_called=True) as mock:
+        route = mock.get(SPLS_ENDPOINT).mock(return_value=httpx.Response(200, json={"data": []}))
+        assert resolve_setid("ANDA208677") is None
+
+    queried = [call.request.url.params["application_number"] for call in route.calls]
+    assert queried == ["ANDA208677"]
+
+
+def test_resolve_setid_single_letter_prefix_queries_its_application() -> None:
+    """'N020503' (the UI placeholder format) is NDA020503 — never degraded to
+    bare digits, never the three-way expansion."""
+    with respx.mock(assert_all_called=True) as mock:
+        route = mock.get(SPLS_ENDPOINT).mock(return_value=httpx.Response(200, json={"data": []}))
+        assert resolve_setid("N020503") is None
+
+    queried = [call.request.url.params["application_number"] for call in route.calls]
+    assert queried == ["NDA020503"]
+
+
+def test_spl_listings_follow_pagination_metadata() -> None:
+    """Live ANDA208677 shows total_elements 103 — page 2 must be fetched and
+    aggregated; a single pagesize-100 request silently drops listings."""
+    page1 = {
+        "metadata": {"total_elements": 103, "elements_per_page": 100, "total_pages": 2},
+        "data": [_listing(f"setid-{i}", "Jan 02, 2020") for i in range(100)],
+    }
+    page2 = {
+        "metadata": {"total_elements": 103, "elements_per_page": 100, "total_pages": 2},
+        "data": [
+            _listing("setid-100", "Jan 03, 2020"),
+            _listing("setid-101", "Jan 04, 2020"),
+            _listing(SETID, "Dec 18, 2025"),
+        ],
+    }
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        page = request.url.params.get("page")
+        return httpx.Response(200, json=page1 if page == "1" else page2)
+
+    with respx.mock(assert_all_called=True) as mock:
+        route = mock.get(SPLS_ENDPOINT).mock(side_effect=respond)
+        resolution = resolve_setid("ANDA208677")
+
+    assert route.call_count == 2
+    assert [call.request.url.params["page"] for call in route.calls] == ["1", "2"]
+    assert resolution is not None
+    assert resolution.setid == SETID  # the most recent listing lives on page 2
+
+
+def test_spl_listings_follow_next_page_url_metadata() -> None:
+    """Some responses advertise pagination via next_page_url, not total_pages."""
+    page1 = {
+        "metadata": {"next_page_url": f"{SPLS_ENDPOINT}?application_number=NDA020503&page=2"},
+        "data": [_listing("setid-0", "Jan 02, 2020")],
+    }
+    page2 = {
+        "metadata": {"next_page_url": None},
+        "data": [_listing(SETID, "Dec 18, 2025")],
+    }
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        page = request.url.params.get("page")
+        return httpx.Response(200, json=page1 if page == "1" else page2)
+
+    with respx.mock(assert_all_called=True) as mock:
+        route = mock.get(SPLS_ENDPOINT).mock(side_effect=respond)
+        resolution = resolve_setid("NDA020503")
+
+    assert route.call_count == 2
+    assert resolution is not None
+    assert resolution.setid == SETID
+
+
+def test_spl_listings_pagination_hard_cap_at_ten_pages() -> None:
+    """A runaway (or lying) pagination signal stops at the 10-page hard cap."""
+    payload = {
+        "metadata": {"total_pages": 99},
+        "data": [_listing("setid-x", "Jan 02, 2020")],
+    }
+    with respx.mock(assert_all_called=True) as mock:
+        route = mock.get(SPLS_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
+        resolution = resolve_setid("NDA020503")
+
+    assert route.call_count == 10
+    assert resolution is not None
+
+
 def test_resolve_setid_none_only_after_successful_empty_query() -> None:
     with respx.mock(assert_all_called=True) as mock:
         mock.get(SPLS_ENDPOINT).mock(return_value=httpx.Response(200, json={"data": []}))
@@ -224,10 +315,13 @@ def test_handler_without_application_number_does_not_query() -> None:
     assert route.call_count == 0
 
 
-def test_dailymed_registered_and_routed_without_disturbing_defaults() -> None:
+def test_dailymed_registered_and_routed_with_application_number() -> None:
     assert isinstance(router_mod._HANDLERS[SourceKind.DAILYMED], DailyMedHandler)
     assert SourceKind.DAILYMED in route_sources(
-        SourceQuery(query_text="What does the SPL labeling on DailyMed say?")
+        SourceQuery(
+            query_text="What does the SPL labeling on DailyMed say?",
+            application_number="NDA020503",
+        )
     )
     # The no-cue fallback triple is untouched.
     assert route_sources(SourceQuery(query_text="hello")) == [
@@ -235,3 +329,17 @@ def test_dailymed_registered_and_routed_without_disturbing_defaults() -> None:
         SourceKind.ORANGE_BOOK,
         SourceKind.PSG,
     ]
+
+
+def test_labeling_cue_without_application_number_keeps_default_routing() -> None:
+    """Regression (B5): 'metformin spl' used to exclusive-route to DailyMed,
+    whose handler returns [] without an application number — a guaranteed
+    zero-result query. Without an application number the labeling cue must
+    behave exactly as pre-whitepaper: other cues, else the default triple."""
+    assert route_sources(SourceQuery(query_text="metformin spl")) == [
+        SourceKind.DRUGSFDA,
+        SourceKind.ORANGE_BOOK,
+        SourceKind.PSG,
+    ]
+    # Other cues still win on their own merits.
+    assert route_sources(SourceQuery(query_text="rems spl for metformin")) == [SourceKind.REMS]

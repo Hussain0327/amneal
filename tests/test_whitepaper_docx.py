@@ -4,11 +4,19 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import pytest
 from docx import Document
 
-from regwatch.whitepaper.docx_writer import docx_media_type, write_whitepaper_docx
+import regwatch.whitepaper.docx_writer as docx_writer
+from regwatch.whitepaper.docx_writer import (
+    FALLBACK_MARKER,
+    _marker,
+    _render_value,
+    docx_media_type,
+    write_whitepaper_docx,
+)
 from regwatch.whitepaper.populator import build_whitepaper
 from tests._whitepaper_stub import APPL_NO, RLD_NAME, install_fake_sources
 
@@ -177,6 +185,113 @@ def test_duplicate_label_rows_filled_once(monkeypatch: pytest.MonkeyPatch, tmp_p
 
 def test_media_type() -> None:
     assert "wordprocessingml.document" in docx_media_type()
+
+
+# ---------- empty/whitespace value defense (contract C3, writer side) ----------
+def _populated_cell(value: object) -> dict:
+    return {
+        "id": "rems",
+        "label": "REMS",
+        "mode": "auto",
+        "status": "populated",
+        "value": value,
+        "evidence": [],
+        "note": None,
+    }
+
+
+def test_render_value_treats_empty_and_whitespace_as_no_value() -> None:
+    assert _render_value(_populated_cell("Yes — program X")) == "Yes — program X"
+    for blank in ("", "   ", "\n\t", None):
+        assert _render_value(_populated_cell(blank)) == "Analyst input required"
+    absent = {**_populated_cell(""), "status": "verified_absent"}
+    assert _render_value(absent) == "No (verified absent)"
+
+
+def test_marker_treats_empty_and_whitespace_as_no_value() -> None:
+    assert _marker(_populated_cell("Yes — program X")) == "Yes — program X"
+    # A populated checkbox cell with no usable value falls to the bare marker,
+    # never the literal blank.
+    for blank in ("", "   ", "\n\t", None):
+        assert _marker(_populated_cell(blank)) == "Yes"
+    assert _marker({**_populated_cell(""), "status": "verified_absent"}) == "No"
+    assert (
+        _marker({**_populated_cell(""), "status": "analyst_input_required"})
+        == "Analyst input required"
+    )
+
+
+def _set_cell_value(result: dict, cell_id: str, value: str) -> str:
+    for section in result["sections"]:
+        for cell in section["cells"]:
+            if cell["id"] == cell_id:
+                cell["value"] = value
+                return str(cell["label"])
+    raise AssertionError(f"cell {cell_id} not in result")
+
+
+def test_empty_values_render_as_analyst_input_in_document(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A blank that slips past the populator never renders as a populated cell."""
+    result = _build(monkeypatch)
+    empty_label = _set_cell_value(result, "product_name", "")
+    whitespace_label = _set_cell_value(result, "strengths", "   ")
+    data = write_whitepaper_docx(result, template_path=tmp_path / "missing.docx")
+    doc = Document(BytesIO(data))
+    # Only the section tables (header Cell | Value | Status) — the provenance
+    # appendix repeats labels with source columns.
+    by_label = {
+        r.cells[0].text: r.cells[1].text
+        for t in doc.tables
+        if t.rows and [c.text for c in t.rows[0].cells][:3] == ["Cell", "Value", "Status"]
+        for r in t.rows[1:]
+    }
+    assert by_label[empty_label] == "Analyst input required"
+    assert by_label[whitespace_label] == "Analyst input required"
+
+
+# ---------- template fallback is loud (logger + visible marker) ----------
+class _LogRecorder:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, Any]]] = []
+
+    def warning(self, event: str, **kwargs: Any) -> None:
+        self.events.append((event, kwargs))
+
+
+def test_missing_template_falls_back_with_warning_and_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result = _build(monkeypatch)
+    recorder = _LogRecorder()
+    monkeypatch.setattr(docx_writer, "log", recorder)
+    missing = tmp_path / "official-template.docx"
+    data = write_whitepaper_docx(result, template_path=missing)
+    # The logger warning names the missed path...
+    assert recorder.events, "no warning logged for the missing template"
+    event, kwargs = recorder.events[0]
+    assert event == "whitepaper_template_missing"
+    assert kwargs["template_path"] == str(missing)
+    # ...and the document itself carries the visible marker under the heading.
+    doc = Document(BytesIO(data))
+    paragraphs = [p.text for p in doc.paragraphs]
+    assert FALLBACK_MARKER in paragraphs
+    assert paragraphs.index(FALLBACK_MARKER) == paragraphs.index("CRA White Paper") + 1
+
+
+def test_real_template_render_has_no_fallback_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    template = tmp_path / "template.docx"
+    _synthetic_template(template)
+    result = _build(monkeypatch)
+    recorder = _LogRecorder()
+    monkeypatch.setattr(docx_writer, "log", recorder)
+    data = write_whitepaper_docx(result, template_path=template)
+    assert recorder.events == []
+    doc = Document(BytesIO(data))
+    assert FALLBACK_MARKER not in {p.text for p in doc.paragraphs}
 
 
 def test_provenance_appendix_lists_evidence(

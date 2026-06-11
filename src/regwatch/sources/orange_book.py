@@ -27,9 +27,12 @@ from typing import Any
 import httpx
 from config.settings import get_settings
 
+from regwatch.common.logging import get_logger
 from regwatch.common.text_normalize import canonical_name
 from regwatch.sources._utils import clean_application_number, clean_text, owned_client
 from regwatch.sources.types import SourceKind, SourceQuery, SourceRecord
+
+log = get_logger(__name__)
 
 ORANGE_BOOK_ZIP_URL = "https://www.fda.gov/media/76860/download"
 ORANGE_BOOK_SEARCH_URL = "https://www.accessdata.fda.gov/scripts/cder/ob/index.cfm"
@@ -89,10 +92,16 @@ class OrangeBookRows:
     ``fetched_at`` is the auditable wall-clock time the underlying ZIP was
     downloaded (source freshness/provenance, INV-5). Rows are surfaced as-is —
     callers never receive a classification, only the file's own columns.
+
+    ``member_missing`` is True when this rowset's file was absent from the
+    downloaded ZIP: the empty ``rows`` then mean "file unavailable", NOT
+    "queried and absent" — callers must not assert absence or replace a
+    previous durable snapshot from it (INV-5).
     """
 
     rows: list[dict[str, str]]
     fetched_at: datetime
+    member_missing: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,11 +111,14 @@ class _ZipCache:
     ``monotonic_at`` drives TTL expiry (immune to clock changes); ``fetched_at``
     is the auditable wall-clock timestamp of the underlying download, surfaced
     on every :class:`OrangeBookRows` as source freshness (INV-5).
+    ``missing_members`` records which optional files were absent from the ZIP
+    (their texts degrade to "") so the row APIs can surface the degradation.
     """
 
     files: Mapping[str, str]
     fetched_at: datetime
     monotonic_at: float
+    missing_members: frozenset[str] = frozenset()
 
 
 # Module-level in-process cache. Shared across handler instances so repeated
@@ -231,7 +243,11 @@ def _rows_for_application(
         if row.get("appl_no") == appl_no
         and (appl_type is None or row.get("appl_type") == appl_type)
     ]
-    return OrangeBookRows(rows=rows, fetched_at=cache.fetched_at)
+    return OrangeBookRows(
+        rows=rows,
+        fetched_at=cache.fetched_at,
+        member_missing=member in cache.missing_members,
+    )
 
 
 def _split_application_number(value: str) -> tuple[str | None, str]:
@@ -267,17 +283,18 @@ def _cached_zip(client: httpx.Client | None) -> _ZipCache:
     cached = _ZIP_CACHE
     if cached is not None and ttl > 0 and (time.monotonic() - cached.monotonic_at) < ttl:
         return cached
-    files = _fetch_zip_files(client)
+    files, missing = _fetch_zip_files(client)
     fresh = _ZipCache(
         files=files,
         fetched_at=datetime.now(UTC),
         monotonic_at=time.monotonic(),
+        missing_members=missing,
     )
     _ZIP_CACHE = fresh
     return fresh
 
 
-def _fetch_zip_files(client: httpx.Client | None) -> dict[str, str]:
+def _fetch_zip_files(client: httpx.Client | None) -> tuple[dict[str, str], frozenset[str]]:
     s = get_settings()
     with owned_client(
         client,
@@ -288,17 +305,44 @@ def _fetch_zip_files(client: httpx.Client | None) -> dict[str, str]:
         return _file_texts_from_zip(resp.content)
 
 
-def _file_texts_from_zip(content: bytes) -> dict[str, str]:
+def _file_texts_from_zip(content: bytes) -> tuple[dict[str, str], frozenset[str]]:
+    """(member texts, members ABSENT from the ZIP); only ``products.txt`` is required.
+
+    A ZIP missing ``patent.txt``/``exclusivity.txt`` degrades those texts to
+    "" but the degradation is SURFACED in the missing set — an absent file's
+    empty rows must never read as "queried and absent" or replace a previous
+    durable snapshot (INV-5). A ZIP without ``products.txt`` is unusable and
+    raises.
+    """
     out: dict[str, str] = {}
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
-        for name in zf.namelist():
-            for member in _ZIP_MEMBERS:
-                if name.lower().endswith(member):
-                    out[member] = zf.read(name).decode("latin-1")
-    missing = [member for member in _ZIP_MEMBERS if member not in out]
-    if missing:
-        raise RuntimeError(f"Orange Book ZIP is missing expected files: {', '.join(missing)}")
-    return out
+        names = zf.namelist()
+        for member in _ZIP_MEMBERS:
+            name = _select_member(names, member)
+            if name is not None:
+                out[member] = zf.read(name).decode("latin-1")
+    if PRODUCTS_MEMBER not in out:
+        raise RuntimeError(f"Orange Book ZIP is missing the required file: {PRODUCTS_MEMBER}")
+    missing = frozenset(member for member in _ZIP_MEMBERS if member not in out)
+    for member in missing:
+        log.warning("orange_book_zip_member_missing", member=member)
+        out[member] = ""
+    return out, missing
+
+
+def _select_member(names: list[str], member: str) -> str | None:
+    """The archive entry whose basename is exactly ``member``, deterministically.
+
+    Preference order: fewest path separators, then lexicographically smallest
+    — so ``archive/old_products.txt`` (or any nested/renamed copy) can never
+    shadow the top-level file.
+    """
+    candidates = [
+        name for name in names if name.replace("\\", "/").rsplit("/", 1)[-1].lower() == member
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda name: (name.count("/") + name.count("\\"), name))
 
 
 def _record(row: dict[str, str]) -> SourceRecord:

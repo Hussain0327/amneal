@@ -8,7 +8,9 @@ Two paths, per the feature contract:
    ``-> Yes`` / ``-> No`` / ``-> Analyst input required`` marker (we do not try
    to tick the template's symbol checkboxes).
 2. **From-scratch fallback** — when the template file is absent (CI), build a
-   structurally-equivalent document from the registry.
+   structurally-equivalent document from the registry. The fallback is never
+   silent: it logs the missed path and stamps a visible marker line under the
+   heading (``FALLBACK_MARKER``).
 
 Both paths append a Provenance appendix table (cell -> source / locator /
 fetched_at). The docx tests use a synthetic in-test template fixture, so CI
@@ -25,12 +27,19 @@ from docx import Document
 from docx.document import Document as DocxDocument
 from docx.table import _Cell
 
+from regwatch.common.logging import get_logger
 from regwatch.whitepaper.template import (
     CHECKBOX_CELL_IDS,
     CellSpec,
     section_order,
     specs_for_section,
 )
+
+log = get_logger(__name__)
+
+# Rendered under the heading whenever the document is built WITHOUT the real
+# CRA template, so a fallback render can never pass for the official form.
+FALLBACK_MARKER = "(generated without the official CRA template file)"
 
 # Aliases mapping a registry cell id -> the normalized template label text it
 # appears under. Matching is by PREFIX (longest alias first), because the real
@@ -142,18 +151,31 @@ _PRIORITY_BLOCK_MEMBER_IDS: tuple[str, ...] = (
 )
 
 
+def _cell_value(cell: dict[str, Any]) -> str | None:
+    """The cell's renderable value — empty/whitespace reads as no value (C3).
+
+    The populator's choke point already rejects empty values; this is the
+    writer-side defense so a blank can never render as a populated cell.
+    """
+    value = cell.get("value")
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
 def _marker(cell: dict[str, Any]) -> str:
     status = cell["status"]
     if status == "verified_absent":
         return "No"
     if status == "analyst_input_required":
         return "Analyst input required"
-    return cell["value"] or "Yes"
+    return _cell_value(cell) or "Yes"
 
 
 def _render_value(cell: dict[str, Any]) -> str:
-    if cell["value"]:
-        return cell["value"]
+    value = _cell_value(cell)
+    if value is not None:
+        return value
     if cell["status"] == "verified_absent":
         return "No (verified absent)"
     return "Analyst input required"
@@ -172,6 +194,12 @@ def write_whitepaper_docx(result: dict[str, Any], *, template_path: Path | None)
     if template_path is not None and template_path.exists():
         doc = _fill_template(template_path, result)
     else:
+        # Never silent: name the path that was missed and fall back loudly —
+        # the fallback document itself carries a visible marker line.
+        log.warning(
+            "whitepaper_template_missing",
+            template_path=str(template_path) if template_path is not None else "(not configured)",
+        )
         doc = _build_from_scratch(result)
     _append_provenance(doc, result)
     buffer = BytesIO()
@@ -277,6 +305,7 @@ def _build_from_scratch(result: dict[str, Any]) -> DocxDocument:
     doc = Document()
     spine = result.get("spine", {})
     doc.add_heading("CRA White Paper", level=0)
+    doc.add_paragraph(FALLBACK_MARKER)
     doc.add_paragraph(
         f"{spine.get('application_type', '')} {spine.get('application_number', '')} — "
         f"{spine.get('ingredient', '')}"

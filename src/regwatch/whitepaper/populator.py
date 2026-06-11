@@ -31,7 +31,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import desc
+from sqlalchemy import func
+from sqlalchemy import select as sa_select
 from sqlmodel import select
 
 from regwatch.common.audit import log_query
@@ -64,10 +65,9 @@ from regwatch.sources.types import SourceQuery, SourceRecord
 from regwatch.store.db import session_scope
 from regwatch.store.models import BeRequirement, PsgDocument
 from regwatch.store.whitepaper_sources import (
-    persist_ob_exclusivities,
-    persist_ob_patents,
-    persist_ob_products,
-    persist_spl_document,
+    ObSnapshot,
+    SplSnapshot,
+    persist_whitepaper_snapshot,
 )
 from regwatch.whitepaper.template import (
     CELL_SPECS,
@@ -159,10 +159,6 @@ def _rems_search(query: SourceQuery) -> tuple[list[SourceRecord], int]:
     return RemsHandler(html=html).search(query), len(parse_rems_rows(html))
 
 
-def _rems_records(query: SourceQuery) -> list[SourceRecord]:
-    return _rems_search(query)[0]
-
-
 @dataclass
 class _Ctx:
     """Everything fetched once for one populate run; extractors read from it."""
@@ -178,8 +174,17 @@ class _Ctx:
     product_rows: list[dict[str, str]] = field(default_factory=list)
     patent_rows: list[dict[str, str]] = field(default_factory=list)
     exclusivity_rows: list[dict[str, str]] = field(default_factory=list)
-    ob_fetched_at: datetime | None = None
+    # Per-rowset freshness: products/patents/exclusivity are fetched separately
+    # and each cell/persisted row carries ITS rowset's timestamp (INV-5).
+    ob_products_fetched_at: datetime | None = None
+    ob_patents_fetched_at: datetime | None = None
+    ob_exclusivities_fetched_at: datetime | None = None
     ob_failed: bool = False
+    # True when the downloaded ZIP lacked that rowset's file: the empty rows
+    # mean "file unavailable", never "queried and absent" — the cells say so
+    # and persistence retains the previous durable snapshot (INV-5).
+    ob_patents_member_missing: bool = False
+    ob_exclusivities_member_missing: bool = False
     drugsfda_records: list[SourceRecord] = field(default_factory=list)
     setid: str | None = None
     setid_resolution: SetidResolution | None = None
@@ -191,8 +196,18 @@ class _Ctx:
     spl_media: list[SplMedia] | None = None
     ndc_records: list[SourceRecord] | None = None  # None = the NDC query failed
     psg_docs: list[dict[str, Any]] = field(default_factory=list)
+    # Same-ingredient PSGs whose dosage form/route does NOT match this
+    # application — surfaced to the analyst, never cited as this form's "Yes".
+    psg_other_form_docs: list[dict[str, Any]] = field(default_factory=list)
+    # True when name-matched PSGs could not be form-verified because the
+    # application's own form is unknown (no Orange Book product rows).
+    psg_form_unverified: bool = False
+    psg_store_count: int = 0
     psg_failed: bool = False
     be_requirement: dict[str, Any] | None = None
+    # One REMS index fetch+parse per build (lazy); both REMS cells read it.
+    rems_result: tuple[list[SourceRecord], int] | None = None
+    rems_error: Exception | None = None
     known_tokens: set[str] = field(default_factory=set)
     warnings: list[str] = field(default_factory=list)
 
@@ -244,6 +259,13 @@ def _cell(
 def _populated(
     spec: CellSpec, value: str, evidence: list[dict[str, Any]], note: str | None = None
 ) -> dict[str, Any]:
+    # Single choke point for the empty-value rule: a blank/whitespace value is
+    # not a populated fact — it collapses to analyst input (INV-5), never an
+    # empty cell that renders as a confident blank.
+    if not value.strip():
+        reason = "source returned an empty value"
+        merged = f"{note.rstrip()} — {reason}." if note else f"Cell collapsed: {reason}."
+        return _analyst(spec, evidence, merged)
     return _cell(spec, "populated", _clip(value), evidence, note)
 
 
@@ -281,21 +303,37 @@ def _split_input(value: str) -> tuple[str, str]:
     return cleaned, ""
 
 
+# Containment shorter than this proves nothing ("a" is in half the formulary).
+_MIN_CONTAINMENT_CHARS = 4
+_MIN_RLD_NAME_CHARS = 3
+
+
 def _name_matches(rld_name: str, candidates: Iterable[str]) -> bool:
+    """Whether the submitted RLD name verifiably matches a candidate name.
+
+    A 1-2 character or whitespace name cannot verify ANY application —
+    bidirectional substring would wave it through — so it raises instead of
+    silently matching (the spine 422s). Containment only counts when the
+    contained string is >= 4 characters; exact (case-folded) equality always
+    passes.
+    """
+    want_lc = " ".join(rld_name.lower().split())
+    if len(want_lc) < _MIN_RLD_NAME_CHARS:
+        raise SpineResolutionError("RLD name too short to verify against the application")
     want_canon = canonical_name(rld_name)
     want_strip = stripped_name(rld_name)
-    want_lc = " ".join(rld_name.lower().split())
-    if not want_lc:
-        return True  # nothing to disagree with
     for cand in candidates:
         cand_lc = " ".join((cand or "").lower().split())
         if not cand_lc:
             continue
+        if want_lc == cand_lc:
+            return True
         if want_canon and canonical_name(cand) == want_canon:
             return True
         if want_strip and stripped_name(cand) == want_strip:
             return True
-        if want_lc in cand_lc or cand_lc in want_lc:
+        contained = want_lc if want_lc in cand_lc else cand_lc if cand_lc in want_lc else None
+        if contained is not None and len(contained) >= _MIN_CONTAINMENT_CHARS:
             return True
     return False
 
@@ -340,7 +378,21 @@ def _fetch_orange_book(ctx: _Ctx) -> None:
     ctx.product_rows = products.rows
     ctx.patent_rows = patents.rows
     ctx.exclusivity_rows = exclusivity.rows
-    ctx.ob_fetched_at = products.fetched_at
+    ctx.ob_products_fetched_at = products.fetched_at
+    ctx.ob_patents_fetched_at = patents.fetched_at
+    ctx.ob_exclusivities_fetched_at = exclusivity.fetched_at
+    ctx.ob_patents_member_missing = patents.member_missing
+    ctx.ob_exclusivities_member_missing = exclusivity.member_missing
+    if patents.member_missing:
+        ctx.warnings.append(
+            "patent.txt unavailable in this Orange Book download — patent rows could not "
+            "be queried; the previous durable patent snapshot is retained."
+        )
+    if exclusivity.member_missing:
+        ctx.warnings.append(
+            "exclusivity.txt unavailable in this Orange Book download — exclusivity rows "
+            "could not be queried; the previous durable exclusivity snapshot is retained."
+        )
 
 
 def _fetch_drugsfda(ctx: _Ctx) -> None:
@@ -353,14 +405,44 @@ def _fetch_drugsfda(ctx: _Ctx) -> None:
         log.warning("whitepaper_drugsfda_fetch_failed", error=str(exc))
 
 
+def _resolved_application_number(ctx: _Ctx) -> str:
+    """The resolved, PREFIXED application number ("NDA020503").
+
+    Post-resolution queries pass THIS — never the raw input, whose bare-digit
+    candidate expansion ORs NDA/ANDA/BLA and can pull a digit-colliding
+    other-type application's records into this product's cells (INV-5).
+    """
+    return f"{ctx.application_type}{ctx.appl_no}"
+
+
 def _establish_identity(ctx: _Ctx, input_type: str) -> None:
     if not input_type:
         _reject_cross_type_ambiguity(ctx)
-    ingredient = ""
-    if ctx.product_rows:
-        ingredient = ctx.product_rows[0].get("ingredient", "")
-        letter = ctx.product_rows[0].get("appl_type", "")
-        ctx.application_type = _OB_TYPE_TO_APP.get(letter, ctx.application_type)
+    ob_letter = ctx.product_rows[0].get("appl_type", "") if ctx.product_rows else ""
+    ob_type = _OB_TYPE_TO_APP.get(ob_letter, "")
+    if input_type:
+        # An explicit prefix names ONE application; other-type rows are dropped
+        # downstream, never re-typed onto the requested application.
+        ctx.application_type = input_type
+    elif ob_type:
+        # Orange-Book-confirmed type. Drugs@FDA NEVER overrides it — its
+        # bare-digit candidate expansion can return the other type's record.
+        ctx.application_type = ob_type
+    else:
+        drugsfda_types = sorted(
+            {t for t in (_record_application_type(r) for r in ctx.drugsfda_records) if t}
+        )
+        if len(drugsfda_types) > 1:
+            found = "; ".join(f"{t} {ctx.appl_no}" for t in drugsfda_types)
+            raise SpineResolutionError(
+                f"Application number {ctx.appl_no} matches more than one application type in "
+                f"Drugs@FDA: {found}. Re-submit with the NDA/ANDA prefix — applications are "
+                f"never blended."
+            )
+        if drugsfda_types:
+            ctx.application_type = drugsfda_types[0]
+    _filter_drugsfda_to_identity(ctx)
+    ingredient = ctx.product_rows[0].get("ingredient", "") if ctx.product_rows else ""
     if not ingredient:
         ingredient = _drugsfda_ingredient(ctx.drugsfda_records)
     if not ctx.product_rows and not ctx.drugsfda_records:
@@ -368,10 +450,30 @@ def _establish_identity(ctx: _Ctx, input_type: str) -> None:
             f"No Orange Book or Drugs@FDA product found for application number "
             f"{ctx.application_type} {ctx.appl_no}. Confirm the number is correct."
         )
-    if not input_type:
-        ctx.application_type = _type_from_drugsfda(ctx.drugsfda_records) or ctx.application_type
     ctx.ingredient = ingredient
     ctx.normalized_name = canonical_name(ingredient) if ingredient else ""
+
+
+def _filter_drugsfda_to_identity(ctx: _Ctx) -> None:
+    """Keep only Drugs@FDA records that ARE the resolved application (INV-5).
+
+    The Drugs@FDA query runs on the raw input, whose bare-digit candidate
+    expansion ORs the type prefixes — so a same-digit application of another
+    type can ride along and leak its sponsor/brand/forms into cells.
+    """
+    expected = _resolved_application_number(ctx)
+    kept = [
+        r
+        for r in ctx.drugsfda_records
+        if clean_application_number(r.identifiers.get("application_number") or "") == expected
+    ]
+    dropped = len(ctx.drugsfda_records) - len(kept)
+    if dropped:
+        ctx.warnings.append(
+            f"Dropped {dropped} Drugs@FDA record(s) not matching {expected} "
+            f"(applications are never blended)."
+        )
+    ctx.drugsfda_records = kept
 
 
 def _reject_cross_type_ambiguity(ctx: _Ctx) -> None:
@@ -431,6 +533,9 @@ def _reconcile_rld_name(ctx: _Ctx) -> None:
         candidates.append(str(rec.fields.get("sponsor_name") or ""))
     candidates = [c for c in candidates if c]
     if not candidates:
+        # Still enforce the verifiability floor — a 1-2 char name cannot
+        # verify any application (raises inside _name_matches).
+        _name_matches(ctx.rld_name, [])
         return
     if not _name_matches(ctx.rld_name, candidates):
         found = ", ".join(sorted({c for c in candidates})[:8])
@@ -453,7 +558,9 @@ def _fetch_dailymed(ctx: _Ctx) -> None:
         ]
     )
     try:
-        resolution = dailymed.resolve_setid(ctx.application_number_input, prefer_titles=prefer)
+        # The RESOLVED, PREFIXED number — bare-digit input must not let the
+        # candidate expansion resolve another type's label (contract C1).
+        resolution = dailymed.resolve_setid(_resolved_application_number(ctx), prefer_titles=prefer)
     except Exception as exc:
         ctx.warnings.append(f"DailyMed setid resolution failed ({type(exc).__name__}).")
         log.warning("whitepaper_setid_failed", error=str(exc))
@@ -492,7 +599,7 @@ def _fetch_dailymed(ctx: _Ctx) -> None:
 def _fetch_ndc(ctx: _Ctx) -> None:
     try:
         ctx.ndc_records = _ndc_records(
-            SourceQuery(application_number=ctx.application_number_input, limit=20)
+            SourceQuery(application_number=_resolved_application_number(ctx), limit=20)
         )
     except Exception as exc:
         ctx.ndc_records = None
@@ -502,8 +609,12 @@ def _fetch_ndc(ctx: _Ctx) -> None:
 
 def _fetch_psg_store(ctx: _Ctx) -> None:
     try:
-        ctx.psg_docs = _matching_psg_docs(ctx)
-        ctx.be_requirement = _latest_be_requirement(ctx.psg_docs)
+        with session_scope() as s:
+            count = s.scalar(sa_select(func.count()).select_from(PsgDocument))
+        ctx.psg_store_count = int(count or 0)
+        matches = _matching_psg_docs(ctx)
+        ctx.psg_docs, ctx.psg_other_form_docs = _filter_psg_by_form(ctx, matches)
+        ctx.be_requirement = _latest_be_requirement(ctx)
     except Exception as exc:
         # The flag is the tri-state signal: a failed store query must never be
         # indistinguishable from a successful empty one (INV-5).
@@ -539,11 +650,11 @@ def _drugsfda_ingredient(records: list[SourceRecord]) -> str:
     return ""
 
 
-def _type_from_drugsfda(records: list[SourceRecord]) -> str | None:
-    for rec in records:
-        an = rec.identifiers.get("application_number", "")
+def _record_application_type(rec: SourceRecord) -> str | None:
+    cleaned = clean_application_number(rec.identifiers.get("application_number") or "")
+    if cleaned:
         for prefix in ("NDA", "ANDA", "BLA"):
-            if an.startswith(prefix):
+            if cleaned.startswith(prefix):
                 return prefix
     return None
 
@@ -572,30 +683,145 @@ def _matching_psg_docs(ctx: _Ctx) -> list[dict[str, Any]]:
                         "recommended_date": d.recommended_date,
                         "last_seen_at": d.last_seen_at,
                         "matched_by_appl": by_appl or by_ref,
+                        "dosage_form": d.dosage_form,
+                        "route": d.route,
                     }
                 )
     return out
 
 
-def _latest_be_requirement(psg_docs: list[dict[str, Any]]) -> dict[str, Any] | None:
-    doc_ids = [d["id"] for d in psg_docs if isinstance(d.get("id"), int)]
+_FORM_NORM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _normalized_form(value: str | None) -> str:
+    return " ".join(_FORM_NORM_RE.sub(" ", (value or "").lower()).split())
+
+
+def _ob_forms_and_routes(ctx: _Ctx) -> tuple[set[str], set[str]]:
+    forms: set[str] = set()
+    routes: set[str] = set()
+    for row in ctx.product_rows:
+        value = row.get("dosage_form_route", "")
+        form = _normalized_form(_dosage_form_route_parts(value, 0))
+        route = _normalized_form(_dosage_form_route_parts(value, 1))
+        if form:
+            forms.add(form)
+        if route:
+            routes.add(route)
+    return forms, routes
+
+
+def _form_compatible(value: str | None, wanted: set[str]) -> bool:
+    """Whether a PSG's recorded form/route IS one of the application's own.
+
+    Exact normalized equality only. Bidirectional substring containment let an
+    immediate-release product cite the same molecule's extended-release PSG
+    ("tablet" ⊂ "tablet extended release") — release types are distinct PSGs
+    with materially different BE recommendations, so a containment-only match
+    goes to the analyst path, never a cited "Yes" (INV-1/INV-5).
+    """
+    if not wanted:
+        return True
+    got = _normalized_form(value)
+    if not got:
+        # A name-only match with no recorded form is not demonstrably this
+        # form's guidance — it goes to the analyst path, never a cited "Yes".
+        return False
+    return got in wanted
+
+
+def _filter_psg_by_form(
+    ctx: _Ctx, docs: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(compatible docs, same-ingredient docs not verifiable as this form's).
+
+    A PSG matched only on ingredient NAME can belong to a different dosage
+    form of the same molecule — citing it as this product's BE guidance would
+    attach another form's recommendation (INV-1/INV-5). Appl-no/RLD-ref
+    matches are the application's own and always pass. When the application's
+    own form was never established (no Orange Book product rows — ``ob_failed``
+    or a Drugs@FDA-only identity), a name-only match is UNVERIFIABLE and goes
+    to the analyst path, mirroring the no-recorded-form rule on the doc side.
+    """
+    ob_forms, ob_routes = _ob_forms_and_routes(ctx)
+    kept: list[dict[str, Any]] = []
+    mismatched: list[dict[str, Any]] = []
+    for doc in docs:
+        doc["exact_form"] = bool(ob_forms) and _normalized_form(doc.get("dosage_form")) in ob_forms
+        if doc.get("matched_by_appl"):
+            kept.append(doc)
+            continue
+        if not ob_forms and not ob_routes:
+            mismatched.append(doc)
+            continue
+        if _form_compatible(doc.get("dosage_form"), ob_forms) and _form_compatible(
+            doc.get("route"), ob_routes
+        ):
+            kept.append(doc)
+        else:
+            mismatched.append(doc)
+    if mismatched and not ob_forms and not ob_routes:
+        ctx.psg_form_unverified = True
+        ctx.warnings.append(
+            f"{len(mismatched)} name-matched PSG document(s) could not be form-verified — "
+            f"this application's dosage form is unknown (no Orange Book product rows); "
+            f"the PSG(s) are surfaced to the analyst, never cited as this form's guidance."
+        )
+    return kept, mismatched
+
+
+def _latest_be_requirement(ctx: _Ctx) -> dict[str, Any] | None:
+    """The latest BE-requirement row for the SINGLE applicable PSG document.
+
+    ``version_id`` orders versions WITHIN one document only — comparing it
+    across documents would let an unrelated document's higher id win. The
+    latest row is picked per document; with multiple surviving documents the
+    exact-form match is preferred, otherwise no fields are surfaced and the
+    candidate PSGs ride along as evidence (never blended).
+    """
+    docs = ctx.psg_docs
+    doc_ids = [d["id"] for d in docs if isinstance(d.get("id"), int)]
     if not doc_ids:
         return None
     with session_scope() as s:
-        row = s.scalars(
-            select(BeRequirement)
-            .where(BeRequirement.psg_document_id.in_(doc_ids))  # type: ignore[attr-defined]
-            .order_by(desc(BeRequirement.version_id), desc(BeRequirement.id))  # type: ignore[arg-type]
-        ).first()
-        if row is None:
+        rows = list(
+            s.scalars(
+                select(BeRequirement).where(
+                    BeRequirement.psg_document_id.in_(doc_ids)  # type: ignore[attr-defined]
+                )
+            )
+        )
+        latest_by_doc: dict[int, BeRequirement] = {}
+        for row in rows:
+            current = latest_by_doc.get(row.psg_document_id)
+            if current is None or (row.version_id, row.id or 0) > (
+                current.version_id,
+                current.id or 0,
+            ):
+                latest_by_doc[row.psg_document_id] = row
+        if not latest_by_doc:
             return None
+        if len(latest_by_doc) == 1:
+            chosen = next(iter(latest_by_doc.values()))
+        else:
+            exact_ids = {d["id"] for d in docs if d.get("exact_form")}
+            exact_rows = [r for doc_id, r in latest_by_doc.items() if doc_id in exact_ids]
+            if len(exact_rows) == 1:
+                chosen = exact_rows[0]
+            else:
+                ctx.warnings.append(
+                    f"{len(latest_by_doc)} distinct PSG documents carry BE requirements for "
+                    f"this product and no single exact-form match exists — study fields are "
+                    f"not blended; all candidate PSGs are surfaced as evidence."
+                )
+                return None
         url = next(
-            (d["source_url"] for d in psg_docs if d.get("id") == row.psg_document_id),
+            (d["source_url"] for d in docs if d.get("id") == chosen.psg_document_id),
             None,
         )
         return {
-            "fields": dict(row.fields_json) or _be_fields(row),
-            "citations": dict(row.citations_json),
+            "fields": dict(chosen.fields_json) or _be_fields(chosen),
+            "citations": dict(chosen.citations_json),
             "source_url": url,
         }
 
@@ -618,41 +844,44 @@ def _be_fields(row: BeRequirement) -> dict[str, Any]:
 # evidence) and the SPL resolution upserts by setid. One implementation only.
 # ---------------------------------------------------------------------------
 def _persist(ctx: _Ctx) -> None:
+    ob: ObSnapshot | None = None
+    if not ctx.ob_failed:
+        # Replace-snapshot only on a SUCCESSFUL fetch — a failed query must
+        # never wipe the previous durable snapshot. A rowset whose file was
+        # absent from the ZIP is that rowset's failed fetch: None skips its
+        # replace so the previous durable rows survive. Each rowset carries
+        # ITS fetch timestamp as freshness, never another rowset's.
+        ob = ObSnapshot(
+            application_number=ctx.appl_no,
+            appl_type=ctx.application_type,
+            product_rows=ctx.product_rows,
+            patent_rows=None if ctx.ob_patents_member_missing else ctx.patent_rows,
+            exclusivity_rows=(
+                None if ctx.ob_exclusivities_member_missing else ctx.exclusivity_rows
+            ),
+            products_fetched_at=ctx.ob_products_fetched_at or ctx.now,
+            patents_fetched_at=ctx.ob_patents_fetched_at or ctx.now,
+            exclusivities_fetched_at=ctx.ob_exclusivities_fetched_at or ctx.now,
+            source_url=ORANGE_BOOK_SEARCH_URL,
+        )
+    spl: SplSnapshot | None = None
+    if ctx.setid_resolution is not None:
+        resolution = ctx.setid_resolution
+        spl = SplSnapshot(
+            setid=resolution.setid,
+            appl_no=ctx.appl_no,
+            title=resolution.title,
+            published=resolution.published,
+            source_url=resolution.source_url,
+            fetched_at=ctx.spl_fetched_at or resolution.fetched_at,
+        )
     try:
-        if not ctx.ob_failed:
-            # Replace-snapshot only on a SUCCESSFUL fetch — a failed query must
-            # never wipe the previous durable snapshot.
-            fetched_at = ctx.ob_fetched_at or ctx.now
-            persist_ob_products(
-                ctx.appl_no,
-                ctx.product_rows,
-                fetched_at=fetched_at,
-                source_url=ORANGE_BOOK_SEARCH_URL,
-            )
-            persist_ob_patents(
-                ctx.appl_no,
-                ctx.patent_rows,
-                fetched_at=fetched_at,
-                source_url=ORANGE_BOOK_SEARCH_URL,
-            )
-            persist_ob_exclusivities(
-                ctx.appl_no,
-                ctx.exclusivity_rows,
-                fetched_at=fetched_at,
-                source_url=ORANGE_BOOK_SEARCH_URL,
-            )
-        if ctx.setid_resolution is not None:
-            resolution = ctx.setid_resolution
-            persist_spl_document(
-                setid=resolution.setid,
-                appl_no=ctx.appl_no,
-                title=resolution.title,
-                published=resolution.published,
-                source_url=resolution.source_url,
-                fetched_at=ctx.spl_fetched_at or resolution.fetched_at,
-            )
+        persist_whitepaper_snapshot(ob=ob, spl=spl)
     except Exception as exc:
-        ctx.warnings.append("Persistence write-through failed (provenance rows not stored).")
+        ctx.warnings.append(
+            "Persistence write-through failed — the snapshot transaction rolled back "
+            "atomically; no partial provenance rows were stored."
+        )
         log.warning("whitepaper_persist_failed", error=str(exc))
 
 
@@ -692,7 +921,7 @@ def _ob_product_evidence(ctx: _Ctx, rows: list[dict[str, str]]) -> list[dict[str
                 "Orange Book",
                 token,
                 source_url=ORANGE_BOOK_SEARCH_URL,
-                fetched_at=ctx.ob_fetched_at,
+                fetched_at=ctx.ob_products_fetched_at,
                 snippet=_product_snippet(row),
             )
         )
@@ -865,9 +1094,10 @@ def _drugsfda_evidence(ctx: _Ctx) -> list[dict[str, Any]]:
 
 
 def _ext_shortage(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
-    # Identity filter: query by application number ONLY — an ingredient search
-    # could return another product's shortage and emit a false "Yes".
-    query = SourceQuery(application_number=ctx.application_number_input, limit=10)
+    # Identity filter: query by the RESOLVED PREFIXED application number ONLY —
+    # an ingredient search could return another product's shortage, and the raw
+    # input's bare-digit expansion could return another TYPE's shortage.
+    query = SourceQuery(application_number=_resolved_application_number(ctx), limit=10)
     try:
         records = _shortage_records(query)
     except Exception as exc:
@@ -918,6 +1148,32 @@ def _ext_shortage(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     )
 
 
+def _rems_query(ctx: _Ctx) -> SourceQuery:
+    return SourceQuery(
+        application_number=_resolved_application_number(ctx),
+        active_ingredient=ctx.ingredient or None,
+        brand_name=_drugsfda_brand(ctx.drugsfda_records) or None,
+        limit=10,
+    )
+
+
+def _rems_index_results(ctx: _Ctx) -> tuple[list[SourceRecord], int]:
+    """(matched records, TOTAL parsed rows) — ONE index fetch+parse per build.
+
+    Both REMS-backed cells read this lazily: the second caller reuses the
+    first's result (or re-raises its failure) instead of re-fetching the index.
+    """
+    if ctx.rems_error is not None:
+        raise ctx.rems_error
+    if ctx.rems_result is None:
+        try:
+            ctx.rems_result = _rems_search(_rems_query(ctx))
+        except Exception as exc:
+            ctx.rems_error = exc
+            raise
+    return ctx.rems_result
+
+
 def _ext_rems(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     brand = _drugsfda_brand(ctx.drugsfda_records)
     if not ctx.ingredient and not brand:
@@ -930,14 +1186,8 @@ def _ext_rems(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
             "No ingredient or brand name resolved — the REMS index cannot be keyed by "
             "application number alone, so absence cannot be asserted (tri-state, INV-5).",
         )
-    query = SourceQuery(
-        application_number=ctx.application_number_input,
-        active_ingredient=ctx.ingredient or None,
-        brand_name=brand or None,
-        limit=10,
-    )
     try:
-        records, total_rows = _rems_search(query)
+        records, total_rows = _rems_index_results(ctx)
     except Exception as exc:
         return _analyst(
             spec,
@@ -946,7 +1196,8 @@ def _ext_rems(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
             f"(tri-state, INV-5).",
         )
     if records:
-        confirmed = [r for r in records if _rems_record_matches_application(r, ctx.appl_no)]
+        expected = _resolved_application_number(ctx)
+        confirmed = [r for r in records if _rems_record_matches_application(r, expected)]
         ev = [
             _evidence(
                 "REMS@FDA",
@@ -990,16 +1241,33 @@ def _ext_rems(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     )
 
 
-def _rems_record_matches_application(record: SourceRecord, appl_no: str) -> bool:
-    """True when the index row itself carries this application number.
+# How the index embeds application numbers in row free text: "NDA #022549".
+_REMS_APP_NO_TEXT_RE = re.compile(r"\b(?:NDA|ANDA|BLA)\s*#?\s*\d{5,6}\b", re.IGNORECASE)
 
-    Single-product programs embed the number in free text ("NDA #022549");
-    shared-system rows carry none and stay ambiguous.
+
+def _rems_record_matches_application(record: SourceRecord, expected: str) -> bool:
+    """True only when a TYPED application number on the row IS this application.
+
+    ``expected`` is the resolved, prefixed number ("NDA020503"). Candidate
+    numbers come only from application-number-bearing fields — the structured
+    identifiers, the raw application-number column, and explicit
+    "NDA #022549"-style free-text mentions — each cleaned and compared for
+    EXACT equality. A bare-digit value never confirms (it cannot name a type),
+    and arbitrary raw values (URLs, dates) are never substring-scanned: digits
+    embedded in an unrelated value must not assert a REMS program (INV-5).
     """
-    rec_no = record.identifiers.get("application_number") or ""
-    if rec_no.endswith(appl_no):
-        return True
-    return any(appl_no in str(v) for v in record.raw.values())
+    candidates: list[str] = []
+    for key in ("application_number", "application_numbers"):
+        value = record.identifiers.get(key)
+        if value:
+            candidates.extend(part for part in str(value).split(",") if part.strip())
+    for key in ("application_number", "application_no"):
+        raw_value = record.raw.get(key)
+        if raw_value:
+            candidates.append(str(raw_value))
+    for raw_value in record.raw.values():
+        candidates.extend(m.group(0) for m in _REMS_APP_NO_TEXT_RE.finditer(str(raw_value)))
+    return any(clean_application_number(c) == expected for c in candidates)
 
 
 def _ext_packaging(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
@@ -1332,6 +1600,50 @@ def _ext_be_guidance_available(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
             for d in docs
         ]
         return _populated(spec, "Yes", ev)
+    if ctx.psg_other_form_docs:
+        # Same-ingredient PSGs exist, but for OTHER dosage forms (or for forms
+        # that cannot be verified against this application) — citing one as
+        # this form's guidance would attach another form's recommendation,
+        # and "No" would deny guidance the analyst should review (INV-1/5).
+        ev = [
+            _evidence(
+                "PSG store",
+                f"PSG_{d.get('appl_no') or ctx.appl_no}",
+                source_url=d.get("source_url"),
+                fetched_at=d.get("last_seen_at"),
+                snippet=f"{d.get('psg_type')} PSG ({d.get('dosage_form') or 'unspecified form'})",
+            )
+            for d in ctx.psg_other_form_docs
+        ]
+        if ctx.psg_form_unverified:
+            return _analyst(
+                spec,
+                ev,
+                "PSG(s) matched this ingredient by name, but this application's dosage "
+                "form could not be established (no Orange Book product rows) — the "
+                "match cannot be verified as this form's guidance, so neither 'Yes' "
+                "nor 'No' can be asserted (INV-1/5).",
+            )
+        forms = _unique(
+            f"{d.get('dosage_form') or 'unspecified form'}"
+            f" / {d.get('route') or 'unspecified route'}"
+            for d in ctx.psg_other_form_docs
+        )
+        return _analyst(
+            spec,
+            ev,
+            f"PSG(s) found for this ingredient only in other dosage form(s): "
+            f"{'; '.join(forms)} — none matches this application's form, so neither "
+            f"'Yes' nor 'No' can be asserted (forms are never blended, INV-1/5).",
+        )
+    if ctx.psg_store_count <= 0:
+        # An empty local store proves nothing about FDA's catalog — "queried,
+        # genuinely absent" requires a corpus to be absent FROM (INV-5).
+        return _analyst(
+            spec,
+            [],
+            "PSG store is empty/unseeded — absence cannot be verified (tri-state, INV-5).",
+        )
     return _verified_absent(
         spec,
         [
@@ -1339,7 +1651,8 @@ def _ext_be_guidance_available(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
                 "PSG store",
                 f"appl_no={ctx.appl_no}",
                 fetched_at=ctx.now,
-                snippet="No PSG in the local store keyed to this application number/ingredient.",
+                snippet=f"No PSG among {ctx.psg_store_count} stored document(s) keyed to "
+                f"this application number/ingredient.",
             )
         ],
         "Local PSG store queried; no product-specific guidance present.",
@@ -1418,17 +1731,28 @@ def _ext_patent_block(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
                 "Orange Book patent.txt",
                 token,
                 source_url=ORANGE_BOOK_SEARCH_URL,
-                fetched_at=ctx.ob_fetched_at,
+                fetched_at=ctx.ob_patents_fetched_at,
                 snippet=_patent_snippet(row),
             )
         )
-    note = (
-        "Orange Book patent rows surfaced as evidence; paragraph classification / priority "
-        "posture is regulatory judgment (INV-3)."
-        if ev
-        else "No Orange Book patent rows for this application; patent posture is analyst "
-        "judgment (INV-3)."
-    )
+    if ev:
+        note = (
+            "Orange Book patent rows surfaced as evidence; paragraph classification / "
+            "priority posture is regulatory judgment (INV-3)."
+        )
+    elif ctx.ob_patents_member_missing:
+        # The file was absent from the download — "no rows for this
+        # application" would be a queried-and-absent claim the data cannot
+        # support (INV-5).
+        note = (
+            "patent.txt unavailable in this Orange Book download — patent rows could not "
+            "be queried; patent posture is analyst judgment (INV-3)."
+        )
+    else:
+        note = (
+            "No Orange Book patent rows for this application; patent posture is analyst "
+            "judgment (INV-3)."
+        )
     return _analyst(spec, ev, note)
 
 
@@ -1460,17 +1784,25 @@ def _ext_exclusivity_block(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
                 "Orange Book exclusivity.txt",
                 token,
                 source_url=ORANGE_BOOK_SEARCH_URL,
-                fetched_at=ctx.ob_fetched_at,
+                fetched_at=ctx.ob_exclusivities_fetched_at,
                 snippet=f"code {code} (expires {row.get('exclusivity_date') or 'n/a'})",
             )
         )
-    note = (
-        "Orange Book exclusivity rows surfaced as evidence; First-to-Market / eFTF eligibility "
-        "is regulatory judgment (INV-3)."
-        if ev
-        else "No Orange Book exclusivity rows for this application; eligibility is analyst "
-        "judgment (INV-3)."
-    )
+    if ev:
+        note = (
+            "Orange Book exclusivity rows surfaced as evidence; First-to-Market / eFTF "
+            "eligibility is regulatory judgment (INV-3)."
+        )
+    elif ctx.ob_exclusivities_member_missing:
+        note = (
+            "exclusivity.txt unavailable in this Orange Book download — exclusivity rows "
+            "could not be queried; eligibility is analyst judgment (INV-3)."
+        )
+    else:
+        note = (
+            "No Orange Book exclusivity rows for this application; eligibility is analyst "
+            "judgment (INV-3)."
+        )
     return _analyst(spec, ev, note)
 
 
@@ -1510,26 +1842,38 @@ def _ext_combination_product(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
 
 
 def _ext_restricted_distribution(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
-    query = SourceQuery(
-        application_number=ctx.application_number_input,
-        active_ingredient=ctx.ingredient or None,
-        limit=10,
-    )
+    # Same identity terms (ingredient + brand) and the same single per-build
+    # REMS index fetch as the REMS Y/N cell — including its parse-sanity rule.
     ev: list[dict[str, Any]] = []
     note_tail = ""
-    try:
-        for rec in _rems_records(query):
-            ev.append(
-                _evidence(
-                    "REMS@FDA",
-                    rec.identifiers.get("application_number") or "rems index",
-                    source_url=rec.source_url or REMS_INDEX_URL,
-                    fetched_at=ctx.now,
-                    snippet=rec.title,
+    brand = _drugsfda_brand(ctx.drugsfda_records)
+    if not ctx.ingredient and not brand:
+        note_tail = (
+            " No ingredient or brand name resolved — the REMS index cannot be keyed by "
+            "application number alone."
+        )
+    else:
+        try:
+            records, total_rows = _rems_index_results(ctx)
+        except Exception as exc:
+            note_tail = f" REMS query failed ({type(exc).__name__})."
+        else:
+            if total_rows == 0:
+                note_tail = (
+                    " REMS index returned no parseable rows (the page shape may have "
+                    "changed); REMS evidence unavailable."
                 )
-            )
-    except Exception as exc:
-        note_tail = f" REMS query failed ({type(exc).__name__})."
+            else:
+                ev = [
+                    _evidence(
+                        "REMS@FDA",
+                        rec.identifiers.get("application_number") or "rems index",
+                        source_url=rec.source_url or REMS_INDEX_URL,
+                        fetched_at=ctx.now,
+                        snippet=rec.title,
+                    )
+                    for rec in records
+                ]
     note = (
         "Restricted-distribution / ETASU is an interpretation of the REMS program — analyst "
         "judgment (INV-3); REMS rows surfaced as evidence." + note_tail
@@ -1554,7 +1898,7 @@ def _ext_labeling_carveouts(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
                     "Orange Book patent.txt",
                     token,
                     source_url=ORANGE_BOOK_SEARCH_URL,
-                    fetched_at=ctx.ob_fetched_at,
+                    fetched_at=ctx.ob_patents_fetched_at,
                     snippet=f"patent {patent_no} use code {use_code}",
                 )
             )
