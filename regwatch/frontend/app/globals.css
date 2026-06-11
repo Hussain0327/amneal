@@ -580,6 +580,146 @@ button.chip:hover {
   background: var(--gold-wash);
 }
 
+/* ---------- White Paper (cell ledger) ----------
+   Three states, distinct at a glance: populated (solid gold dot, value set in
+   ink), verified absent (hollow ring, a "No" with its dashed annotation), and
+   analyst-input-required (oxblood ring + dashed oxblood panel — needs a human). */
+.wp-cell {
+  padding: 0.9rem 0;
+  border-top: 1px solid var(--edge);
+}
+.wp-cell:first-child {
+  border-top: 0;
+}
+.wp-cell__head {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+.wp-cell__label {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--ink);
+}
+/* value / note / evidence hang from the label, aligned past the status glyph */
+.wp-cell__value {
+  margin: 0.35rem 0 0 1.05rem;
+  font-size: 0.97rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+}
+.wp-cell__note {
+  margin: 0.3rem 0 0 1.05rem;
+  font-family: var(--font-display), serif;
+  font-style: italic;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+.wp-cell__evidence {
+  margin: 0.45rem 0 0 1.05rem;
+}
+
+/* status glyph — the at-a-glance tri-state */
+.wp-dot {
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+}
+.wp-dot--populated {
+  background: var(--gold-deep);
+}
+.wp-dot--verified_absent {
+  background: #fffdf8;
+  box-shadow: inset 0 0 0 1.5px var(--ink-soft);
+}
+.wp-dot--analyst_input_required {
+  background: var(--oxblood-wash);
+  box-shadow: inset 0 0 0 1.5px var(--oxblood);
+}
+
+/* mode badge: auto / evidence / manual */
+.wp-badge {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 0.12rem 0.45rem;
+  border-radius: 2px;
+  border: 1px solid var(--edge);
+  background: var(--paper-3);
+  color: var(--ink-soft);
+}
+.wp-badge--auto {
+  border-color: rgba(201, 138, 12, 0.55);
+  background: var(--gold-wash);
+  color: var(--gold-ink);
+}
+.wp-badge--evidence_only {
+  border-color: rgba(22, 33, 58, 0.3);
+  background: #eceef4;
+  color: var(--ink-2);
+}
+/* manual keeps the neutral base */
+
+/* annotation beside the rendered "No" of a verified-absent cell */
+.wp-absent {
+  margin-left: 0.55rem;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  border: 1px dashed var(--ink-soft);
+  border-radius: 2px;
+  padding: 0.08rem 0.4rem;
+  vertical-align: 0.08em;
+}
+
+/* analyst-input-required: the open, needs-a-human state */
+.wp-pending {
+  margin: 0.45rem 0 0 1.05rem;
+  border: 1px dashed rgba(122, 46, 46, 0.55);
+  border-radius: 2px;
+  background: var(--oxblood-wash);
+  padding: 0.5rem 0.75rem;
+}
+.wp-pending__tag {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--oxblood);
+}
+.wp-pending p {
+  margin: 0.25rem 0 0;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  color: #5a2222;
+}
+
+/* gold notice for resolution-spine warnings */
+.wp-warn {
+  margin-top: 1.1rem;
+  border: 1px solid rgba(201, 138, 12, 0.5);
+  border-radius: 2px;
+  background: var(--gold-wash);
+  padding: 0.7rem 0.9rem;
+}
+.wp-warn ul {
+  margin: 0.35rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.86rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
 /* ---------- Motion: staggered editorial reveal ---------- */
 @keyframes rise {
   from {

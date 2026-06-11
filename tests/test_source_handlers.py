@@ -110,9 +110,19 @@ def test_orange_book_handler_filters_by_application_number() -> None:
 
 
 def _orange_book_zip_bytes() -> bytes:
+    # The real EOBZIP always ships all three files; the fetcher requires them.
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as zf:
         zf.writestr("products.txt", ORANGE_PRODUCTS)
+        zf.writestr(
+            "patent.txt",
+            "Appl_Type~Appl_No~Product_No~Patent_No~Patent_Expire_Date_Text"
+            "~Drug_Substance_Flag~Drug_Product_Flag~Patent_Use_Code~Delist_Flag~Submission_Date\n",
+        )
+        zf.writestr(
+            "exclusivity.txt",
+            "Appl_Type~Appl_No~Product_No~Exclusivity_Code~Exclusivity_Date\n",
+        )
     return buffer.getvalue()
 
 

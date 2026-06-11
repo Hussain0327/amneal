@@ -22,6 +22,19 @@ encode this.
   RLD), build a fully cited dossier: PSG(s), extracted BE requirements,
   RLD label from openFDA, applicable guidance via retrieval, dissolution
   method link, and a requirements checklist scaffold.
+- **White Paper.** Given an RLD name + NDA/ANDA number, populate the CRA White
+  Paper template cell by cell, each cell carrying provenance (source + locator +
+  fetched_at). Three cell modes encode the compliance line: **auto** cells are
+  deterministic source joins (Orange Book product/RLD/RS/strengths, sponsor,
+  NDC packaging) — Yes/No auto cells (REMS, Drug Shortages) are **tri-state**, so
+  a failed/ambiguous query collapses to `analyst_input_required` rather than
+  emitting a false "No"; **evidence_only** cells carry verbatim cited SPL LOINC
+  sections and the scoped PSG Q&A for Requirements; **manual** cells (patents,
+  combination type, BE strategy, every Required-Studies decision) always render
+  `analyst_input_required` with the underlying evidence attached but **no
+  generated value** — the system surfaces and cites, it never renders the
+  regulatory judgment. Output is JSON or a filled Word document. See
+  [`docs/whitepaper_schema.md`](docs/whitepaper_schema.md).
 - **Ask.** Plain-language Q&A over the corpus. Inline `[short_name, p.N]`
   citations on every claim, exact-string refusal when the corpus does not
   contain the answer. **Conversational**: `/query` carries a chat session so
@@ -206,6 +219,10 @@ POST   /query        grounded, conversational Q&A (auth)
                      status ∈ answer | summary | clarify | scope_warning | refused
 POST   /sources/search structured FDA source lookup — {routed_sources[], records[]} (auth)
 POST   /assemble     cited dossier for {active_ingredient, dosage_form?, rld?} (auth)
+POST   /whitepaper   populate the CRA White Paper for {rld_name, application_number} (auth)
+                     out: {spine, sections[{title, cells[]}], warnings[], audit_id}
+                     422 {detail} when the spine cannot resolve or name≠number
+POST   /whitepaper/docx  same body → the filled Word document (.docx attachment) (auth)
 GET    /watch/latest matched changes since cursor (auth)
 GET    /products     watchlist (auth)
 POST   /products     add a manual product (INV-5 enforced) (auth)

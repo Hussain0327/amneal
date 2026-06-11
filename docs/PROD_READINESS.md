@@ -102,12 +102,19 @@ Each item notes where it lives in the tree so the work is actionable cold.
   (`recall@k≥0.90`, `citation_precision≥0.95`, `refusal_accuracy≥0.95`) hold.
 
 ### 9. Structured-source layer completion
-- **Where:** [`src/regwatch/sources/`](../src/regwatch/sources/) handlers.
-- **Gap:** Drugs@FDA, Orange Book, NDC, Shortages, REMS are handler-level
-  evidence today — no persisted source tables, freshness metadata, caching,
-  or cross-source answer synthesis.
-- **Done when:** sources persisted with freshness/last-fetched metadata,
-  cached, and synthesized into a multi-source answer graph.
+- **Where:** [`src/regwatch/sources/`](../src/regwatch/sources/) handlers,
+  [`src/regwatch/whitepaper/`](../src/regwatch/whitepaper/) populator.
+- **Gap (largely closed by Gate 2):** Orange Book now parses
+  patent/exclusivity from the same cached ZIP; DailyMed (SPL) is a new handler;
+  the White-Paper populator persists Orange Book product/patent/exclusivity and
+  the DailyMed SPL resolution with `last_fetched_at` freshness
+  (`ob_product`/`ob_patent`/`ob_exclusivity`/`spl_document`, migration 0005) and
+  synthesizes a multi-source, cited cell graph (Orange Book + Drugs@FDA + NDC +
+  DailyMed + Shortages + REMS + PSG). **Remaining:** apply the same
+  persist-and-cite pattern to the conversational/assemble paths, and a broader
+  cross-source answer graph beyond the white paper.
+- **Done when:** the persisted-source + freshness pattern is the default across
+  every read path, not only the white paper.
 
 ### 10. Secrets management
 - **Where:** `.env` on disk, [`config/settings.py`](../config/settings.py).

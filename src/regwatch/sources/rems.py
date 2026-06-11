@@ -71,6 +71,17 @@ def parse_rems_rows(html: str) -> list[dict[str, str]]:
     return rows
 
 
+def fetch_rems_index_html(client: httpx.Client | None = None) -> str:
+    """Fetch the REMS index page HTML once.
+
+    Callers that need a tri-state absence signal parse this with
+    :func:`parse_rems_rows` themselves: zero TOTAL parsed rows means the scrape
+    degraded (the parser deliberately invents nothing), which must never read
+    as "queried, genuinely absent" (INV-5).
+    """
+    return _fetch_rems_html(client)
+
+
 def _fetch_rems_html(client: httpx.Client | None) -> str:
     s = get_settings()
     with owned_client(

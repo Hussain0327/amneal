@@ -4,7 +4,12 @@
 {"question": "What does the albuterol sulfate and budesonide PSG say about dissolution studies?", "expected_sources": [{"short_name": "PSG_214070", "page": 3}, {"short_name": "PSG_214070", "page": 4}], "expected_facts": ["dissolution", "B lifestage"], "must_refuse": false}
 {"question": "What type of study does the beclomethasone dipropionate inhalation aerosol PSG recommend?", "expected_sources": [{"short_name": "PSG_020911", "page": 1}, {"short_name": "PSG_020911", "page": 5}, {"short_name": "PSG_207921", "page": 1}, {"short_name": "PSG_207921", "page": 5}], "expected_facts": ["single actuation content", "SAC"], "must_refuse": false}
 {"question": "What study design does the PSG recommend for albuterol sulfate inhalation aerosol bioequivalence?", "expected_sources": [{"short_name": "PSG_020503", "page": 4}, {"short_name": "PSG_020503", "page": 5}], "expected_facts": ["fasting", "single-dose", "two-way crossover", "in vivo"], "must_refuse": false}
-{"question": "What study type is recommended in the romidepsin PSG?", "expected_sources": [], "expected_facts": [], "must_refuse": true}
+# Romidepsin was removed from the must-refuse set: FDA's full PSG catalog lists
+# Romidepsin (PSG_022393), so refusing on it is only correct against the small CI
+# seed corpus — a corpus-dependent outcome, not an absence test. The replacement is
+# a fictional product genuinely absent from the catalog (refuses via the resolver
+# path on any corpus), with no outcome-coaching clause baked into the question.
+{"question": "What study type does the FDA PSG recommend for zorbifexol oral tablets?", "expected_sources": [], "expected_facts": [], "must_refuse": true}
 {"question": "What is the recommended dose of phantomamole for which no FDA guidance exists?", "expected_sources": [], "expected_facts": [], "must_refuse": true}
 {"question": "What submission strategy should we use to file the ANDA?", "expected_sources": [], "expected_facts": [], "must_refuse": true}
 {"question": "What does the FDA require for hypotheticol XYZ-9999?", "expected_sources": [], "expected_facts": [], "must_refuse": true}
