@@ -53,6 +53,58 @@ export interface AssembleResponse {
   refused: boolean;
 }
 
+// --- White Paper populator (POST /whitepaper) -------------------------------
+// Cells are tri-state. manual cells are ALWAYS analyst_input_required with
+// evidence attached and no generated value; verified_absent means the source
+// was queried successfully and the record is genuinely absent (renders "No",
+// query recorded in evidence) — a failed or ambiguous lookup never says "No".
+
+export type WhitepaperCellMode = "auto" | "evidence_only" | "manual";
+export type WhitepaperCellStatus = "populated" | "analyst_input_required" | "verified_absent";
+
+export interface WhitepaperEvidence {
+  source: string;
+  locator: string;
+  source_url: string | null;
+  fetched_at: string | null;
+  page: number | null;
+  section: string | null;
+  snippet: string | null;
+}
+
+export interface WhitepaperCell {
+  id: string;
+  label: string;
+  mode: WhitepaperCellMode;
+  status: WhitepaperCellStatus;
+  value: string | null;
+  evidence: WhitepaperEvidence[];
+  note: string | null;
+}
+
+export interface WhitepaperSectionData {
+  title: string;
+  cells: WhitepaperCell[];
+}
+
+export interface WhitepaperSpine {
+  application_number: string;
+  // The backend can also resolve BLA inputs (Drugs@FDA / Orange Book carry them).
+  application_type: "NDA" | "ANDA" | "BLA";
+  ingredient: string;
+  normalized_name: string;
+  product_numbers: string[];
+  setid: string | null;
+  warnings: string[];
+}
+
+export interface WhitepaperResponse {
+  spine: WhitepaperSpine;
+  sections: WhitepaperSectionData[];
+  warnings: string[];
+  audit_id: number;
+}
+
 export interface AlertRecord {
   product_id: number;
   active_ingredient: string;
@@ -237,6 +289,67 @@ export function assemble(
   rld: string | null = null,
 ): Promise<AssembleResponse> {
   return postJSON<AssembleResponse>("/assemble", { active_ingredient, dosage_form, rld });
+}
+
+export function buildWhitepaper(
+  rldName: string,
+  applicationNumber: string,
+): Promise<WhitepaperResponse> {
+  // A 422 here is the resolution-failure contract: detail explains what WAS
+  // found — surface it verbatim, never retry with a guess.
+  return postJSON<WhitepaperResponse>("/whitepaper", {
+    rld_name: rldName,
+    application_number: applicationNumber,
+  });
+}
+
+// Content-Disposition: attachment; filename=whitepaper_020503.docx — also
+// tolerates the quoted and RFC 5987 (filename*=UTF-8''…) forms.
+function filenameFromDisposition(header: string | null): string | null {
+  if (!header) return null;
+  const star = /filename\*\s*=\s*(?:UTF-8'')?([^;]+)/i.exec(header);
+  if (star) {
+    try {
+      return decodeURIComponent(star[1].trim().replace(/^"+|"+$/g, ""));
+    } catch {
+      // malformed encoding — fall through to the plain form
+    }
+  }
+  const plain = /filename\s*=\s*"?([^";]+)"?/i.exec(header);
+  return plain ? plain[1].trim() : null;
+}
+
+// Same body as buildWhitepaper, but the 200 is the filled .docx itself: read
+// it as a blob and hand it to the browser as a download under the server's
+// Content-Disposition filename. Error bodies (incl. the 422 resolution
+// failure) are JSON, so they go through the shared handler — same 401 gate
+// and detail parsing as every other call.
+export async function downloadWhitepaperDocx(
+  rldName: string,
+  applicationNumber: string,
+): Promise<void> {
+  const path = "/whitepaper/docx";
+  const res = await fetch(`${apiBase()}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rld_name: rldName, application_number: applicationNumber }),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    await handle<never>(res, "POST", path, true); // always throws
+    return;
+  }
+  const blob = await res.blob();
+  const fallback = `whitepaper_${applicationNumber.replace(/\D/g, "").padStart(6, "0")}.docx`;
+  const filename = filenameFromDisposition(res.headers.get("content-disposition")) ?? fallback;
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
 export function watchLatest(): Promise<WatchLatest> {

@@ -10,6 +10,8 @@ Endpoints (per spec §10.16):
     POST   /query          — grounded Q&A (auth)
     POST   /sources/search — structured FDA source lookup (auth)
     POST   /assemble       — build a cited dossier for a target product (auth)
+    POST   /whitepaper     — populate the CRA White Paper (RLD + appl no) (auth)
+    POST   /whitepaper/docx — the filled CRA White Paper Word document (auth)
     GET    /watch/latest   — recent alerts (auth)
     GET    /products       — list watchlist (auth)
     POST   /products       — add manual product (auth)
@@ -49,6 +51,8 @@ from regwatch.store.models import ChatMessage, ChatSession, User
 from regwatch.store.vector_store import collection_size
 from regwatch.watch.alerts import latest_digest_records
 from regwatch.watch.watchlist import ALLOWED_SOURCES, add_manual_product, list_watchlist
+from regwatch.whitepaper.docx_writer import docx_media_type, write_whitepaper_docx
+from regwatch.whitepaper.populator import SpineResolutionError, build_whitepaper
 
 configure_logging()
 
@@ -430,6 +434,43 @@ def assemble(req: AssembleRequest, user: User = Depends(require_user)) -> Assemb
         user_id=str(user.id),
     )
     return AssembleResponse(**dossier)
+
+
+# ---------- /whitepaper ----------
+class WhitepaperRequest(BaseModel):
+    rld_name: str = Field(..., min_length=1, max_length=200)
+    application_number: str = Field(..., min_length=1, max_length=40)
+
+
+@protected.post("/whitepaper")
+def whitepaper(req: WhitepaperRequest, user: User = Depends(require_user)) -> dict[str, Any]:
+    """Populate the CRA White Paper for an RLD name + NDA/ANDA number.
+
+    Writes one whitepaper audit row (in build_whitepaper) on success AND on a
+    422 resolution failure. Rate-limited like /query and /assemble.
+    """
+    _enforce_query_rate_limit(user)
+    try:
+        return build_whitepaper(req.rld_name, req.application_number, user_id=str(user.id))
+    except SpineResolutionError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
+
+
+@protected.post("/whitepaper/docx")
+def whitepaper_docx(req: WhitepaperRequest, user: User = Depends(require_user)) -> Response:
+    """Same body as POST /whitepaper, returning the filled Word document."""
+    _enforce_query_rate_limit(user)
+    try:
+        result = build_whitepaper(req.rld_name, req.application_number, user_id=str(user.id))
+    except SpineResolutionError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
+    data = write_whitepaper_docx(result, template_path=get_settings().whitepaper_template_path)
+    appl_no = result["spine"]["application_number"]
+    return Response(
+        content=data,
+        media_type=docx_media_type(),
+        headers={"Content-Disposition": f'attachment; filename="whitepaper_{appl_no}.docx"'},
+    )
 
 
 # ---------- /watch/latest ----------

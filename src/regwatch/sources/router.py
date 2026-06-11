@@ -8,6 +8,7 @@ from collections.abc import Iterable
 import httpx
 
 from regwatch.common.logging import get_logger
+from regwatch.sources.dailymed import DailyMedHandler
 from regwatch.sources.drugsfda import DrugsFdaHandler
 from regwatch.sources.ndc import NdcHandler
 from regwatch.sources.orange_book import OrangeBookHandler
@@ -19,6 +20,7 @@ from regwatch.sources.types import SourceHandler, SourceKind, SourceQuery, Sourc
 NDC_PATTERN = re.compile(r"\b\d{4,5}-\d{3,4}(?:-\d{1,2})?\b")
 APP_PATTERN = re.compile(r"\b(?:NDA|ANDA|BLA)?\s*\d{5,6}\b", re.IGNORECASE)
 RS_PATTERN = re.compile(r"\brs\b", re.IGNORECASE)
+SPL_PATTERN = re.compile(r"\bspl\b", re.IGNORECASE)
 log = get_logger(__name__)
 
 
@@ -49,6 +51,10 @@ def route_sources(
         routed.append(SourceKind.SHORTAGE)
     if "rems" in text or "risk evaluation" in text or "mitigation strategy" in text:
         routed.append(SourceKind.REMS)
+    # DailyMed routes only on explicit labeling cues so existing defaults
+    # (the fallback triple below) are untouched.
+    if "dailymed" in text or "structured product label" in text or SPL_PATTERN.search(text):
+        routed.append(SourceKind.DAILYMED)
     if (
         "orange book" in text
         or "therapeutic equivalence" in text
@@ -111,6 +117,7 @@ _HANDLERS: dict[SourceKind, SourceHandler] = {
     SourceKind.SHORTAGE: ShortagesHandler(),
     SourceKind.NDC: NdcHandler(),
     SourceKind.REMS: RemsHandler(),
+    SourceKind.DAILYMED: DailyMedHandler(),
 }
 
 

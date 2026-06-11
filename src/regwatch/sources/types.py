@@ -20,6 +20,7 @@ class SourceKind(StrEnum):
     SHORTAGE = "shortage"
     NDC = "ndc"
     REMS = "rems"
+    DAILYMED = "dailymed"
 
 
 @dataclass(frozen=True)

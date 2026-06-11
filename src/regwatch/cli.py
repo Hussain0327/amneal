@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import typer
 from config.settings import get_settings
 from rich import print as rprint
+from rich.console import Console
 
 from regwatch.common.logging import configure_logging
 from regwatch.store.db import init_db
@@ -244,6 +247,66 @@ def cmd_ingest_all(
         }
     )
     raise typer.Exit(code=0 if stats.errors == 0 else 2)
+
+
+@app.command("whitepaper")
+def cmd_whitepaper(
+    appl: str = typer.Option(..., "--appl", help="NDA/ANDA number, e.g. 020503 or 'NDA 020503'."),
+    rld: str = typer.Option(..., "--rld", help="RLD name (proprietary or active ingredient)."),
+    json_path: str = typer.Option("", "--json", help="Write the full result JSON to this path."),
+    docx_path: str = typer.Option(
+        "", "--docx", help="Write the filled Word document to this path."
+    ),
+) -> None:
+    """Populate the CRA White Paper for an RLD + application number (cited cells)."""
+    import json as _json
+
+    from rich.table import Table
+
+    from regwatch.whitepaper.docx_writer import write_whitepaper_docx
+    from regwatch.whitepaper.populator import SpineResolutionError, build_whitepaper
+
+    init_db()
+    try:
+        result = build_whitepaper(rld, appl)
+    except SpineResolutionError as exc:
+        rprint(f"[red]could not resolve spine[/red] {exc.detail}")
+        raise typer.Exit(code=2) from exc
+
+    spine = result["spine"]
+    rprint(
+        f"[cyan]{spine['application_type']} {spine['application_number']}[/cyan] "
+        f"{spine['ingredient'] or '(unknown ingredient)'} "
+        f"(setid={spine['setid'] or 'n/a'})"
+    )
+    for warning in result["warnings"]:
+        rprint(f"[yellow]warning[/yellow] {warning}")
+
+    table = Table(title="White paper — per-section summary")
+    table.add_column("Section")
+    table.add_column("cells", justify="right")
+    table.add_column("populated", justify="right")
+    table.add_column("analyst", justify="right")
+    table.add_column("verified-absent", justify="right")
+    for section in result["sections"]:
+        cells = section["cells"]
+        pop = sum(1 for c in cells if c["status"] == "populated")
+        ana = sum(1 for c in cells if c["status"] == "analyst_input_required")
+        absent = sum(1 for c in cells if c["status"] == "verified_absent")
+        table.add_row(section["title"], str(len(cells)), str(pop), str(ana), str(absent))
+    Console().print(table)
+
+    if json_path:
+        Path(json_path).write_text(_json.dumps(result, indent=2), encoding="utf-8")
+        rprint(f"[green]ok[/green] wrote JSON to {json_path}")
+    if docx_path:
+        data = write_whitepaper_docx(result, template_path=s_template_path())
+        Path(docx_path).write_bytes(data)
+        rprint(f"[green]ok[/green] wrote DOCX to {docx_path}")
+
+
+def s_template_path() -> Path:
+    return get_settings().whitepaper_template_path
 
 
 @app.command("watch")

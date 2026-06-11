@@ -1,0 +1,3 @@
+Appl_Type~Appl_No~Product_No~Exclusivity_Code~Exclusivity_Date
+N~020503~001~NCE~Oct 29, 2009
+N~020911~001~M-127~Feb 1, 2027

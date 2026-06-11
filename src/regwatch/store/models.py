@@ -152,6 +152,82 @@ class ChatSession(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
 
 
+class ObProduct(SQLModel, table=True):
+    """A persisted Orange Book ``Products.txt`` row (White-Paper provenance, INV-5).
+
+    The populator writes-through on fetch so a cell can cite the durable row and
+    carry its ``last_fetched_at`` as source freshness. Raw rows only — paragraph
+    classification / eligibility are never stored (INV-3).
+    """
+
+    __tablename__ = "ob_product"
+
+    id: int | None = Field(default=None, primary_key=True)
+    appl_no: str = Field(index=True)
+    product_no: str = Field(index=True)
+    appl_type: str | None = None
+    ingredient: str | None = None
+    normalized_name: str | None = Field(default=None, index=True)
+    trade_name: str | None = None
+    dosage_form_route: str | None = None
+    strength: str | None = None
+    rld: str | None = None
+    rs: str | None = None
+    te_code: str | None = None
+    approval_date: str | None = None
+    applicant: str | None = None
+    applicant_full_name: str | None = None
+    source_url: str | None = None
+    last_fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class ObPatent(SQLModel, table=True):
+    """A persisted Orange Book ``patent.txt`` row. Raw rows only (INV-3)."""
+
+    __tablename__ = "ob_patent"
+
+    id: int | None = Field(default=None, primary_key=True)
+    appl_no: str = Field(index=True)
+    product_no: str | None = None
+    patent_no: str = Field(index=True)
+    patent_expire_date: str | None = None
+    drug_substance_flag: str | None = None
+    drug_product_flag: str | None = None
+    patent_use_code: str | None = None
+    delist_flag: str | None = None
+    submission_date: str | None = None
+    source_url: str | None = None
+    last_fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class ObExclusivity(SQLModel, table=True):
+    """A persisted Orange Book ``exclusivity.txt`` row. Raw rows only (INV-3)."""
+
+    __tablename__ = "ob_exclusivity"
+
+    id: int | None = Field(default=None, primary_key=True)
+    appl_no: str = Field(index=True)
+    product_no: str | None = None
+    exclusivity_code: str = Field(index=True)
+    exclusivity_date: str | None = None
+    source_url: str | None = None
+    last_fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class SplDocument(SQLModel, table=True):
+    """A persisted DailyMed SPL document resolution (White-Paper provenance)."""
+
+    __tablename__ = "spl_document"
+
+    id: int | None = Field(default=None, primary_key=True)
+    setid: str = Field(index=True, unique=True)
+    appl_no: str | None = Field(default=None, index=True)
+    title: str | None = None
+    published: str | None = None
+    source_url: str | None = None
+    last_fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class ChatMessage(SQLModel, table=True):
     """One user or assistant turn inside a chat session."""
 

@@ -98,6 +98,12 @@ class Settings(BaseSettings):
     # re-parsing on every query. Set to 0 to disable caching.
     orange_book_cache_ttl_s: float = 86_400.0
 
+    # ---------- White Paper populator ----------
+    # The Word template the CRA White Paper populator fills (python-docx). It is
+    # gitignored but present on a real deployment; when absent (CI), the docx
+    # writer generates a structurally-equivalent document from scratch.
+    whitepaper_template_path: Path = Path("./CRA White Paper Template May 2026 - Raja.docx")
+
     # ---------- API ----------
     api_host: str = "127.0.0.1"
     api_port: int = 8000

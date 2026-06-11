@@ -279,3 +279,24 @@ def test_eval_gate_clarifies_on_multiform_drug(monkeypatch: pytest.MonkeyPatch) 
     # correct iff the system clarified rather than blending the two forms.
     assert sc.clarified_correctly == 1, sc.details
     assert sc.refusal_accuracy >= 0.95, sc.details
+
+
+# White-Paper deterministic gate. A faithful STRUCTURED stub stands in for the
+# live FDA sources (Orange Book / Drugs@FDA / NDC / DailyMed / Shortages / REMS)
+# and the scoped PSG ask(); the populator's real cell logic runs against it and
+# is graded by the real eval.whitepaper_metrics at the SAME thresholds. No
+# network, no API key — so this gate fires in CI.
+def test_eval_gate_whitepaper_cells(monkeypatch: pytest.MonkeyPatch) -> None:
+    from regwatch.eval.whitepaper_metrics import evaluate_whitepaper, load_whitepaper_gold
+    from regwatch.whitepaper.populator import build_whitepaper
+    from tests._whitepaper_stub import APPL_NO, RLD_NAME, install_fake_sources
+
+    install_fake_sources(monkeypatch)
+    result = build_whitepaper(RLD_NAME, APPL_NO)
+    items = load_whitepaper_gold()
+    assert len(items) >= 10, "expected at least 10 white-paper gold items"
+
+    sc = evaluate_whitepaper(result, items)
+    assert sc.recall_at_k >= 0.90, sc.details
+    assert sc.citation_precision >= 0.95, sc.details
+    assert sc.refusal_accuracy >= 0.95, sc.details

@@ -24,7 +24,16 @@ _BASELINE_TABLES = frozenset(
     }
 )
 _CURRENT_TABLES = _BASELINE_TABLES | frozenset(
-    {"chat_session", "chat_message", "user", "auth_session"}
+    {
+        "chat_session",
+        "chat_message",
+        "user",
+        "auth_session",
+        "ob_product",
+        "ob_patent",
+        "ob_exclusivity",
+        "spl_document",
+    }
 )
 _BASELINE_REVISION = "0001_initial_schema"
 

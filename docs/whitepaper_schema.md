@@ -62,8 +62,8 @@ violates INV-5 (verified provenance).
 | If PIV — Eligible for eFTF? Y/N (PIV website review) | FDA Paragraph IV list + OB **`exclusivity.txt`** | PIV certifications page | appl_no | manual |
 | Drug Shortages: On Shortage List? Y/N | Drug Shortages (DSS) | `shortages.json` `openfda.application_number:"NDA{appl}"` → `status` | appl_no | **auto ⚠** |
 | Combination Product (Type 1–9) | derived — **NOT OB `type`** | Drugs@FDA products + 21 CFR 3.2(e) | appl_no | manual |
-| Reference Listed Drug (RLD) | Orange Book | row where `rld` = "RLD" | appl_no | auto |
-| Reference Standard (RS) | Orange Book | row where `rs` = "RS" | appl_no/product_no | auto |
+| Reference Listed Drug (RLD) | Orange Book | row where the `rld` flag = "Yes" (the live products.txt carries Yes/No) | appl_no | auto |
+| Reference Standard (RS) | Orange Book | row where the `rs` flag = "Yes" (the live products.txt carries Yes/No) | appl_no/product_no | auto |
 
 ## Section 2 — Reference Listed Drug Product
 

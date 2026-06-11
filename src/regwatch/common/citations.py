@@ -14,7 +14,8 @@ citation precision on the eval. Every consumer must go through this module.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 
 # A single source token inside a bracket: short_name + page, e.g. "PSG_020503, p.4".
 # Keep the token source-shaped so prose like "[Table 1, p.3]" is not treated as
@@ -74,3 +75,103 @@ def filter_citations(text: str, allowed: set[tuple[str, int]]) -> str:
         return "[" + "; ".join(f"{s}, p.{p}" for (s, p) in kept) + "]"
 
     return _BRACKET.sub(repl, text)
+
+
+# ---------------------------------------------------------------------------
+# Structured source-token grammar (INV-8).
+#
+# A White-Paper cell that cites a structured FDA row uses one of four token
+# shapes instead of the ``[short_name, p.N]`` PSG/SPL-page form:
+#
+#   SPL_{setid}#{loinc}      a DailyMed SPL LOINC-coded section
+#   OB_{applno}/{productno}  an Orange Book Products.txt product row
+#   OBPAT_{patentno}         an Orange Book patent.txt row
+#   OBEXCL_{code}            an Orange Book exclusivity.txt row
+#
+# ``validate_structured_citations`` is the INV-8 guard: a token is honored ONLY
+# when it both parses AND is backed by a row the populator actually fetched. Any
+# token outside that set is dropped, and its cell collapses to
+# ``analyst_input_required`` — the structured analogue of the PSG-citation
+# stripping above. The grammar is deliberately distinct from ``_PAIR`` so the
+# two citation worlds never collide.
+# ---------------------------------------------------------------------------
+
+_SPL_TOKEN = re.compile(r"^SPL_(?P<setid>[A-Za-z0-9._-]+)#(?P<loinc>[0-9]+-[0-9])$")
+_OB_TOKEN = re.compile(r"^OB_(?P<applno>\d{6})/(?P<productno>\d{1,4})$")
+_OBPAT_TOKEN = re.compile(r"^OBPAT_(?P<patentno>[A-Za-z0-9,*-]+)$")
+_OBEXCL_TOKEN = re.compile(r"^OBEXCL_(?P<code>[A-Za-z0-9*-]+)$")
+
+
+@dataclass(frozen=True)
+class StructuredCitation:
+    """A parsed structured source token: ``kind`` plus its identifying parts."""
+
+    kind: str  # "spl" | "ob" | "obpat" | "obexcl"
+    parts: tuple[str, ...]
+    token: str
+
+
+def spl_token(setid: str, loinc: str) -> str:
+    return f"SPL_{setid}#{loinc}"
+
+
+def ob_token(application_number: str, product_number: str) -> str:
+    return f"OB_{application_number}/{product_number}"
+
+
+def obpat_token(patent_no: str) -> str:
+    return f"OBPAT_{patent_no}"
+
+
+def obexcl_token(exclusivity_code: str) -> str:
+    return f"OBEXCL_{exclusivity_code}"
+
+
+def parse_structured_token(token: str) -> StructuredCitation | None:
+    """Parse one structured token, or return ``None`` if it is not one.
+
+    Plain prose and ``[short_name, p.N]`` locators return ``None`` — they are
+    handled by the PSG-page grammar above, not by the structured validator.
+    """
+    raw = token.strip()
+    if (m := _SPL_TOKEN.match(raw)) is not None:
+        return StructuredCitation("spl", (m.group("setid"), m.group("loinc")), raw)
+    if (m := _OB_TOKEN.match(raw)) is not None:
+        return StructuredCitation("ob", (m.group("applno"), m.group("productno")), raw)
+    if (m := _OBPAT_TOKEN.match(raw)) is not None:
+        return StructuredCitation("obpat", (m.group("patentno"),), raw)
+    if (m := _OBEXCL_TOKEN.match(raw)) is not None:
+        return StructuredCitation("obexcl", (m.group("code"),), raw)
+    return None
+
+
+def is_structured_token(token: str) -> bool:
+    """True if ``token`` is a structured source token (not a PSG-page locator)."""
+    return parse_structured_token(token) is not None
+
+
+def validate_structured_citations(
+    tokens: Sequence[str],
+    known: set[str],
+) -> tuple[list[str], list[str]]:
+    """Split ``tokens`` into (valid, invalid) against the fetched-row set.
+
+    A token is valid iff it parses as a structured token AND is present in
+    ``known`` (the set of tokens for rows actually fetched this run). Anything
+    else — malformed, or fabricated/unfetched — is invalid. Order preserved;
+    duplicates de-duped within each bucket so a caller can collapse cleanly.
+    """
+    valid: list[str] = []
+    invalid: list[str] = []
+    seen_valid: set[str] = set()
+    seen_invalid: set[str] = set()
+    for token in tokens:
+        raw = token.strip()
+        if parse_structured_token(raw) is not None and raw in known:
+            if raw not in seen_valid:
+                seen_valid.add(raw)
+                valid.append(raw)
+        elif raw not in seen_invalid:
+            seen_invalid.add(raw)
+            invalid.append(raw)
+    return valid, invalid

@@ -101,7 +101,7 @@ def fetch_openfda_results(
         for search in searches:
             if len(out) >= limit:
                 break
-            resp = _openfda_get_with_retry(active_client, endpoint, openfda_params(search, limit))
+            resp = get_with_retry(active_client, endpoint, openfda_params(search, limit))
             if resp.status_code == 404:
                 continue
             resp.raise_for_status()
@@ -116,13 +116,14 @@ def fetch_openfda_results(
     return out
 
 
-def _openfda_get_with_retry(
+def get_with_retry(
     client: httpx.Client,
     endpoint: str,
-    params: dict[str, Any],
+    params: dict[str, Any] | None = None,
     *,
     attempts: int = 3,
 ) -> httpx.Response:
+    """GET with exponential backoff on 429/5xx (polite-crawler house rule)."""
     for attempt in range(attempts):
         resp = client.get(endpoint, params=params)
         if resp.status_code != 429 and resp.status_code < 500:

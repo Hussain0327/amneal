@@ -16,6 +16,11 @@ data/
 *.log
 .DS_Store
 
+# local tool state
+supabase/.branches/
+supabase/.temp/
+.claude/settings.local.json
+
 # frontend build/install artifacts
 node_modules/
 .next/

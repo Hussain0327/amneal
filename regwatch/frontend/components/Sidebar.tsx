@@ -13,6 +13,7 @@ const NAV = [
   { href: "/", no: "01", label: "Ask", note: "Cited Q&A" },
   { href: "/assemble", no: "02", label: "Assemble", note: "Build a dossier" },
   { href: "/watch", no: "03", label: "Watch", note: "Change feed" },
+  { href: "/whitepaper", no: "04", label: "White Paper", note: "Populate & cite" },
 ];
 
 // Compact relative time for the history list. Timestamps may arrive without an

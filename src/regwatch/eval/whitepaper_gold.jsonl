@@ -1,0 +1,21 @@
+# White-Paper gold set — per-cell expectations graded by eval.whitepaper_metrics.
+# Weighted to auto/evidence cells the structured sources can score, plus manual
+# cells whose correct outcome is analyst_input_required (graded like must_refuse).
+# The deterministic offline gate (tests/test_eval_gate.py) builds a white paper
+# from a faithful structured stub and asserts these hold at the shared thresholds.
+{"cell_id": "product_name", "expect_status": "populated", "expect_value_contains": "albuterol", "expect_evidence_source": "Orange Book"}
+{"cell_id": "strengths", "expect_status": "populated", "expect_value_contains": "0.09", "expect_evidence_source": "Orange Book"}
+{"cell_id": "rld", "expect_status": "populated", "expect_value_contains": "Yes", "expect_evidence_source": "Orange Book"}
+{"cell_id": "rs", "expect_status": "populated", "expect_value_contains": "Yes"}
+{"cell_id": "nda_holder", "expect_status": "populated", "expect_value_contains": "MERCK", "expect_evidence_source": "Drugs@FDA"}
+{"cell_id": "packaging", "expect_status": "populated", "expect_value_contains": "0085-1132-01", "expect_evidence_source": "NDC"}
+{"cell_id": "indication", "expect_status": "populated", "expect_value_contains": "bronchospasm", "expect_evidence_source": "DailyMed SPL"}
+{"cell_id": "epc", "expect_status": "populated", "expect_value_contains": "EPC", "expect_evidence_source": "openFDA NDC"}
+{"cell_id": "requirements", "expect_status": "populated", "expect_value_contains": "fasting", "expect_evidence_source": "PSG"}
+{"cell_id": "be_guidance_available", "expect_status": "populated", "expect_value_contains": "Yes", "expect_evidence_source": "PSG store"}
+{"cell_id": "drug_shortage", "expect_status": "verified_absent", "expect_evidence_source": "Drug Shortages"}
+{"cell_id": "rems", "expect_status": "verified_absent", "expect_evidence_source": "REMS"}
+{"cell_id": "dea_classification", "expect_status": "analyst_input_required"}
+{"cell_id": "rd_center", "expect_status": "analyst_input_required"}
+{"cell_id": "patents", "expect_status": "analyst_input_required", "expect_evidence_source": "Orange Book patent"}
+{"cell_id": "proposed_strategy", "expect_status": "analyst_input_required"}
