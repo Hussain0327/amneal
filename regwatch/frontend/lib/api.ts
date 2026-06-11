@@ -319,20 +319,20 @@ function filenameFromDisposition(header: string | null): string | null {
   return plain ? plain[1].trim() : null;
 }
 
-// Same body as buildWhitepaper, but the 200 is the filled .docx itself: read
-// it as a blob and hand it to the browser as a download under the server's
-// Content-Disposition filename. Error bodies (incl. the 422 resolution
-// failure) are JSON, so they go through the shared handler — same 401 gate
-// and detail parsing as every other call.
-export async function downloadWhitepaperDocx(
-  rldName: string,
-  applicationNumber: string,
-): Promise<void> {
+// The body is {result: <the exact JSON object buildWhitepaper returned>}: the
+// server verifies result.audit_id is the caller's own white-paper run and
+// renders the .docx FROM that payload — no re-populate, so the document can
+// never silently differ from what the analyst reviewed. The 200 is the .docx
+// itself: read it as a blob and hand it to the browser as a download under
+// the server's Content-Disposition filename. Error bodies are JSON, so they
+// go through the shared handler — same 401 gate and detail parsing as every
+// other call.
+export async function downloadWhitepaperDocx(result: WhitepaperResponse): Promise<void> {
   const path = "/whitepaper/docx";
   const res = await fetch(`${apiBase()}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ rld_name: rldName, application_number: applicationNumber }),
+    body: JSON.stringify({ result }),
     credentials: "include",
   });
   if (!res.ok) {
@@ -340,7 +340,7 @@ export async function downloadWhitepaperDocx(
     return;
   }
   const blob = await res.blob();
-  const fallback = `whitepaper_${applicationNumber.replace(/\D/g, "").padStart(6, "0")}.docx`;
+  const fallback = `whitepaper_${result.spine.application_number}.docx`;
   const filename = filenameFromDisposition(res.headers.get("content-disposition")) ?? fallback;
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -349,7 +349,9 @@ export async function downloadWhitepaperDocx(
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  URL.revokeObjectURL(url);
+  // Revoking in the same tick aborts the download in WebKit — defer until the
+  // browser has had a chance to start streaming the blob.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export function watchLatest(): Promise<WatchLatest> {

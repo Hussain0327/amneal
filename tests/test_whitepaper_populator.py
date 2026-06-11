@@ -7,13 +7,20 @@ from datetime import UTC, datetime
 import pytest
 
 from regwatch.sources import dailymed, orange_book
-from regwatch.sources.dailymed import SplXmlDocument
+from regwatch.sources.dailymed import SetidResolution, SplXmlDocument
 from regwatch.sources.orange_book import OrangeBookRows
+from regwatch.sources.types import SourceKind, SourceQuery, SourceRecord
+from regwatch.store.db import session_scope
+from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
 from regwatch.whitepaper import populator
 from regwatch.whitepaper.populator import (
     SpineResolutionError,
     _cell,
     _enforce_structured_citations,
+    _form_compatible,
+    _name_matches,
+    _populated,
+    _rems_record_matches_application,
     build_whitepaper,
 )
 from tests._whitepaper_stub import APPL_NO, RLD_NAME, install_fake_sources
@@ -21,6 +28,46 @@ from tests._whitepaper_stub import APPL_NO, RLD_NAME, install_fake_sources
 
 def _cells(result: dict) -> dict[str, dict]:
     return {c["id"]: c for s in result["sections"] for c in s["cells"]}
+
+
+def _seed_psg_doc(**overrides: object) -> int:
+    """Seed one PSG document directly (the stub's seeder is fixed-shape)."""
+    defaults: dict[str, object] = {
+        "active_ingredient": "Ibuprofen",
+        "normalized_name": "ibuprofen",
+        "dosage_form": "Tablet",
+        "route": "Oral",
+        "appl_no": None,
+        "rld_or_rs_number": None,
+        "psg_type": "final",
+        "recommended_date": "2021-01-01",
+        "source_url": "http://example/PSG_other.pdf",
+        "content_hash": "hash-other",
+    }
+    defaults.update(overrides)
+    with session_scope() as s:
+        doc = PsgDocument(**defaults)  # type: ignore[arg-type]
+        s.add(doc)
+        s.flush()
+        assert doc.id is not None
+        return doc.id
+
+
+def _seed_be_requirement(doc_id: int, *, dissolution: str) -> None:
+    with session_scope() as s:
+        version = PsgVersion(psg_document_id=doc_id, content_hash=f"hash-{doc_id}")
+        s.add(version)
+        s.flush()
+        assert version.id is not None
+        s.add(
+            BeRequirement(
+                psg_document_id=doc_id,
+                version_id=version.id,
+                dissolution=dissolution,
+                fields_json={"dissolution": dissolution},
+                citations_json={"dissolution": {"page": 9}},
+            )
+        )
 
 
 # --------------------------- spine resolution ---------------------------
@@ -326,10 +373,26 @@ def test_be_guidance_available_yes(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cell["value"] == "Yes"
 
 
-def test_be_guidance_absent_when_no_psg(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_be_guidance_empty_store_collapses_to_analyst(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A2: an EMPTY/unseeded store proves nothing about FDA's PSG catalog — a
+    # "No" from it would be an unverified negative (tri-state, INV-5).
     install_fake_sources(monkeypatch, seed_psg=False)
     cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["be_guidance_available"]
+    assert cell["status"] == "analyst_input_required"
+    assert cell["value"] is None
+    assert "empty/unseeded" in (cell["note"] or "")
+
+
+def test_be_guidance_absent_when_seeded_store_has_no_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # "No" requires a corpus to be absent FROM: a seeded store with only an
+    # unrelated product's PSG verifies absence for this product.
+    install_fake_sources(monkeypatch, seed_psg=False)
+    _seed_psg_doc()  # ibuprofen tablet — unrelated to albuterol
+    cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["be_guidance_available"]
     assert cell["status"] == "verified_absent"
+    assert cell["value"] == "No"
 
 
 def test_be_guidance_store_failure_collapses_to_analyst(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -559,3 +622,460 @@ def test_enforce_structured_citation_keeps_backed() -> None:
     )
     kept = _enforce_structured_citations(cell, known={"OB_020503/001"})
     assert kept["status"] == "populated"
+
+
+# --------------------------- A1: REMS identity confirmation ---------------------------
+def _rems_record(
+    identifiers: dict[str, str] | None = None, raw: dict[str, str] | None = None
+) -> SourceRecord:
+    return SourceRecord(
+        source=SourceKind.REMS,
+        title="REMS: SOMEDRUG",
+        source_url="https://www.accessdata.fda.gov/scripts/cder/rems/index.cfm",
+        identifiers=identifiers or {},
+        fields={},
+        raw=raw or {},
+    )
+
+
+def test_rems_match_rejects_other_type_sharing_digits() -> None:
+    # endswith(bare digits) was prefix-blind: ANDA020503 confirmed NDA020503.
+    rec = _rems_record(identifiers={"application_number": "ANDA020503"})
+    assert not _rems_record_matches_application(rec, "NDA020503")
+    assert _rems_record_matches_application(rec, "ANDA020503")
+
+
+def test_rems_match_ignores_digit_collisions_in_unrelated_raw_values() -> None:
+    # The unanchored substring scan matched digits inside URLs/dates/free text.
+    rec = _rems_record(
+        raw={
+            "info_url": "https://accessdata.fda.gov/rems?program=1020503",
+            "updated": "2020-05-03",
+            "drug_name": "SOMEDRUG",
+        }
+    )
+    assert not _rems_record_matches_application(rec, "NDA020503")
+
+
+def test_rems_match_accepts_typed_free_text_number() -> None:
+    rec = _rems_record(raw={"drug_name": "SOMEDRUG", "application_number": "NDA #020503"})
+    assert _rems_record_matches_application(rec, "NDA020503")
+
+
+def test_rems_match_bare_digit_column_never_confirms() -> None:
+    # A bare-digit value cannot name an application TYPE; it stays ambiguous.
+    rec = _rems_record(raw={"application_number": "020503"})
+    assert not _rems_record_matches_application(rec, "NDA020503")
+
+
+def test_rems_other_type_record_collapses_to_analyst(monkeypatch: pytest.MonkeyPatch) -> None:
+    # End to end: a digit-colliding other-type REMS row must never render "Yes".
+    install_fake_sources(monkeypatch)
+
+    def other_type_rems(query: SourceQuery) -> tuple[list[SourceRecord], int]:
+        return [_rems_record(identifiers={"application_number": f"ANDA{APPL_NO}"})], 47
+
+    monkeypatch.setattr(populator, "_rems_search", other_type_rems)
+    cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["rems"]
+    assert cell["status"] == "analyst_input_required"
+    assert cell["value"] is None
+    assert cell["evidence"]  # candidates ride along for the analyst
+
+
+# --------------------------- A3: PSG dosage-form scoping ---------------------------
+def test_be_guidance_never_yes_from_another_forms_psg(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A name-only PSG match for a DIFFERENT dosage form must not populate "Yes"
+    # citing the other form's guidance — and must not read as "No" either.
+    install_fake_sources(monkeypatch, seed_psg=False)
+    _seed_psg_doc(
+        active_ingredient="Albuterol Sulfate",
+        normalized_name="albuterol sulfate",
+        dosage_form="Tablet, Extended Release",
+        route="Oral",
+        content_hash="hash-tablet",
+    )
+    cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["be_guidance_available"]
+    assert cell["status"] == "analyst_input_required"
+    assert cell["value"] is None
+    assert "Tablet, Extended Release" in (cell["note"] or "")
+    assert cell["evidence"]  # the other-form PSG is surfaced for the analyst
+
+
+def test_be_guidance_yes_for_compatible_form_name_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_sources(monkeypatch, seed_psg=False)
+    _seed_psg_doc(
+        active_ingredient="Albuterol Sulfate",
+        normalized_name="albuterol sulfate",
+        dosage_form="Aerosol, Metered",
+        route="Inhalation",
+        content_hash="hash-aerosol",
+    )
+    cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["be_guidance_available"]
+    assert cell["status"] == "populated"
+    assert cell["value"] == "Yes"
+
+
+def test_be_requirement_prefers_exact_form_doc_over_higher_version_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # version_id orders versions WITHIN one document; the old global
+    # ORDER BY version_id let an unrelated doc's newer row win.
+    install_fake_sources(monkeypatch)  # seeds the exact-form Aerosol, Metered PSG
+    other_id = _seed_psg_doc(
+        active_ingredient="Albuterol Sulfate",
+        normalized_name="albuterol sulfate",
+        dosage_form="Aerosol",  # compatible (substring) but NOT exact
+        route="Inhalation",
+        content_hash="hash-aerosol-plain",
+    )
+    _seed_be_requirement(other_id, dissolution="DOC2 dissolution profile")
+    cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["dissolution_testing"]
+    snippets = [ev.get("snippet") or "" for ev in cell["evidence"]]
+    assert any("USP apparatus" in s for s in snippets)  # the exact-form doc's field
+    assert not any("DOC2 dissolution" in s for s in snippets)
+
+
+def test_be_requirement_collapses_when_multiple_docs_and_no_exact_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_sources(monkeypatch)
+    other_id = _seed_psg_doc(
+        active_ingredient="Albuterol Sulfate",
+        normalized_name="albuterol sulfate",
+        dosage_form="Aerosol, Metered",  # a SECOND exact-form doc -> ambiguous
+        route="Inhalation",
+        content_hash="hash-aerosol-2",
+    )
+    _seed_be_requirement(other_id, dissolution="DOC2 dissolution profile")
+    result = build_whitepaper(RLD_NAME, APPL_NO)
+    cell = _cells(result)["dissolution_testing"]
+    snippets = [ev.get("snippet") or "" for ev in cell["evidence"]]
+    # No single applicable document -> no study field surfaced, never blended;
+    # all candidate PSGs ride along as evidence.
+    assert not any("USP apparatus" in s for s in snippets)
+    assert not any("DOC2 dissolution" in s for s in snippets)
+    assert sum(1 for ev in cell["evidence"] if ev["source"] == "PSG store") >= 2
+    assert any("not blended" in w for w in result["spine"]["warnings"])
+
+
+def test_form_compatible_requires_exact_normalized_equality() -> None:
+    # Bidirectional containment let an IR product treat the ER form's PSG as
+    # compatible ("tablet" ⊂ "tablet extended release") and vice versa —
+    # release types are distinct PSGs with different BE recommendations.
+    assert not _form_compatible("Tablet, Extended Release", {"tablet"})
+    assert not _form_compatible("Tablet", {"tablet extended release"})
+    assert _form_compatible("TABLET", {"tablet"})
+    assert _form_compatible("Aerosol, Metered", {"aerosol metered"})
+    assert not _form_compatible("Aerosol", {"aerosol metered"})
+    assert not _form_compatible(None, {"tablet"})  # no recorded form -> analyst path
+
+
+def test_be_guidance_never_yes_from_release_type_variant_psg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Containment let an IR TABLET;ORAL product cite — and pull study fields
+    # from — the same molecule's "Tablet, Extended Release" PSG (INV-1/5).
+    install_fake_sources(monkeypatch, seed_psg=False)
+
+    def tablet_products(application_number: str, *, client: object = None) -> OrangeBookRows:
+        return OrangeBookRows(
+            rows=[
+                {
+                    "appl_type": "N",
+                    "appl_no": APPL_NO,
+                    "product_no": "001",
+                    "ingredient": "ALBUTEROL SULFATE",
+                    "trade_name": "PROVENTIL",
+                    "dosage_form_route": "TABLET;ORAL",
+                    "strength": "2MG",
+                    "rld": "Yes",
+                    "rs": "Yes",
+                }
+            ],
+            fetched_at=datetime.now(UTC),
+        )
+
+    monkeypatch.setattr(orange_book, "product_rows", tablet_products)
+    er_id = _seed_psg_doc(
+        active_ingredient="Albuterol Sulfate",
+        normalized_name="albuterol sulfate",
+        dosage_form="Tablet, Extended Release",
+        route="Oral",
+        content_hash="hash-er",
+    )
+    _seed_be_requirement(er_id, dissolution="ER dissolution profile")
+    cells = _cells(build_whitepaper(RLD_NAME, APPL_NO))
+    cell = cells["be_guidance_available"]
+    assert cell["status"] == "analyst_input_required"
+    assert cell["value"] is None
+    assert cell["evidence"]  # the ER PSG rides along for the analyst
+    assert "Tablet, Extended Release" in (cell["note"] or "")
+    # The ER form's study fields never surface as this product's.
+    snippets = [ev.get("snippet") or "" for ev in cells["dissolution_testing"]["evidence"]]
+    assert not any("ER dissolution" in s for s in snippets)
+
+
+def test_be_guidance_unverifiable_when_application_form_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Orange Book yields no product rows (identity resolved from Drugs@FDA
+    # alone): name-matched PSGs used to be kept with NO form check, so a PSG
+    # whose form was never verified could be cited as this product's "Yes".
+    install_fake_sources(monkeypatch, seed_psg=False)
+
+    def empty_rows(application_number: str, *, client: object = None) -> OrangeBookRows:
+        return OrangeBookRows(rows=[], fetched_at=datetime.now(UTC))
+
+    monkeypatch.setattr(orange_book, "product_rows", empty_rows)
+    monkeypatch.setattr(orange_book, "patent_rows", empty_rows)
+    monkeypatch.setattr(orange_book, "exclusivity_rows", empty_rows)
+    _seed_psg_doc(
+        active_ingredient="Albuterol Sulfate",
+        normalized_name="albuterol sulfate",
+        dosage_form="Aerosol, Metered",
+        route="Inhalation",
+        content_hash="hash-unverified",
+    )
+    result = build_whitepaper(RLD_NAME, APPL_NO)
+    cell = _cells(result)["be_guidance_available"]
+    assert cell["status"] == "analyst_input_required"
+    assert cell["value"] is None
+    assert cell["evidence"]  # the unverifiable PSG is surfaced for the analyst
+    assert "could not be established" in (cell["note"] or "")
+    assert any("could not be form-verified" in w for w in result["spine"]["warnings"])
+
+
+# --------------------------- A5/C1: resolved number on post-resolution queries ----------
+def test_post_resolution_queries_use_resolved_prefixed_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Bare-digit input resolves to NDA; the raw input's candidate expansion ORs
+    # NDA/ANDA/BLA, so post-resolution queries must pass the PREFIXED number.
+    install_fake_sources(monkeypatch)
+    seen: dict[str, str | None] = {}
+
+    def capture_shortage(query: SourceQuery) -> list[SourceRecord]:
+        seen["shortage"] = query.application_number
+        return []
+
+    def capture_ndc(query: SourceQuery) -> list[SourceRecord]:
+        seen["ndc"] = query.application_number
+        return []
+
+    def capture_rems(query: SourceQuery) -> tuple[list[SourceRecord], int]:
+        seen["rems"] = query.application_number
+        return [], 47
+
+    def capture_resolve(
+        application_number: str, *, prefer_titles: object = (), client: object = None
+    ) -> SetidResolution | None:
+        seen["dailymed"] = application_number
+        return None
+
+    monkeypatch.setattr(populator, "_shortage_records", capture_shortage)
+    monkeypatch.setattr(populator, "_ndc_records", capture_ndc)
+    monkeypatch.setattr(populator, "_rems_search", capture_rems)
+    monkeypatch.setattr(dailymed, "resolve_setid", capture_resolve)
+    build_whitepaper(RLD_NAME, APPL_NO)  # bare digits in
+    assert seen["shortage"] == f"NDA{APPL_NO}"
+    assert seen["ndc"] == f"NDA{APPL_NO}"
+    assert seen["rems"] == f"NDA{APPL_NO}"
+    assert seen["dailymed"] == f"NDA{APPL_NO}"
+
+
+# --------------------------- A6: Drugs@FDA never overrides / never blends ----------
+def _drugsfda_rec(application_number: str, sponsor: str) -> SourceRecord:
+    return SourceRecord(
+        source=SourceKind.DRUGSFDA,
+        title=f"Drugs@FDA: {application_number}",
+        source_url="https://open.fda.gov/apis/drug/drugsfda/",
+        identifiers={"application_number": application_number},
+        fields={"sponsor_name": sponsor, "products": []},
+        raw={},
+    )
+
+
+def test_drugsfda_type_never_overrides_orange_book_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # OB confirms NDA; a digit-colliding ANDA Drugs@FDA record previously
+    # overrode the resolved type AND leaked its sponsor into cells.
+    install_fake_sources(monkeypatch)
+    monkeypatch.setattr(
+        populator,
+        "_drugsfda_records",
+        lambda q: [_drugsfda_rec(f"ANDA{APPL_NO}", "OTHER GENERICS CORP")],
+    )
+    result = build_whitepaper(RLD_NAME, APPL_NO)
+    assert result["spine"]["application_type"] == "NDA"
+    assert any("Dropped 1 Drugs@FDA record" in w for w in result["spine"]["warnings"])
+    holder = _cells(result)["nda_holder"]
+    # The other application's sponsor never populates this cell; the OB
+    # applicant rows back it instead.
+    assert "OTHER GENERICS CORP" not in (holder["value"] or "")
+    assert "MERCK" in (holder["value"] or "")
+
+
+def test_drugsfda_records_filtered_to_resolved_application(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_sources(monkeypatch)
+    monkeypatch.setattr(
+        populator,
+        "_drugsfda_records",
+        lambda q: [
+            _drugsfda_rec(f"NDA{APPL_NO}", "MERCK SHARP DOHME CORP"),
+            _drugsfda_rec(f"ANDA{APPL_NO}", "OTHER GENERICS CORP"),
+        ],
+    )
+    result = build_whitepaper(RLD_NAME, APPL_NO)
+    cells = _cells(result)
+    locators = [ev["locator"] for ev in cells["nda_holder"]["evidence"]]
+    assert f"ANDA{APPL_NO}" not in locators
+    assert any("Dropped 1 Drugs@FDA record" in w for w in result["spine"]["warnings"])
+
+
+def test_bare_digits_ob_down_drugsfda_both_types_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With OB unavailable, bare digits + Drugs@FDA records spanning both types
+    # is the same ambiguity as the OB-based guard -> 422, never a blend.
+    install_fake_sources(monkeypatch, ob_raises=True)
+    monkeypatch.setattr(
+        populator,
+        "_drugsfda_records",
+        lambda q: [
+            _drugsfda_rec(f"NDA{APPL_NO}", "MERCK SHARP DOHME CORP"),
+            _drugsfda_rec(f"ANDA{APPL_NO}", "OTHER GENERICS CORP"),
+        ],
+    )
+    with pytest.raises(SpineResolutionError) as exc:
+        build_whitepaper(RLD_NAME, APPL_NO)
+    assert f"NDA {APPL_NO}" in exc.value.detail
+    assert f"ANDA {APPL_NO}" in exc.value.detail
+
+
+# --------------------------- A7: RLD-name verification floor ---------------------------
+@pytest.mark.parametrize("name", ["a", "  ", "ab"])
+def test_too_short_rld_name_raises(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    # Bidirectional substring waved 1-char and whitespace names through.
+    install_fake_sources(monkeypatch)
+    with pytest.raises(SpineResolutionError) as exc:
+        build_whitepaper(name, APPL_NO)
+    assert "too short" in exc.value.detail
+
+
+def test_short_substring_no_longer_verifies_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    # "pro" is a 3-char substring of PROVENTIL HFA — containment below 4 chars
+    # proves nothing, so the spine refuses with a mismatch (not a build).
+    install_fake_sources(monkeypatch)
+    with pytest.raises(SpineResolutionError) as exc:
+        build_whitepaper("pro", APPL_NO)
+    assert "does not match" in exc.value.detail
+
+
+def test_name_matches_containment_and_equality_rules() -> None:
+    assert _name_matches("ABC", ["abc"])  # exact case-folded equality always passes
+    assert _name_matches("prov", ["PROVENTIL HFA"])  # 4-char containment counts
+    assert not _name_matches("hfa", ["PROVENTIL HFA"])  # 3-char containment does not
+    with pytest.raises(SpineResolutionError):
+        _name_matches("ab", ["PROVENTIL HFA"])
+
+
+# --------------------------- A8: empty-value choke point ---------------------------
+def test_populated_rejects_empty_and_whitespace_values() -> None:
+    from regwatch.whitepaper.template import spec_by_id
+
+    spec = spec_by_id("product_name")
+    assert spec is not None
+    for value in ("", "   ", "\n\t"):
+        cell = _populated(spec, value, [], note="from a real query")
+        assert cell["status"] == "analyst_input_required"
+        assert cell["value"] is None
+        assert "source returned an empty value" in (cell["note"] or "")
+    kept = _populated(spec, "ALBUTEROL", [])
+    assert kept["status"] == "populated"
+
+
+def test_whitespace_spl_section_collapses_to_analyst(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_sources(monkeypatch)
+    _install_pregnancy_xml(monkeypatch, "Call the registry at 1-800-555-0100.")
+
+    class _Blank:
+        text = "   "
+        title = "INDICATIONS"
+        source_url = "https://example.invalid/spl"
+        fetched_at = None
+
+    def blank_sections(*args: object, **kwargs: object) -> dict:
+        return {"34067-9": _Blank()}
+
+    monkeypatch.setattr(dailymed, "parse_spl_sections", blank_sections)
+    cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["indication"]
+    assert cell["status"] == "analyst_input_required"
+    assert cell["value"] is None
+
+
+# --------------------------- A10: per-rowset freshness on evidence ---------------------------
+def test_patent_evidence_carries_patent_rowset_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # patents.txt is fetched separately from products.txt; its evidence must
+    # carry ITS fetch time, not the products rowset's.
+    install_fake_sources(monkeypatch)
+    patents_at = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+    def fake_patents(application_number: str, *, client: object = None) -> OrangeBookRows:
+        return OrangeBookRows(
+            rows=[
+                {
+                    "appl_type": "N",
+                    "appl_no": APPL_NO,
+                    "product_no": "001",
+                    "patent_no": "RE37410",
+                    "patent_expire_date": "Aug 22, 2017",
+                }
+            ],
+            fetched_at=patents_at,
+        )
+
+    monkeypatch.setattr(orange_book, "patent_rows", fake_patents)
+    cells = _cells(build_whitepaper(RLD_NAME, APPL_NO))
+    patent_ev = cells["patents"]["evidence"][0]
+    assert patent_ev["fetched_at"] == patents_at.isoformat()
+    product_ev = cells["product_name"]["evidence"][0]
+    assert product_ev["fetched_at"] != patents_at.isoformat()
+
+
+# --------------------------- A11: one REMS fetch per build ---------------------------
+def test_rems_index_fetched_once_per_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_sources(monkeypatch, has_rems=True)
+    fake = populator._rems_search
+    calls: list[SourceQuery] = []
+
+    def counting(query: SourceQuery) -> tuple[list[SourceRecord], int]:
+        calls.append(query)
+        return fake(query)
+
+    monkeypatch.setattr(populator, "_rems_search", counting)
+    cells = _cells(build_whitepaper(RLD_NAME, APPL_NO))
+    # Both REMS-backed cells consumed evidence...
+    assert cells["rems"]["status"] == "populated"
+    assert cells["restricted_distribution"]["evidence"]
+    # ...from ONE index fetch+parse, queried with brand AND ingredient terms.
+    assert len(calls) == 1
+    assert calls[0].brand_name == "PROVENTIL HFA"
+    assert calls[0].active_ingredient == "ALBUTEROL SULFATE"
+
+
+def test_restricted_distribution_inherits_parse_sanity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Zero TOTAL parsed rows = degraded scrape; the manual cell's note must say
+    # so instead of implying "queried and empty".
+    install_fake_sources(monkeypatch, has_rems=False, rems_index_rows=0)
+    cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["restricted_distribution"]
+    assert cell["status"] == "analyst_input_required"
+    assert "no parseable rows" in (cell["note"] or "")

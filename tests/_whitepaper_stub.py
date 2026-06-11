@@ -274,7 +274,9 @@ def install_fake_sources(
         # rems_index_rows=0 simulates a degraded scrape (nothing parsed at all).
         if not has_rems or rems_index_rows == 0:
             return [], rems_index_rows
-        identifiers = {} if rems_ambiguous else {"application_number": APPL_NO}
+        # The real handler extracts and CLEANS typed numbers ("NDA #020503" ->
+        # "NDA020503") into identifiers; ambiguous rows carry none.
+        identifiers = {} if rems_ambiguous else {"application_number": f"NDA{APPL_NO}"}
         return [
             SourceRecord(
                 source=SourceKind.REMS,

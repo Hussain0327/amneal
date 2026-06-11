@@ -78,6 +78,17 @@ def test_verified_absent_only_on_successful_empty_query(monkeypatch: pytest.Monk
         assert cell["evidence"], cell_id
 
 
+def test_populated_cells_never_carry_blank_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The empty-value rule: a populated cell renders a FACT; a blank value is
+    # not a fact and must have collapsed to analyst input at the choke point.
+    install_fake_sources(monkeypatch, on_shortage=True, has_rems=True, dea_schedule="CIV")
+    cells = _cells(build_whitepaper(RLD_NAME, APPL_NO))
+    for cell in cells.values():
+        if cell["status"] == "populated":
+            assert cell["value"] is not None, cell["id"]
+            assert cell["value"].strip(), cell["id"]
+
+
 def test_no_draft_or_submit_extractor_or_label() -> None:
     # The vocabulary stays on the surfacing side of the line (INV-3).
     banned = ("draft", "submit", "file anda", "recommend filing")

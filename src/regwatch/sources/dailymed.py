@@ -7,9 +7,9 @@ verbatim with provenance; nothing here interprets a label (INV-3/INV-5).
 
 Application-number format (verified empirically against the live API):
 ``spls.json?application_number=`` matches the *prefixed, zero-padded* form
-(``NDA020503``); bare digits return zero rows. Inputs are normalized through
-``application_number_candidates`` and the prefixed candidates are tried in
-order.
+(``NDA020503``); bare digits return zero rows. A prefixed input queries
+exactly that application; only genuinely bare digits expand to the prefixed
+NDA→ANDA→BLA candidates (contract C1).
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from config.settings import get_settings
 
 from regwatch.common.text_normalize import canonical_name
 from regwatch.sources._utils import (
-    application_number_candidates,
+    APPLICATION_PREFIXES,
     clean_application_number,
     clean_text,
     get_with_retry,
@@ -266,31 +266,71 @@ class DailyMedHandler:
         return records
 
 
+# Hard cap on pagination follows: 10 pages * pagesize 100 = 1,000 listings.
+_MAX_SPL_PAGES = 10
+
+
 def _spl_listings(
     application_number: str,
     client: httpx.Client | None,
 ) -> list[dict[str, Any]]:
-    """All SPL listings for the first application-number candidate with hits.
+    """All SPL listings (every page) for the application number.
 
-    Only prefixed candidates are tried — DailyMed does not match bare digits
-    (verified empirically), so querying them would fabricate a "no SPL" answer.
+    A prefixed input — the populator always sends one (contract C1) — queries
+    EXACTLY that application. Candidate expansion (prefixed NDA→ANDA→BLA,
+    first with hits wins) happens only for genuinely bare digits: DailyMed
+    does not match bare digits (verified empirically), so querying them
+    directly would fabricate a "no SPL" answer.
     """
-    candidates = [c for c in application_number_candidates(application_number) if not c.isdigit()]
+    cleaned = clean_application_number(application_number)
+    if cleaned is None:
+        return []
+    if cleaned.isdigit():
+        candidates = [f"{prefix}{cleaned}" for prefix in APPLICATION_PREFIXES]
+    else:
+        candidates = [cleaned]
     with owned_client(client, _dailymed_client) as active_client:
         for candidate in candidates:
-            resp = get_with_retry(
-                active_client,
-                SPLS_ENDPOINT,
-                {"application_number": candidate, "pagesize": 100},
-            )
-            if resp.status_code == 404:
-                continue
-            resp.raise_for_status()
-            data = resp.json().get("data") or []
-            listings = [item for item in data if isinstance(item, dict)]
+            listings = _paged_listings(active_client, candidate)
             if listings:
                 return listings
     return []
+
+
+def _paged_listings(client: httpx.Client, candidate: str) -> list[dict[str, Any]]:
+    """Aggregate every spls.json page for one candidate (hard cap 10 pages).
+
+    DailyMed pages at ``pagesize`` (live ANDA208677 shows total_elements 103,
+    so a single 100-row page silently drops listings); the response's own
+    pagination metadata (``total_pages`` / ``next_page_url``) drives the loop.
+    """
+    listings: list[dict[str, Any]] = []
+    for page in range(1, _MAX_SPL_PAGES + 1):
+        resp = get_with_retry(
+            client,
+            SPLS_ENDPOINT,
+            {"application_number": candidate, "pagesize": 100, "page": page},
+        )
+        if resp.status_code == 404:
+            break
+        resp.raise_for_status()
+        payload = resp.json()
+        data = payload.get("data") or []
+        listings.extend(item for item in data if isinstance(item, dict))
+        if not _has_next_page(payload.get("metadata"), page):
+            break
+    return listings
+
+
+def _has_next_page(metadata: object, page: int) -> bool:
+    """Whether DailyMed's pagination metadata announces a page after ``page``."""
+    if not isinstance(metadata, dict):
+        return False
+    total_pages = metadata.get("total_pages")
+    if isinstance(total_pages, int):
+        return page < total_pages
+    next_url = clean_text(metadata.get("next_page_url"))
+    return bool(next_url) and next_url.lower() != "null"
 
 
 def _select_listing(
@@ -382,7 +422,12 @@ def _section_title(section: ET.Element) -> str:
 
 def _section_text(section: ET.Element) -> str:
     """Verbatim text content of a section (nested subsections included)."""
-    skip = {f"{_HL7_NS}title", f"{_HL7_NS}code", f"{_HL7_NS}id", f"{_HL7_NS}effectiveTime"}
+    skip = {
+        f"{_HL7_NS}title",
+        f"{_HL7_NS}code",
+        f"{_HL7_NS}id",
+        f"{_HL7_NS}effectiveTime",
+    }
     parts: list[str] = []
     for child in section:
         if child.tag in skip:
