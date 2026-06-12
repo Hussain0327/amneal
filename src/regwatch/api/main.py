@@ -8,6 +8,7 @@ Endpoints (per spec §10.16):
     POST   /auth/logout    — revoke the session cookie
     GET    /auth/me        — current user
     POST   /query          — grounded Q&A (auth)
+    POST   /feedback       — thumbs up/down on one of the caller's answers (auth)
     POST   /sources/search — structured FDA source lookup (auth)
     POST   /assemble       — build a cited dossier for a target product (auth)
     POST   /whitepaper     — populate the CRA White Paper (RLD + appl no) (auth)
@@ -34,9 +35,10 @@ from typing import Any
 from config.settings import Settings, get_settings
 from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, text, update
 from sqlalchemy import select as sa_select
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from regwatch.assemble.dossier import build_dossier
@@ -45,13 +47,14 @@ from regwatch.auth.sessions import authenticate, create_session, revoke_token
 from regwatch.common.audit import log_query
 from regwatch.common.conversation import SessionOwnershipError
 from regwatch.common.logging import configure_logging
+from regwatch.common.observability import init_sentry
 from regwatch.common.ratelimit import LOGIN_ATTEMPTS_PER_MINUTE, login_limiter, query_limiter
 from regwatch.generate.grounded_qa import ask
 from regwatch.process.embedder import assert_embedding_runtime_available
 from regwatch.sources.router import search_sources
 from regwatch.sources.types import SourceKind, SourceQuery
 from regwatch.store.db import get_engine, init_db, session_scope
-from regwatch.store.models import ChatMessage, ChatSession, QueryLog, User
+from regwatch.store.models import AnswerFeedback, ChatMessage, ChatSession, QueryLog, User
 from regwatch.store.vector_store import collection_size
 from regwatch.watch.alerts import latest_digest_records
 from regwatch.watch.watchlist import ALLOWED_SOURCES, add_manual_product, list_watchlist
@@ -88,6 +91,10 @@ def _guard_test_providers(s: Settings) -> None:
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     s = get_settings()
+    # Sentry first (H1): OFF unless SENTRY_DSN is set. Initialized before
+    # init_db so the explicit migration-mode-mismatch captures in store/db.py
+    # can report a refused boot.
+    init_sentry(s)
     if os.getenv("REGWATCH_DB_INITIALIZED") != "1":
         init_db()
     elif s.database_url:
@@ -368,6 +375,69 @@ def query(req: QueryRequest, user: User = Depends(require_user)) -> QueryRespons
             for o in result.clarify
         ],
     )
+
+
+# ---------- /feedback ----------
+class FeedbackRequest(BaseModel):
+    audit_id: int
+    rating: int
+    comment: str | None = Field(None, max_length=2000)
+
+    @field_validator("rating")
+    @classmethod
+    def _check_rating(cls, v: int) -> int:
+        if v not in (-1, 1):
+            raise ValueError("rating must be -1 (thumbs down) or 1 (thumbs up)")
+        return v
+
+
+class FeedbackResponse(BaseModel):
+    audit_id: int
+    rating: int
+    comment: str | None = None
+
+
+def _upsert_feedback(audit_id: int, user_id: str, rating: int, comment: str | None) -> None:
+    """One feedback row per (audit_id, user_id) — re-rating replaces."""
+    with session_scope() as s:
+        existing = s.scalars(
+            select(AnswerFeedback).where(
+                AnswerFeedback.audit_id == audit_id,
+                AnswerFeedback.user_id == user_id,
+            )
+        ).first()
+        if existing is None:
+            s.add(
+                AnswerFeedback(audit_id=audit_id, user_id=user_id, rating=rating, comment=comment)
+            )
+        else:
+            existing.rating = rating
+            existing.comment = comment
+            s.add(existing)
+        s.flush()
+
+
+@protected.post("/feedback", response_model=FeedbackResponse)
+def feedback(req: FeedbackRequest, user: User = Depends(require_user)) -> FeedbackResponse:
+    """Thumbs up/down on one of the caller's own answered Q&A turns (H4).
+
+    404 for a missing, foreign, or non-qa audit row — mirroring the docx
+    ownership pattern, the response never confirms that someone else's audit
+    row exists. Feedback rows are the candidate pool for future eval gold-set
+    items (see README).
+    """
+    user_id = str(user.id)
+    with session_scope() as s:
+        row = s.get(QueryLog, req.audit_id)
+        if row is None or row.mode != "qa" or row.user_id != user_id:
+            raise HTTPException(status_code=404, detail="answer not found")
+    try:
+        _upsert_feedback(req.audit_id, user_id, req.rating, req.comment)
+    except IntegrityError:
+        # Lost a concurrent-insert race on uq_answer_feedback_audit_user — the
+        # row exists now, so the retry takes the replace branch.
+        _upsert_feedback(req.audit_id, user_id, req.rating, req.comment)
+    return FeedbackResponse(audit_id=req.audit_id, rating=req.rating, comment=req.comment)
 
 
 # ---------- /sources/search ----------

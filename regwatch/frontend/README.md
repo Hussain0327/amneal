@@ -51,6 +51,19 @@ cloudflared tunnel --url http://localhost:3000          # 3) public link
 
 - **Ask** (`/`) — cited Q&A. Renders by status: `answer` (markdown + clickable
   sources), `clarify` (interpretation line + clickable options that resend the
-  query/filters), `refused` (plain refusal text).
+  query/filters), `refused` (plain refusal text). Answer turns carry a quiet
+  thumbs up/down (`POST /feedback`, upsert per answer+user; thumbs-down offers
+  a one-line optional note). Turns restored from session history have no
+  `audit_id`, so they render without the affordance.
 - **Assemble** (`/assemble`) — cited dossier for a target product.
 - **Watch** (`/watch`) — recent change-feed alerts + the watchlist.
+
+## Error monitoring (Sentry, opt-in)
+
+`@sentry/nextjs` is wired through the standard files (`sentry.client.config.ts`,
+`sentry.server.config.ts`, `sentry.edge.config.ts`, `instrumentation.ts`,
+`app/global-error.tsx`) but initializes **only** when `NEXT_PUBLIC_SENTRY_DSN`
+is set at build time — unset, the whole thing is a no-op. Optional
+`NEXT_PUBLIC_SENTRY_ENVIRONMENT` tags events (default `dev`). Deliberately
+minimal: no session replay, `sendDefaultPii: false`, no source-map upload —
+question/answer text never leaves the app's own audit log.

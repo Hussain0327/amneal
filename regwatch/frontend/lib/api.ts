@@ -354,6 +354,19 @@ export async function downloadWhitepaperDocx(result: WhitepaperResponse): Promis
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+// Answer feedback: rating is exactly +1 (helpful) or -1 (not helpful); the
+// server upserts per (audit_id, user) so re-rating — or re-sending with a
+// comment attached — replaces the previous row rather than stacking. A 404
+// means the audit row isn't the caller's own qa answer; surfaced like any
+// other ApiError. Response body is ignored on purpose: success is the signal.
+export async function sendFeedback(
+  auditId: number,
+  rating: 1 | -1,
+  comment: string | null = null,
+): Promise<void> {
+  await postJSON<unknown>("/feedback", { audit_id: auditId, rating, comment });
+}
+
 export function watchLatest(): Promise<WatchLatest> {
   return getJSON<WatchLatest>("/watch/latest");
 }

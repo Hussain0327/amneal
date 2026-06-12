@@ -6,11 +6,17 @@ demos, environments, or experiments lives here.
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# OpenAI dated-snapshot suffix: what follows "<alias>-" in the server-reported
+# model name, e.g. "gpt-5.4-nano-2026-01-15" or legacy "gpt-4-0613". Digits and
+# hyphens only — "gpt-5-nano-mini" is a DIFFERENT model, not a snapshot.
+_SNAPSHOT_SUFFIX_RE = re.compile(r"\d[\d-]*")
 
 
 class Settings(BaseSettings):
@@ -41,6 +47,60 @@ class Settings(BaseSettings):
     allow_test_providers: bool = Field(
         default=False, validation_alias="REGWATCH_ALLOW_TEST_PROVIDERS"
     )
+
+    # ---------- LLM pricing (H3) ----------
+    # USD per 1M tokens, keyed by model name. Env-overridable as JSON, e.g.
+    #   LLM_MODEL_PRICES='{"gpt-5.4-nano": {"input": 0.05, "output": 0.40}}'
+    # Defaults cover the gpt-5 nano family the app actually runs. An unknown
+    # model yields cost_usd NULL in the audit log — never a guessed price.
+    llm_model_prices: dict[str, dict[str, float]] = Field(
+        default_factory=lambda: {
+            "gpt-5-nano": {"input": 0.05, "output": 0.40},
+            "gpt-5.4-nano": {"input": 0.05, "output": 0.40},
+        }
+    )
+
+    def price_for_model(self, model: str) -> dict[str, float] | None:
+        """Per-1M-token prices for a model, or None when unknown (cost stays NULL).
+
+        Exact table match first. The OpenAI Responses path reports the RESOLVED
+        dated snapshot id (e.g. ``gpt-5.4-nano-2026-01-15``) rather than the
+        configured alias, so a miss falls back to the longest table key that is
+        a dated-snapshot prefix of the reported name. Genuinely unknown model
+        families (including non-snapshot suffixes like ``-mini``) stay None —
+        never a guessed price.
+        """
+        entry = self.llm_model_prices.get(model)
+        if entry is None:
+            snapshot_keys = [
+                key
+                for key in self.llm_model_prices
+                if model.startswith(f"{key}-")
+                and _SNAPSHOT_SUFFIX_RE.fullmatch(model[len(key) + 1 :])
+            ]
+            if snapshot_keys:
+                entry = self.llm_model_prices[max(snapshot_keys, key=len)]
+        if entry is None:
+            return None
+        if "input" not in entry or "output" not in entry:
+            return None
+        return entry
+
+    # ---------- Observability (H1) ----------
+    # Sentry is OFF unless SENTRY_DSN is set — zero behavior change otherwise.
+    # No question text ever goes to Sentry: query_text lives in our own audit
+    # log (query_log), and request bodies are never attached to events.
+    sentry_dsn: str | None = None
+    sentry_environment: str = "dev"
+
+    @field_validator("sentry_dsn", mode="before")
+    @classmethod
+    def _normalize_sentry_dsn(cls, v: object) -> str | None:
+        """Empty/whitespace SENTRY_DSN means OFF, same as unset."""
+        if v is None:
+            return None
+        dsn = str(v).strip()
+        return dsn or None
 
     # ---------- openFDA ----------
     openfda_api_key: str | None = None

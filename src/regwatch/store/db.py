@@ -44,6 +44,16 @@ _CURRENT_TABLES = _BASELINE_TABLES | frozenset(
     }
 )
 _BASELINE_REVISION = "0001_initial_schema"
+# Stamp targets for unstamped DBs created out-of-band by an older build's
+# create_all. _init_sqlite stamps the NEWEST revision the present shape
+# actually proves, then upgrades — stamping anything newer (e.g. "head")
+# would silently skip the missing migrations. The probes:
+#   - tables through 0005 + the 0002 query_log columns -> at least 0005;
+#   - 0006's appl_type columns on ob_patent/ob_exclusivity -> 0006. 0007 is
+#     only an if_not_exists index, so replaying it over a 0007-shaped DB is a
+#     no-op and needs no probe of its own.
+_PRE_0006_SCHEMA_REVISION = "0005_whitepaper_sources"
+_CURRENT_SCHEMA_REVISION = "0006_ob_appl_type"
 
 # K4: the pgvector chunk store. The embedding column is raw DDL (the `vector`
 # type comes from the pgvector extension); everything else mirrors the Chroma
@@ -108,8 +118,13 @@ def _has_complete_legacy_schema() -> bool:
         return MigrationContext.configure(conn).get_current_revision() is None
 
 
-def _has_complete_current_schema() -> bool:
-    """Detect DBs created from current SQLModel metadata before Alembic stamping."""
+def _has_unstamped_post_0005_schema() -> bool:
+    """Detect DBs created from post-0005 SQLModel metadata before Alembic stamping.
+
+    Verifies the tables through 0005 plus the 0002 query_log columns — i.e.
+    the 0005 shape, NOT anything later. _init_sqlite probes the 0006 columns
+    separately to pick the stamp the shape actually proves.
+    """
     engine = get_engine()
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
@@ -120,6 +135,29 @@ def _has_complete_current_schema() -> bool:
         return False
     with engine.connect() as conn:
         return MigrationContext.configure(conn).get_current_revision() is None
+
+
+def _has_ob_appl_type_columns() -> bool:
+    """0006's shape probe: the appl_type column on ob_patent AND ob_exclusivity."""
+    inspector = inspect(get_engine())
+    return all(
+        "appl_type" in {c["name"] for c in inspector.get_columns(t)}
+        for t in ("ob_patent", "ob_exclusivity")
+    )
+
+
+def _matches_head_schema() -> bool:
+    """True when an (unstamped) schema already carries everything past 0007.
+
+    Discriminates a DB created from CURRENT metadata via create_all (stamp it
+    head) from an older-shaped one (stamp what the shape proves, then upgrade
+    so 0008's query_log token columns and answer_feedback actually land).
+    """
+    inspector = inspect(get_engine())
+    if "answer_feedback" not in set(inspector.get_table_names()):
+        return False
+    query_columns = {c["name"] for c in inspector.get_columns("query_log")}
+    return {"input_tokens", "output_tokens", "cost_usd"} <= query_columns
 
 
 def get_engine() -> Engine:
@@ -232,22 +270,33 @@ def _init_postgres(engine: Engine) -> None:
         with engine.connect() as conn:
             current = MigrationContext.configure(conn).get_current_revision()
         if current != head:
-            raise RuntimeError(
+            exc = RuntimeError(
                 f"Postgres schema is stamped at alembic revision {current!r} but this build "
                 f"expects {head!r}. Refusing to start: run the data migration / upgrade "
                 "tooling against this database first."
             )
+            # Explicit Sentry capture point (H1): a migration-mode mismatch is
+            # an operator-facing boot refusal that must be visible, not silent.
+            from regwatch.common.observability import capture_exception
+
+            capture_exception(exc)
+            raise exc
         # Same revision: ensure the idempotent extras exist, then proceed.
         _ensure_postgres_objects(engine)
         _enable_row_level_security(engine)
         return
 
     if tables & set(SQLModel.metadata.tables.keys()):
-        raise RuntimeError(
+        exc = RuntimeError(
             "Postgres database has regwatch tables but no alembic_version stamp — "
             "ambiguous state. Refusing to start: restore from a clean database or "
             "re-run scripts/migrate_to_supabase.py with --truncate."
         )
+        # Explicit Sentry capture point (H1): same migration-mode mismatch class.
+        from regwatch.common.observability import capture_exception
+
+        capture_exception(exc)
+        raise exc
 
     # Empty database: bootstrap.
     _ensure_vector_extension(engine)
@@ -264,8 +313,20 @@ def _init_sqlite() -> None:
     from regwatch.store import models  # noqa: F401  (registers tables)
 
     cfg = _alembic_config()
-    if _has_complete_current_schema():
-        command.stamp(cfg, "head")
+    if _has_unstamped_post_0005_schema():
+        if _matches_head_schema():
+            command.stamp(cfg, "head")
+        elif _has_ob_appl_type_columns():
+            # 0006-shaped (0007 is an if_not_exists index — replaying it is
+            # safe either way): stamp 0006 and apply 0007+.
+            command.stamp(cfg, _CURRENT_SCHEMA_REVISION)
+            command.upgrade(cfg, "head")
+        else:
+            # post-0005/pre-0006 model era: stamp only what the shape proves
+            # and replay 0006+ (appl_type columns + the ob_product N->NDA
+            # normalization) instead of silently skipping them.
+            command.stamp(cfg, _PRE_0006_SCHEMA_REVISION)
+            command.upgrade(cfg, "head")
     elif _has_complete_legacy_schema():
         command.stamp(cfg, _BASELINE_REVISION)
         command.upgrade(cfg, "head")

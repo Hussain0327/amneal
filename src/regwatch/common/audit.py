@@ -23,8 +23,15 @@ def log_query(
     user_id: str | None = None,
     status: str | None = None,
     route_json: dict[str, Any] | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cost_usd: float | None = None,
 ) -> int:
-    """Persist a query record and return its id."""
+    """Persist a query record and return its id.
+
+    Token/cost fields (H3) default to NULL: no LLM call, unreported usage, or
+    an unpriced model all stay NULL — the audit log never guesses a cost.
+    """
     with session_scope() as s:
         row = QueryLog(
             ts=datetime.now(UTC),
@@ -40,6 +47,9 @@ def log_query(
             status=status,
             route_json=route_json or {},
             model_name=model_name,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
         )
         s.add(row)
         s.flush()

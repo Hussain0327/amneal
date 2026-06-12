@@ -1,0 +1,40 @@
+name: uptime-eval
+
+# Scheduled probe of the production GET /health endpoint (CI backstop to the
+# external uptime monitor — see docs/DEPLOY.md §6.2 "Uptime").
+#
+# Driven entirely by the PROD_HEALTH_URL repository secret (Settings →
+# Secrets and variables → Actions): set it to https://<api-host>/health.
+# While the secret is unset, the job skips cleanly — no failures and no
+# invented URLs. No checkout, no tokens, no repo access.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      PROD_HEALTH_URL: ${{ secrets.PROD_HEALTH_URL }}
+    steps:
+      - name: probe /health
+        if: env.PROD_HEALTH_URL != ''
+        run: |
+          set -euo pipefail
+          body="$(curl -fsS --max-time 20 --retry 2 --retry-delay 10 "$PROD_HEALTH_URL")"
+          # /health is 503 + "unhealthy" when db/vector store are down (curl -f
+          # already fails); also assert the healthy body shape explicitly.
+          echo "$body" | grep -Eq '"status":\s*"ok"' || {
+            echo "health responded 200 but body is not status ok:" >&2
+            echo "$body" >&2
+            exit 1
+          }
+          echo "health OK"
+
+      - name: skipped (secret not configured)
+        if: env.PROD_HEALTH_URL == ''
+        run: echo "PROD_HEALTH_URL secret not set — see docs/DEPLOY.md §6.2; skipping."
