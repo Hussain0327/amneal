@@ -36,6 +36,7 @@ from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import func, text, update
+from sqlalchemy import select as sa_select
 from sqlmodel import Session, col, select
 
 from regwatch.assemble.dossier import build_dossier
@@ -46,6 +47,7 @@ from regwatch.common.conversation import SessionOwnershipError
 from regwatch.common.logging import configure_logging
 from regwatch.common.ratelimit import LOGIN_ATTEMPTS_PER_MINUTE, login_limiter, query_limiter
 from regwatch.generate.grounded_qa import ask
+from regwatch.process.embedder import assert_embedding_runtime_available
 from regwatch.sources.router import search_sources
 from regwatch.sources.types import SourceKind, SourceQuery
 from regwatch.store.db import get_engine, init_db, session_scope
@@ -85,9 +87,20 @@ def _guard_test_providers(s: Settings) -> None:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    s = get_settings()
     if os.getenv("REGWATCH_DB_INITIALIZED") != "1":
         init_db()
-    _guard_test_providers(get_settings())
+    elif s.database_url:
+        # init_db (which asserts this itself) ran out-of-process — e.g. the
+        # Docker entrypoint's `regwatch init-db`. Re-assert the K6 fail-fast
+        # here so the API process never boots with a wrong-dim provider.
+        from regwatch.store.pgvector_store import assert_embedding_provider_dim
+
+        assert_embedding_provider_dim()
+    _guard_test_providers(s)
+    # A provider whose runtime deps are missing (slim image + local-bge-small)
+    # must refuse to boot, not 500 on the first embed call.
+    assert_embedding_runtime_available(s.embedding_provider)
     yield
 
 
@@ -671,29 +684,53 @@ def _owned_session_or_404(s: Session, session_id: str, user_id: str) -> ChatSess
 
 @protected.get("/sessions")
 def list_sessions(user: User = Depends(require_user)) -> dict[str, Any]:
+    """Two queries max — network RTT amplifies per-row queries ~1000x on Postgres.
+
+    Query 1 is the session page with the title fallback (first user message)
+    folded in as a correlated scalar subquery; query 2 fetches all message
+    counts for the page via one GROUP BY. Never N+1.
+    """
     user_id = str(user.id)
     with session_scope() as s:
-        rows = s.scalars(
-            select(ChatSession)
-            .where(ChatSession.user_id == user_id)
-            .order_by(col(ChatSession.updated_at).desc())
-        ).all()
+        first_user_message = (
+            sa_select(col(ChatMessage.content))
+            .where(
+                col(ChatMessage.session_id) == col(ChatSession.id),
+                col(ChatMessage.role) == "user",
+            )
+            .order_by(col(ChatMessage.created_at).asc())
+            .limit(1)
+            .correlate(ChatSession)
+            .scalar_subquery()
+        )
+        rows: list[tuple[ChatSession, str | None]] = [
+            (r[0], r[1])
+            for r in s.execute(
+                sa_select(ChatSession, first_user_message)
+                .where(col(ChatSession.user_id) == user_id)
+                .order_by(col(ChatSession.updated_at).desc())
+            )
+        ]
+        session_ids = [row.id for row, _ in rows]
+        counts: dict[str, int] = {}
+        if session_ids:
+            counts = {
+                str(sid): int(n)
+                for sid, n in s.execute(
+                    sa_select(col(ChatMessage.session_id), func.count())
+                    .where(col(ChatMessage.session_id).in_(session_ids))
+                    .group_by(col(ChatMessage.session_id))
+                )
+            }
         sessions = [
             {
                 "id": row.id,
-                "title": _session_title(s, row),
+                "title": row.title or (first_msg[:60] if first_msg else "(untitled)"),
                 "created_at": row.created_at.isoformat(),
                 "updated_at": row.updated_at.isoformat(),
-                "message_count": int(
-                    s.scalar(
-                        select(func.count())
-                        .select_from(ChatMessage)
-                        .where(ChatMessage.session_id == row.id)
-                    )
-                    or 0
-                ),
+                "message_count": counts.get(row.id, 0),
             }
-            for row in rows
+            for row, first_msg in rows
         ]
     return {"sessions": sessions}
 

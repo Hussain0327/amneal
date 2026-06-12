@@ -1,13 +1,24 @@
-"""Thin wrapper around ChromaDB.
+"""Vector store facade: ChromaDB by default, pgvector in Postgres mode.
 
 Chunks live in a single collection. Each chunk's metadata carries enough to
 build a citation (`doc_id`, `version_id`, `page`, `source_url`) and enough to
 filter by drug (`normalized_name`, `dosage_form`, `route`).
+
+Backend rule (K1): when DATABASE_URL is set the app runs against
+Postgres/Supabase and vectors live in pgvector (`store/pgvector_store.py`);
+otherwise Chroma remains the SQLite-mode backend, exactly as before. Every
+public function here dispatches on that single switch, so callers
+(retriever, ingest pipeline, watch, API health, resolver) never change.
+Both backends return `Hit.score` on the same scale — cosine similarity in
+[0, 1], computed as `1 - cosine_distance / 2` — so the refusal threshold
+means the same thing everywhere.
 """
 
 from __future__ import annotations
 
 import contextlib
+import os
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +28,25 @@ from chromadb.config import Settings as ChromaSettings
 from config.settings import get_settings
 
 COLLECTION = "regwatch_chunks"
+
+
+def _database_url() -> str | None:
+    """The K1 backend switch: a non-empty DATABASE_URL means Postgres mode.
+
+    Reads `settings.database_url` when the settings cluster has landed the
+    field, with a direct env fallback so the dispatch behaves per contract
+    regardless of integration order (pydantic maps the field to the same
+    DATABASE_URL env var, so the two sources agree once both exist).
+    """
+    raw: object = getattr(get_settings(), "database_url", None)
+    url = raw.strip() if isinstance(raw, str) else ""
+    if not url:
+        url = (os.environ.get("DATABASE_URL") or "").strip()
+    return url or None
+
+
+def _pg_mode() -> bool:
+    return _database_url() is not None
 
 
 @dataclass
@@ -58,6 +88,12 @@ def reset_for_tests() -> None:
             _client.reset()
     _client = None
     _metadata_values_cache.clear()
+    # Only reset the pgvector backend if something already imported it —
+    # importing it here eagerly would register its SQLModel table for every
+    # SQLite-mode test run.
+    pg = sys.modules.get("regwatch.store.pgvector_store")
+    if pg is not None:
+        pg.reset_for_tests()
 
 
 def add_chunks(
@@ -67,6 +103,11 @@ def add_chunks(
     metadatas: list[dict[str, Any]],
 ) -> None:
     if not ids:
+        return
+    if _pg_mode():
+        from regwatch.store import pgvector_store
+
+        pgvector_store.add_chunks(ids, embeddings, documents, metadatas)
         return
     coll = get_collection()
     coll.upsert(
@@ -85,6 +126,10 @@ def delete_chunks_for_doc_except_version(doc_id: int, keep_version_id: int) -> i
     search index, so old chunks for the same PSG document should not remain
     retrievable after a revision.
     """
+    if _pg_mode():
+        from regwatch.store import pgvector_store
+
+        return pgvector_store.delete_chunks_for_doc_except_version(doc_id, keep_version_id)
     coll = get_collection()
     res = coll.get(
         where={"doc_id": {"$eq": doc_id}},  # type: ignore[arg-type, dict-item]
@@ -113,6 +158,10 @@ def similarity_search(
     k: int = 8,
     where: dict[str, Any] | None = None,
 ) -> list[Hit]:
+    if _pg_mode():
+        from regwatch.store import pgvector_store
+
+        return pgvector_store.similarity_search(query_embedding, k=k, where=where)
     coll = get_collection()
     res = coll.query(
         query_embeddings=[query_embedding],  # type: ignore[arg-type]
@@ -126,7 +175,10 @@ def similarity_search(
     metas = (res.get("metadatas") or [[]])[0]
     dists = (res.get("distances") or [[]])[0]
     for i, chunk_id in enumerate(ids):
-        # Chroma cosine distance is in [0, 2]; convert to similarity in [0, 1].
+        # Score convention (shared with store/pgvector_store.py): Chroma's
+        # cosine distance d = 1 - cos_sim ∈ [0, 2]; score = 1 - d/2 ∈ [0, 1]
+        # (1.0 identical, 0.5 orthogonal, 0.0 opposite). The refusal
+        # threshold is calibrated against this scale on both backends.
         sim = 1.0 - float(dists[i]) / 2.0
         sim = max(0.0, min(1.0, sim))  # clamp for float-precision overshoot
         hits.append(Hit(chunk_id=chunk_id, text=docs[i], metadata=dict(metas[i] or {}), score=sim))
@@ -134,6 +186,10 @@ def similarity_search(
 
 
 def collection_size() -> int:
+    if _pg_mode():
+        from regwatch.store import pgvector_store
+
+        return pgvector_store.collection_size()
     return int(get_collection().count())
 
 
@@ -145,6 +201,10 @@ def distinct_metadata_values(key: str) -> set[str]:
     PSG corpus grows beyond the POC seed set. `add_chunks` and test resets
     invalidate this cache.
     """
+    if _pg_mode():
+        from regwatch.store import pgvector_store
+
+        return pgvector_store.distinct_metadata_values(key)
     cached = _metadata_values_cache.get(key)
     if cached is not None:
         return set(cached)

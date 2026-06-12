@@ -10,8 +10,18 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, Index
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
+
+
+def _json_column() -> Column[Any]:
+    """A JSON column that becomes JSONB on Postgres (K3).
+
+    Same Python types at every call site; SQLite (and any other dialect)
+    keeps plain JSON. Each sa_column must be a fresh Column instance.
+    """
+    return Column(JSON().with_variant(JSONB(), "postgresql"))
 
 
 class Product(SQLModel, table=True):
@@ -82,8 +92,8 @@ class BeRequirement(SQLModel, table=True):
     dissolution: str | None = None
     waiver_conditions: str | None = None
     additional_notes: str | None = None
-    fields_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
-    citations_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    fields_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
+    citations_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
 
 
 class User(SQLModel, table=True):
@@ -125,12 +135,12 @@ class QueryLog(SQLModel, table=True):
     user_id: str | None = Field(default=None, index=True)
     mode: str  # qa | assemble | watch
     query_text: str
-    retrieved_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    retrieved_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=_json_column())
     answer_text: str
-    citations_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    citations_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=_json_column())
     refused: bool = False
     status: str | None = None
-    route_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    route_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
     model_name: str
 
 
@@ -143,11 +153,16 @@ class ChatSession(SQLModel, table=True):
     """
 
     __tablename__ = "chat_session"
+    # GET /sessions orders by updated_at within a user; on hosted Postgres the
+    # composite index keeps that page a single index scan. Declared in metadata
+    # (not ad-hoc DDL) so create_all, alembic autogenerate, and migration
+    # 0007 all agree on the schema.
+    __table_args__ = (Index("ix_chat_session_user_id_updated_at", "user_id", "updated_at"),)
 
     id: str = Field(primary_key=True)
     user_id: str | None = Field(default=None, index=True)
     title: str | None = None
-    active_filters_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    active_filters_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
 
@@ -243,7 +258,7 @@ class ChatMessage(SQLModel, table=True):
     status: str | None = None
     model_name: str | None = None
     audit_id: int | None = Field(default=None, index=True)
-    filters_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
-    citations_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
-    metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    filters_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
+    citations_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=_json_column())
+    metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)

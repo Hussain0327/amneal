@@ -7,8 +7,11 @@ vectors. Swappable via config — business logic never references a model name.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import random
+import time
 from collections import OrderedDict
-from typing import ClassVar, Protocol
+from typing import Any, ClassVar, Protocol
 
 from config.settings import get_settings
 
@@ -100,12 +103,127 @@ class EchoEmbeddingProvider:
         return out
 
 
+class OpenAIEmbeddingProvider:
+    """OpenAI `text-embedding-3-small` (1536 dims, unit-norm vectors).
+
+    Batches up to 512 inputs per API call and retries 429/5xx responses with
+    exponential backoff + jitter. The chunk table in Postgres mode stores
+    `vector(1536)`, so `dim` must stay in lockstep with it (the pgvector
+    store asserts this at startup — see store/pgvector_store.py).
+
+    `client` is injectable for tests, mirroring generate/llm.OpenAIProvider.
+    """
+
+    name = "openai"
+    dim = 1536
+    model = "text-embedding-3-small"
+
+    _max_batch_size: ClassVar[int] = 512
+    _max_attempts: ClassVar[int] = 6
+    _backoff_base_s: ClassVar[float] = 1.0
+    _backoff_cap_s: ClassVar[float] = 30.0
+
+    def __init__(self, *, client: Any = None) -> None:
+        self._client = client
+
+    def _client_or_create(self) -> Any:
+        if self._client is None:
+            api_key = get_settings().openai_api_key
+            if not api_key:
+                raise RuntimeError("EMBEDDING_PROVIDER=openai requires OPENAI_API_KEY to be set")
+            try:
+                from openai import OpenAI
+            except ModuleNotFoundError as exc:
+                raise RuntimeError(
+                    "EMBEDDING_PROVIDER=openai requires installing `regwatch[llm]` "
+                    "or running `uv sync --extra llm`."
+                ) from exc
+            self._client = OpenAI(api_key=api_key)
+        return self._client
+
+    @staticmethod
+    def _is_retryable(exc: Exception) -> bool:
+        """Retry only rate limits (429) and server errors (5xx)."""
+        status = getattr(exc, "status_code", None)
+        if not isinstance(status, int):
+            return False
+        return status == 429 or status >= 500
+
+    def _create_with_retry(self, client: Any, batch: list[str]) -> Any:
+        delay = self._backoff_base_s
+        for attempt in range(1, self._max_attempts + 1):
+            try:
+                return client.embeddings.create(model=self.model, input=batch)
+            except Exception as exc:
+                if attempt >= self._max_attempts or not self._is_retryable(exc):
+                    raise
+                time.sleep(delay + random.uniform(0, delay / 2))
+                delay = min(delay * 2, self._backoff_cap_s)
+        raise RuntimeError("unreachable")  # pragma: no cover
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        client = self._client_or_create()
+        out: list[list[float]] = []
+        for start in range(0, len(texts), self._max_batch_size):
+            batch = list(texts[start : start + self._max_batch_size])
+            resp = self._create_with_retry(client, batch)
+            data = sorted(resp.data, key=lambda d: int(d.index))
+            if len(data) != len(batch):
+                raise RuntimeError(
+                    f"openai embeddings returned {len(data)} vectors for {len(batch)} inputs"
+                )
+            for item in data:
+                vec = [float(x) for x in item.embedding]
+                if len(vec) != self.dim:
+                    raise RuntimeError(
+                        f"openai embedding has {len(vec)} dims, expected {self.dim} "
+                        f"({self.model})"
+                    )
+                out.append(vec)
+        return out
+
+
+def _module_available(module: str) -> bool:
+    """Cheap importability probe (no actual import — torch never loads here)."""
+    return importlib.util.find_spec(module) is not None
+
+
+def assert_embedding_runtime_available(name: str | None = None) -> None:
+    """Boot-time fail-fast: the configured provider's runtime deps must exist.
+
+    Providers import their heavy dependencies lazily on first ``embed()``, so a
+    slim image (``INSTALL_LOCAL_EMBEDDINGS=false``) configured with
+    ``EMBEDDING_PROVIDER=local-bge-small`` would otherwise boot cleanly,
+    report healthy, and then 500 on every query/ingest at embed time. The API
+    lifespan calls this so that misconfiguration refuses to start with the
+    same remediation message the lazy path would raise.
+    """
+    name = (name or get_settings().embedding_provider).lower()
+    if name == "local-bge-small" and not _module_available("sentence_transformers"):
+        raise RuntimeError(
+            "EMBEDDING_PROVIDER=local-bge-small requires installing "
+            "`regwatch[local-embeddings]` or running "
+            "`uv sync --extra local-embeddings` (Docker: build with "
+            "INSTALL_LOCAL_EMBEDDINGS=true), or set EMBEDDING_PROVIDER=openai "
+            "for the slim image."
+        )
+    if name == "openai" and not _module_available("openai"):
+        raise RuntimeError(
+            "EMBEDDING_PROVIDER=openai requires installing `regwatch[llm]` "
+            "or running `uv sync --extra llm`."
+        )
+
+
 def get_embedding_provider(name: str | None = None) -> EmbeddingProvider:
     """Factory. Falls back to settings if no name provided."""
     name = name or get_settings().embedding_provider
     name = name.lower()
     if name == "local-bge-small":
         return LocalBgeSmallProvider()
+    if name == "openai":
+        return OpenAIEmbeddingProvider()
     if name == "echo":
         return EchoEmbeddingProvider()
     raise ValueError(f"unknown embedding provider: {name}")

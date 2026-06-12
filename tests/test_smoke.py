@@ -37,6 +37,78 @@ def test_settings_load() -> None:
     assert s.refusal_text.startswith("I can't find this")
 
 
+def test_database_url_defaults_to_none_sqlite_mode() -> None:
+    from config.settings import get_settings
+
+    assert get_settings().database_url is None
+
+
+def test_database_url_normalized_to_psycopg_driver(monkeypatch: pytest.MonkeyPatch) -> None:
+    import config.settings as cs
+
+    cases = {
+        "postgresql://u:p@h:5432/db": "postgresql+psycopg://u:p@h:5432/db",
+        "postgres://u:p@h:5432/db": "postgresql+psycopg://u:p@h:5432/db",
+        "postgresql+psycopg://u:p@h:5432/db": "postgresql+psycopg://u:p@h:5432/db",
+    }
+    for raw, expected in cases.items():
+        monkeypatch.setenv("DATABASE_URL", raw)
+        cs.get_settings.cache_clear()
+        assert cs.get_settings().database_url == expected
+    monkeypatch.setenv("DATABASE_URL", "   ")
+    cs.get_settings.cache_clear()
+    assert cs.get_settings().database_url is None
+    monkeypatch.setenv("DATABASE_URL", "")
+    cs.get_settings.cache_clear()
+    assert cs.get_settings().database_url is None
+
+
+def test_engine_dialect_branches_on_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No server needed: create_engine is lazy, so this proves dispatch only."""
+    import config.settings as cs
+
+    from regwatch.store import db as db_module
+
+    assert db_module.get_engine().dialect.name == "sqlite"
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@127.0.0.1:5499/regwatch_test")
+    cs.get_settings.cache_clear()
+    cs.settings = cs.get_settings()
+    db_module.reset_for_tests()
+    engine = db_module.get_engine()
+    assert engine.dialect.name == "postgresql"
+    assert engine.dialect.driver == "psycopg"
+    db_module.reset_for_tests()
+
+
+def test_init_db_sqlite_creates_chat_session_composite_index() -> None:
+    from sqlalchemy import inspect
+
+    from regwatch.store.db import get_engine, init_db
+
+    init_db()
+    # Migration 0007 creates the index through alembic's own engine; dispose
+    # the cached engine's pool so PRAGMA-based introspection below doesn't
+    # read a pooled connection's pre-migration schema cache.
+    get_engine().dispose()
+    names = {ix["name"] for ix in inspect(get_engine()).get_indexes("chat_session")}
+    assert "ix_chat_session_user_id_updated_at" in names
+    # Idempotent (CREATE INDEX IF NOT EXISTS in 0007): a second boot must not fail.
+    init_db()
+
+
+def test_json_columns_get_jsonb_variant_on_postgres() -> None:
+    from sqlalchemy.dialects import postgresql, sqlite
+
+    from regwatch.store.models import QueryLog
+
+    column = QueryLog.__table__.c.route_json  # type: ignore[attr-defined]
+    assert (
+        column.type.compile(dialect=postgresql.dialect()) == "JSONB"  # type: ignore[no-untyped-call]
+    )
+    assert column.type.compile(dialect=sqlite.dialect()) == "JSON"
+
+
 def test_db_boots_and_round_trips() -> None:
     from sqlalchemy import inspect, text
 
@@ -48,7 +120,7 @@ def test_db_boots_and_round_trips() -> None:
     with get_engine().connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0006_ob_appl_type"
+            == "0007_chat_session_user_updated"
         )
     with session_scope() as s:
         s.add(
@@ -87,7 +159,7 @@ def test_init_db_stamps_complete_legacy_schema_without_version_table() -> None:
     with get_engine().connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0006_ob_appl_type"
+            == "0007_chat_session_user_updated"
         )
 
 
@@ -113,7 +185,7 @@ def test_init_db_stamps_complete_legacy_schema_with_empty_version_table() -> Non
     with engine.connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0006_ob_appl_type"
+            == "0007_chat_session_user_updated"
         )
 
 

@@ -82,6 +82,33 @@ class Settings(BaseSettings):
         return v
 
     # ---------- Storage ----------
+    # DATABASE_URL switches the structured store to Postgres (Supabase). Empty
+    # or unset -> SQLite at sqlite_path, exactly as before (dev/test default).
+    # Vector backend rule (K1): vectors live in pgvector iff database_url is
+    # set; Chroma remains the SQLite-mode backend. There is no separate toggle.
+    database_url: str | None = None
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _normalize_database_url(cls, v: object) -> str | None:
+        """Normalize DATABASE_URL to the SQLAlchemy psycopg v3 driver form.
+
+        - empty/whitespace -> None (SQLite mode)
+        - 'postgres://' (Heroku/Supabase shorthand) -> 'postgresql://'
+        - bare 'postgresql://' -> 'postgresql+psycopg://' (psycopg v3)
+        - 'postgresql+psycopg://' passes through unchanged
+        """
+        if v is None:
+            return None
+        url = str(v).strip()
+        if not url:
+            return None
+        if url.startswith("postgres://"):
+            url = "postgresql://" + url.removeprefix("postgres://")
+        if url.startswith("postgresql://"):
+            url = "postgresql+psycopg://" + url.removeprefix("postgresql://")
+        return url
+
     data_dir: Path = Path("./data")
     chroma_dir: Path = Path("./data/chroma")
     sqlite_path: Path = Path("./data/regwatch.db")

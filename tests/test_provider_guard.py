@@ -73,3 +73,34 @@ def test_echo_with_empty_corpus_boots(monkeypatch: pytest.MonkeyPatch) -> None:
         assert body["status"] == "ok"
         assert body["components"]["chroma"]["corpus_count"] == 0
         assert body["warnings"]
+
+
+def test_local_bge_without_sentence_transformers_refuses_to_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slim image + local-bge-small must fail at boot, not 500 per request."""
+    from regwatch.process import embedder
+
+    _reload_settings(monkeypatch, EMBEDDING_PROVIDER="local-bge-small")
+    monkeypatch.setattr(embedder, "_module_available", lambda module: False)
+    with pytest.raises(RuntimeError, match="local-embeddings"), TestClient(app):
+        pass
+
+
+def test_local_bge_with_sentence_transformers_boots(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The probe checks importability only — it must not load the model.
+    from regwatch.process import embedder
+
+    _reload_settings(monkeypatch, EMBEDDING_PROVIDER="local-bge-small")
+    monkeypatch.setattr(embedder, "_module_available", lambda module: True)
+    with TestClient(app) as c:
+        assert c.get("/health").status_code == 200
+
+
+def test_openai_embeddings_without_sdk_refuses_to_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+    from regwatch.process import embedder
+
+    _reload_settings(monkeypatch, EMBEDDING_PROVIDER="openai")
+    monkeypatch.setattr(embedder, "_module_available", lambda module: False)
+    with pytest.raises(RuntimeError, match="extra llm"), TestClient(app):
+        pass
