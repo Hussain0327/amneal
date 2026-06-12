@@ -35,9 +35,14 @@ export function broadcastAuthChange(): void {
   channel.close();
 }
 
-// Session gate for the whole app. /login renders bare; everything else gets
-// the sidebar shell only once /auth/me has confirmed a user — until then a
-// quiet shell, so protected UI never flashes for signed-out visitors.
+// Paths that render bare — no auth, no sidebar shell. /login is the gate
+// itself; /fixtures is the static design gallery (fake data only, and it
+// 404s in production builds).
+const BARE_PATHS = new Set(["/login", "/fixtures"]);
+
+// Session gate for the whole app. Bare paths render as-is; everything else
+// gets the sidebar shell only once /auth/me has confirmed a user — until then
+// a quiet shell, so protected UI never flashes for signed-out visitors.
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
@@ -82,7 +87,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [refresh]);
 
   useEffect(() => {
-    if (!loading && !user && pathname !== "/login") router.replace("/login");
+    if (!loading && !user && !BARE_PATHS.has(pathname)) router.replace("/login");
   }, [loading, user, pathname, router]);
 
   const logout = useCallback(async () => {
@@ -98,7 +103,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <AuthContext.Provider value={{ user, loading, refresh, logout }}>
-      {pathname === "/login" ? (
+      {BARE_PATHS.has(pathname) ? (
         children
       ) : user ? (
         // key={user.id}: a different identity remounts the whole authed
