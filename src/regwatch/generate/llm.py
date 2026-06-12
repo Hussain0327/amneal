@@ -20,10 +20,49 @@ class LLMMessage:
 
 
 @dataclass
+class LLMUsage:
+    """Token usage for one completion. None = the provider didn't report it."""
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
+@dataclass
 class LLMResponse:
     text: str
     model: str
     raw: dict[str, Any] = field(default_factory=dict)
+    # H3: token accounting rides on the existing return object rather than a
+    # (text, usage) tuple or provider-level last_usage state — every existing
+    # caller keeps working unchanged, there is no mutable per-provider state to
+    # race on, and only the call sites that care (the synthesizer audit path)
+    # read it.
+    usage: LLMUsage = field(default_factory=LLMUsage)
+
+
+def _usage_from(resp: Any, input_attr: str, output_attr: str) -> LLMUsage:
+    """Extract token usage defensively — absent/odd shapes yield None, never a guess."""
+
+    def _as_int(v: Any) -> int | None:
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+    u = getattr(resp, "usage", None)
+    if u is None:
+        return LLMUsage()
+    return LLMUsage(
+        input_tokens=_as_int(getattr(u, input_attr, None)),
+        output_tokens=_as_int(getattr(u, output_attr, None)),
+    )
+
+
+def estimate_cost_usd(model: str, usage: LLMUsage) -> float | None:
+    """USD cost from the settings price table; unknown model/usage -> None (never a guess)."""
+    prices = get_settings().price_for_model(model)
+    if prices is None or usage.input_tokens is None or usage.output_tokens is None:
+        return None
+    return (
+        usage.input_tokens * prices["input"] + usage.output_tokens * prices["output"]
+    ) / 1_000_000
 
 
 class LLMProvider(Protocol):
@@ -57,12 +96,14 @@ class EchoLLMProvider:
         response_format: str | None = None,
     ) -> LLMResponse:
         last_user = next((m.content for m in reversed(messages) if m.role == "user"), "")
+        usage = LLMUsage(input_tokens=0, output_tokens=0)  # stub: zeros, never None
         if response_format == "json":
             return LLMResponse(
                 text=json.dumps({"echo": last_user}),
                 model="echo",
+                usage=usage,
             )
-        return LLMResponse(text=f"ECHO: {last_user}", model="echo")
+        return LLMResponse(text=f"ECHO: {last_user}", model="echo", usage=usage)
 
 
 # ---------- openai provider ----------
@@ -155,7 +196,12 @@ class OpenAIProvider:
                 raise
         text = (getattr(resp, "output_text", "") or "").strip()
         raw = resp.model_dump() if hasattr(resp, "model_dump") else {}
-        return LLMResponse(text=text, model=getattr(resp, "model", self.model), raw=raw)
+        return LLMResponse(
+            text=text,
+            model=getattr(resp, "model", self.model),
+            raw=raw,
+            usage=_usage_from(resp, "input_tokens", "output_tokens"),
+        )
 
     def _complete_chat(
         self,
@@ -176,7 +222,12 @@ class OpenAIProvider:
             kwargs["response_format"] = {"type": "json_object"}
         resp = client.chat.completions.create(**kwargs)
         text = (resp.choices[0].message.content or "").strip()
-        return LLMResponse(text=text, model=self.model, raw=resp.model_dump())
+        return LLMResponse(
+            text=text,
+            model=self.model,
+            raw=resp.model_dump(),
+            usage=_usage_from(resp, "prompt_tokens", "completion_tokens"),
+        )
 
 
 # ---------- anthropic provider ----------
@@ -221,7 +272,12 @@ class AnthropicProvider:
             for block in resp.content
             if getattr(block, "type", None) == "text"
         ).strip()
-        return LLMResponse(text=text, model=self.model, raw=resp.model_dump())
+        return LLMResponse(
+            text=text,
+            model=self.model,
+            raw=resp.model_dump(),
+            usage=_usage_from(resp, "input_tokens", "output_tokens"),
+        )
 
 
 def _model_for_role(s: Any, role: str) -> str:

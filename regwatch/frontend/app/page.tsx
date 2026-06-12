@@ -3,6 +3,7 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 
+import { AnswerFeedback } from "@/components/AnswerFeedback";
 import { PageHeader } from "@/components/PageHeader";
 import { Markdown } from "@/components/Markdown";
 import { useSessions } from "@/components/SessionsProvider";
@@ -402,6 +403,10 @@ function AssistantTurn({
           </div>
         )}
       </div>
+
+      {/* Thumbs only on live turns: meta (and so audit_id) is absent on turns
+          rehydrated from session history, which degrade to no affordance. */}
+      {turn.meta && <AnswerFeedback auditId={turn.meta.audit_id} />}
 
       {turn.meta && (
         <details className="mt-5">

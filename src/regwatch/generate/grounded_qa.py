@@ -39,7 +39,13 @@ from regwatch.common.conversation import (
 )
 from regwatch.common.logging import get_logger
 from regwatch.common.text_normalize import canonical_name
-from regwatch.generate.llm import LLMMessage, current_model_name, get_llm_provider
+from regwatch.generate.llm import (
+    LLMMessage,
+    LLMUsage,
+    current_model_name,
+    estimate_cost_usd,
+    get_llm_provider,
+)
 from regwatch.generate.prompts import GROUNDED_QA_SYSTEM, GROUNDED_QA_USER
 from regwatch.retrieve.reranker import rerank_passages
 from regwatch.retrieve.resolver import resolve_brand, resolve_product, suggest_products
@@ -423,6 +429,21 @@ def _validate_citations(
     return validated, bad
 
 
+def _usage_fields(model_name: str, usage: LLMUsage | None) -> dict[str, Any]:
+    """log_query kwargs for the synthesizer call's token usage (H3).
+
+    None (no LLM call happened) keeps all three columns NULL; an unpriced
+    model keeps cost_usd NULL while still recording the token counts.
+    """
+    if usage is None:
+        return {}
+    return {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cost_usd": estimate_cost_usd(model_name, usage),
+    }
+
+
 def _refuse(
     *,
     question: str,
@@ -435,6 +456,7 @@ def _refuse(
     route_json: dict[str, Any],
     status: str = "refused",
     answer_text: str | None = None,
+    usage: LLMUsage | None = None,
 ) -> QAResult:
     s = get_settings()
     answer = answer_text or s.refusal_text
@@ -452,6 +474,7 @@ def _refuse(
         user_id=user_id,
         status=status,
         route_json=route_json,
+        **_usage_fields(model_name, usage),
     )
     log.info("qa_refused", reason=reason, audit_id=audit_id)
     return QAResult(
@@ -479,6 +502,7 @@ def _clarify(
     turn_id: str,
     user_id: str | None,
     route_json: dict[str, Any],
+    usage: LLMUsage | None = None,
 ) -> QAResult:
     """Guide instead of guess: we know the product (or a near-match) but need
     direction. Carries ZERO citations (never fabricates) and logs one audit row
@@ -496,6 +520,7 @@ def _clarify(
         user_id=user_id,
         status="clarify",
         route_json=route_json,
+        **_usage_fields(model_name, usage),
     )
     log.info("qa_clarify", reason=reason, audit_id=audit_id, options=len(options))
     return QAResult(
@@ -995,6 +1020,7 @@ def ask(
                     turn_id=turn_id,
                     user_id=user_id,
                     route_json=route_json,
+                    usage=response.usage,
                 ),
                 filters=active_filters,
                 route_json=route_json,
@@ -1015,6 +1041,7 @@ def ask(
                 turn_id=turn_id,
                 user_id=user_id,
                 route_json=route_json,
+                usage=response.usage,
             ),
             filters=active_filters,
             route_json=route_json,
@@ -1044,6 +1071,7 @@ def ask(
                 turn_id=turn_id,
                 user_id=user_id,
                 route_json=route_json,
+                usage=response.usage,
             ),
             filters=active_filters,
             route_json=route_json,
@@ -1072,6 +1100,7 @@ def ask(
         user_id=user_id,
         status=response_mode,
         route_json=route_json,
+        **_usage_fields(response.model, response.usage),
     )
     return _finish_turn(
         QAResult(

@@ -883,6 +883,19 @@ def _persist(ctx: _Ctx) -> None:
             "atomically; no partial provenance rows were stored."
         )
         log.warning("whitepaper_persist_failed", error=str(exc))
+        # Explicit Sentry capture point (H1): the populator degrades gracefully
+        # (the response still ships), but losing provenance rows must be visible.
+        # Sanitized: str() on the realistic failure class here (SQLAlchemy
+        # StatementError/IntegrityError) embeds the failed SQL plus a parameters
+        # preview — the very snapshot rows being inserted (provenance text and
+        # the user-supplied RLD/application input). Forward only the exception
+        # CLASS, with no cause/context chain, so none of that reaches Sentry.
+        from regwatch.common.observability import capture_exception
+
+        sanitized = RuntimeError(f"whitepaper persistence failed: {type(exc).__name__}")
+        sanitized.__cause__ = None
+        sanitized.__suppress_context__ = True
+        capture_exception(sanitized)
 
 
 # ---------------------------------------------------------------------------

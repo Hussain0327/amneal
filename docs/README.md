@@ -25,6 +25,7 @@ Read these in order if you are new to the project:
 | `PROJECT_SPEC.md` | Engineers / reviewers | Original POC spec, phase plan, and compliance invariants. |
 | `DECISIONS.md` | Engineers / reviewers | Append-only decision log. Read this before changing architecture. |
 | `PROD_READINESS.md` | Engineers / deployment owners | Tracks what stands between the POC and a real production deployment, prioritized and mapped to the tree. |
+| `DEPLOY.md` | Engineers / deployment owners | Production cutover runbook (Supabase + Fly.io/Railway + Vercel) plus the Operations section: rollback levers, uptime monitoring, and the monthly staging restore drill (`scripts/restore_drill.sh`). |
 | `../regwatch/backend/README.md` | Backend engineers | Explains why backend source remains in `src/regwatch` and how to run the FastAPI API. |
 | `../regwatch/frontend/README.md` | Frontend engineers | Explains how to run the Next.js UI and how it proxies to the API. |
 | `CLAUDE.md` | Agent operators | Working instructions for Claude Code or similar coding agents. |

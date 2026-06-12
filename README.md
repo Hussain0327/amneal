@@ -151,6 +151,9 @@ Key guides:
   chat-session / follow-up model.
 - [`docs/DOCKER.md`](docs/DOCKER.md) for container setup and ingest notes.
 - [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md) for the POC→production path.
+- [`docs/DEPLOY.md`](docs/DEPLOY.md) for the production runbook (Supabase +
+  Fly.io/Railway + Vercel) and the Operations section: rollback, uptime
+  monitoring, and the monthly staging restore drill.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) for the append-only decision log.
 
 ## Docker
@@ -229,6 +232,9 @@ POST   /whitepaper   populate the CRA White Paper for {rld_name, application_num
 POST   /whitepaper/docx  body {"result": <exact JSON from POST /whitepaper>} → the filled
                      Word document (.docx attachment) (auth; renders from the
                      reviewed result — no re-populate, no live fetches)
+POST   /feedback     rate a Q&A answer {audit_id, rating: -1|1, comment?} —
+                     upserts per (audit row, user); 404 unless the audit row is
+                     the caller's own /query answer (auth)
 GET    /watch/latest matched changes since cursor (auth)
 GET    /products     watchlist (auth)
 POST   /products     add a manual product (INV-5 enforced) (auth)
@@ -303,6 +309,13 @@ Two layers:
   `faithfulness` and `fact_recall` hard-gated at 1.0 — and fires in CI where the
   live `run_eval` no-ops on an empty corpus.
 
+Growing the gold set is a human process, not code: answer-feedback rows
+(thumbs up/down from the Ask UI, stored in `answer_feedback` and keyed to the
+`query_log` audit row with its question, route, and citations) are the
+candidate pool for future gold-set items. Review them — thumbs-down with
+comments first — and promote the good ones into `gold_set.jsonl` by hand;
+nothing is auto-ingested.
+
 ## Layout
 
 ```
@@ -346,8 +359,12 @@ Definition of Done passed before moving on.
 - **Auth is app-layer only.** Cookie-session auth, CLI-provisioned users,
   per-user chat history, and per-user rate limiting exist, but TLS, OIDC/SSO,
   and a production gateway are still environment work before external exposure.
-- **Datastores are single-node** (SQLite + on-disk Chroma); no HA, pooling, or
-  backup/restore. Migrations still run on app boot rather than as a deploy step.
+- **Datastores are single-node in dev** (SQLite + on-disk Chroma; Supabase
+  Postgres + pgvector when `DATABASE_URL` is set); no HA or pooling beyond
+  Supabase's. Rollback, uptime monitoring, and the monthly staging restore
+  drill (`scripts/restore_drill.sh`) are documented in
+  [`docs/DEPLOY.md`](docs/DEPLOY.md) (Operations). Migrations still run on app
+  boot rather than as a deploy step.
 - The gold set is 12 items, not the spec's 30–50, and scoring is mechanical
   (`(short_name, page)` + `expected_facts` substrings). LLM-as-judge is not wired.
 - The cross-encoder reranker exists as a hook but is off by default. Turn

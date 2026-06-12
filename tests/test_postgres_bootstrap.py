@@ -191,6 +191,38 @@ def test_refuses_to_start_on_revision_mismatch(pg_db: ModuleType) -> None:
         pg_db.init_db()
 
 
+def test_alembic_upgrade_head_heals_0007_stamped_postgres(pg_db: ModuleType) -> None:
+    """H3 existing-Postgres path: a 0007-stamped DB reaches head via the
+    documented operator one-liner (`alembic upgrade head`, DEPLOY.md §3/§6.3)
+    after this build's boot refusal — 0008's batch ops are PG-compatible."""
+    from alembic import command
+
+    pg_db.init_db()  # fresh bootstrap: create_all + stamp head
+    cfg = pg_db._alembic_config()
+    # Rewind to the 0007 shape (0008's downgrade runs fine on Postgres),
+    # leaving the stamp at 0007 — the state a parallel cutover produces.
+    command.downgrade(cfg, "0007_chat_session_user_updated")
+    inspector = inspect(pg_db.get_engine())
+    assert "answer_feedback" not in inspector.get_table_names()
+    assert "input_tokens" not in {c["name"] for c in inspector.get_columns("query_log")}
+    assert _stamped_revision(pg_db) == "0007_chat_session_user_updated"
+
+    # Booting this build against it refuses (by design) ...
+    with pytest.raises(RuntimeError, match="stamped at alembic revision"):
+        pg_db.init_db()
+
+    # ... and the documented one-liner heals it.
+    command.upgrade(cfg, "head")
+    pg_db.reset_for_tests()
+    inspector = inspect(pg_db.get_engine())
+    cols = {c["name"] for c in inspector.get_columns("query_log")}
+    assert {"input_tokens", "output_tokens", "cost_usd"} <= cols
+    assert "answer_feedback" in inspector.get_table_names()
+    pg_db.init_db()  # boots clean at head
+    head = pg_db._head_revision(pg_db._alembic_config())
+    assert _stamped_revision(pg_db) == head
+
+
 def test_refuses_to_start_on_unstamped_nonempty_database(pg_db: ModuleType) -> None:
     pg_db.init_db()
     with pg_db.get_engine().begin() as conn:

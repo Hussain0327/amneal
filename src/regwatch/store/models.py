@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Column, Index
+from sqlalchemy import JSON, CheckConstraint, Column, Index, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -142,6 +142,35 @@ class QueryLog(SQLModel, table=True):
     status: str | None = None
     route_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
     model_name: str
+    # H3 token/cost accounting for the dominant (synthesizer) LLM call. NULL =
+    # no LLM call happened, or the provider didn't report usage / has no price
+    # in the settings table — never a guessed number.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cost_usd: float | None = None
+
+
+class AnswerFeedback(SQLModel, table=True):
+    """An analyst's thumbs up/down on one answered Q&A turn (H4).
+
+    One row per (audit_id, user_id) — re-rating replaces. These rows are the
+    candidate pool for future eval gold-set items.
+    """
+
+    __tablename__ = "answer_feedback"
+    # Declared in metadata so create_all (the Postgres bootstrap) and the
+    # alembic migration produce the same constraints on both paths.
+    __table_args__ = (
+        UniqueConstraint("audit_id", "user_id", name="uq_answer_feedback_audit_user"),
+        CheckConstraint("rating IN (-1, 1)", name="ck_answer_feedback_rating"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    audit_id: int = Field(foreign_key="query_log.id", index=True)
+    user_id: str = Field(index=True)
+    rating: int  # -1 (thumbs down) | 1 (thumbs up); CHECK-enforced
+    comment: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ChatSession(SQLModel, table=True):

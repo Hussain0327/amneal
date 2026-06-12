@@ -389,6 +389,60 @@ button.chip:hover {
   color: var(--ink);
 }
 
+/* ---------- Answer feedback (thumbs on a finding) ---------- */
+.fb {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.fb__btn {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  padding: 0.3rem 0.65rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.fb__btn:hover:not(:disabled) {
+  border-color: var(--gold-deep);
+  background: var(--gold-wash);
+  color: var(--ink);
+}
+.fb__btn:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+.fb__btn--on {
+  border-color: var(--gold-deep);
+  background: var(--gold-wash);
+  color: var(--gold-ink);
+}
+.fb__status {
+  font-size: 0.68rem;
+}
+.fb__note {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.55rem;
+  max-width: 30rem;
+}
+.fb__note .field {
+  font-size: 0.9rem;
+  padding: 0.45rem 0.65rem;
+}
+.fb__note .btn {
+  padding: 0.5rem 0.9rem;
+  white-space: nowrap;
+}
+
 /* ---------- Editorial prose (rendered markdown) ---------- */
 .prose {
   font-size: 1.04rem;

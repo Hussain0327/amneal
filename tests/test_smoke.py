@@ -120,7 +120,7 @@ def test_db_boots_and_round_trips() -> None:
     with get_engine().connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0007_chat_session_user_updated"
+            == "0008_token_cost_feedback"
         )
     with session_scope() as s:
         s.add(
@@ -159,7 +159,7 @@ def test_init_db_stamps_complete_legacy_schema_without_version_table() -> None:
     with get_engine().connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0007_chat_session_user_updated"
+            == "0008_token_cost_feedback"
         )
 
 
@@ -185,7 +185,7 @@ def test_init_db_stamps_complete_legacy_schema_with_empty_version_table() -> Non
     with engine.connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0007_chat_session_user_updated"
+            == "0008_token_cost_feedback"
         )
 
 

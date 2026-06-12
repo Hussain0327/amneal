@@ -200,6 +200,18 @@ combination.
    mismatch it refuses to start (that's the signal you deployed code without
    migrating, or vice versa).
 
+   **Schema-advancing releases** (a new file in `migrations/versions/` since
+   the last deploy) need the database advanced FIRST — from any machine with
+   a repo checkout (the alembic env resolves `DATABASE_URL` itself):
+
+   ```bash
+   DATABASE_URL="$SUPABASE_DB_URL" uv run alembic upgrade head
+   ```
+
+   The same one-liner is the recovery for the boot refusal above: a message
+   like `stamped at alembic revision '0007_…' but this build expects
+   '0008_…'` means exactly this command, then deploy again.
+
 4. Verify:
 
    ```bash
@@ -302,17 +314,141 @@ Do these in order; stop at the first failure.
 
 If 6–9 pass, the deploy is good.
 
-## 6. Rollback / recovery
+## 6. Operations
 
-- **App rollback:** `fly releases` → `fly deploy --image <previous image ref>`
-  (or Railway → Deployments → Redeploy previous). The DB schema is stamped;
-  an older app that expects an older head will refuse to boot rather than
-  corrupt data.
-- **Data rollback:** Supabase **Database → Backups** (daily on paid plans) —
-  restore, then redeploy. The SQLite/Chroma snapshot in
-  `/tmp/regwatch-snapshot` (and the untouched live `data/`) remain a full
-  fallback: unset `DATABASE_URL` and the stack runs SQLite mode exactly as
-  before the migration.
-- **Re-migration:** rerun `scripts/migrate_to_supabase.py --truncate` from the
-  snapshot at any time; it is idempotent under `--truncate` and refuses
-  otherwise.
+Day-2 runbook: rollback, uptime monitoring, and the monthly staging restore
+drill. Everything here is operator-driven — agents and CI never touch
+production data paths.
+
+### 6.1 Rollback
+
+Three independent levers, least to most drastic. Pick the smallest one that
+covers the failure.
+
+1. **App rollback (bad deploy, schema unchanged).** List releases, note the
+   image ref of the last good one, pin it:
+
+   ```bash
+   fly releases --image                       # last good release's image ref
+   fly deploy --image <previous-image-ref>    # e.g. registry.fly.io/regwatch-api:deployment-…
+   ```
+
+   (Railway: **Deployments → ⋮ → Redeploy** on the previous build.) The DB
+   schema is alembic-stamped and verified on boot: an older app that expects
+   an older head **refuses to start** rather than running against a newer
+   schema. If the bad deploy also migrated the schema, an image rollback
+   alone is not enough — restore data (lever 2) or roll forward with a fix.
+
+2. **Data rollback (bad write / bad migration).** Supabase **Database →
+   Backups** (daily on paid plans) → restore the last good backup, then
+   restart the API (`fly apps restart regwatch-api`). A restore overwrites
+   the whole database — stop the API first, and accept that sessions, audit
+   rows, and any other writes since that backup are lost. Verify with the §5
+   smoke checklist before calling it done.
+
+3. **App-level fallback (Postgres unusable — last resort).** Unset
+   `DATABASE_URL` (and set `EMBEDDING_PROVIDER` to match the local store) and
+   the stack runs SQLite + Chroma from the pre-cutover `data/` snapshot
+   exactly as before the migration. **Honest caveat — this is continuity,
+   not rollback:** everything written to Postgres after the cutover (users,
+   sessions, `query_log` audit rows, newly ingested PSGs) does NOT exist in
+   the SQLite copy, and everything written during the fallback will not be
+   in Postgres. The two stores diverge from the moment of cutover. Returning
+   to Postgres later means a fresh SQLite/Chroma snapshot and a re-run of
+   `scripts/migrate_to_supabase.py --truncate` (idempotent under
+   `--truncate`; refuses a non-empty target otherwise).
+
+### 6.2 Uptime
+
+Point an external monitor at the one open endpoint:
+
+- **URL:** `GET https://<api-host>/health` (no auth).
+- **Expected:** HTTP `200` with compact JSON shaped like
+
+  ```json
+  {"status":"ok","components":{"db":{"ok":true},"chroma":{"ok":true,"corpus_count":1795},"llm":{"provider":"openai","key_present":true},"embedding":{"provider":"openai"}},"warnings":[]}
+  ```
+
+  (the `chroma` key reports the *active* vector store — pgvector when
+  `DATABASE_URL` is set). When the DB or vector store is unreachable the API
+  returns **503** with `"status":"unhealthy"`, so a plain HTTP-status monitor
+  already catches real outages.
+- **UptimeRobot** (free tier): HTTP(s) monitor on the URL, 5-minute interval;
+  optionally a keyword monitor that alerts when `"status":"ok"` is *absent*
+  from the body. **healthchecks.io** alternative: a cron on any box you
+  control —
+  `curl -fsS --max-time 20 https://<api-host>/health >/dev/null && curl -fsS https://hc-ping.com/<your-uuid>`.
+- **Alert threshold:** 2 consecutive failures (~10 minutes at a 5-minute
+  interval). Single blips happen during deploys; sustained failure pages.
+
+**CI backstop — `.github/workflows/uptime-eval.yml`:** a scheduled GitHub
+Action curls the production health URL every 30 minutes and fails the run
+when the response is not 200 / `"status":"ok"`. It is driven entirely by a
+repository secret — **Settings → Secrets and variables → Actions → New
+repository secret**: name `PROD_HEALTH_URL`, value
+`https://<api-host>/health`. While the secret is unset the workflow skips
+cleanly (no failures, no invented URLs). This complements — does not
+replace — the external monitor: GitHub cron schedules can lag or pause on
+inactive repos.
+
+### 6.3 Staging + restore drill (monthly, ~30 min)
+
+A backup you have never restored is a hope, not a backup.
+
+**One-time setup:** create a second free Supabase project,
+`regwatch-staging`, same region as prod (§1 steps 1–3; the free tier holds
+this corpus comfortably). Save its session-pooler URL next to the prod one —
+they differ by project ref.
+
+**Monthly drill:**
+
+1. Get a restorable copy into staging. Either:
+   - **Backup path (preferred — exercises the real recovery lever):**
+     Supabase prod → **Database → Backups** → download the latest daily
+     backup and restore it into `regwatch-staging` (dashboard restore, or
+     `psql "<staging-url>" < backup.sql` run by the operator).
+   - **Snapshot path:** re-run the migration from the SQLite/Chroma snapshot
+     through the wrapper:
+
+     ```bash
+     DATABASE_URL='postgresql://postgres.<STAGING-ref>:<pw>@aws-0-<region>.pooler.supabase.com:5432/postgres' \
+       ./scripts/restore_drill.sh /tmp/regwatch-snapshot
+     ```
+
+     The wrapper runs `scripts/migrate_to_supabase.py --truncate` against the
+     target and prints the migrate script's per-table verification table.
+     This step passes only when every row is `OK` and the exit code is 0.
+     `DRILL_SKIP_EMBED=1` rehearses the relational copy with no OpenAI
+     embedding spend (`chunk` stays empty — fine for a schema/data drill,
+     not for smoke step 7).
+
+     A staging DB still stamped at an older revision (e.g. by last month's
+     drill, run before a schema-advancing release) makes this step refuse
+     with `stamped at alembic revision … but this build expects …` —
+     `--truncate` clears rows, not schema, so it cannot self-heal. Advance
+     staging first, then re-run the drill:
+
+     ```bash
+     DATABASE_URL='<staging-url>' uv run alembic upgrade head
+     ```
+2. Point a local API at staging and smoke it:
+   `DATABASE_URL='<staging-url>' EMBEDDING_PROVIDER=openai uv run uvicorn
+   regwatch.api.main:app --port 8099`, then run the §5 checklist against
+   `localhost:8099` (step 1 directly; steps 6–9 via curl or a local
+   frontend with `API_PROXY_TARGET=http://localhost:8099`).
+3. Record date + result (a line in the team log is enough). Anything that
+   fails here failed on staging — fix it now, not mid-incident.
+
+**Hard guard:** `scripts/restore_drill.sh` refuses to run — before any
+network call or subprocess, reserved exit code 4 — when the target URL
+contains the production project ref `xvhbfmoynibkcghazzxc`. The ref appears
+in the pooler username (`postgres.<ref>@…pooler.supabase.com`) and in the
+direct-connection host (`db.<ref>.supabase.co`), so it is matched anywhere
+in the URL, case-insensitively and after percent-decoding (an encoded ref
+cannot slip past). Bare non-loopback IP hosts are refused too — they carry
+no ref for the guard to vet (loopback stays allowed, so a local docker
+Postgres still works as a rehearsal target). Residual limit: the guard is
+textual; a production target reached through a hostname alias containing
+neither the ref nor an IP is out of its scope. The drill can truncate
+staging; it can never truncate production. Covered by
+`tests/test_restore_drill.py`.
