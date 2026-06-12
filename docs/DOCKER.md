@@ -123,21 +123,26 @@ DAGSTER_HOME=/app/data/dagster/home
 
 ## Embedding Modes
 
-The baseline Docker image defaults to:
+Compose defaults to the real local model:
 
 ```text
-EMBEDDING_PROVIDER=echo
+INSTALL_LOCAL_EMBEDDINGS=true        # compose build-arg default
+EMBEDDING_PROVIDER=local-bge-small   # compose environment default
 ```
 
-That is good for smoke tests because it avoids shipping PyTorch and avoids model
-downloads. It is not acceptable for broad production ingest because it produces
-low-quality deterministic test vectors.
+so an out-of-the-box `docker compose up --build` ships sentence-transformers
+and produces real embeddings. (The bare Docker *image* — built without compose
+— keeps an in-image `EMBEDDING_PROVIDER=echo` default: good for empty-corpus
+smoke boots only, because echo produces low-quality deterministic test
+vectors. The API refuses to boot `local-bge-small` on an image built without
+sentence-transformers.)
 
-For real PSG ingest inside Docker, set these in `.env`:
+For a slim no-torch stack — the production pairing, see `docs/DEPLOY.md` —
+set both in `.env`:
 
 ```text
-INSTALL_LOCAL_EMBEDDINGS=true
-EMBEDDING_PROVIDER=local-bge-small
+INSTALL_LOCAL_EMBEDDINGS=false
+EMBEDDING_PROVIDER=openai            # plus OPENAI_API_KEY
 ```
 
 Then rebuild:

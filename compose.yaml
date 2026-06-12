@@ -1,7 +1,12 @@
+# INSTALL_LOCAL_EMBEDDINGS defaults to true here (NOT in the Dockerfile, where
+# the slim no-torch image stays the default) so the out-of-the-box compose
+# build ships sentence-transformers — matching the default
+# EMBEDDING_PROVIDER=local-bge-small below. For a slim compose stack set
+# INSTALL_LOCAL_EMBEDDINGS=false AND EMBEDDING_PROVIDER=openai together.
 x-regwatch-build: &regwatch-build
   context: .
   args:
-    INSTALL_LOCAL_EMBEDDINGS: ${INSTALL_LOCAL_EMBEDDINGS:-false}
+    INSTALL_LOCAL_EMBEDDINGS: ${INSTALL_LOCAL_EMBEDDINGS:-true}
 
 x-regwatch-environment: &regwatch-environment
   DATA_DIR: /app/data
@@ -9,7 +14,18 @@ x-regwatch-environment: &regwatch-environment
   SQLITE_PATH: /app/data/regwatch.db
   RAW_PDF_DIR: /app/data/raw
   PROCESSED_DIR: /app/data/processed
-  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-echo}
+  # Empty -> SQLite + Chroma under /app/data (local default). Set to a Postgres
+  # URL (Supabase session pooler) to move the structured store AND vectors
+  # (pgvector) to Postgres — see docs/DEPLOY.md.
+  DATABASE_URL: ${DATABASE_URL:-}
+  # local-bge-small needs the heavier image — the compose build default
+  # (INSTALL_LOCAL_EMBEDDINGS=true, see x-regwatch-build above) provides it.
+  # For a slim stack set INSTALL_LOCAL_EMBEDDINGS=false and use
+  # EMBEDDING_PROVIDER=openai + OPENAI_API_KEY instead; the API refuses to
+  # boot local-bge-small on an image without sentence-transformers. The old
+  # `echo` default bricked a seeded stack: the API fails fast when a test
+  # provider faces a non-empty corpus.
+  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local-bge-small}
 
 x-dagster-environment: &dagster-environment
   DAGSTER_CONFIG_DIR: /app/dagster_config

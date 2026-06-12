@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-from sqlalchemy import desc, or_
-from sqlmodel import col, select
+from sqlalchemy import desc, or_, select
+from sqlmodel import col
 
 from regwatch.common.text_normalize import canonical_name, stripped_name
 from regwatch.sources._utils import APPLICATION_PREFIXES, clean_application_number
@@ -48,7 +48,23 @@ class PsgHandler:
         ingredient_stripped = stripped_name(query.active_ingredient or query.query_text)
         records: list[SourceRecord] = []
         with session_scope() as s:
-            stmt = select(PsgDocument)
+            # One round trip: join each document to its latest version via a
+            # correlated scalar subquery (ordered by captured_at, id — both
+            # served by the psg_document_id index). On hosted Postgres the
+            # old two-pass fetch (docs, then every version row for those
+            # docs) pays a second network RTT and transfers the full version
+            # history; this folds it into a single indexed query.
+            latest_version_id = (
+                select(col(PsgVersion.id))
+                .where(col(PsgVersion.psg_document_id) == col(PsgDocument.id))
+                .order_by(desc(col(PsgVersion.captured_at)), desc(col(PsgVersion.id)))
+                .limit(1)
+                .correlate(PsgDocument)
+                .scalar_subquery()
+            )
+            stmt = select(PsgDocument, PsgVersion).outerjoin(
+                PsgVersion, col(PsgVersion.id) == latest_version_id
+            )
             if app_no:
                 stmt = stmt.where(
                     or_(
@@ -70,24 +86,10 @@ class PsgHandler:
                         col(PsgDocument.dosage_form).ilike(f"%{query.dosage_form}%"),
                     )
                 )
-            rows = list(s.scalars(stmt.limit(query.limit * 5)))
-            doc_ids = [doc.id for doc in rows if doc.id is not None]
-            latest_versions: dict[int, PsgVersion] = {}
-            if doc_ids:
-                version_rows = list(
-                    s.scalars(
-                        select(PsgVersion)
-                        .where(col(PsgVersion.psg_document_id).in_(doc_ids))
-                        .order_by(
-                            col(PsgVersion.psg_document_id),
-                            desc(col(PsgVersion.captured_at)),
-                            desc(col(PsgVersion.id)),
-                        )
-                    )
-                )
-                for version_row in version_rows:
-                    latest_versions.setdefault(version_row.psg_document_id, version_row)
-            for doc in rows:
+            pairs: list[tuple[PsgDocument, PsgVersion | None]] = [
+                (row[0], row[1]) for row in s.execute(stmt.limit(query.limit * 5))
+            ]
+            for doc, version in pairs:
                 if app_no and app_no not in (doc.rld_or_rs_number or "") and doc.appl_no != app_no:
                     continue
                 if query.active_ingredient and not (
@@ -101,7 +103,6 @@ class PsgHandler:
                     and query.dosage_form.lower() not in doc.dosage_form.lower()
                 ):
                     continue
-                version = latest_versions.get(doc.id or 0)
                 records.append(_record_from_doc(doc, version))
                 if len(records) >= query.limit:
                     break

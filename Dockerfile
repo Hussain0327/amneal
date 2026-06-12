@@ -1,5 +1,14 @@
 # syntax=docker/dockerfile:1
 
+# Two build flavors, gated by INSTALL_LOCAL_EMBEDDINGS:
+#   * slim (default, production): no torch/sentence-transformers. Run with
+#     EMBEDDING_PROVIDER=openai + OPENAI_API_KEY (+ DATABASE_URL for
+#     Postgres/pgvector on Supabase) — the openai SDK ships via the `llm`
+#     extra, so the slim image is fully embedding-capable. See docs/DEPLOY.md.
+#   * local ingest: --build-arg INSTALL_LOCAL_EMBEDDINGS=true, then run with
+#     EMBEDDING_PROVIDER=local-bge-small.
+# The in-image EMBEDDING_PROVIDER=echo default below is for empty-corpus smoke
+# tests only; the API refuses to boot an echo provider against a seeded corpus.
 ARG PYTHON_VERSION=3.12
 FROM python:${PYTHON_VERSION}-slim
 ARG INSTALL_LOCAL_EMBEDDINGS=false

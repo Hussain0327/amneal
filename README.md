@@ -80,7 +80,7 @@ These are code with tests, not guidelines. See `tests/test_invariants.py`.
 | Language | Python 3.11+ via `uv` |
 | Scrape | `httpx` + `selectolax` (`pdfplumber` primary, `pypdf` fallback) |
 | Chunking | Heading + page-aware recursive splitter, ~1000 tokens, ~150 overlap |
-| Embeddings | Pluggable. Local `BAAI/bge-small-en-v1.5` via sentence-transformers (`--extra local-embeddings`); Docker defaults to `echo` unless opted into the heavier local model image |
+| Embeddings | Pluggable. Local `BAAI/bge-small-en-v1.5` via sentence-transformers (`--extra local-embeddings`) is the dev and Compose default; `openai` (`text-embedding-3-small`, 1536-dim) pairs with the slim no-torch image for production; `echo` is test-only (bare-image smoke boots) |
 | Vector store | ChromaDB, persistent on disk |
 | Structured store | SQLite via SQLModel |
 | DB migrations | Alembic baseline + incremental migrations |
@@ -183,12 +183,16 @@ docker compose --profile ingest run --rm ingest
 ```
 
 Compose mounts `./data` into `/app/data` so SQLite, Chroma, raw PDFs, and
-processed files survive restarts. The default Compose image uses
-`EMBEDDING_PROVIDER=echo` to avoid shipping PyTorch/CUDA in the baseline image;
-set `INSTALL_LOCAL_EMBEDDINGS=true` and `EMBEDDING_PROVIDER=local-bge-small`
-in `.env`, then run `docker compose build`, if you want local BGE embeddings
-inside Docker. Do not run broad production ingest with `echo` embeddings.
-Container defaults are:
+processed files survive restarts. Compose defaults to
+`EMBEDDING_PROVIDER=local-bge-small` with `INSTALL_LOCAL_EMBEDDINGS=true` at
+build time, so the out-of-the-box stack ships sentence-transformers and real
+local embeddings. (The Dockerfile's own defaults stay slim — no torch — with
+an in-image `EMBEDDING_PROVIDER=echo` for empty-corpus smoke boots only; the
+API refuses to boot `echo` against a seeded corpus, and refuses
+`local-bge-small` on an image without sentence-transformers.) For a slim
+production stack set `INSTALL_LOCAL_EMBEDDINGS=false` and
+`EMBEDDING_PROVIDER=openai` + `OPENAI_API_KEY` together in `.env`, then run
+`docker compose build` — see `docs/DEPLOY.md`. Compose container defaults are:
 
 ```
 DATA_DIR=/app/data
@@ -196,7 +200,7 @@ CHROMA_DIR=/app/data/chroma
 SQLITE_PATH=/app/data/regwatch.db
 RAW_PDF_DIR=/app/data/raw
 PROCESSED_DIR=/app/data/processed
-EMBEDDING_PROVIDER=echo
+EMBEDDING_PROVIDER=local-bge-small
 API_HOST=0.0.0.0
 API_PORT=8000
 ```

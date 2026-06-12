@@ -87,7 +87,10 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     monkeypatch.setenv("OPENAI_API_KEY", "")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setenv("OPENFDA_API_KEY", "")
-    # Per-test storage.
+    # Per-test storage. DATABASE_URL is cleared so a host .env pointing at
+    # Postgres can never leak into the SQLite-default test suite; the
+    # Postgres integration tests opt in via TEST_DATABASE_URL explicitly.
+    monkeypatch.setenv("DATABASE_URL", "")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("CHROMA_DIR", str(tmp_path / "chroma"))
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "regwatch.db"))
