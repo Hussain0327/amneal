@@ -3,19 +3,12 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 
-import { AnswerFeedback } from "@/components/AnswerFeedback";
 import { PageHeader } from "@/components/PageHeader";
-import { Markdown } from "@/components/Markdown";
+import { StatusTicker } from "@/components/StatusTicker";
+import { AssistantTurn, UserTurn } from "@/components/Turns";
 import { useSessions } from "@/components/SessionsProvider";
-import {
-  askQuery,
-  getSession,
-  type ChatMessage,
-  type Citation,
-  type ClarifyOption,
-  type QueryResponse,
-  type QueryStatus,
-} from "@/lib/api";
+import { askQueryStream, getSession, type Suggestion } from "@/lib/api";
+import { assistantTurn, turnFromMessage, userTurn, type Turn } from "@/lib/turns";
 
 const EXAMPLES = [
   { label: "albuterol BE study", q: "What BE study design is recommended for albuterol sulfate inhalation aerosol?" },
@@ -24,51 +17,8 @@ const EXAMPLES = [
   { label: "metformin dissolution", q: "What dissolution method is recommended for metformin hydrochloride?" },
 ];
 
-// One rendered turn of the conversation. Live assistant turns carry clarify
-// options + provenance; turns rehydrated from GET /sessions/{id} carry only
-// content / status / citations (same Citation shape as a live answer).
-interface Turn {
-  role: "user" | "assistant";
-  content: string;
-  status: QueryStatus | null;
-  refused: boolean;
-  citations: Citation[];
-  clarify: ClarifyOption[];
-  interpretation: string | null;
-  meta: { model_name: string; audit_id: number; turn_id: string } | null;
-}
-
-const STATUSES: readonly string[] = ["answer", "summary", "clarify", "scope_warning", "refused"];
-
-function turnFromMessage(m: ChatMessage): Turn {
-  const status = m.status && STATUSES.includes(m.status) ? (m.status as QueryStatus) : null;
-  return {
-    role: m.role,
-    content: m.content,
-    status,
-    refused: status === "refused",
-    citations: m.citations ?? [],
-    clarify: [],
-    interpretation: null,
-    meta: null,
-  };
-}
-
-function userTurn(q: string): Turn {
-  return { role: "user", content: q, status: null, refused: false, citations: [], clarify: [], interpretation: null, meta: null };
-}
-
-function assistantTurn(r: QueryResponse): Turn {
-  return {
-    role: "assistant",
-    content: r.answer,
-    status: r.status,
-    refused: r.refused || r.status === "refused",
-    citations: r.citations,
-    clarify: r.clarify,
-    interpretation: r.interpretation,
-    meta: { model_name: r.model_name, audit_id: r.audit_id, turn_id: r.turn_id },
-  };
+function isAbortError(e: unknown): boolean {
+  return e instanceof Error && e.name === "AbortError";
 }
 
 export default function AskPage() {
@@ -94,13 +44,24 @@ function AskView() {
   const [loading, setLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // SSE status frames for the in-flight query; cleared when the answer lands.
+  const [statusFrames, setStatusFrames] = useState<string[]>([]);
   // Mirrors sessionId so the URL-sync effect can tell "we just created this
   // session live" (skip refetch) from "another session was selected" (fetch).
   const sessionIdRef = useRef<string | null>(null);
+  // In-flight race guard: one run at a time; a session switch or new chat
+  // aborts the active stream, and a stale run discovers it via the sequence.
+  const runSeqRef = useRef(0);
+  const controllerRef = useRef<AbortController | null>(null);
+  // Auto-scroll is armed only by live activity — never by rehydrating an old
+  // conversation, which should open at the top like a document.
+  const scrollArmedRef = useRef(false);
+  const threadEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!urlSession) {
-      // New chat: back to the empty state.
+      // New chat: abort anything in flight, back to the empty state.
+      controllerRef.current?.abort();
       sessionIdRef.current = null;
       setSessionId(null);
       setTurns([]);
@@ -112,6 +73,7 @@ function AskView() {
       setActiveSessionId(urlSession);
       return;
     }
+    controllerRef.current?.abort();
     let cancelled = false;
     setHistoryLoading(true);
     setError(null);
@@ -137,24 +99,57 @@ function AskView() {
     };
   }, [urlSession, refreshSessions, setActiveSessionId]);
 
+  // Abort any in-flight stream on unmount.
+  useEffect(() => () => controllerRef.current?.abort(), []);
+
+  useEffect(() => {
+    if (!scrollArmedRef.current) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    threadEndRef.current?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "end" });
+    if (!loading) scrollArmedRef.current = false;
+  }, [turns, loading, statusFrames]);
+
   async function run(q: string, filters: Record<string, string> | null) {
+    if (loading) return; // race guard: one send at a time
+    const seq = ++runSeqRef.current;
+    const controller = new AbortController();
+    controllerRef.current = controller;
     setLoading(true);
     setError(null);
+    setStatusFrames([]);
+    scrollArmedRef.current = true;
+    // The inquiry joins the thread immediately; the ticker answers it in place.
+    setTurns((prev) => [...prev, userTurn(q)]);
+    setQuestion("");
     try {
-      const next = await askQuery(q, filters, sessionIdRef.current);
+      const next = await askQueryStream(
+        q,
+        filters,
+        sessionIdRef.current,
+        (text) => {
+          if (runSeqRef.current === seq) setStatusFrames((prev) => [...prev, text]);
+        },
+        controller.signal,
+      );
+      if (runSeqRef.current !== seq) return; // superseded by a newer run
       sessionIdRef.current = next.session_id;
       setSessionId(next.session_id);
-      setTurns((prev) => [...prev, userTurn(q), assistantTurn(next)]);
-      setQuestion("");
+      setTurns((prev) => [...prev, assistantTurn(next)]);
       setActiveSessionId(next.session_id);
       if (urlSession !== next.session_id) {
         router.replace(`/?session=${encodeURIComponent(next.session_id)}`, { scroll: false });
       }
       void refreshSessions();
     } catch (e) {
+      // An abort means new chat / session switch already took over the view.
+      if (isAbortError(e) || runSeqRef.current !== seq) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (runSeqRef.current === seq) {
+        setLoading(false);
+        setStatusFrames([]);
+        controllerRef.current = null;
+      }
     }
   }
 
@@ -168,13 +163,68 @@ function AskView() {
     void run(q, Object.keys(filters).length ? filters : null);
   }
 
-  // A clarify option carries the exact query + filters to resend — click, no retyping.
-  function onClarify(opt: ClarifyOption) {
+  // Clarify options and grounded suggestions share a shape: the exact query +
+  // filters to resend — click, no retyping.
+  function onPick(opt: Suggestion) {
+    if (loading) return;
     setIngredient(opt.filters?.normalized_name ?? "");
     void run(opt.query, opt.filters ?? null);
   }
 
-  const empty = turns.length === 0 && !loading && !historyLoading;
+  const hasThread = turns.length > 0 || loading || historyLoading;
+  // Free-text clarify: when the last assistant turn asked for clarification,
+  // the composer becomes a reply — the backend resolves typed answers against
+  // the pending options, so picking a card and typing are both first-class.
+  const lastAssistant = [...turns].reverse().find((t) => t.role === "assistant");
+  const clarifyPending = !loading && lastAssistant?.status === "clarify";
+
+  const composer = (
+    <form onSubmit={onSubmit} className={hasThread ? "mt-10" : "rise d3"}>
+      <label className="kicker" htmlFor="q" style={{ color: clarifyPending ? "var(--gold-ink)" : "var(--ink-soft)" }}>
+        {clarifyPending ? "Reply" : hasThread ? "Follow-up inquiry" : "Inquiry"}
+      </label>
+      <textarea
+        id="q"
+        className="field field--inquiry"
+        style={{ marginTop: "0.5rem", minHeight: "3.4rem" }}
+        placeholder={
+          clarifyPending
+            ? "Pick an option above, or reply in your own words"
+            : "propranolol   ·   What BE study design is recommended for metformin?"
+        }
+        rows={2}
+        value={question}
+        onChange={(e) => setQuestion(e.target.value)}
+      />
+      <div className="mt-5 flex flex-wrap items-end gap-4">
+        <div className="grow" style={{ minWidth: "12rem" }}>
+          <label className="kicker" style={{ color: "var(--ink-faint)" }}>
+            Active ingredient · optional
+          </label>
+          <input
+            className="field mt-1"
+            value={ingredient}
+            onChange={(e) => setIngredient(e.target.value)}
+            placeholder="e.g. albuterol sulfate"
+          />
+        </div>
+        <div className="grow" style={{ minWidth: "12rem" }}>
+          <label className="kicker" style={{ color: "var(--ink-faint)" }}>
+            Dosage form · optional
+          </label>
+          <input
+            className="field mt-1"
+            value={dosage}
+            onChange={(e) => setDosage(e.target.value)}
+            placeholder="e.g. inhalation aerosol"
+          />
+        </div>
+        <button className="btn" type="submit" disabled={loading}>
+          {loading ? "Consulting…" : clarifyPending ? "Send reply" : "Submit inquiry"}
+        </button>
+      </div>
+    </form>
+  );
 
   return (
     <div className="measure">
@@ -185,70 +235,33 @@ function AskView() {
         tagline="Plain-language Q&A over FDA product-specific guidance. Every claim is cited to its source — and if a question is unclear, it asks rather than guesses."
       />
 
-      <form onSubmit={onSubmit} className="rise d3">
-        <label className="kicker" htmlFor="q" style={{ color: "var(--ink-soft)" }}>
-          Inquiry
-        </label>
-        <textarea
-          id="q"
-          className="field field--inquiry"
-          style={{ marginTop: "0.5rem", minHeight: "3.4rem" }}
-          placeholder="propranolol   ·   What BE study design is recommended for metformin?"
-          rows={2}
-          value={question}
-          onChange={(e) => setQuestion(e.target.value)}
-        />
-        <div className="mt-5 flex flex-wrap items-end gap-4">
-          <div className="grow" style={{ minWidth: "12rem" }}>
-            <label className="kicker" style={{ color: "var(--ink-faint)" }}>
-              Active ingredient · optional
-            </label>
-            <input
-              className="field mt-1"
-              value={ingredient}
-              onChange={(e) => setIngredient(e.target.value)}
-              placeholder="e.g. albuterol sulfate"
-            />
+      {/* Empty state: the inquiry desk up top, examples beneath. Once a thread
+          exists, the composer moves below the latest turn — you sign the next
+          line of the correspondence. */}
+      {!hasThread && (
+        <>
+          {composer}
+          <div className="rise d4 mt-7">
+            <span className="kicker" style={{ color: "var(--ink-faint)" }}>
+              Try
+            </span>
+            <div className="mt-2.5 flex flex-wrap gap-2">
+              {EXAMPLES.map((ex) => (
+                <button
+                  key={ex.q}
+                  className="chip"
+                  onClick={() => {
+                    setIngredient("");
+                    setDosage("");
+                    void run(ex.q, null);
+                  }}
+                >
+                  {ex.label}
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="grow" style={{ minWidth: "12rem" }}>
-            <label className="kicker" style={{ color: "var(--ink-faint)" }}>
-              Dosage form · optional
-            </label>
-            <input
-              className="field mt-1"
-              value={dosage}
-              onChange={(e) => setDosage(e.target.value)}
-              placeholder="e.g. inhalation aerosol"
-            />
-          </div>
-          <button className="btn" type="submit" disabled={loading}>
-            {loading ? "Consulting…" : "Submit inquiry"}
-          </button>
-        </div>
-      </form>
-
-      {empty && (
-        <div className="rise d4 mt-7">
-          <span className="kicker" style={{ color: "var(--ink-faint)" }}>
-            Try
-          </span>
-          <div className="mt-2.5 flex flex-wrap gap-2">
-            {EXAMPLES.map((ex) => (
-              <button
-                key={ex.q}
-                className="chip"
-                onClick={() => {
-                  setQuestion(ex.q);
-                  setIngredient("");
-                  setDosage("");
-                  void run(ex.q, null);
-                }}
-              >
-                {ex.label}
-              </button>
-            ))}
-          </div>
-        </div>
+        </>
       )}
 
       {historyLoading && (
@@ -263,17 +276,13 @@ function AskView() {
             t.role === "user" ? (
               <UserTurn key={i} content={t.content} />
             ) : (
-              <AssistantTurn key={i} turn={t} sessionId={sessionId} onClarify={onClarify} />
+              <AssistantTurn key={i} turn={t} sessionId={sessionId} onPick={onPick} busy={loading} />
             ),
           )}
         </section>
       )}
 
-      {loading && turns.length > 0 && (
-        <p className="code mt-7" style={{ fontSize: "0.74rem", color: "var(--ink-faint)" }}>
-          Consulting the corpus…
-        </p>
-      )}
+      {loading && <StatusTicker frames={statusFrames} />}
 
       {error && (
         <div className="stamp mt-9" style={{ borderColor: "var(--oxblood)" }}>
@@ -283,172 +292,9 @@ function AskView() {
           </p>
         </div>
       )}
-    </div>
-  );
-}
 
-function UserTurn({ content }: { content: string }) {
-  return (
-    <div className="mt-9 rise">
-      <div className="kicker" style={{ color: "var(--ink-faint)" }}>
-        Inquiry
-      </div>
-      <p className="display" style={{ fontWeight: 400, fontSize: "1.25rem", lineHeight: 1.4, margin: "0.4rem 0 0" }}>
-        {content}
-      </p>
-    </div>
-  );
-}
-
-function AssistantTurn({
-  turn,
-  sessionId,
-  onClarify,
-}: {
-  turn: Turn;
-  sessionId: string | null;
-  onClarify: (opt: ClarifyOption) => void;
-}) {
-  if (turn.status === "clarify") {
-    return (
-      <section className="mt-6 rise">
-        <div className="kicker" style={{ color: "var(--gold-ink)" }}>
-          Clarification requested
-        </div>
-        <p
-          className="display"
-          style={{ fontWeight: 400, fontSize: "1.3rem", lineHeight: 1.4, margin: "0.6rem 0 1.3rem" }}
-        >
-          {turn.interpretation || turn.content}
-        </p>
-        {/* Options exist only on live turns; rehydrated history shows the prompt alone. */}
-        {turn.clarify.length > 0 && (
-          <div className="flex flex-col gap-2.5">
-            {turn.clarify.map((opt, i) => (
-              <button key={`${opt.query}::${i}`} className="opt" onClick={() => onClarify(opt)}>
-                <span className="opt__no">{String(i + 1).padStart(2, "0")}</span>
-                <span>{opt.label}</span>
-                <span className="opt__arrow" aria-hidden>
-                  →
-                </span>
-              </button>
-            ))}
-          </div>
-        )}
-      </section>
-    );
-  }
-
-  if (turn.status === "scope_warning") {
-    return (
-      <section className="mt-6 rise">
-        <div className="stamp doc--seal">
-          <div className="stamp__tag">Out of scope</div>
-          <p style={{ margin: "0.5rem 0 0", fontSize: "1.02rem", lineHeight: 1.55 }}>{turn.content}</p>
-        </div>
-        {turn.meta && (
-          <p className="code mt-3" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
-            audit #{turn.meta.audit_id} · {turn.meta.model_name}
-          </p>
-        )}
-      </section>
-    );
-  }
-
-  if (turn.refused) {
-    return (
-      <section className="mt-6 rise">
-        <div className="stamp doc--seal">
-          <div className="stamp__tag">Declined · not in corpus</div>
-          <p style={{ margin: "0.5rem 0 0", fontSize: "1.02rem", lineHeight: 1.55 }}>{turn.content}</p>
-        </div>
-        {turn.meta && (
-          <p className="code mt-3" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
-            audit #{turn.meta.audit_id} · {turn.meta.model_name}
-          </p>
-        )}
-      </section>
-    );
-  }
-
-  return (
-    <section className="mt-6 rise">
-      <div className="doc doc--seal doc--pad">
-        <div className="kicker" style={{ color: "var(--gold-ink)", marginBottom: "0.6rem" }}>
-          Finding
-        </div>
-        <Markdown>{turn.content}</Markdown>
-      </div>
-
-      <div className="mt-7">
-        <div className="flex items-baseline gap-3">
-          <h2 className="kicker" style={{ color: "var(--ink)" }}>
-            References
-          </h2>
-          <hr className="hair grow" />
-          <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
-            {turn.citations.length} cited
-          </span>
-        </div>
-
-        {turn.citations.length === 0 ? (
-          <p className="mt-3" style={{ color: "var(--ink-soft)", fontSize: "0.95rem" }}>
-            No citations.
-          </p>
-        ) : (
-          <div className="mt-2">
-            {turn.citations.map((c, i) => (
-              <Reference key={`${c.short_name}-${c.page}-${i}`} n={i + 1} c={c} />
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Thumbs only on live turns: meta (and so audit_id) is absent on turns
-          rehydrated from session history, which degrade to no affordance. */}
-      {turn.meta && <AnswerFeedback auditId={turn.meta.audit_id} />}
-
-      {turn.meta && (
-        <details className="mt-5">
-          <summary className="kicker" style={{ cursor: "pointer", color: "var(--ink-faint)" }}>
-            Provenance
-          </summary>
-          <p className="code mt-2" style={{ fontSize: "0.72rem", color: "var(--ink-soft)" }}>
-            model {turn.meta.model_name} · audit #{turn.meta.audit_id} · status {turn.status}
-            {sessionId ? ` · session ${sessionId}` : ""} · turn {turn.meta.turn_id}
-          </p>
-          <pre
-            className="code mt-2"
-            style={{
-              fontSize: "0.7rem",
-              background: "var(--paper-3)",
-              border: "1px solid var(--edge)",
-              borderRadius: "2px",
-              padding: "0.8rem",
-              overflow: "auto",
-              color: "var(--ink-2)",
-            }}
-          >
-            {JSON.stringify(turn.citations, null, 2)}
-          </pre>
-        </details>
-      )}
-    </section>
-  );
-}
-
-function Reference({ n, c }: { n: number; c: Citation }) {
-  return (
-    <div className="ref">
-      <span className="ref__no">[{n}]</span>
-      <div>
-        <span className="ref__src">{c.short_name}</span>
-        <span className="ref__page"> · p.{c.page}</span>
-      </div>
-      <blockquote className="ref__quote">{c.snippet}</blockquote>
-      <a className="link code" style={{ fontSize: "0.76rem" }} href={c.source_url} target="_blank" rel="noreferrer">
-        {c.source_url}
-      </a>
+      {hasThread && !historyLoading && composer}
+      <div ref={threadEndRef} aria-hidden />
     </div>
   );
 }
