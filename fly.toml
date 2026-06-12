@@ -1,0 +1,27 @@
+app = "amneal"
+primary_region = "iad"
+
+[build]
+  [build.args]
+    INSTALL_LOCAL_EMBEDDINGS = "false"
+
+[env]
+  EMBEDDING_PROVIDER = "openai"
+  AUTH_COOKIE_SECURE = "true"
+  API_HOST = "0.0.0.0"
+  API_PORT = "8000"
+  CORS_ALLOW_ORIGINS_CSV = "https://amneal.vercel.app"
+  SENTRY_ENVIRONMENT = "production"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = false
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "10s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/health"
