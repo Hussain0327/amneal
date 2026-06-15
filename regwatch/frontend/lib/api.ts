@@ -32,7 +32,17 @@ export interface ClarifyOption {
   filters: Record<string, string> | null;
 }
 
-export type QueryStatus = "answer" | "summary" | "clarify" | "scope_warning" | "refused";
+// Grounded next steps / refusal redirects. Same wire shape as a clarify
+// option on purpose: tapping either resends {query, filters} in-session.
+export type Suggestion = ClarifyOption;
+
+export type QueryStatus =
+  | "answer"
+  | "summary"
+  | "clarify"
+  | "scope_warning"
+  | "refused"
+  | "conversational";
 
 export interface QueryResponse {
   answer: string;
@@ -45,6 +55,22 @@ export interface QueryResponse {
   status: QueryStatus;
   interpretation: string | null;
   clarify: ClarifyOption[];
+  // Conversational-layer additions — may be absent until the backend ships
+  // them; normalizeQuery() guarantees arrays to every consumer.
+  suggestions: Suggestion[];
+  unanswered: string[];
+}
+
+// The conversational-layer fields are additive: a backend that predates them
+// simply omits the keys. Normalize at the client boundary so components never
+// branch on undefined.
+function normalizeQuery(r: QueryResponse): QueryResponse {
+  return {
+    ...r,
+    clarify: r.clarify ?? [],
+    suggestions: r.suggestions ?? [],
+    unanswered: r.unanswered ?? [],
+  };
 }
 
 export interface AssembleResponse {
@@ -224,12 +250,13 @@ async function handle<T>(res: Response, method: string, path: string, gate: bool
 // same-origin /api proxy would include it by default, but the direct-call dev
 // mode (NEXT_PUBLIC_API_BASE on localhost) is cross-origin and would silently
 // drop the cookie without this; the backend's CORS allows credentials.
-async function postJSON<T>(path: string, body: unknown, gate = true): Promise<T> {
+async function postJSON<T>(path: string, body: unknown, gate = true, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${apiBase()}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
     credentials: "include",
+    signal,
   });
   return handle<T>(res, "POST", path, gate);
 }
@@ -275,12 +302,147 @@ export function deleteSession(sessionId: string): Promise<void> {
   return deleteJSON(`/sessions/${encodeURIComponent(sessionId)}`);
 }
 
-export function askQuery(
+export async function askQuery(
   question: string,
   filters: Record<string, string> | null = null,
   session_id: string | null = null,
+  signal?: AbortSignal,
 ): Promise<QueryResponse> {
-  return postJSON<QueryResponse>("/query", { question, filters, session_id });
+  return normalizeQuery(await postJSON<QueryResponse>("/query", { question, filters, session_id }, true, signal));
+}
+
+function isAbortError(e: unknown): boolean {
+  return e instanceof Error && e.name === "AbortError";
+}
+
+// Minimal text/event-stream reader for /query/stream. Frames per the pinned
+// contract: zero or more `event: status` / `data: {"text": …}` then exactly
+// one `event: result` whose data is the full QueryResponse, then close.
+// Returns null if the stream closes without a result frame (caller falls
+// back to plain /query).
+async function consumeSse(
+  body: ReadableStream<Uint8Array>,
+  onStatus?: (text: string) => void,
+): Promise<QueryResponse | null> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let eventName = "";
+  let data = "";
+
+  const dispatch = (): QueryResponse | null => {
+    const name = eventName;
+    const payload = data;
+    eventName = "";
+    data = "";
+    if (!payload) return null;
+    if (name === "status") {
+      try {
+        const d = JSON.parse(payload) as { text?: unknown };
+        if (typeof d.text === "string") onStatus?.(d.text);
+      } catch {
+        // a malformed status frame is cosmetic — keep reading
+      }
+      return null;
+    }
+    if (name === "result") return JSON.parse(payload) as QueryResponse;
+    return null;
+  };
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) !== -1) {
+        let line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (line.endsWith("\r")) line = line.slice(0, -1);
+        if (line === "") {
+          const result = dispatch();
+          if (result) return result;
+          continue;
+        }
+        if (line.startsWith(":")) continue; // SSE comment / keep-alive
+        const colon = line.indexOf(":");
+        const field = colon === -1 ? line : line.slice(0, colon);
+        let value2 = colon === -1 ? "" : line.slice(colon + 1);
+        if (value2.startsWith(" ")) value2 = value2.slice(1);
+        if (field === "event") eventName = value2;
+        else if (field === "data") data = data ? `${data}\n${value2}` : value2;
+        // id:/retry: are irrelevant here
+      }
+    }
+    // Stream closed. Flush any bytes still held in the decoder, then drain a
+    // residual final line (a frame whose last line carried no trailing newline
+    // — otherwise its data would be lost and the question re-sent on fallback).
+    buf += decoder.decode();
+    let tail = buf;
+    if (tail.endsWith("\r")) tail = tail.slice(0, -1);
+    if (tail !== "" && !tail.startsWith(":")) {
+      const colon = tail.indexOf(":");
+      const field = colon === -1 ? tail : tail.slice(0, colon);
+      let value2 = colon === -1 ? "" : tail.slice(colon + 1);
+      if (value2.startsWith(" ")) value2 = value2.slice(1);
+      if (field === "event") eventName = value2;
+      else if (field === "data") data = data ? `${data}\n${value2}` : value2;
+    }
+    // A trailing record without its blank-line terminator still dispatches.
+    return dispatch();
+  } finally {
+    void reader.cancel().catch(() => {});
+  }
+}
+
+// Streamed ask. Status frames arrive via onStatus while the backend works;
+// resolves with the same QueryResponse shape as askQuery. Any stream-level
+// failure (endpoint missing, proxy buffering, mid-stream error, stream closed
+// without a result frame) falls back to plain POST /query transparently — the
+// pinned contract accepts that a mid-stream fallback re-runs the question.
+// An abort (new chat / session switch) is NOT a failure: it rethrows so the
+// caller can discard the turn instead of double-sending.
+export async function askQueryStream(
+  question: string,
+  filters: Record<string, string> | null = null,
+  session_id: string | null = null,
+  onStatus?: (text: string) => void,
+  signal?: AbortSignal,
+): Promise<QueryResponse> {
+  const path = "/query/stream";
+  let res: Response;
+  try {
+    res = await fetch(`${apiBase()}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify({ question, filters, session_id }),
+      credentials: "include",
+      signal,
+    });
+  } catch (e) {
+    if (isAbortError(e)) throw e;
+    return askQuery(question, filters, session_id, signal);
+  }
+  if (res.status === 401) {
+    onUnauthorized?.();
+    throw new ApiError(401, "authentication required");
+  }
+  const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
+  if (!res.ok || !res.body || !contentType.includes("text/event-stream")) {
+    // 404/405 (endpoint not deployed yet) or a non-streaming response. Cancel
+    // the body so a stray non-SSE stream can't run alongside the fallback.
+    void res.body?.cancel().catch(() => {});
+    return askQuery(question, filters, session_id, signal);
+  }
+  try {
+    const result = await consumeSse(res.body, onStatus);
+    if (result) return normalizeQuery(result);
+  } catch (e) {
+    if (isAbortError(e)) throw e;
+    // fall through to the plain call
+  }
+  if (signal?.aborted) throw new DOMException("aborted", "AbortError");
+  return askQuery(question, filters, session_id, signal);
 }
 
 export function assemble(

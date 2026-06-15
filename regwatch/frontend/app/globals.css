@@ -269,10 +269,14 @@ body::before {
   font-size: 0.98rem;
   transition: border-color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
 }
-.opt:hover {
+.opt:hover:not(:disabled) {
   border-color: var(--gold-deep);
   box-shadow: var(--shadow-soft);
   transform: translateX(2px);
+}
+.opt:disabled {
+  opacity: 0.55;
+  cursor: progress;
 }
 .opt__no {
   flex: none;
@@ -293,7 +297,7 @@ body::before {
   color: var(--gold-deep);
   transition: transform 0.15s ease;
 }
-.opt:hover .opt__arrow {
+.opt:hover:not(:disabled) .opt__arrow {
   transform: translateX(3px);
 }
 
@@ -383,10 +387,14 @@ button.chip {
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
-button.chip:hover {
+button.chip:hover:not(:disabled) {
   border-color: var(--gold-deep);
   background: var(--gold-wash);
   color: var(--ink);
+}
+button.chip:disabled {
+  opacity: 0.55;
+  cursor: progress;
 }
 
 /* ---------- Answer feedback (thumbs on a finding) ---------- */
@@ -774,6 +782,135 @@ button.chip:hover {
   color: var(--ink-2);
 }
 
+/* ---------- Status ticker (the docket log while a query runs) ----------
+   Each SSE status frame is one ruled docket line: gold rule draws in, the
+   live line carries a pulsing seal-dot, superseded lines dim in place. With
+   reduced motion the log collapses to the single current line, static. */
+.ticker {
+  margin-top: 1.6rem;
+}
+.ticker__line {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.24rem 0;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.74rem;
+  color: var(--ink-soft);
+  transition: opacity 0.3s ease, color 0.3s ease;
+}
+.ticker__line--past {
+  opacity: 0.38;
+}
+.ticker__line--live {
+  color: var(--ink-2);
+}
+.ticker__rule {
+  flex: none;
+  width: 1.7rem;
+  height: 2px;
+  background: linear-gradient(90deg, var(--gold), var(--gold-deep));
+}
+.ticker__line--live .ticker__rule {
+  transform-origin: left;
+  animation: draw 0.45s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.ticker__line--past .ticker__rule {
+  height: 1px;
+  opacity: 0.6;
+}
+@keyframes ticker-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.ticker__dot {
+  flex: none;
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 999px;
+  background: var(--gold-deep);
+  animation: ticker-pulse 1.6s ease-in-out infinite;
+}
+
+/* ---------- Memorandum (conversational turn) ----------
+   Deliberately quiet: no seal, no card, no references frame. The contrast
+   with a published finding is the point — chat never dresses up as guidance. */
+.memo {
+  max-width: 40rem;
+}
+.memo__body {
+  margin: 0.45rem 0 0;
+  font-family: var(--font-display), Georgia, serif;
+  font-style: italic;
+  font-size: 1.08rem;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+/* ---------- Not addressed (partial-answer annotation) ----------
+   Same vocabulary as the white paper's verified-absent cells: dashed border,
+   hollow-ring markers — "this box is empty on purpose", not an error. */
+.na {
+  margin-top: 1.1rem;
+  border: 1px dashed var(--ink-soft);
+  border-radius: 2px;
+  padding: 0.65rem 0.9rem;
+}
+.na__tag {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.na__list {
+  margin: 0.4rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.na__item {
+  position: relative;
+  padding-left: 1.1rem;
+  margin: 0.3rem 0;
+  font-size: 0.92rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.na__item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.42em;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: #fffdf8;
+  box-shadow: inset 0 0 0 1.5px var(--ink-soft);
+}
+
+/* ---------- Suggestions (grounded next steps / refusal redirects) ---------- */
+.suggest {
+  margin-top: 1.2rem;
+}
+.suggest__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.55rem;
+}
+.suggest__opts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-top: 0.7rem;
+}
+
 /* ---------- Motion: staggered editorial reveal ---------- */
 @keyframes rise {
   from {
@@ -820,5 +957,13 @@ button.chip:hover {
     animation: none;
     opacity: 1;
     transform: none;
+  }
+  /* Ticker degrades to a single static line: no log, no pulse, no draw. */
+  .ticker__line--past {
+    display: none;
+  }
+  .ticker__line--live .ticker__rule,
+  .ticker__dot {
+    animation: none;
   }
 }
