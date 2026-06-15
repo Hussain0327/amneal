@@ -134,7 +134,12 @@ class OpenAIEmbeddingProvider:
             from regwatch.common.llm_clients import shared_openai_client
 
             try:
-                self._client = shared_openai_client(api_key)
+                # max_retries=0: _create_with_retry below owns the retry loop, so
+                # SDK retries would stack on top of it (B3). The timeout still
+                # bounds each attempt.
+                self._client = shared_openai_client(
+                    api_key, timeout=get_settings().llm_timeout_s, max_retries=0
+                )
             except ModuleNotFoundError as exc:
                 raise RuntimeError(
                     "EMBEDDING_PROVIDER=openai requires installing `regwatch[llm]` "

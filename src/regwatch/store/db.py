@@ -177,10 +177,29 @@ def get_engine() -> Engine:
                         max_overflow=5,
                     )
                 else:
+                    # B1: never fall through to SQLite in production. A missing
+                    # DATABASE_URL here would otherwise boot on the container's
+                    # ephemeral disk and silently destroy all data + the audit
+                    # trail on the next recycle, with /health staying green.
+                    if s.require_database_url:
+                        raise RuntimeError(
+                            "REQUIRE_DATABASE_URL is set but DATABASE_URL is empty — "
+                            "refusing to boot on the SQLite fallback. Set DATABASE_URL "
+                            "to the production Postgres/Supabase URL."
+                        )
                     s.ensure_dirs()
                     url = f"sqlite:///{s.sqlite_path.as_posix()}"
                     _engine = create_engine(url, echo=False)
     return _engine
+
+
+def engine_dialect() -> str:
+    """Active SQLAlchemy dialect name ('postgresql' | 'sqlite').
+
+    Surfaced in /health so a production stack accidentally running on SQLite is
+    visibly wrong even if the B1 boot guard were ever bypassed.
+    """
+    return get_engine().dialect.name
 
 
 def _alembic_config() -> Config:

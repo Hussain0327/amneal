@@ -186,8 +186,16 @@ combination.
    fly secrets set \
      DATABASE_URL="$SUPABASE_DB_URL" \
      OPENAI_API_KEY="sk-..." \
+     SENTRY_DSN="https://...ingest.sentry.io/..." \   # B4: error tracking
      OPENFDA_API_KEY="..."        # optional
    ```
+
+   `DATABASE_URL` is mandatory in production: `fly.toml` sets
+   `REQUIRE_DATABASE_URL = "true"`, so if this secret is missing the app
+   **refuses to boot** rather than silently running on an ephemeral SQLite
+   disk and losing the audit trail (B1). `SENTRY_DSN` is strongly recommended:
+   without it the app still boots but logs a loud `sentry_disabled_in_production`
+   warning, and 500s go only to stderr (B4).
 
 3. Deploy:
 
@@ -218,8 +226,10 @@ combination.
    curl -s https://regwatch-api.fly.dev/health | python -m json.tool
    ```
 
-   Expect `"status": "ok"`, `db.ok true`, embedding provider `openai`,
-   `llm.key_present true`, and a non-zero corpus count.
+   Expect `"status": "ok"`, `db.ok true`, **`db.dialect "postgresql"`** (B1 —
+   if you see `"sqlite"` here the prod stack is on the wrong datastore),
+   embedding provider `openai`, `llm.key_present true`, and a non-zero corpus
+   count.
 
 5. Provision users (CLI-only, no self-signup; password is prompted):
 
