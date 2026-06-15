@@ -6,8 +6,16 @@ import { useEffect, useState } from "react";
 
 import { ApiError, deleteSession, getPublicSettings, type PublicSettings } from "@/lib/api";
 import { useAuth } from "./AuthProvider";
+import { useCurrentProduct } from "./CurrentProductProvider";
 import { useSessions } from "./SessionsProvider";
 import { Wordmark } from "./Wordmark";
+
+// Append the scoped-product params to an in-app href so navigating between the
+// four surfaces keeps the current product. `productParams` is "" when unset.
+function withScope(href: string, productParams: string): string {
+  if (!productParams) return href;
+  return `${href}${href.includes("?") ? "&" : "?"}${productParams}`;
+}
 
 const NAV = [
   { href: "/", no: "01", label: "Ask", note: "Cited Q&A" },
@@ -35,6 +43,7 @@ function relTime(iso: string): string {
 export function Sidebar() {
   const pathname = usePathname();
   const { user, logout } = useAuth();
+  const { productParams } = useCurrentProduct();
   const [settings, setSettings] = useState<PublicSettings | null>(null);
   const [reachable, setReachable] = useState(true);
 
@@ -83,7 +92,7 @@ export function Sidebar() {
           return (
             <Link
               key={n.href}
-              href={n.href}
+              href={withScope(n.href, productParams)}
               style={{
                 display: "flex",
                 alignItems: "baseline",
@@ -108,6 +117,8 @@ export function Sidebar() {
           );
         })}
       </nav>
+
+      <ProductScope />
 
       <History />
 
@@ -175,11 +186,42 @@ export function Sidebar() {
   );
 }
 
+// The product all four surfaces are scoped to, shown in the shell so the
+// shared focus is unmistakable. Set on White Paper (on resolve) or Watch (per
+// row); cleared here. The state of record is the URL — this only reflects it.
+function ProductScope() {
+  const { referenceProductName, applicationNumber, hasProduct, clearProduct } = useCurrentProduct();
+  return (
+    <div className="scope">
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "0.5rem" }}>
+        <span className="kicker" style={{ fontSize: "0.6rem", color: "var(--ink-faint)" }}>
+          Current product
+        </span>
+        {hasProduct && (
+          <button className="scope__clear" onClick={clearProduct} aria-label="Clear current product">
+            clear
+          </button>
+        )}
+      </div>
+      {hasProduct ? (
+        <div className="scope__body">
+          {referenceProductName && <div className="scope__name">{referenceProductName}</div>}
+          {applicationNumber && <span className="chip code scope__appl">{applicationNumber}</span>}
+        </div>
+      ) : (
+        <p className="scope__empty">None scoped — set one on White Paper or Watch to focus all four surfaces.</p>
+      )}
+    </div>
+  );
+}
+
 // The user's prior conversations. Selecting one routes the Ask page to
-// /?session=<id>; deletion asks for an inline confirm before committing.
+// /?session=<id>; deletion asks for an inline confirm before committing. Links
+// carry the scoped product so switching conversations keeps the current focus.
 function History() {
   const router = useRouter();
   const pathname = usePathname();
+  const { productParams } = useCurrentProduct();
   const { sessions, loaded, activeSessionId, setActiveSessionId, refresh } = useSessions();
   const [confirming, setConfirming] = useState<string | null>(null);
 
@@ -192,8 +234,9 @@ function History() {
     }
     if (id === activeSessionId) {
       setActiveSessionId(null);
-      // Only reset the Ask page if we're on it; don't yank other pages.
-      if (pathname === "/") router.replace("/");
+      // Only reset the Ask page if we're on it; don't yank other pages. Keep
+      // the scoped product on the reset URL.
+      if (pathname === "/") router.replace(withScope("/", productParams));
     }
     await refresh();
   }
@@ -205,7 +248,7 @@ function History() {
           History
         </span>
         <Link
-          href="/"
+          href={withScope("/", productParams)}
           className="code link"
           style={{ fontSize: "0.66rem", borderBottom: "none" }}
           onClick={() => setActiveSessionId(null)}
@@ -236,7 +279,7 @@ function History() {
                 ) : (
                   <>
                     <Link
-                      href={`/?session=${encodeURIComponent(s.id)}`}
+                      href={withScope(`/?session=${encodeURIComponent(s.id)}`, productParams)}
                       className="hist__main"
                       title={s.title}
                       onClick={() => setActiveSessionId(s.id)}

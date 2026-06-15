@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { useCurrentProduct } from "@/components/CurrentProductProvider";
 import { PageHeader } from "@/components/PageHeader";
 import {
   ApiError,
@@ -51,8 +52,13 @@ function tally(result: WhitepaperResponse) {
 }
 
 export default function WhitepaperPage() {
-  const [rld, setRld] = useState("");
-  const [applNo, setApplNo] = useState("");
+  // The reference product name + application number ARE the scoped product, so
+  // this surface both reads it (prefill) and writes it (on a successful
+  // resolve). Seed from the URL scope on mount; route navigation remounts, so
+  // arriving here with a product scoped fills the form.
+  const { referenceProductName, applicationNumber, setProduct } = useCurrentProduct();
+  const [rld, setRld] = useState(() => referenceProductName);
+  const [applNo, setApplNo] = useState(() => applicationNumber);
   const [result, setResult] = useState<WhitepaperResponse | null>(null);
   // 422 (spine could not resolve) is an expected, explanatory outcome and is
   // rendered inline as its own state — distinct from transport/server errors.
@@ -72,7 +78,12 @@ export default function WhitepaperPage() {
     setResolveError(null);
     setDownloadError(null);
     try {
-      setResult(await buildWhitepaper(r, a));
+      const built = await buildWhitepaper(r, a);
+      setResult(built);
+      // Only scope to a product that actually resolved; use the spine's
+      // canonical application number. A 422 (could not resolve) throws above,
+      // so an unresolvable input never becomes the scope.
+      setProduct({ referenceProductName: r, applicationNumber: built.spine.application_number });
     } catch (er) {
       setResult(null);
       if (er instanceof ApiError && er.status === 422) {

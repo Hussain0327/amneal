@@ -1,0 +1,36 @@
+"use client";
+
+import { Suspense } from "react";
+
+import { useAuth } from "@/components/AuthProvider";
+import { CurrentProductProvider } from "@/components/CurrentProductProvider";
+import { SessionsProvider } from "@/components/SessionsProvider";
+import { Sidebar } from "@/components/Sidebar";
+
+// The shared shell for the four product surfaces (Ask / Assemble / Watch /
+// White Paper). One sidebar, one canvas, one scoped-product context — defined
+// here once and applied to every route in this group. The bare routes
+// (/login, /fixtures) sit outside the group and never see it.
+//
+// Auth is still gated upstream in <AuthProvider>, which renders this subtree
+// only once /auth/me confirms a user — so `user` is non-null whenever this
+// layout mounts. key={user.id} preserves the prior behavior: a different
+// identity remounts the session-scoped subtree, so a stale tab can never keep
+// another user's transcript or session list in component state.
+export default function ShellLayout({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  return (
+    <SessionsProvider key={user?.id ?? "anon"}>
+      {/* useSearchParams (CurrentProductProvider + Sidebar) needs a Suspense
+          boundary to prerender cleanly. */}
+      <Suspense fallback={null}>
+        <CurrentProductProvider>
+          <div className="shell">
+            <Sidebar />
+            <main className="canvas">{children}</main>
+          </div>
+        </CurrentProductProvider>
+      </Suspense>
+    </SessionsProvider>
+  );
+}

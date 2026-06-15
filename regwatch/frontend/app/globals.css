@@ -86,6 +86,53 @@ body::before {
   max-width: var(--maxw);
 }
 
+/* ---------- Sidebar: current-product scope ---------- */
+.scope {
+  margin-top: 1.3rem;
+  padding: 0.85rem 0.8rem;
+  background: #fffdf8;
+  border: 1px solid var(--edge);
+  border-left: 3px solid var(--gold);
+  border-radius: 2px;
+}
+.scope__clear {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.scope__clear:hover {
+  color: var(--oxblood);
+}
+.scope__body {
+  margin-top: 0.55rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.45rem;
+}
+.scope__name {
+  font-family: var(--font-display), serif;
+  font-size: 0.98rem;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--ink);
+}
+.scope__appl {
+  color: var(--gold-ink);
+}
+.scope__empty {
+  margin: 0.5rem 0 0;
+  font-size: 0.74rem;
+  line-height: 1.45;
+  color: var(--ink-faint);
+}
+
 /* ---------- Typographic primitives ---------- */
 .kicker {
   font-family: var(--font-mono), ui-monospace, monospace;

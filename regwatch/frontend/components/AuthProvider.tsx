@@ -4,8 +4,6 @@ import { usePathname, useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 
 import { logout as apiLogout, me, setUnauthorizedHandler, type User } from "@/lib/api";
-import { SessionsProvider } from "./SessionsProvider";
-import { Sidebar } from "./Sidebar";
 import { Wordmark } from "./Wordmark";
 
 interface AuthState {
@@ -40,9 +38,10 @@ export function broadcastAuthChange(): void {
 // 404s in production builds).
 const BARE_PATHS = new Set(["/login", "/fixtures"]);
 
-// Session gate for the whole app. Bare paths render as-is; everything else
-// gets the sidebar shell only once /auth/me has confirmed a user — until then
-// a quiet shell, so protected UI never flashes for signed-out visitors.
+// Session gate for the whole app. Bare paths render as-is; protected routes
+// render their children — the sidebar shell (see app/(shell)/layout.tsx) — only
+// once /auth/me has confirmed a user; until then a quiet shell, so protected UI
+// never flashes for signed-out visitors.
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
@@ -106,15 +105,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       {BARE_PATHS.has(pathname) ? (
         children
       ) : user ? (
-        // key={user.id}: a different identity remounts the whole authed
-        // subtree, so a stale tab never keeps the previous user's transcript
-        // or session list in component state.
-        <SessionsProvider key={user.id}>
-          <div className="shell">
-            <Sidebar />
-            <main className="canvas">{children}</main>
-          </div>
-        </SessionsProvider>
+        // The authed shell (sidebar + canvas + scoped-product context) is the
+        // (shell) route-group layout; it remounts per identity via its own
+        // key={user.id}, so a stale tab never keeps a prior user's state.
+        children
       ) : (
         <QuietShell />
       )}

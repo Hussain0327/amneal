@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { useCurrentProduct } from "@/components/CurrentProductProvider";
 import { PageHeader } from "@/components/PageHeader";
 import { listProducts, watchLatest, type AlertRecord, type ProductRecord } from "@/lib/api";
 
@@ -120,6 +121,10 @@ export default function WatchPage() {
 }
 
 function WatchlistTable({ products }: { products: ProductRecord[] | null }) {
+  // Watch is the second place a product can be scoped: a watchlist row carries
+  // both halves (rld_name + rld_application_number), so scoping from here is a
+  // faithful set, not a guess.
+  const { applicationNumber, referenceProductName, setProduct } = useCurrentProduct();
   if (products === null) return <p style={{ color: "var(--ink-soft)", fontSize: "0.9rem" }}>Loading…</p>;
   if (products.length === 0)
     return (
@@ -145,18 +150,41 @@ function WatchlistTable({ products }: { products: ProductRecord[] | null }) {
             {columns.map((c) => (
               <th key={c}>{c}</th>
             ))}
+            <th aria-label="scope" />
           </tr>
         </thead>
         <tbody>
-          {products.map((p, i) => (
-            <tr key={i}>
-              {columns.map((c) => (
-                <td key={c} className={/no|number|appl|ndc|id/i.test(c) ? "code" : undefined}>
-                  {str(p[c])}
+          {products.map((p, i) => {
+            const appl = str(p.rld_application_number);
+            const name = str(p.rld_name) || str(p.active_ingredient);
+            // Nothing to scope to unless the row names a reference product.
+            const scopeable = Boolean(appl || str(p.rld_name));
+            // Scoped iff this row's (name, appl) identity IS the active scope —
+            // both halves, matching exactly what the button writes. Keys on the
+            // pair so duplicate ANDAs sharing one RLD don't all light up, and a
+            // name-only row still reflects correctly (its appl is "" on both sides).
+            const scoped = scopeable && name === referenceProductName && appl === applicationNumber;
+            return (
+              <tr key={i}>
+                {columns.map((c) => (
+                  <td key={c} className={/no|number|appl|ndc|id/i.test(c) ? "code" : undefined}>
+                    {str(p[c])}
+                  </td>
+                ))}
+                <td>
+                  {scopeable && (
+                    <button
+                      className="chip"
+                      aria-pressed={scoped}
+                      onClick={() => setProduct({ referenceProductName: name, applicationNumber: appl })}
+                    >
+                      {scoped ? "scoped" : "scope"}
+                    </button>
+                  )}
                 </td>
-              ))}
-            </tr>
-          ))}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

@@ -157,7 +157,11 @@ function AskView() {
       setActiveSessionId(next.session_id);
       refocusRef.current = true;
       if (urlSession !== next.session_id) {
-        router.replace(`/?session=${encodeURIComponent(next.session_id)}`, { scroll: false });
+        // Preserve any scoped-product params (rp/appl) when stamping the new
+        // session into the URL — only `session` changes here.
+        const params = new URLSearchParams(searchParams.toString());
+        params.set("session", next.session_id);
+        router.replace(`/?${params.toString()}`, { scroll: false });
       }
       void refreshSessions();
     } catch (e) {
