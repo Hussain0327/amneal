@@ -187,6 +187,9 @@ def test_refuses_to_start_on_revision_mismatch(pg_db: ModuleType) -> None:
     pg_db.init_db()
     with pg_db.get_engine().begin() as conn:
         conn.execute(text("UPDATE alembic_version SET version_num = '0000_bogus'"))
+    # init_db is memoized per process; reset to simulate a fresh process boot
+    # against the tampered DB — the state the boot refusal actually guards.
+    pg_db.reset_for_tests()
     with pytest.raises(RuntimeError, match="stamped at alembic revision"):
         pg_db.init_db()
 
@@ -207,7 +210,9 @@ def test_alembic_upgrade_head_heals_0007_stamped_postgres(pg_db: ModuleType) -> 
     assert "input_tokens" not in {c["name"] for c in inspector.get_columns("query_log")}
     assert _stamped_revision(pg_db) == "0007_chat_session_user_updated"
 
-    # Booting this build against it refuses (by design) ...
+    # Booting this build against it refuses (by design) ... reset the per-
+    # process init_db memoization first so this models an actual fresh boot.
+    pg_db.reset_for_tests()
     with pytest.raises(RuntimeError, match="stamped at alembic revision"):
         pg_db.init_db()
 
@@ -227,6 +232,9 @@ def test_refuses_to_start_on_unstamped_nonempty_database(pg_db: ModuleType) -> N
     pg_db.init_db()
     with pg_db.get_engine().begin() as conn:
         conn.execute(text("DROP TABLE alembic_version"))
+    # init_db is memoized per process; reset to simulate a fresh process boot
+    # against the now-unstamped DB — the state the boot refusal actually guards.
+    pg_db.reset_for_tests()
     with pytest.raises(RuntimeError, match="no alembic_version stamp"):
         pg_db.init_db()
 
