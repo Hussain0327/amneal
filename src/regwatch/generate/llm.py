@@ -133,9 +133,9 @@ class OpenAIProvider:
 
     def _client_or_create(self) -> Any:
         if self._client is None:
-            from openai import OpenAI
+            from regwatch.common.llm_clients import shared_openai_client
 
-            self._client = OpenAI(api_key=self.api_key)
+            self._client = shared_openai_client(self.api_key)
         return self._client
 
     def complete(
@@ -246,9 +246,9 @@ class AnthropicProvider:
         max_tokens: int = 1024,
         response_format: str | None = None,
     ) -> LLMResponse:
-        from anthropic import Anthropic
+        from regwatch.common.llm_clients import shared_anthropic_client
 
-        client = Anthropic(api_key=self.api_key)
+        client = shared_anthropic_client(self.api_key)
         system = "\n\n".join(m.content for m in messages if m.role == "system")
         convo = [
             {"role": m.role, "content": m.content}

@@ -131,14 +131,15 @@ class OpenAIEmbeddingProvider:
             api_key = get_settings().openai_api_key
             if not api_key:
                 raise RuntimeError("EMBEDDING_PROVIDER=openai requires OPENAI_API_KEY to be set")
+            from regwatch.common.llm_clients import shared_openai_client
+
             try:
-                from openai import OpenAI
+                self._client = shared_openai_client(api_key)
             except ModuleNotFoundError as exc:
                 raise RuntimeError(
                     "EMBEDDING_PROVIDER=openai requires installing `regwatch[llm]` "
                     "or running `uv sync --extra llm`."
                 ) from exc
-            self._client = OpenAI(api_key=api_key)
         return self._client
 
     @staticmethod
