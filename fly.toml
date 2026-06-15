@@ -12,6 +12,12 @@ primary_region = "iad"
   API_PORT = "8000"
   CORS_ALLOW_ORIGINS_CSV = "https://amneal.vercel.app"
   SENTRY_ENVIRONMENT = "production"
+  # B1: refuse to boot on the SQLite fallback. DATABASE_URL is a Fly secret
+  # (`fly secrets set DATABASE_URL=...`); if it is missing the app must fail
+  # loudly, not silently run on ephemeral disk and lose the audit trail.
+  REQUIRE_DATABASE_URL = "true"
+  # B4: SENTRY_DSN is a Fly secret (`fly secrets set SENTRY_DSN=...`). Without
+  # it the app boots but logs a loud warning — errors would otherwise vanish.
 
 [http_service]
   internal_port = 8000

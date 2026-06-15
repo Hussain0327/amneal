@@ -38,6 +38,7 @@ from regwatch.common.conversation import (
     update_session_filters,
 )
 from regwatch.common.logging import get_logger
+from regwatch.common.observability import capture_exception
 from regwatch.common.text_normalize import canonical_name
 from regwatch.generate.llm import (
     LLMMessage,
@@ -982,14 +983,47 @@ def ask(
     system_prompt = GROUNDED_QA_SYSTEM.format(refusal=s.refusal_text)
 
     provider = get_llm_provider(role="synthesizer")
-    response = provider.complete(
-        [
-            LLMMessage(role="system", content=system_prompt),
-            LLMMessage(role="user", content=user_prompt),
-        ],
-        temperature=0.0,
-        max_tokens=900,
-    )
+    try:
+        response = provider.complete(
+            [
+                LLMMessage(role="system", content=system_prompt),
+                LLMMessage(role="user", content=user_prompt),
+            ],
+            temperature=0.0,
+            max_tokens=900,
+        )
+    except Exception as exc:  # provider transport error (timeout / 429 / 5xx)
+        # B2: a synthesizer failure must NOT return a naked 500 with no audit
+        # row — that would break INV-6 exactly when the system misbehaves. We
+        # degrade to a graceful, audited refusal (status="error") and surface
+        # the cause to Sentry. The error never reaches the user verbatim.
+        log.warning("qa_provider_error", error=str(exc), error_type=type(exc).__name__)
+        capture_exception(exc)
+        route_json = _route_json(
+            filters=active_filters,
+            reason="provider_error",
+            context_applied=context_applied,
+            response_mode="refused",
+        )
+        return _finish_turn(
+            _refuse(
+                question=question,
+                passages=passages,
+                reason="provider_error",
+                model_name=model_name,
+                session_id=session_id,
+                turn_id=turn_id,
+                user_id=user_id,
+                route_json=route_json,
+                status="error",
+                answer_text=(
+                    "The answer service is temporarily unavailable. Your question was "
+                    "not answered — please try again in a moment."
+                ),
+            ),
+            filters=active_filters,
+            route_json=route_json,
+        )
     answer = response.text.strip()
 
     # LLM-side refusal: it returned the exact refusal sentinel.

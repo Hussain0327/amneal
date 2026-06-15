@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     extractor_model: str = "gpt-5.4-nano"
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
+    # ---------- LLM client transport (B3) ----------
+    # The OpenAI/Anthropic SDKs default to a 600s read timeout with 2 retries —
+    # a stalled provider would pin a sync-route worker for ~10-20 min. Bound it.
+    # The embedder owns its own retry loop, so it constructs the shared client
+    # with max_retries=0 to avoid stacking SDK retries on top of that loop.
+    llm_timeout_s: float = 60.0
+    llm_max_retries: int = 2
     # Test-grade `echo` providers against a real (non-empty) corpus are an
     # invisible quality degradation; the API refuses to boot unless this is set.
     allow_test_providers: bool = Field(
@@ -147,6 +154,11 @@ class Settings(BaseSettings):
     # Vector backend rule (K1): vectors live in pgvector iff database_url is
     # set; Chroma remains the SQLite-mode backend. There is no separate toggle.
     database_url: str | None = None
+    # Production safety (B1): when true, the app refuses to boot on the SQLite
+    # fallback — a missing/typo'd DATABASE_URL would otherwise silently run on
+    # an ephemeral disk and lose all users, sessions, and the query_log audit
+    # trail (INV-6 evidence) on the next machine recycle. Set in fly.toml.
+    require_database_url: bool = False
 
     @field_validator("database_url", mode="before")
     @classmethod

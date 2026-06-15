@@ -27,7 +27,9 @@ def test_health() -> None:
     body = r.json()
     assert body["status"] == "ok"
     components = body["components"]
-    assert components["db"] == {"ok": True}
+    # B1: /health exposes the active datastore dialect so a prod stack on the
+    # SQLite fallback is visible. In tests that dialect is sqlite.
+    assert components["db"] == {"ok": True, "dialect": "sqlite"}
     assert components["chroma"]["ok"] is True
     assert components["chroma"]["corpus_count"] == 0
     assert components["llm"] == {"provider": "echo", "key_present": True}

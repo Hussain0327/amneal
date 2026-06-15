@@ -135,7 +135,10 @@ class OpenAIProvider:
         if self._client is None:
             from regwatch.common.llm_clients import shared_openai_client
 
-            self._client = shared_openai_client(self.api_key)
+            s = get_settings()
+            self._client = shared_openai_client(
+                self.api_key, timeout=s.llm_timeout_s, max_retries=s.llm_max_retries
+            )
         return self._client
 
     def complete(
@@ -248,7 +251,10 @@ class AnthropicProvider:
     ) -> LLMResponse:
         from regwatch.common.llm_clients import shared_anthropic_client
 
-        client = shared_anthropic_client(self.api_key)
+        s = get_settings()
+        client = shared_anthropic_client(
+            self.api_key, timeout=s.llm_timeout_s, max_retries=s.llm_max_retries
+        )
         system = "\n\n".join(m.content for m in messages if m.role == "system")
         convo = [
             {"role": m.role, "content": m.content}

@@ -33,8 +33,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from config.settings import Settings, get_settings
-from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Response
+from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, text, update
 from sqlalchemy import select as sa_select
@@ -46,14 +47,14 @@ from regwatch.auth.deps import SESSION_COOKIE, require_user
 from regwatch.auth.sessions import authenticate, create_session, revoke_token
 from regwatch.common.audit import log_query
 from regwatch.common.conversation import SessionOwnershipError
-from regwatch.common.logging import configure_logging
-from regwatch.common.observability import init_sentry
+from regwatch.common.logging import configure_logging, get_logger
+from regwatch.common.observability import capture_exception, init_sentry
 from regwatch.common.ratelimit import LOGIN_ATTEMPTS_PER_MINUTE, login_limiter, query_limiter
 from regwatch.generate.grounded_qa import ask
 from regwatch.process.embedder import assert_embedding_runtime_available
 from regwatch.sources.router import search_sources
 from regwatch.sources.types import SourceKind, SourceQuery
-from regwatch.store.db import get_engine, init_db, session_scope
+from regwatch.store.db import engine_dialect, get_engine, init_db, session_scope
 from regwatch.store.models import AnswerFeedback, ChatMessage, ChatSession, QueryLog, User
 from regwatch.store.vector_store import collection_size
 from regwatch.watch.alerts import latest_digest_records
@@ -62,6 +63,7 @@ from regwatch.whitepaper.docx_writer import docx_media_type, write_whitepaper_do
 from regwatch.whitepaper.populator import SpineResolutionError, build_whitepaper
 
 configure_logging()
+log = get_logger(__name__)
 
 
 def _guard_test_providers(s: Settings) -> None:
@@ -94,7 +96,15 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # Sentry first (H1): OFF unless SENTRY_DSN is set. Initialized before
     # init_db so the explicit migration-mode-mismatch captures in store/db.py
     # can report a refused boot.
-    init_sentry(s)
+    sentry_enabled = init_sentry(s)
+    # B4: in production, a missing SENTRY_DSN means every 500 vanishes to stderr
+    # with no alerting. Don't hard-fail (Sentry being down must not take the app
+    # down), but make the gap loud instead of silent.
+    if s.sentry_environment == "production" and not sentry_enabled:
+        log.warning(
+            "sentry_disabled_in_production",
+            detail="SENTRY_ENVIRONMENT=production but no SENTRY_DSN — errors are not being reported",
+        )
     if os.getenv("REGWATCH_DB_INITIALIZED") != "1":
         init_db()
     elif s.database_url:
@@ -141,6 +151,47 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+async def _handle_upstream_error(_request: Request, exc: Exception) -> JSONResponse:
+    """Map an LLM-provider transport error to 503 — never a naked 500 that leaks
+    provider internals. The /query path already degrades to an audited refusal
+    (B2); this is the safety net for /assemble, /whitepaper, and the
+    router/extractor LLM calls. Genuine bugs still 500 and are Sentry-captured.
+    """
+    log.warning("upstream_provider_error", error_type=type(exc).__name__)
+    capture_exception(exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "the answer service is temporarily unavailable; please try again"},
+    )
+
+
+def _register_upstream_error_handlers(target: FastAPI) -> None:
+    """Register the 503 handler for whichever LLM SDK base errors are importable.
+
+    Registering the SDK's base error class catches all of its subclasses
+    (timeout / connection / rate-limit / 5xx status). Kept lazy so the API does
+    not hard-depend on the LLM SDKs in echo-only environments (tests/CI).
+    """
+    bases: list[type[Exception]] = []
+    try:
+        from openai import APIError as _OpenAIAPIError
+
+        bases.append(_OpenAIAPIError)
+    except Exception:  # SDK not installed in this environment
+        pass
+    try:
+        from anthropic import APIError as _AnthropicAPIError
+
+        bases.append(_AnthropicAPIError)
+    except Exception:
+        pass
+    for base in bases:
+        target.add_exception_handler(base, _handle_upstream_error)
+
+
+_register_upstream_error_handlers(app)
+
 # Single authorization chokepoint: every endpoint except GET /health and the
 # /auth routes is registered on this router, so its router-level dependency
 # makes an accidentally-unauthenticated route impossible.
@@ -153,7 +204,9 @@ def _db_component() -> dict[str, Any]:
     try:
         with get_engine().connect() as conn:
             conn.execute(text("SELECT 1"))
-        return {"ok": True}
+        # B1: expose the dialect so a prod stack accidentally on SQLite is
+        # visibly wrong (operators / the uptime check can assert 'postgresql').
+        return {"ok": True, "dialect": engine_dialect()}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
