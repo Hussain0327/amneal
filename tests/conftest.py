@@ -87,12 +87,19 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     monkeypatch.setenv("OPENAI_API_KEY", "")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setenv("OPENFDA_API_KEY", "")
-    # Sentry stays OFF in tests even if the host .env carries a DSN.
+    # Sentry stays OFF in tests even if the host .env carries a DSN, and pinned
+    # to the default environment so a host .env (SENTRY_ENVIRONMENT=development/
+    # production) can't leak into the "default off" assertions.
     monkeypatch.setenv("SENTRY_DSN", "")
+    monkeypatch.setenv("SENTRY_ENVIRONMENT", "dev")
     # Per-test storage. DATABASE_URL is cleared so a host .env pointing at
     # Postgres can never leak into the SQLite-default test suite; the
     # Postgres integration tests opt in via TEST_DATABASE_URL explicitly.
     monkeypatch.setenv("DATABASE_URL", "")
+    # The B1 prod guard must never fire in the SQLite test suite: a host .env
+    # with REQUIRE_DATABASE_URL=true would otherwise make get_engine() refuse to
+    # boot the moment DATABASE_URL is cleared above.
+    monkeypatch.setenv("REQUIRE_DATABASE_URL", "0")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("CHROMA_DIR", str(tmp_path / "chroma"))
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "regwatch.db"))
