@@ -18,6 +18,10 @@ from regwatch.auth.passwords import _DUMMY_HASH, verify_password
 from regwatch.store.db import session_scope
 from regwatch.store.models import AuthSession, User
 
+# last_seen_at is only persisted once it has drifted past this window, so a
+# burst of read requests on one session doesn't serialize on a per-request write.
+_LAST_SEEN_COALESCE = timedelta(minutes=5)
+
 
 def _hash_token(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -109,8 +113,15 @@ def resolve_token(raw: str) -> User | None:
         user = s.get(User, row.user_id)
         if user is None or not user.is_active:
             return None
-        row.last_seen_at = now
-        s.add(row)
+        # Coarsen the last_seen_at write: this runs for EVERY authenticated
+        # request (incl. pure reads), and an unconditional write is a WAL-
+        # generating UPDATE + row lock on the hottest path. last_seen_at is
+        # informational (expiry uses expires_at), so only persist once it has
+        # drifted past a coalescing window.
+        prev = _as_utc(row.last_seen_at) if row.last_seen_at is not None else None
+        if prev is None or (now - prev) >= _LAST_SEEN_COALESCE:
+            row.last_seen_at = now
+            s.add(row)
         return _detached_user(user)
 
 

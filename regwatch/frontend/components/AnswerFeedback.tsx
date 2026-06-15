@@ -20,7 +20,9 @@ export function AnswerFeedback({ auditId }: { auditId: number }) {
   const [noteSent, setNoteSent] = useState(false);
 
   function rate(next: 1 | -1) {
-    if (phase === "saving") return;
+    // Ignore a no-op re-click of the already-saved thumb (buttons stay enabled
+    // after success); a real switch (next !== rating) still fires.
+    if (phase === "saving" || next === rating) return;
     setNoteSent(false);
     if (next === 1) setNote("");
     void (async () => {

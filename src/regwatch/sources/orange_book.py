@@ -125,12 +125,17 @@ class _ZipCache:
 # queries within the TTL reuse a single download/unzip/parse. Not thread-safe;
 # a benign re-fetch on a race is acceptable for this in-process cache.
 _ZIP_CACHE: _ZipCache | None = None
+# Parsed rows per ZIP member, parsed once per cached download. Without this the
+# ~50k-row products.txt was re-run through csv.DictReader on every query even on
+# a warm text cache. Invalidated whenever _ZIP_CACHE is replaced/cleared.
+_PARSED_CACHE: dict[str, list[dict[str, str]]] = {}
 
 
 def reset_products_cache() -> None:
     """Clear the cached Orange Book ZIP texts (for deterministic tests)."""
     global _ZIP_CACHE
     _ZIP_CACHE = None
+    _PARSED_CACHE.clear()
 
 
 class OrangeBookHandler:
@@ -145,7 +150,11 @@ class OrangeBookHandler:
         *,
         client: httpx.Client | None = None,
     ) -> list[SourceRecord]:
-        rows = parse_products_text(self._products_text or _cached_products_text(client))
+        rows = (
+            parse_products_text(self._products_text)
+            if self._products_text is not None
+            else _cached_parsed(PRODUCTS_MEMBER, PRODUCT_COLUMNS, client)
+        )
         records: list[SourceRecord] = []
         app_no = _orange_book_app_no(query.application_number)
         ingredient = canonical_name(query.active_ingredient or "")
@@ -216,7 +225,14 @@ def parse_exclusivity_text(text: str) -> list[dict[str, str]]:
 
 
 def _parse_tilde_text(text: str, columns: Mapping[str, str]) -> list[dict[str, str]]:
-    reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff")), delimiter="~")
+    # QUOTE_NONE: the FDA tilde format uses '~' purely as a column delimiter and
+    # double-quotes appear as literal data (inch marks, abbreviations in
+    # Trade_Name / Applicant). With default quoting a field that *starts* with a
+    # double-quote would put csv into quote mode and swallow '~' delimiters and
+    # newlines until the next quote \u2014 silently merging, shifting, or dropping rows.
+    reader = csv.DictReader(
+        io.StringIO(text.lstrip("\ufeff")), delimiter="~", quoting=csv.QUOTE_NONE
+    )
     out: list[dict[str, str]] = []
     for row in reader:
         normalized = {
@@ -239,7 +255,7 @@ def _rows_for_application(
     cache = _cached_zip(client)
     rows = [
         row
-        for row in _parse_tilde_text(cache.files[member], columns)
+        for row in _cached_parsed(member, columns, client)
         if row.get("appl_no") == appl_no
         and (appl_type is None or row.get("appl_type") == appl_type)
     ]
@@ -270,6 +286,22 @@ def _cached_products_text(client: httpx.Client | None) -> str:
     return _cached_zip(client).files[PRODUCTS_MEMBER]
 
 
+def _cached_parsed(
+    member: str, columns: Mapping[str, str], client: httpx.Client | None
+) -> list[dict[str, str]]:
+    """Parsed rows for one ZIP member, parsed once per cached download.
+
+    Callers must treat the returned list as read-only (it is the cached object).
+    Invalidated whenever ``_cached_zip`` refreshes and replaces ``_ZIP_CACHE``.
+    """
+    cache = _cached_zip(client)
+    rows = _PARSED_CACHE.get(member)
+    if rows is None:
+        rows = _parse_tilde_text(cache.files[member], columns)
+        _PARSED_CACHE[member] = rows
+    return rows
+
+
 def _cached_zip(client: httpx.Client | None) -> _ZipCache:
     """Return the Orange Book file texts, reusing a fresh in-process cache.
 
@@ -291,6 +323,7 @@ def _cached_zip(client: httpx.Client | None) -> _ZipCache:
         missing_members=missing,
     )
     _ZIP_CACHE = fresh
+    _PARSED_CACHE.clear()  # parsed rows are tied to this download
     return fresh
 
 

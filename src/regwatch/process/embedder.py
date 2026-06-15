@@ -11,9 +11,16 @@ import importlib.util
 import random
 import time
 from collections import OrderedDict
+from threading import Lock
 from typing import Any, ClassVar, Protocol
 
 from config.settings import get_settings
+
+# Guards LocalBgeSmallProvider's process-wide model load and shared LRU cache.
+# FastAPI runs the sync /query endpoint in a threadpool, so embed() executes
+# concurrently across threads; unsynchronized OrderedDict mutation would raise
+# (mirrors retrieve/reranker.py's _RERANKER_LOCK).
+_LOCAL_CACHE_LOCK = Lock()
 
 
 class EmbeddingProvider(Protocol):
@@ -36,46 +43,56 @@ class LocalBgeSmallProvider:
     def _ensure_model(self) -> None:
         if self._model is not None:
             return
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ModuleNotFoundError as exc:
-            raise RuntimeError(
-                "EMBEDDING_PROVIDER=local-bge-small requires installing "
-                "`regwatch[local-embeddings]` or running "
-                "`uv sync --extra local-embeddings`."
-            ) from exc
+        with _LOCAL_CACHE_LOCK:  # double-checked: only one thread loads the model
+            if self._model is not None:
+                return
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ModuleNotFoundError as exc:
+                raise RuntimeError(
+                    "EMBEDDING_PROVIDER=local-bge-small requires installing "
+                    "`regwatch[local-embeddings]` or running "
+                    "`uv sync --extra local-embeddings`."
+                ) from exc
 
-        LocalBgeSmallProvider._model = SentenceTransformer("BAAI/bge-small-en-v1.5")
+            LocalBgeSmallProvider._model = SentenceTransformer("BAAI/bge-small-en-v1.5")
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
         out: list[list[float]] = []
         misses: list[tuple[int, str]] = []
-        for i, t in enumerate(texts):
-            key = hashlib.sha256(t.encode("utf-8")).hexdigest()
-            cached = self._cache.get(key)
-            if cached is not None:
-                self._cache.move_to_end(key)
-            out.append(cached if cached is not None else [])
-            if cached is None:
-                misses.append((i, key))
+        # Cache reads/writes are guarded: the shared OrderedDict is mutated
+        # (move_to_end / __setitem__ / popitem) and would corrupt under the
+        # concurrent threadpool /query path without the lock.
+        with _LOCAL_CACHE_LOCK:
+            for i, t in enumerate(texts):
+                key = hashlib.sha256(t.encode("utf-8")).hexdigest()
+                cached = self._cache.get(key)
+                if cached is not None:
+                    self._cache.move_to_end(key)
+                out.append(cached if cached is not None else [])
+                if cached is None:
+                    misses.append((i, key))
         if misses:
             self._ensure_model()
             if self._model is None:
                 raise RuntimeError("local embedding model failed to initialize")
             batch_texts = [texts[i] for i, _ in misses]
+            # Model inference runs OUTSIDE the lock so concurrent callers are not
+            # serialized on the slow encode; only the cache mutation is guarded.
             vecs = self._model.encode(  # type: ignore[attr-defined]
                 batch_texts,
                 normalize_embeddings=True,
                 convert_to_numpy=True,
             ).tolist()
-            for (i, key), v in zip(misses, vecs, strict=False):
-                self._cache[key] = v
-                self._cache.move_to_end(key)
-                while len(self._cache) > self._cache_max_size:
-                    self._cache.popitem(last=False)
-                out[i] = v
+            with _LOCAL_CACHE_LOCK:
+                for (i, key), v in zip(misses, vecs, strict=False):
+                    self._cache[key] = v
+                    self._cache.move_to_end(key)
+                    while len(self._cache) > self._cache_max_size:
+                        self._cache.popitem(last=False)
+                    out[i] = v
         return out
 
 

@@ -90,7 +90,13 @@ class PsgHandler:
                 (row[0], row[1]) for row in s.execute(stmt.limit(query.limit * 5))
             ]
             for doc, version in pairs:
-                if app_no and app_no not in (doc.rld_or_rs_number or "") and doc.appl_no != app_no:
+                ref_tokens = {
+                    t.strip().zfill(6) for t in (doc.rld_or_rs_number or "").split(",") if t.strip()
+                }
+                # Exact-token membership, not raw substring: rld_or_rs_number is a
+                # comma-joined list of bare numbers, so a substring match could
+                # span a token boundary and blend two applications (INV-7..9).
+                if app_no and app_no not in ref_tokens and doc.appl_no != app_no:
                     continue
                 if query.active_ingredient and not (
                     doc.normalized_name == ingredient

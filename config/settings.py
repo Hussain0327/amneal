@@ -18,6 +18,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # hyphens only — "gpt-5-nano-mini" is a DIFFERENT model, not a snapshot.
 _SNAPSHOT_SUFFIX_RE = re.compile(r"\d[\d-]*")
 
+# Default final-k after optional reranking. Used to detect whether RERANK_TOP_K
+# was set explicitly (vs. the legacy RETRIEVAL_TOP_K) in effective_rerank_top_k.
+_DEFAULT_RERANK_TOP_K = 8
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -128,16 +132,28 @@ class Settings(BaseSettings):
     # first RERANK_TOP_K of the wide net. This keeps the diagram and the
     # config in agreement at all times.
     vector_top_k: int = 50
-    rerank_top_k: int = 8
+    rerank_top_k: int = _DEFAULT_RERANK_TOP_K
     # Legacy alias — populated from RETRIEVAL_TOP_K if set (backwards compat).
     retrieval_top_k: int | None = None
     refusal_score_threshold: float = 0.30
+    # TTL for the in-process distinct-metadata cache (the resolver's "which
+    # drugs exist" set). Bounds how long the long-lived API process can serve a
+    # stale set after a SEPARATE ingest process adds a drug. 0 disables the TTL
+    # (cache only invalidated by same-process writes / restart).
+    metadata_cache_ttl_s: float = 60.0
 
     @property
     def effective_rerank_top_k(self) -> int:
-        """Final-k after optional reranking. Prefers explicit RERANK_TOP_K."""
-        if self.retrieval_top_k is not None and self.retrieval_top_k != self.rerank_top_k:
-            # Honor legacy env var if user only set the old name.
+        """Final-k after optional reranking.
+
+        Prefers an explicitly-set RERANK_TOP_K (the current name). The legacy
+        RETRIEVAL_TOP_K is honored ONLY when RERANK_TOP_K is still at its
+        default — so a stale legacy var lingering in the environment can no
+        longer silently override an explicit new RERANK_TOP_K.
+        """
+        if self.rerank_top_k != _DEFAULT_RERANK_TOP_K:
+            return self.rerank_top_k
+        if self.retrieval_top_k is not None:
             return self.retrieval_top_k
         return self.rerank_top_k
 
@@ -175,10 +191,12 @@ class Settings(BaseSettings):
         url = str(v).strip()
         if not url:
             return None
-        if url.startswith("postgres://"):
-            url = "postgresql://" + url.removeprefix("postgres://")
-        if url.startswith("postgresql://"):
-            url = "postgresql+psycopg://" + url.removeprefix("postgresql://")
+        # Match the scheme case-insensitively (a 'POSTGRES://' would otherwise
+        # slip through unrewritten and fail SQLAlchemy's dialect lookup), but
+        # leave the credentials/host portion untouched.
+        scheme, sep, rest = url.partition("://")
+        if sep and scheme.lower() in ("postgres", "postgresql"):
+            return f"postgresql+psycopg://{rest}"
         return url
 
     data_dir: Path = Path("./data")
@@ -190,6 +208,9 @@ class Settings(BaseSettings):
     # ---------- Crawler ----------
     user_agent: str = "RegWatch/0.1 (clinical-regulatory-affairs; +https://example.invalid/contact)"
     http_timeout_s: float = 30.0
+    # Reserved / not yet wired: the PSG crawl and ingest run sequentially today
+    # (politeness + the single-threaded alembic init path). Kept so the knob
+    # exists if a concurrent fetch path is added; it currently has no effect.
     crawl_concurrency: int = 4
     crawl_min_interval_ms: int = 250
     # In-process cache-aside TTL for the Orange Book products ZIP. The ~50k-row

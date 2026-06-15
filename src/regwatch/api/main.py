@@ -37,6 +37,7 @@ from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Request,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, text, update
 from sqlalchemy import select as sa_select
 from sqlalchemy.exc import IntegrityError
@@ -60,7 +61,11 @@ from regwatch.store.vector_store import collection_size
 from regwatch.watch.alerts import latest_digest_records
 from regwatch.watch.watchlist import ALLOWED_SOURCES, add_manual_product, list_watchlist
 from regwatch.whitepaper.docx_writer import docx_media_type, write_whitepaper_docx
-from regwatch.whitepaper.populator import SpineResolutionError, build_whitepaper
+from regwatch.whitepaper.populator import (
+    SpineResolutionError,
+    build_whitepaper,
+    result_fingerprint,
+)
 
 configure_logging()
 log = get_logger(__name__)
@@ -208,14 +213,21 @@ def _db_component() -> dict[str, Any]:
         # visibly wrong (operators / the uptime check can assert 'postgresql').
         return {"ok": True, "dialect": engine_dialect()}
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        # /health is the one anonymous-reachable endpoint: never return the raw
+        # exception (it discloses DB host/port/name + driver) to the caller.
+        # Keep the detail server-side / in Sentry.
+        log.warning("health_db_unreachable", error=str(exc))
+        capture_exception(exc)
+        return {"ok": False, "error": "unreachable"}
 
 
 def _chroma_component() -> dict[str, Any]:
     try:
         return {"ok": True, "corpus_count": collection_size()}
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        log.warning("health_vector_store_unreachable", error=str(exc))
+        capture_exception(exc)
+        return {"ok": False, "error": "unreachable"}
 
 
 def _llm_key_present(s: Settings) -> bool:
@@ -332,7 +344,10 @@ def _enforce_query_rate_limit(user: User) -> None:
 
 # ---------- /query ----------
 class QueryRequest(BaseModel):
-    question: str = Field(..., min_length=2)
+    # max_length bounds the synthesizer prompt and per-request work; other string
+    # fields are capped for the same reason. 4000 chars is far above any real
+    # question while refusing a megabyte payload.
+    question: str = Field(..., min_length=2, max_length=4000)
     filters: dict[str, Any] | None = None
     k: int | None = Field(None, ge=1)
     session_id: str | None = None
@@ -520,7 +535,13 @@ class SourceSearchResponse(BaseModel):
 
 
 @protected.post("/sources/search", response_model=SourceSearchResponse)
-def sources_search(req: SourceSearchRequest) -> SourceSearchResponse:
+def sources_search(
+    req: SourceSearchRequest, user: User = Depends(require_user)
+) -> SourceSearchResponse:
+    # Fans out to live FDA endpoints (openFDA, DailyMed, Orange Book ZIP), so
+    # rate-limit it like the other outbound/expensive routes — an authed caller
+    # must not be able to hammer FDA unthrottled (amplification / FDA-side block).
+    _enforce_query_rate_limit(user)
     routed, records = search_sources(
         SourceQuery(
             query_text=req.query_text,
@@ -610,7 +631,7 @@ _DOCX_CELL_KEYS = ("id", "label", "status")
 # prefixed. The value is interpolated into the Content-Disposition filename
 # (and the audit row), so anything looser — CR/LF, quotes, path characters —
 # is rejected rather than trusted into a response header.
-_DOCX_APPL_NO_RE = re.compile(r"^[A-Z]{0,4}\d{6}$")
+_DOCX_APPL_NO_RE = re.compile(r"^[A-Z]{0,4}[0-9]{6}$")
 
 
 def _validated_docx_result(result: dict[str, Any]) -> tuple[int, str]:
@@ -654,11 +675,13 @@ def _validated_docx_result(result: dict[str, Any]) -> tuple[int, str]:
     return audit_id, appl_no
 
 
-def _require_owned_whitepaper_audit(audit_id: int, user_id: str) -> None:
+def _require_owned_whitepaper_audit(audit_id: int, user_id: str) -> str | None:
     """The audit row must be the caller's own successful white-paper run.
 
     One uniform 422 for fabricated, foreign, or non-whitepaper ids — the
-    response never confirms that someone else's audit row exists.
+    response never confirms that someone else's audit row exists. Returns the
+    sections fingerprint stored on that run (None for a legacy row predating
+    the integrity check) so the caller can verify the echoed result body.
     """
     with session_scope() as s:
         row = s.get(QueryLog, audit_id)
@@ -675,6 +698,9 @@ def _require_owned_whitepaper_audit(audit_id: int, user_id: str) -> None:
                     "re-run POST /whitepaper and send its result verbatim"
                 ),
             )
+        route = row.route_json if isinstance(row.route_json, dict) else {}
+        stored = route.get("sections_sha256")
+        return stored if isinstance(stored, str) else None
 
 
 @protected.post("/whitepaper/docx")
@@ -688,7 +714,19 @@ def whitepaper_docx(req: WhitepaperDocxRequest, user: User = Depends(require_use
     """
     _enforce_query_rate_limit(user)
     audit_id, appl_no = _validated_docx_result(req.result)
-    _require_owned_whitepaper_audit(audit_id, str(user.id))
+    expected_hash = _require_owned_whitepaper_audit(audit_id, str(user.id))
+    # Integrity (INV-1/INV-4): audit_id ownership proves the caller ran THIS
+    # white paper, not that the echoed body is unmodified. Render only when the
+    # supplied sections match the audited run byte-for-byte, so a tampered cell
+    # value/status/evidence can never be rendered into an official document.
+    if expected_hash is None or result_fingerprint(req.result.get("sections")) != expected_hash:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "result sections do not match the audited white-paper run for that "
+                "audit_id — re-run POST /whitepaper and send its result verbatim"
+            ),
+        )
     data = write_whitepaper_docx(req.result, template_path=get_settings().whitepaper_template_path)
     log_query(
         mode="whitepaper",
@@ -893,8 +931,9 @@ def get_session(session_id: str, user: User = Depends(require_user)) -> dict[str
 def delete_session(session_id: str, user: User = Depends(require_user)) -> None:
     with session_scope() as s:
         row = _owned_session_or_404(s, session_id, str(user.id))
-        for m in s.scalars(select(ChatMessage).where(ChatMessage.session_id == session_id)):
-            s.delete(m)
+        # One bulk DELETE for the messages instead of a per-row ORM delete
+        # (ChatMessage has no ORM cascades, so a set-based delete is equivalent).
+        s.execute(sa_delete(ChatMessage).where(col(ChatMessage.session_id) == session_id))
         s.delete(row)
 
 

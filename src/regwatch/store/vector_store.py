@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -58,7 +59,14 @@ class Hit:
 
 
 _client: chromadb.api.ClientAPI | None = None
-_metadata_values_cache: dict[str, frozenset[str]] = {}
+# key -> (cached_at_monotonic, values). The TTL bounds cross-process staleness
+# (a separate ingest process adding a drug); same-process writes still clear it.
+_metadata_values_cache: dict[str, tuple[float, frozenset[str]]] = {}
+
+
+def _metadata_cache_fresh(cached_at: float) -> bool:
+    ttl = get_settings().metadata_cache_ttl_s
+    return ttl <= 0 or (time.monotonic() - cached_at) < ttl
 
 
 def get_client() -> chromadb.api.ClientAPI:
@@ -193,6 +201,24 @@ def collection_size() -> int:
     return int(get_collection().count())
 
 
+def chunks_exist(doc_id: int, version_id: int) -> bool:
+    """True iff the search index holds at least one chunk for (doc_id, version_id).
+
+    Used by the ingest pipeline to detect a version row that committed but whose
+    chunks never landed (a crash between the two non-atomic stores), so retrieval
+    is never silently blind to a drug whose hash already matches.
+    """
+    if _pg_mode():
+        from regwatch.store import pgvector_store
+
+        return pgvector_store.chunks_exist(doc_id, version_id)
+    where: dict[str, Any] = {
+        "$and": [{"doc_id": {"$eq": doc_id}}, {"version_id": {"$eq": version_id}}]
+    }
+    res = get_collection().get(where=where, limit=1)  # type: ignore[arg-type]
+    return bool(res.get("ids"))
+
+
 def distinct_metadata_values(key: str) -> set[str]:
     """All distinct non-empty string values of one metadata `key` across chunks.
 
@@ -206,13 +232,13 @@ def distinct_metadata_values(key: str) -> set[str]:
 
         return pgvector_store.distinct_metadata_values(key)
     cached = _metadata_values_cache.get(key)
-    if cached is not None:
-        return set(cached)
+    if cached is not None and _metadata_cache_fresh(cached[0]):
+        return set(cached[1])
     got = get_collection().get(include=["metadatas"])
     out: set[str] = set()
     for meta in got.get("metadatas") or []:
         value = (meta or {}).get(key)
         if isinstance(value, str) and value:
             out.add(value)
-    _metadata_values_cache[key] = frozenset(out)
+    _metadata_values_cache[key] = (time.monotonic(), frozenset(out))
     return out

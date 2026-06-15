@@ -41,10 +41,10 @@ def current_dosage_form_routes(
     with session_scope() as s:
         stmt = select(PsgDocument.dosage_form, PsgDocument.route).where(
             PsgDocument.normalized_name == normalized_name,
+            # "document has >= 1 version" — a non-correlated DISTINCT is clearer
+            # than the self-correlated IN and lets the DB do the de-dup.
             PsgDocument.id.in_(  # type: ignore[union-attr]
-                select(PsgVersion.psg_document_id).where(
-                    PsgVersion.psg_document_id == PsgDocument.id
-                )
+                select(PsgVersion.psg_document_id).distinct()
             ),
         )
         if dosage_form:

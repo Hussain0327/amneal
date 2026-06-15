@@ -242,20 +242,27 @@ def _finish_turn(
     route_json: dict[str, Any],
 ) -> QAResult:
     if result.session_id and result.turn_id:
-        record_message(
-            session_id=result.session_id,
-            turn_id=result.turn_id,
-            role="assistant",
-            content=result.answer,
-            status=result.status,
-            model_name=result.model_name,
-            audit_id=result.audit_id,
-            filters=filters,
-            citations=[asdict(c) for c in result.citations],
-            metadata={"retrieved": result.retrieved, "route": route_json},
-        )
-        if result.status in {"answer", "summary", "clarify"} and filters.get("normalized_name"):
-            update_session_filters(result.session_id, filters)
+        # Best-effort chat-history write: the audit row (INV-6) is already
+        # committed by this point, so a failure here — e.g. the degraded
+        # session_id=turn_id fallback has no chat_session row and the assistant
+        # FK insert fails on Postgres — must not 500 an already-audited turn.
+        try:
+            record_message(
+                session_id=result.session_id,
+                turn_id=result.turn_id,
+                role="assistant",
+                content=result.answer,
+                status=result.status,
+                model_name=result.model_name,
+                audit_id=result.audit_id,
+                filters=filters,
+                citations=[asdict(c) for c in result.citations],
+                metadata={"retrieved": result.retrieved, "route": route_json},
+            )
+            if result.status in {"answer", "summary", "clarify"} and filters.get("normalized_name"):
+                update_session_filters(result.session_id, filters)
+        except Exception:
+            log.warning("assistant_record_message_failed", exc_info=True)
     return result
 
 
@@ -398,23 +405,27 @@ def _validate_citations(
     answer_text: str, passages: list[RetrievedPassage]
 ) -> tuple[list[Citation], list[tuple[str, int]]]:
     """Return (validated citations in order of appearance, list of bad cites)."""
+    # Key case-insensitively: the citation parser is re.IGNORECASE, so the model
+    # may echo a bracket lowercase, while the passage short_name is canonical
+    # uppercase (PSG_NNNNNN). A case-sensitive miss would drop a valid citation
+    # and could flip a genuinely-grounded answer to a false refusal.
     allowed: dict[tuple[str, int], RetrievedPassage] = {}
     for p in passages:
-        allowed[(p.short_name, p.page)] = p
+        allowed[(p.short_name.upper(), p.page)] = p
 
     seen: set[tuple[str, int]] = set()
     validated: list[Citation] = []
     bad: list[tuple[str, int]] = []
 
     for short_name, page in iter_psg_citations(answer_text):
-        key = (short_name, page)
-        passage = allowed.get(key)
+        fold = (short_name.upper(), page)
+        passage = allowed.get(fold)
         if passage is None:
-            bad.append(key)
+            bad.append((short_name, page))
             continue
-        if key in seen:
+        if fold in seen:
             continue
-        seen.add(key)
+        seen.add(fold)
         snippet = passage.text.strip().replace("\n", " ")[:200]
         validated.append(
             Citation(
@@ -884,8 +895,12 @@ def ask(
     passages = rerank_passages(question, passages)
     passages = passages[: s.effective_rerank_top_k]
 
-    # INV-2: if retrieval is weak, refuse before calling the LLM.
-    if not passages or passages[0].score < s.refusal_score_threshold:
+    # INV-2: if retrieval is weak, refuse before calling the LLM. Gate on the
+    # MAX cosine score, not passages[0]: the reranker (when enabled) reorders by
+    # a cross-encoder score on a different scale, so passages[0].score may be a
+    # demoted-but-still-present passage's cosine value — the 0.30 threshold is
+    # calibrated against the cosine scale, so compare the true best cosine.
+    if not passages or max(p.score for p in passages) < s.refusal_score_threshold:
         route_json = _route_json(
             filters=active_filters,
             reason="low_top_score",
@@ -1026,6 +1041,33 @@ def ask(
         )
     answer = response.text.strip()
 
+    # INV-1/INV-2: a degenerate completion (empty after stripping — e.g. a
+    # max_tokens truncation or a provider hiccup) is not an answer. Refuse
+    # rather than fall through and emit a non-refused, zero-citation empty
+    # "answer" (the sentinel check below would not catch an empty string).
+    if not answer:
+        route_json = _route_json(
+            filters=active_filters,
+            reason="empty_completion",
+            context_applied=context_applied,
+            response_mode="refused",
+        )
+        return _finish_turn(
+            _refuse(
+                question=question,
+                passages=passages,
+                reason="empty_completion",
+                model_name=response.model,
+                session_id=session_id,
+                turn_id=turn_id,
+                user_id=user_id,
+                route_json=route_json,
+                usage=response.usage,
+            ),
+            filters=active_filters,
+            route_json=route_json,
+        )
+
     # LLM-side refusal: it returned the exact refusal sentinel.
     if answer == s.refusal_text or answer.startswith(s.refusal_text):
         if answer != s.refusal_text:
@@ -1085,10 +1127,11 @@ def ask(
     if bad:
         log.warning("qa_unknown_citations", bad=bad)
 
-    # INV-1: if the answer has body text but no valid citations, refuse rather
-    # than emit an ungrounded answer.
+    # INV-1: a grounded answer must carry BOTH actual prose and at least one
+    # valid citation. Refuse on ungrounded prose (body, no citations) OR a
+    # citations-only / empty completion (no body) — never emit either.
     answer_body = strip_all_citations(answer).strip()
-    if answer_body and not citations:
+    if not answer_body or not citations:
         route_json = _route_json(
             filters=active_filters,
             reason="no_valid_citations",
@@ -1121,10 +1164,11 @@ def ask(
     cleaned_answer = re.sub(r"\s+([.,;:])", r"\1", cleaned_answer)
     cleaned_answer = re.sub(r"[ \t]{2,}", " ", cleaned_answer).strip()
 
+    audited = _audit_retrieved(passages)
     audit_id = log_query(
         mode="qa",
         query_text=question,
-        retrieved=_audit_retrieved(passages),
+        retrieved=audited,
         answer_text=cleaned_answer,
         citations=[asdict(c) for c in citations],
         refused=False,
@@ -1143,7 +1187,7 @@ def ask(
             refused=False,
             model_name=response.model,
             audit_id=audit_id,
-            retrieved=_audit_retrieved(passages),
+            retrieved=audited,
             status=response_mode,
             reason=route_json.get("reason"),
             session_id=session_id,

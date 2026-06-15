@@ -22,6 +22,12 @@ from sqlmodel import Session, SQLModel, create_engine
 
 _engine: Engine | None = None
 _engine_lock = Lock()
+# init_db is memoized per process: idempotent but not free (inspect + DDL + RLS
+# round-trips), and ingest calls it once per listing (~1,795x in a full crawl).
+# A SEPARATE lock from _engine_lock — init_db calls get_engine(), which takes
+# _engine_lock, so reusing it here would deadlock (Lock is not reentrant).
+_init_lock = Lock()
+_initialized = False
 _BASELINE_TABLES = frozenset(
     {
         "product",
@@ -354,22 +360,34 @@ def _init_sqlite() -> None:
 
 
 def init_db() -> None:
-    """Apply/verify the schema for the active database (dialect-aware)."""
-    engine = get_engine()
-    if engine.dialect.name == "postgresql":
-        _init_postgres(engine)
-        # K6 fail-fast: the embedding provider's dimension must match the
-        # chunk table's vector(1536) AT STARTUP, not on first vector-store
-        # use. Every Postgres-mode entry point funnels through init_db (API
-        # lifespan, `regwatch init-db`, scripts/migrate_to_supabase.py), so a
-        # misconfigured provider refuses to boot instead of 500-ing on the
-        # first query/ingest. Imported lazily so SQLite mode never touches
-        # the pgvector module.
-        from regwatch.store.pgvector_store import assert_embedding_provider_dim
+    """Apply/verify the schema for the active database (dialect-aware).
 
-        assert_embedding_provider_dim()
+    Memoized per process (reset by ``reset_for_tests``): the schema work is
+    idempotent but not free, and ingest calls init_db once per listing.
+    """
+    global _initialized
+    if _initialized:
         return
-    _init_sqlite()
+    # get_engine() takes _engine_lock; call it BEFORE acquiring _init_lock.
+    engine = get_engine()
+    with _init_lock:
+        if _initialized:
+            return
+        if engine.dialect.name == "postgresql":
+            _init_postgres(engine)
+            # K6 fail-fast: the embedding provider's dimension must match the
+            # chunk table's vector(1536) AT STARTUP, not on first vector-store
+            # use. Every Postgres-mode entry point funnels through init_db (API
+            # lifespan, `regwatch init-db`, scripts/migrate_to_supabase.py), so
+            # a misconfigured provider refuses to boot instead of 500-ing on
+            # the first query/ingest. Imported lazily so SQLite mode never
+            # touches the pgvector module.
+            from regwatch.store.pgvector_store import assert_embedding_provider_dim
+
+            assert_embedding_provider_dim()
+        else:
+            _init_sqlite()
+        _initialized = True
 
 
 @contextmanager
@@ -387,7 +405,8 @@ def session_scope() -> Iterator[Session]:
 
 def reset_for_tests() -> None:
     """Tests use this to swap in a temp DB. Resets the cached engine."""
-    global _engine
+    global _engine, _initialized
     if _engine is not None:
         _engine.dispose()
     _engine = None
+    _initialized = False

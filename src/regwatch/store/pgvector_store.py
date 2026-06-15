@@ -22,8 +22,11 @@ table; the app connects as ``postgres``, which bypasses RLS.
 
 from __future__ import annotations
 
+import math
+import time
 from typing import TYPE_CHECKING, Any
 
+from config.settings import get_settings
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, Engine, create_engine
 from sqlalchemy import text as sa_text
@@ -94,7 +97,15 @@ class Chunk(SQLModel, table=True):
 _engine: Engine | None = None
 _owns_engine = False
 _schema_ready = False
-_metadata_values_cache: dict[str, frozenset[str]] = {}
+_metadata_values_cache: dict[str, tuple[float, frozenset[str]]] = {}
+
+
+def _metadata_cache_fresh(cached_at: float) -> bool:
+    """TTL gate: bounds cross-process staleness; 0 keeps the legacy behavior."""
+    ttl = get_settings().metadata_cache_ttl_s
+    return ttl <= 0 or (time.monotonic() - cached_at) < ttl
+
+
 _INSERT_BATCH_SIZE = 1000
 
 _UPSERT_SQL = """
@@ -254,6 +265,10 @@ def _validate_embedding(embedding: list[float]) -> None:
         raise ValueError(
             f"embedding has {len(embedding)} dims; the chunk table stores vector({EMBEDDING_DIM})"
         )
+    # pgvector rejects NaN/Inf inside the CAST with an opaque error far from the
+    # cause; name the offending input up front, mirroring the dim check.
+    if not all(math.isfinite(x) for x in embedding):
+        raise ValueError("embedding contains non-finite (NaN/Inf) components")
 
 
 def _vector_literal(embedding: list[float]) -> str:
@@ -365,12 +380,20 @@ def _append_condition(
 ) -> None:
     if column not in _FILTERABLE_COLUMNS:
         raise ValueError(f"unsupported chunk filter field: {column!r}")
+
+    def coerce(v: object) -> object:
+        # Match the bound value to the column's declared type, mirroring the
+        # Chroma path's loose metadata coercion: a client-supplied string
+        # version_id/doc_id/page (filters is dict[str, Any] off the wire) would
+        # otherwise mismatch the integer column instead of filtering correctly.
+        return _as_int(v) if column in _INT_METADATA_COLUMNS else v
+
     if isinstance(value, dict):
         ops = set(value)
         if ops == {"$eq"}:
             param = f"p{len(params)}"
             conditions.append(f"{column} = :{param}")
-            params[param] = value["$eq"]
+            params[param] = coerce(value["$eq"])
             return
         if ops == {"$in"}:
             seq = value["$in"]
@@ -381,12 +404,12 @@ def _append_condition(
                 return
             param = f"p{len(params)}"
             conditions.append(f"{column} = ANY(:{param})")
-            params[param] = list(seq)
+            params[param] = [coerce(x) for x in seq]
             return
         raise ValueError(f"unsupported filter operator(s) {ops!r} for {column!r}")
     param = f"p{len(params)}"
     conditions.append(f"{column} = :{param}")
-    params[param] = value
+    params[param] = coerce(value)
 
 
 def _parse_where(node: dict[str, Any], conditions: list[str], params: dict[str, Any]) -> None:
@@ -474,6 +497,19 @@ def collection_size() -> int:
         return int(conn.execute(sa_text("SELECT count(*) FROM chunk")).scalar() or 0)
 
 
+def chunks_exist(doc_id: int, version_id: int) -> bool:
+    """True iff at least one chunk row exists for (doc_id, version_id)."""
+    _ensure_ready()
+    with get_engine().connect() as conn:
+        found = conn.execute(
+            sa_text(
+                "SELECT 1 FROM chunk WHERE doc_id = :doc_id " "AND version_id = :version_id LIMIT 1"
+            ),
+            {"doc_id": doc_id, "version_id": version_id},
+        ).scalar()
+    return found is not None
+
+
 def distinct_metadata_values(key: str) -> set[str]:
     """Distinct non-empty values of one text metadata column.
 
@@ -482,9 +518,12 @@ def distinct_metadata_values(key: str) -> set[str]:
     no Chroma chunk carries.
     """
     cached = _metadata_values_cache.get(key)
-    if cached is not None:
-        return set(cached)
+    if cached is not None and _metadata_cache_fresh(cached[0]):
+        return set(cached[1])
     if key not in _TEXT_METADATA_COLUMNS:
+        # Cache the empty result too, matching the Chroma path (which caches
+        # every key) so the dual-backend behavior stays identical.
+        _metadata_values_cache[key] = (time.monotonic(), frozenset())
         return set()
     _ensure_ready()
     with get_engine().connect() as conn:
@@ -492,5 +531,5 @@ def distinct_metadata_values(key: str) -> set[str]:
             sa_text(f"SELECT DISTINCT {key} FROM chunk WHERE {key} IS NOT NULL AND {key} != ''")
         ).scalars()
         out = {str(v) for v in rows}
-    _metadata_values_cache[key] = frozenset(out)
+    _metadata_values_cache[key] = (time.monotonic(), frozenset(out))
     return out

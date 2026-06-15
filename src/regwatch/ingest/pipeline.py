@@ -16,12 +16,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
+from config.settings import get_settings
 from sqlalchemy import desc
 from sqlmodel import select
 
 from regwatch.common.logging import get_logger
-from regwatch.ingest.pdf_parser import parse_pdf
+from regwatch.ingest.pdf_parser import ParsedPdf, parse_pdf
 from regwatch.ingest.psg_crawler import PsgListing, download_pdf
 from regwatch.process.change_detector import summarize_change
 from regwatch.process.chunker import chunk_pdf
@@ -29,7 +31,11 @@ from regwatch.process.embedder import get_embedding_provider
 from regwatch.process.extractor import extract_be
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
-from regwatch.store.vector_store import add_chunks, delete_chunks_for_doc_except_version
+from regwatch.store.vector_store import (
+    add_chunks,
+    chunks_exist,
+    delete_chunks_for_doc_except_version,
+)
 
 log = get_logger(__name__)
 
@@ -113,6 +119,39 @@ def _latest_version_id(psg_document_id: int) -> int | None:
             )
         )
         return rows[0] if rows else None
+
+
+def _latest_version_text_path(psg_document_id: int) -> str | None:
+    """The most recent version's persisted parsed-text path (None if absent)."""
+    with session_scope() as s:
+        rows = list(
+            s.scalars(
+                select(PsgVersion.parsed_text_path)
+                .where(PsgVersion.psg_document_id == psg_document_id)
+                .order_by(desc(PsgVersion.captured_at))  # type: ignore[arg-type]
+                .limit(1)
+            )
+        )
+        return rows[0] if rows else None
+
+
+def _write_parsed_text(doc_id: int, content_hash: str, text: str) -> str:
+    """Persist a version's parsed text so the NEXT revision can produce a real
+    cited diff. Lives under data_dir (isolated per-test via DATA_DIR)."""
+    out_dir = get_settings().data_dir / "parsed_text"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{doc_id}_{content_hash}.txt"
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+def _read_parsed_text(path: str | None) -> str | None:
+    if not path:
+        return None
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None
 
 
 def _be_requirement_exists(version_id: int) -> bool:
@@ -217,6 +256,38 @@ def _chunk_metadata_base(doc_id: int, version_id: int, listing: PsgListing) -> d
     }
 
 
+def _regenerate_chunks(
+    doc_id: int, version_id: int, parsed: ParsedPdf, listing: PsgListing
+) -> None:
+    """Embed and store this version's chunks, then drop any superseded ones.
+
+    Shared by the revised/added path and the unchanged-but-chunkless backfill so
+    both produce an identical, current-only index for the document.
+    """
+    base_meta = _chunk_metadata_base(doc_id, version_id, listing)
+    chunks = chunk_pdf(parsed.pages, base_metadata=base_meta)
+    if not chunks:
+        return
+    embedder = get_embedding_provider()
+    texts = [c.text for c in chunks]
+    embeddings = embedder.embed(texts)
+    ids = [f"{doc_id}-{version_id}-{c.ordinal}" for c in chunks]
+    metas = [{**c.metadata, "section_path": c.metadata.get("section_path") or ""} for c in chunks]
+    add_chunks(ids=ids, embeddings=embeddings, documents=texts, metadatas=metas)
+    log.info("chunks_added", doc_id=doc_id, version_id=version_id, n=len(chunks))
+    try:
+        deleted = delete_chunks_for_doc_except_version(doc_id=doc_id, keep_version_id=version_id)
+        if deleted:
+            log.info("stale_chunks_deleted", doc_id=doc_id, keep_version_id=version_id, n=deleted)
+    except Exception as exc:
+        log.error(
+            "stale_chunk_cleanup_failed",
+            doc_id=doc_id,
+            keep_version_id=version_id,
+            error=str(exc),
+        )
+
+
 def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
     """Ingest one PSG listing. Returns 'added' | 'revised' | 'unchanged' | 'error'.
 
@@ -230,22 +301,41 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
         doc_id, is_new = _upsert_psg_document(listing, content_hash, str(path))
         latest_hash = _latest_version_hash(doc_id)
         if latest_hash == content_hash:
-            # Content is unchanged, but a prior run may have failed BE extraction
-            # (e.g. a transient extractor outage) and left the latest version with
-            # no be_requirement row. Because the hash matches forever, that gap is
-            # never closed by the normal path — so backfill it here rather than
-            # silently skipping (missing extraction == missing citations, INV-1).
-            if extract:
-                latest_version_id = _latest_version_id(doc_id)
-                if latest_version_id is not None and not _be_requirement_exists(latest_version_id):
+            # Content is unchanged, but a prior run may have committed this
+            # version row and then crashed before its chunks and/or BE row landed
+            # (separate stores, not atomic). Because the hash matches forever,
+            # the normal path never revisits it — so backfill any MISSING chunks
+            # (else this version is a permanent retrieval blind spot) or
+            # be_requirement (missing extraction == missing citations, INV-1)
+            # here. Parse the PDF at most once, only when a gap exists.
+            latest_version_id = _latest_version_id(doc_id)
+            if latest_version_id is not None:
+                need_chunks = not chunks_exist(doc_id, latest_version_id)
+                need_be = extract and not _be_requirement_exists(latest_version_id)
+                if need_chunks or need_be:
                     parsed = parse_pdf(pdf_bytes)
-                    _extract_and_save_be(doc_id, latest_version_id, parsed.pages, listing.appl_no)
+                    if need_chunks:
+                        _regenerate_chunks(doc_id, latest_version_id, parsed, listing)
+                        log.info(
+                            "chunkless_version_backfilled",
+                            doc_id=doc_id,
+                            version_id=latest_version_id,
+                        )
+                    if need_be:
+                        _extract_and_save_be(
+                            doc_id, latest_version_id, parsed.pages, listing.appl_no
+                        )
             return "unchanged"
 
+        # A real revision (a prior version exists) gets a real cited diff against
+        # the prior version's persisted text; the genuine first version (no prior)
+        # keeps the "Initial version ingested" marker. A prior version with no
+        # persisted text (created before this was wired) degrades to the marker.
+        prior_text_path = _latest_version_text_path(doc_id) if latest_hash is not None else None
         parsed = parse_pdf(pdf_bytes)
 
         diff_summary = summarize_change(
-            previous_text=None,
+            previous_text=_read_parsed_text(prior_text_path),
             current_text=parsed.text,
             current_page_count=len(parsed.pages),
         )
@@ -253,41 +343,11 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
             psg_document_id=doc_id,
             content_hash=content_hash,
             recommended_date=listing.recommended_date,
-            parsed_text_path=None,
+            parsed_text_path=_write_parsed_text(doc_id, content_hash, parsed.text),
             diff_summary=diff_summary,
         )
 
-        base_meta = _chunk_metadata_base(doc_id, version_id, listing)
-        chunks = chunk_pdf(parsed.pages, base_metadata=base_meta)
-        if chunks:
-            embedder = get_embedding_provider()
-            texts = [c.text for c in chunks]
-            embeddings = embedder.embed(texts)
-            ids = [f"{doc_id}-{version_id}-{c.ordinal}" for c in chunks]
-            metas = [
-                {**c.metadata, "section_path": c.metadata.get("section_path") or ""} for c in chunks
-            ]
-            add_chunks(ids=ids, embeddings=embeddings, documents=texts, metadatas=metas)
-            log.info("chunks_added", doc_id=doc_id, version_id=version_id, n=len(chunks))
-            try:
-                deleted = delete_chunks_for_doc_except_version(
-                    doc_id=doc_id,
-                    keep_version_id=version_id,
-                )
-                if deleted:
-                    log.info(
-                        "stale_chunks_deleted",
-                        doc_id=doc_id,
-                        keep_version_id=version_id,
-                        n=deleted,
-                    )
-            except Exception as exc:
-                log.error(
-                    "stale_chunk_cleanup_failed",
-                    doc_id=doc_id,
-                    keep_version_id=version_id,
-                    error=str(exc),
-                )
+        _regenerate_chunks(doc_id, version_id, parsed, listing)
 
         if extract:
             _extract_and_save_be(doc_id, version_id, parsed.pages, listing.appl_no)

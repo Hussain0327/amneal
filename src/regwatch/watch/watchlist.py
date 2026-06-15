@@ -65,6 +65,11 @@ def _fetch_page(client: httpx.Client, url: str, params: dict[str, Any]) -> dict[
     resp = client.get(url, params=params)
     if resp.status_code == 429:
         raise httpx.HTTPStatusError("rate limited", request=resp.request, response=resp)
+    # openFDA returns 404 as its normal end-of-results signal when skip exceeds
+    # the count. Treat it as an empty page HERE (mirrors aliases._fetch) so the
+    # retry wrapper doesn't burn 3 backoff attempts on every page boundary.
+    if resp.status_code == 404:
+        return {"results": []}
     resp.raise_for_status()
     return resp.json()
 
@@ -166,7 +171,12 @@ def fetch_drugsfda_for_company(
 def _status_from_marketing_status(prod: dict[str, Any]) -> str | None:
     """Map openFDA marketing_status fields to our condensed status."""
     statuses = []
-    for ms in prod.get("marketing_status") or []:
+    # openFDA returns marketing_status as a single STRING (e.g. "Prescription"),
+    # not a list — iterating it directly would walk characters and never match.
+    # Coerce a scalar to a one-element list before scanning.
+    raw = prod.get("marketing_status")
+    items = raw if isinstance(raw, list) else ([raw] if raw else [])
+    for ms in items:
         text = (ms or "").lower()
         if "prescription" in text:
             statuses.append("approved")

@@ -42,8 +42,16 @@ def clean_application_number(value: str | None) -> str | None:
     if match:
         prefix = _SINGLE_LETTER_TYPES.get(match.group(1), match.group(1))
         return f"{prefix}{match.group(2).zfill(6)}"
-    digits = re.sub(r"\D", "", raw)
-    return digits.zfill(6) if digits else None
+    digits = re.sub(r"[^0-9]", "", raw)
+    if not digits:
+        return None
+    # FDA application numbers are six digits. A longer run is malformed (a typo,
+    # a free-text fragment, or a dropped prefix) — return None so "no rows" keeps
+    # meaning "queried and absent" rather than silently coercing to a 7+-digit
+    # value that can never equal a stored six-digit appl_no.
+    if len(digits.lstrip("0")) > 6:
+        return None
+    return digits.zfill(6)
 
 
 def application_number_candidates(value: str | None) -> list[str]:

@@ -132,7 +132,11 @@ def get_aliases() -> list[str]:
         try:
             data = json.loads(cache.read_text(encoding="utf-8"))
             cached = list(data.get("aliases") or [])
-            if cached:
+            # Only trust the cache when it was computed for the CURRENT company
+            # root (mirrors discover_applicant_aliases' own root check), so a
+            # changed COMPANY_NAME doesn't keep serving the prior company's
+            # aliases until a manual refresh.
+            if cached and data.get("root") == s.company_name.strip():
                 return cached
         except json.JSONDecodeError:
             pass

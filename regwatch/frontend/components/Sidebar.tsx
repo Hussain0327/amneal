@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
-import { deleteSession, getPublicSettings, type PublicSettings } from "@/lib/api";
+import { ApiError, deleteSession, getPublicSettings, type PublicSettings } from "@/lib/api";
 import { useAuth } from "./AuthProvider";
 import { useSessions } from "./SessionsProvider";
 import { Wordmark } from "./Wordmark";
@@ -44,7 +44,11 @@ export function Sidebar() {
         setSettings(s);
         setReachable(true);
       })
-      .catch(() => setReachable(false));
+      // A 401 is an auth-expiry (AuthProvider handles the redirect), not a
+      // transport failure — don't show "API unreachable" for it.
+      .catch((e) => {
+        if (!(e instanceof ApiError) || e.status !== 401) setReachable(false);
+      });
   }, []);
 
   return (

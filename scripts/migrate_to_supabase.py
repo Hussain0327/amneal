@@ -31,6 +31,15 @@ Safety / idempotency:
 * Per-table source-vs-target row counts (and chunk count vs the Chroma count)
   are verified at the end; ANY mismatch exits nonzero. A silent partial copy
   is the worst failure mode.
+* NOT resumable. Each table and each 512-row chunk page commits in its own
+  transaction (there is no outer transaction), so a mid-run failure (pooler
+  blip, OpenAI exhausting retries, OOM) leaves a committed-but-partial target.
+  Recovery is a full ``--truncate`` re-run, which re-copies every table AND
+  re-embeds the ENTIRE corpus through OpenAI again (the chunk upsert is
+  idempotent, but there is no high-water-mark to resume from). Budget for the
+  full re-embed cost when planning a cutover, and prefer a low-contention
+  window. The end-of-run count verification still ensures a partial copy is
+  never silently accepted.
 * Postgres sequences are reset via ``setval(max(id)+1)`` after the copy —
   rows arrive with explicit ids, so without this the next INSERT would collide
   (the Postgres equivalent of copying ``sqlite_sequence``).
@@ -49,6 +58,7 @@ Exit codes: 0 success; 1 verification mismatch; 2 configuration/usage error;
 from __future__ import annotations
 
 import argparse
+import atexit
 import importlib.util
 import os
 import shutil
@@ -176,6 +186,9 @@ def upgrade_source_snapshot(sqlite_path: Path) -> Path:
     from alembic.script import ScriptDirectory
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="regwatch-mig-src-"))
+    # Remove the private snapshot copy on exit (every path, incl. the raises
+    # below) — otherwise each run leaves a full DB copy behind in $TMPDIR.
+    atexit.register(shutil.rmtree, tmp_dir, ignore_errors=True)
     tmp_db = tmp_dir / sqlite_path.name
     shutil.copy2(sqlite_path, tmp_db)
 
@@ -549,6 +562,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     src_engine = sa.create_engine(f"sqlite:///{src_db.as_posix()}")
+    # Dispose the source engine on exit (runs before the temp-dir rmtree, LIFO).
+    atexit.register(src_engine.dispose)
     tables = ordered_tables()
 
     try:

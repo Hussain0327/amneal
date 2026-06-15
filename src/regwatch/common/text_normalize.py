@@ -94,3 +94,25 @@ def stripped_name(raw: str) -> str:
 def is_combo(raw: str) -> bool:
     """True if the raw name represents a multi-ingredient combination."""
     return len(split_ingredients(raw)) > 1
+
+
+def names_match(
+    query_canon: str,
+    query_strip: str,
+    doc_normalized_name: str | None,
+    doc_active_ingredient: str | None,
+) -> bool:
+    """True iff a query's canonical/stripped ingredient identifies the document.
+
+    Exact canonical match first; the salt-stripped branch only fires for a
+    NON-EMPTY stripped key, so two products that are *entirely* salt/mineral
+    tokens — ``stripped_name("Magnesium Sulfate") == stripped_name("Calcium
+    Citrate") == ""`` — never collapse into one match. Shared by the dossier
+    and white-paper PSG matchers so the cross-product guard (INV-7..9) cannot
+    drift between them.
+    """
+    if not query_canon:
+        return False
+    if (doc_normalized_name or "") == query_canon:
+        return True
+    return bool(query_strip) and stripped_name(doc_active_ingredient or "") == query_strip

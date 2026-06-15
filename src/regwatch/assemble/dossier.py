@@ -24,7 +24,7 @@ from sqlmodel import select
 
 from regwatch.common.audit import log_query
 from regwatch.common.logging import get_logger
-from regwatch.common.text_normalize import canonical_name, stripped_name
+from regwatch.common.text_normalize import canonical_name, names_match, stripped_name
 from regwatch.generate.grounded_qa import ask
 from regwatch.generate.llm import current_model_name
 from regwatch.store.db import session_scope
@@ -49,8 +49,7 @@ def _find_matching_psgs(active_ingredient: str, dosage_form: str | None) -> list
     with session_scope() as s:
         rows = list(s.scalars(select(PsgDocument)))
         for d in rows:
-            d_strip = stripped_name(d.active_ingredient or "")
-            if d.normalized_name == canon or d_strip == strip:
+            if names_match(canon, strip, d.normalized_name, d.active_ingredient):
                 if dosage_form and d.dosage_form:
                     want = dosage_form.lower()
                     have = d.dosage_form.lower()
@@ -63,6 +62,7 @@ def _find_matching_psgs(active_ingredient: str, dosage_form: str | None) -> list
                     {
                         "id": d.id,
                         "active_ingredient": d.active_ingredient,
+                        "normalized_name": d.normalized_name,
                         "dosage_form": d.dosage_form,
                         "route": d.route,
                         "source_url": d.source_url,
@@ -285,7 +285,17 @@ def build_dossier(
     # the matched documents' exact (dosage_form, route) when they agree on one, so
     # the Q&A's multi-form guard doesn't start clarifying inside a dossier — the
     # dossier already knows the form it's building for.
-    qa_filters: dict[str, Any] = {"normalized_name": canonical_name(active_ingredient)}
+    # Pin the inner Q&A to the MATCHED document's normalized_name, not the raw
+    # input's canonical form. A PSG matched only via the salt-stripped name (doc
+    # stored "albuterol sulfate", query "albuterol") would otherwise be pinned to
+    # the salt-free canonical, which retrieval's exact-match filter can't find —
+    # blanking Section D. Fall back to the canonical form when matches disagree
+    # or there are none (unchanged behavior).
+    matched_names = {p["normalized_name"] for p in psg_matches if p.get("normalized_name")}
+    pinned_name = (
+        next(iter(matched_names)) if len(matched_names) == 1 else canonical_name(active_ingredient)
+    )
+    qa_filters: dict[str, Any] = {"normalized_name": pinned_name}
     matched_combos = {
         (p["dosage_form"], p["route"])
         for p in psg_matches

@@ -42,7 +42,10 @@ def _scrub_event(event: Event, _hint: Hint) -> Event:
     the ``[parameters: …]`` block always follows the SQL block, so one cut
     removes both.
     """
-    for exc in event.get("exception", {}).get("values", []):
+    # None-safe: some message/transaction events carry "exception": None, where
+    # event.get("exception", {}) returns None and .get(...) would raise — which
+    # the SDK swallows by DROPPING the event, silently defeating this scrubber.
+    for exc in (event.get("exception") or {}).get("values") or []:
         value = exc.get("value")
         if isinstance(value, str) and "[SQL:" in value:
             exc["value"] = value.split("[SQL:", 1)[0].rstrip() + " [SQL: scrubbed]"

@@ -25,15 +25,17 @@ This module codes against the PINNED source-layer interface and never edits
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy import select as sa_select
-from sqlmodel import select
+from sqlmodel import col, select
 
 from regwatch.common.audit import log_query
 from regwatch.common.citations import (
@@ -45,7 +47,7 @@ from regwatch.common.citations import (
     validate_structured_citations,
 )
 from regwatch.common.logging import get_logger
-from regwatch.common.text_normalize import canonical_name, stripped_name
+from regwatch.common.text_normalize import canonical_name, names_match, stripped_name
 from regwatch.generate.grounded_qa import ask
 from regwatch.generate.llm import current_model_name
 from regwatch.sources import dailymed, orange_book
@@ -446,9 +448,16 @@ def _establish_identity(ctx: _Ctx, input_type: str) -> None:
     if not ingredient:
         ingredient = _drugsfda_ingredient(ctx.drugsfda_records)
     if not ctx.product_rows and not ctx.drugsfda_records:
+        # With no prefix and no source-confirmed type, ctx.application_type is
+        # still the constructor default ("NDA") — don't assert it as fact.
+        ident = (
+            f"{ctx.application_type} {ctx.appl_no}"
+            if input_type
+            else f"{ctx.appl_no} (application type could not be confirmed)"
+        )
         raise SpineResolutionError(
             f"No Orange Book or Drugs@FDA product found for application number "
-            f"{ctx.application_type} {ctx.appl_no}. Confirm the number is correct."
+            f"{ident}. Confirm the number is correct."
         )
     ctx.ingredient = ingredient
     ctx.normalized_name = canonical_name(ingredient) if ingredient else ""
@@ -666,13 +675,30 @@ def _matching_psg_docs(ctx: _Ctx) -> list[dict[str, Any]]:
     strip = stripped_name(ctx.ingredient) if ctx.ingredient else ""
     out: list[dict[str, Any]] = []
     with session_scope() as s:
-        for d in s.scalars(select(PsgDocument)):
-            d_strip = stripped_name(d.active_ingredient or "")
-            by_name = bool(canon) and (
-                d.normalized_name == canon or (bool(strip) and d_strip == strip)
-            )
+        # The salt-stripped branch (stripped_name(active_ingredient) == strip) is
+        # not indexable — no stored stripped column — so a non-trivial stripped
+        # key still needs a full scan. Otherwise the indexed predicates
+        # (normalized_name / appl_no / rld_or_rs_number) let the DB touch only
+        # the matching rows instead of materializing the whole ~1,795-PSG table.
+        if strip and strip != canon:
+            candidates: list[PsgDocument] = list(s.scalars(select(PsgDocument)))
+        else:
+            preds: list[Any] = []
+            if canon:
+                preds.append(col(PsgDocument.normalized_name) == canon)
+            if ctx.appl_no:
+                preds.append(col(PsgDocument.appl_no) == ctx.appl_no)
+                preds.append(col(PsgDocument.rld_or_rs_number).contains(ctx.appl_no))
+            candidates = list(s.scalars(select(PsgDocument).where(or_(*preds)))) if preds else []
+        for d in candidates:
+            by_name = names_match(canon or "", strip, d.normalized_name, d.active_ingredient)
             by_appl = bool(d.appl_no) and d.appl_no == ctx.appl_no
-            by_ref = bool(d.rld_or_rs_number) and ctx.appl_no in (d.rld_or_rs_number or "")
+            # Exact-token membership (rld_or_rs_number is a comma-joined list of
+            # bare numbers) — a raw substring could span a token boundary and
+            # attach another application's PSG to this product (INV-7..9).
+            by_ref = bool(d.rld_or_rs_number) and ctx.appl_no in {
+                t.strip().zfill(6) for t in (d.rld_or_rs_number or "").split(",") if t.strip()
+            }
             if by_name or by_appl or by_ref:
                 out.append(
                     {
@@ -2079,6 +2105,34 @@ def _status_counts(sections: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def _fingerprint_default(o: Any) -> str:
+    if isinstance(o, datetime | date):
+        return o.isoformat()
+    return str(o)
+
+
+def result_fingerprint(sections: Any) -> str:
+    """SHA-256 over the canonical JSON of the white-paper sections.
+
+    Lets POST /whitepaper/docx verify that a client-echoed result body matches
+    what the audited /whitepaper run actually produced, so a tampered cell
+    value, status, or evidence list can never be rendered into an official
+    document (INV-1/INV-4). Only ``sections`` (the substantive cited content) is
+    fingerprinted — ``spine.application_number`` is intentionally caller-
+    reformattable (it is regex-guarded where it reaches a response header).
+    datetimes serialize via ``isoformat`` to match FastAPI's response encoding
+    so the build-time and render-time hashes agree on the same bytes.
+    """
+    canon = json.dumps(
+        sections,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=_fingerprint_default,
+    )
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
 def build_whitepaper(
     rld_name: str,
     application_number: str,
@@ -2134,6 +2188,7 @@ def build_whitepaper(
         f"{counts['populated']} populated, {counts['analyst_input_required']} analyst-input, "
         f"{counts['verified_absent']} verified-absent."
     )
+    sections_sha256 = result_fingerprint(sections)
     audit_id = log_query(
         mode="whitepaper",
         query_text=query_text,
@@ -2144,7 +2199,12 @@ def build_whitepaper(
         model_name=model_name,
         user_id=user_id,
         status="populated",
-        route_json={**route_json, "reason": "populated", **counts},
+        route_json={
+            **route_json,
+            "reason": "populated",
+            **counts,
+            "sections_sha256": sections_sha256,
+        },
     )
     return {
         "spine": spine,

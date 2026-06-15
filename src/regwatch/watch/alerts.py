@@ -58,7 +58,9 @@ def _fetch_version_for_listing(appl_no: str) -> tuple[int, int, str | None, str]
             s.scalars(
                 select(PsgVersion)
                 .where(PsgVersion.psg_document_id == doc.id)
-                .order_by(desc(PsgVersion.captured_at))  # type: ignore[arg-type]
+                # id tie-break so a captured_at collision is deterministic
+                # (matches assemble/dossier.py's latest-version helper).
+                .order_by(desc(PsgVersion.captured_at), desc(PsgVersion.id))  # type: ignore[arg-type]
                 .limit(1)
             )
         )

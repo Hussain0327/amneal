@@ -21,6 +21,10 @@ NDC_PATTERN = re.compile(r"\b\d{4,5}-\d{3,4}(?:-\d{1,2})?\b")
 APP_PATTERN = re.compile(r"\b(?:NDA|ANDA|BLA)?\s*\d{5,6}\b", re.IGNORECASE)
 RS_PATTERN = re.compile(r"\brs\b", re.IGNORECASE)
 SPL_PATTERN = re.compile(r"\bspl\b", re.IGNORECASE)
+# Word-boundary matched: a bare "rld"/"te code" substring would fire on "world",
+# "worldwide", "integrate code", spuriously routing to ORANGE_BOOK.
+RLD_PATTERN = re.compile(r"\brld\b", re.IGNORECASE)
+TE_CODE_PATTERN = re.compile(r"\bte code\b", re.IGNORECASE)
 log = get_logger(__name__)
 
 
@@ -63,8 +67,8 @@ def route_sources(
     if (
         "orange book" in text
         or "therapeutic equivalence" in text
-        or "te code" in text
-        or "rld" in text
+        or TE_CODE_PATTERN.search(text)
+        or RLD_PATTERN.search(text)
         or "reference standard" in text
         or _mentions_reference_standard(text, query)
     ):
@@ -140,8 +144,8 @@ def _mentions_reference_standard(text: str, query: SourceQuery) -> bool:
         or "orange book" in text
         or "reference standard" in text
         or "therapeutic equivalence" in text
-        or "rld" in text
-        or "te code" in text
+        or RLD_PATTERN.search(text)
+        or TE_CODE_PATTERN.search(text)
     )
 
 

@@ -65,12 +65,16 @@ function AskView() {
 
   useEffect(() => {
     if (!urlSession) {
-      // New chat: abort anything in flight, back to the empty state.
+      // New chat: abort anything in flight, back to the empty state. Reset
+      // historyLoading too — switching to a new chat while a prior session's
+      // history fetch is in flight cancels that fetch, and its (guarded)
+      // finally never clears the flag, which would otherwise wedge the UI.
       controllerRef.current?.abort();
       sessionIdRef.current = null;
       setSessionId(null);
       setTurns([]);
       setError(null);
+      setHistoryLoading(false);
       setActiveSessionId(null);
       return;
     }
@@ -308,13 +312,17 @@ function AskView() {
 
       {turns.length > 0 && (
         <section className="mt-2">
-          {turns.map((t, i) =>
-            t.role === "user" ? (
-              <UserTurn key={i} content={t.content} />
+          {turns.map((t, i) => {
+            // Prefer a stable identity (live assistant turns carry meta.turn_id)
+            // over the array index, so a turn's child state (feedback, details)
+            // tracks the turn rather than its position.
+            const key = `${t.role}-${t.meta?.turn_id ?? i}`;
+            return t.role === "user" ? (
+              <UserTurn key={key} content={t.content} />
             ) : (
-              <AssistantTurn key={i} turn={t} sessionId={sessionId} onPick={onPick} busy={busy} />
-            ),
-          )}
+              <AssistantTurn key={key} turn={t} sessionId={sessionId} onPick={onPick} busy={busy} />
+            );
+          })}
         </section>
       )}
 
