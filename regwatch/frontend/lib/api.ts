@@ -250,12 +250,13 @@ async function handle<T>(res: Response, method: string, path: string, gate: bool
 // same-origin /api proxy would include it by default, but the direct-call dev
 // mode (NEXT_PUBLIC_API_BASE on localhost) is cross-origin and would silently
 // drop the cookie without this; the backend's CORS allows credentials.
-async function postJSON<T>(path: string, body: unknown, gate = true): Promise<T> {
+async function postJSON<T>(path: string, body: unknown, gate = true, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${apiBase()}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
     credentials: "include",
+    signal,
   });
   return handle<T>(res, "POST", path, gate);
 }
@@ -305,8 +306,9 @@ export async function askQuery(
   question: string,
   filters: Record<string, string> | null = null,
   session_id: string | null = null,
+  signal?: AbortSignal,
 ): Promise<QueryResponse> {
-  return normalizeQuery(await postJSON<QueryResponse>("/query", { question, filters, session_id }));
+  return normalizeQuery(await postJSON<QueryResponse>("/query", { question, filters, session_id }, true, signal));
 }
 
 function isAbortError(e: unknown): boolean {
@@ -372,7 +374,21 @@ async function consumeSse(
         // id:/retry: are irrelevant here
       }
     }
-    // stream closed mid-record — a final dispatch can still hold the result
+    // Stream closed. Flush any bytes still held in the decoder, then drain a
+    // residual final line (a frame whose last line carried no trailing newline
+    // — otherwise its data would be lost and the question re-sent on fallback).
+    buf += decoder.decode();
+    let tail = buf;
+    if (tail.endsWith("\r")) tail = tail.slice(0, -1);
+    if (tail !== "" && !tail.startsWith(":")) {
+      const colon = tail.indexOf(":");
+      const field = colon === -1 ? tail : tail.slice(0, colon);
+      let value2 = colon === -1 ? "" : tail.slice(colon + 1);
+      if (value2.startsWith(" ")) value2 = value2.slice(1);
+      if (field === "event") eventName = value2;
+      else if (field === "data") data = data ? `${data}\n${value2}` : value2;
+    }
+    // A trailing record without its blank-line terminator still dispatches.
     return dispatch();
   } finally {
     void reader.cancel().catch(() => {});
@@ -405,16 +421,18 @@ export async function askQueryStream(
     });
   } catch (e) {
     if (isAbortError(e)) throw e;
-    return askQuery(question, filters, session_id);
+    return askQuery(question, filters, session_id, signal);
   }
   if (res.status === 401) {
     onUnauthorized?.();
     throw new ApiError(401, "authentication required");
   }
-  const contentType = res.headers.get("content-type") ?? "";
+  const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
   if (!res.ok || !res.body || !contentType.includes("text/event-stream")) {
-    // 404/405 (endpoint not deployed yet) or a non-streaming response.
-    return askQuery(question, filters, session_id);
+    // 404/405 (endpoint not deployed yet) or a non-streaming response. Cancel
+    // the body so a stray non-SSE stream can't run alongside the fallback.
+    void res.body?.cancel().catch(() => {});
+    return askQuery(question, filters, session_id, signal);
   }
   try {
     const result = await consumeSse(res.body, onStatus);
@@ -424,7 +442,7 @@ export async function askQueryStream(
     // fall through to the plain call
   }
   if (signal?.aborted) throw new DOMException("aborted", "AbortError");
-  return askQuery(question, filters, session_id);
+  return askQuery(question, filters, session_id, signal);
 }
 
 export function assemble(

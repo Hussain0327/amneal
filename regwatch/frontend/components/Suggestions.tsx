@@ -21,7 +21,7 @@ export function SuggestionChips({
   if (suggestions.length === 0) return null;
   return (
     <div className="suggest">
-      <span className="kicker" style={{ color: "var(--ink-faint)" }}>
+      <span className="kicker" style={{ color: "var(--ink-soft)" }}>
         {heading}
       </span>
       <div className="suggest__chips">

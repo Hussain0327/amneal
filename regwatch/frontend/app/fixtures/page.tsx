@@ -152,9 +152,9 @@ function Section({ no, title, children }: { no: string; title: string; children:
     <section style={{ marginTop: "3.6rem" }}>
       <div className="flex items-baseline gap-3">
         <span className="kicker">{no}</span>
-        <span className="kicker" style={{ color: "var(--ink-soft)" }}>
+        <h2 className="kicker" style={{ color: "var(--ink-soft)", margin: 0 }}>
           {title}
-        </span>
+        </h2>
         <hr className="hair grow" />
       </div>
       {children}
@@ -177,7 +177,8 @@ export default function FixturesPage() {
           </h1>
           <hr className="rule-gold draw" style={{ marginTop: "0.9rem", maxWidth: "11rem" }} />
           <p style={{ marginTop: "1rem", maxWidth: "44rem", color: "var(--ink-soft)", fontSize: "0.95rem" }}>
-            Static fake data — nothing here touches the API. Buttons are inert.
+            Static fake data. The suggestion and option buttons are inert; the answer-feedback thumbs are
+            the live component (they will attempt a POST).
           </p>
         </header>
 

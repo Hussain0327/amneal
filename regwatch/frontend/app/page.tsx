@@ -57,6 +57,11 @@ function AskView() {
   // conversation, which should open at the top like a document.
   const scrollArmedRef = useRef(false);
   const threadEndRef = useRef<HTMLDivElement | null>(null);
+  // The composer relocates from top to bottom on the first send, which
+  // unmounts the focused textarea; refocus it once the turn settles so the
+  // keyboard never drops to <body> mid-conversation.
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const refocusRef = useRef(false);
 
   useEffect(() => {
     if (!urlSession) {
@@ -109,6 +114,13 @@ function AskView() {
     if (!loading) scrollArmedRef.current = false;
   }, [turns, loading, statusFrames]);
 
+  // Restore focus to the (relocated) composer once a send settles.
+  useEffect(() => {
+    if (loading || !refocusRef.current) return;
+    refocusRef.current = false;
+    composerRef.current?.focus();
+  }, [loading]);
+
   async function run(q: string, filters: Record<string, string> | null) {
     if (loading) return; // race guard: one send at a time
     const seq = ++runSeqRef.current;
@@ -131,19 +143,28 @@ function AskView() {
         },
         controller.signal,
       );
-      if (runSeqRef.current !== seq) return; // superseded by a newer run
+      // Superseded by a newer run, or aborted by a new-chat / session switch
+      // (the fallback /query fetch is bound to the same signal, so an abort
+      // throws above — this guards the rare in-between resolve).
+      if (runSeqRef.current !== seq || controller.signal.aborted) return;
       sessionIdRef.current = next.session_id;
       setSessionId(next.session_id);
       setTurns((prev) => [...prev, assistantTurn(next)]);
       setActiveSessionId(next.session_id);
+      refocusRef.current = true;
       if (urlSession !== next.session_id) {
         router.replace(`/?session=${encodeURIComponent(next.session_id)}`, { scroll: false });
       }
       void refreshSessions();
     } catch (e) {
       // An abort means new chat / session switch already took over the view.
-      if (isAbortError(e) || runSeqRef.current !== seq) return;
+      if (isAbortError(e) || runSeqRef.current !== seq || controller.signal.aborted) return;
+      // The send failed: restore the typed question and drop the optimistic
+      // inquiry turn so the composer is usable to retry (parity with main).
       setError(e instanceof Error ? e.message : String(e));
+      setQuestion(q);
+      setTurns((prev) => (prev.length && prev[prev.length - 1].role === "user" ? prev.slice(0, -1) : prev));
+      refocusRef.current = true;
     } finally {
       if (runSeqRef.current === seq) {
         setLoading(false);
@@ -163,11 +184,17 @@ function AskView() {
     void run(q, Object.keys(filters).length ? filters : null);
   }
 
+  // Picking a chip while history is loading would send into the session being
+  // swapped away from — so the same guard covers both kinds of in-flight work.
+  const busy = loading || historyLoading;
+
   // Clarify options and grounded suggestions share a shape: the exact query +
-  // filters to resend — click, no retyping.
+  // filters to resend — click, no retyping. Sync BOTH visible filter fields so
+  // a stale dosage form can't leak into the next free-text follow-up.
   function onPick(opt: Suggestion) {
-    if (loading) return;
+    if (busy) return;
     setIngredient(opt.filters?.normalized_name ?? "");
+    setDosage(opt.filters?.dosage_form ?? "");
     void run(opt.query, opt.filters ?? null);
   }
 
@@ -177,6 +204,10 @@ function AskView() {
   // the pending options, so picking a card and typing are both first-class.
   const lastAssistant = [...turns].reverse().find((t) => t.role === "assistant");
   const clarifyPending = !loading && lastAssistant?.status === "clarify";
+  // Restored history clarify turns carry no options (clarify: []), so the
+  // "pick an option above" hint would point at nothing — only show it when
+  // options are actually on screen.
+  const clarifyHasOptions = clarifyPending && (lastAssistant?.clarify.length ?? 0) > 0;
 
   const composer = (
     <form onSubmit={onSubmit} className={hasThread ? "mt-10" : "rise d3"}>
@@ -185,12 +216,15 @@ function AskView() {
       </label>
       <textarea
         id="q"
+        ref={composerRef}
         className="field field--inquiry"
         style={{ marginTop: "0.5rem", minHeight: "3.4rem" }}
         placeholder={
-          clarifyPending
+          clarifyHasOptions
             ? "Pick an option above, or reply in your own words"
-            : "propranolol   ·   What BE study design is recommended for metformin?"
+            : clarifyPending
+              ? "Reply in your own words"
+              : "propranolol   ·   What BE study design is recommended for metformin?"
         }
         rows={2}
         value={question}
@@ -198,10 +232,11 @@ function AskView() {
       />
       <div className="mt-5 flex flex-wrap items-end gap-4">
         <div className="grow" style={{ minWidth: "12rem" }}>
-          <label className="kicker" style={{ color: "var(--ink-faint)" }}>
+          <label className="kicker" htmlFor="filter-ingredient" style={{ color: "var(--ink-faint)" }}>
             Active ingredient · optional
           </label>
           <input
+            id="filter-ingredient"
             className="field mt-1"
             value={ingredient}
             onChange={(e) => setIngredient(e.target.value)}
@@ -209,10 +244,11 @@ function AskView() {
           />
         </div>
         <div className="grow" style={{ minWidth: "12rem" }}>
-          <label className="kicker" style={{ color: "var(--ink-faint)" }}>
+          <label className="kicker" htmlFor="filter-dosage" style={{ color: "var(--ink-faint)" }}>
             Dosage form · optional
           </label>
           <input
+            id="filter-dosage"
             className="field mt-1"
             value={dosage}
             onChange={(e) => setDosage(e.target.value)}
@@ -276,7 +312,7 @@ function AskView() {
             t.role === "user" ? (
               <UserTurn key={i} content={t.content} />
             ) : (
-              <AssistantTurn key={i} turn={t} sessionId={sessionId} onPick={onPick} busy={loading} />
+              <AssistantTurn key={i} turn={t} sessionId={sessionId} onPick={onPick} busy={busy} />
             ),
           )}
         </section>

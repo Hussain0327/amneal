@@ -269,10 +269,14 @@ body::before {
   font-size: 0.98rem;
   transition: border-color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
 }
-.opt:hover {
+.opt:hover:not(:disabled) {
   border-color: var(--gold-deep);
   box-shadow: var(--shadow-soft);
   transform: translateX(2px);
+}
+.opt:disabled {
+  opacity: 0.55;
+  cursor: progress;
 }
 .opt__no {
   flex: none;
@@ -293,7 +297,7 @@ body::before {
   color: var(--gold-deep);
   transition: transform 0.15s ease;
 }
-.opt:hover .opt__arrow {
+.opt:hover:not(:disabled) .opt__arrow {
   transform: translateX(3px);
 }
 
@@ -383,10 +387,14 @@ button.chip {
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
-button.chip:hover {
+button.chip:hover:not(:disabled) {
   border-color: var(--gold-deep);
   background: var(--gold-wash);
   color: var(--ink);
+}
+button.chip:disabled {
+  opacity: 0.55;
+  cursor: progress;
 }
 
 /* ---------- Answer feedback (thumbs on a finding) ---------- */
