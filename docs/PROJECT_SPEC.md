@@ -17,7 +17,10 @@ Status: v1.0, build-ready. Rename the codename freely.
 
 ## 0. How to read this spec
 
-This document is the source of truth. Build it phase by phase (Section 12), not all at once. Where the spec makes a decision, follow it. Where it leaves a choice, decide, then record the decision in `DECISIONS.md`. The Compliance Invariants in Section 4 are not guidelines; they are code-level requirements with tests.
+At the time it was written, this document was the source of truth. It is now an
+archived foundational spec; current-state docs win when implementation has
+evolved. The Compliance Invariants in Section 4 remain the enduring design
+constraints unless a newer decision record explicitly supersedes them.
 
 ---
 

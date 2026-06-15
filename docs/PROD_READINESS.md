@@ -5,6 +5,11 @@ is a strong POC: clean Router → Handlers → Synthesizer architecture, complia
 invariants enforced as tests (INV-1..9), and CI running lint / type / test /
 eval / docker build. This document tracks what stands between that and prod.
 
+This is an active readiness checklist. Historical notes and original planning
+docs are archived in `docs/README.md`; when they conflict with this file, use
+this file plus `README.md`, `docs/ARCHITECTURE.md`, and `docs/DEPLOY.md` as the
+current source of truth.
+
 Legend: 🔴 blocking · 🟡 should-have before launch · 🟢 done · ⚪ decision needed
 
 Each item notes where it lives in the tree so the work is actionable cold.
@@ -32,31 +37,51 @@ Each item notes where it lives in the tree so the work is actionable cold.
   the app (or the cookie-session layer is formally accepted as the pilot
   boundary), and distributed rate limiting is owned by that gateway.
 
-### 2. Production-grade datastores
-- **Where:** SQLite at [`config/settings.py:81`](../config/settings.py),
-  on-disk Chroma at `chroma_dir`.
-- **Gap:** Single-node, no concurrency/HA, no connection pooling, no
-  backup/restore. Fine for one container, not for prod load.
-- **Done when:** Postgres (pgvector or a served vector store) provisioned;
-  backup + point-in-time restore tested; connection pooling configured.
+### 2. Production-grade datastores 🟡 (Postgres/pgvector path landed — proof remains)
+- **Where:** dual-mode storage in [`config/settings.py`](../config/settings.py),
+  Postgres bootstrap in [`src/regwatch/store/db.py`](../src/regwatch/store/db.py),
+  pgvector chunks in
+  [`src/regwatch/store/pgvector_store.py`](../src/regwatch/store/pgvector_store.py),
+  and the cutover runbook in [`DEPLOY.md`](DEPLOY.md).
+- **Now in place:** `DATABASE_URL` switches the structured store to Postgres
+  and vectors to pgvector in the same database; `REQUIRE_DATABASE_URL=true`
+  refuses SQLite fallback in production; pgvector dimension checks fail fast;
+  the deploy runbook covers Supabase, migration, smoke checks, rollback, uptime,
+  and staging restore drills.
+- **Remaining gap:** the code/runbook are ready, but a real production launch
+  still needs the managed database provisioned, the migration completed from a
+  clean snapshot, backup/restore actually exercised, and least-privilege app
+  database credentials accepted or implemented.
+- **Done when:** production Postgres/pgvector is live, smoke-tested, monitored,
+  and a restore drill against staging has passed.
 
-### 3. Migrations run as a deploy step, not on app boot
-- **Where:** `init_db()` in the FastAPI lifespan,
-  [`src/regwatch/api/main.py:42`](../src/regwatch/api/main.py).
-- **Gap:** Schema changes apply during app startup. Risky under multiple
-  replicas (race) and hides failures in boot logs.
-- **Done when:** Alembic `upgrade head` is an explicit, gated deploy/CI step;
-  app boot only verifies schema version and refuses to start on mismatch.
+### 3. Migration discipline 🟡 (verification landed — release gate remains)
+- **Where:** `init_db()` in [`src/regwatch/store/db.py`](../src/regwatch/store/db.py),
+  Docker entrypoint [`docker/entrypoint.sh`](../docker/entrypoint.sh), and
+  schema-release instructions in [`DEPLOY.md`](DEPLOY.md).
+- **Now in place:** Postgres startup verifies the Alembic stamp matches head and
+  refuses to start on mismatch. `DEPLOY.md` requires `alembic upgrade head`
+  before schema-advancing releases.
+- **Remaining gap:** the container entrypoint still runs `regwatch init-db` by
+  default, which is acceptable as a bootstrap/verify guard but not a substitute
+  for a controlled release gate. Multi-replica production needs an explicit
+  deploy step and operator runbook ownership for schema changes.
+- **Done when:** schema-advancing releases run Alembic as a gated deploy step,
+  app boot is treated as verification only, and rollback/roll-forward behavior
+  is rehearsed.
 
-### 4. Production UI deployment + hardening
+### 4. Production UI deployment + hardening 🟡 (Vercel path landed)
 - **Where:** Next.js UI at [`regwatch/frontend/`](../regwatch/frontend/);
   Python backend source remains [`src/regwatch/`](../src/regwatch/).
-- **Gap:** The TypeScript UI exists for Ask / Assemble / Watch, but it is not
-  containerized, authenticated, load-tested, or deployed behind a production
-  gateway.
+- **Now in place:** the TypeScript UI covers Ask, Assemble, Watch, White Paper,
+  login, per-user sessions, same-origin `/api` proxying, Sentry opt-in, and
+  frontend CI (`npm ci`, lint, build). The Vercel + Fly/Railway deploy path is
+  documented in [`DEPLOY.md`](DEPLOY.md).
+- **Remaining gap:** production smoke, load testing, approved gateway/SSO path,
+  and non-technical product/watchlist management UX are still launch work.
 - **Done when:** the UI is deployed behind the approved auth/gateway path; API
-  origin/proxy behavior is documented for that environment; and Streamlit is
-  explicitly retired or kept internal-only.
+  origin/proxy behavior is verified for that environment; and the analyst flows
+  in the deploy smoke checklist pass.
 
 ### 5. ⚪ LLM provider + data-handling decision (D1)
 - **Where:** `llm_provider="openai"` default,
@@ -74,19 +99,31 @@ Each item notes where it lives in the tree so the work is actionable cold.
 
 ### 6. Observability
 - **Have:** structured logging ([`common/logging.py`](../src/regwatch/common/logging.py)),
-  audit rows ([`common/audit.py`](../src/regwatch/common/audit.py)).
-- **Gap:** no metrics, no tracing, no error tracking (Sentry-equivalent).
-  `/health` is liveness-only.
+  audit rows ([`common/audit.py`](../src/regwatch/common/audit.py)), privacy-
+  scrubbed Sentry wiring, and `/health` component diagnostics for DB, vector
+  store, provider names, key presence, corpus count, and warnings.
+- **Gap:** Sentry is optional and a missing production DSN only logs a warning;
+  there are still no exported request/latency/cost metrics, tracing, or LLM
+  reachability readiness check.
 - **Done when:** request/latency/cost metrics exported; readiness probe that
-  checks DB + vector store + LLM reachability; error tracking wired.
+  checks DB + vector store + LLM reachability; error tracking configured in the
+  production environment.
 
-### 7. Automated ingest / watch scheduling
-- **Where:** APScheduler noted as a stub (README "What's not done").
-- **Gap:** The "watch" value prop — PSG crawl → change detect → digest — runs
-  only on demand. No cadence.
-- **Done when:** scheduled worker/cron runs the crawl + change detection +
-  digest reliably, with run logging that respects INV-4 (never report a run
-  that didn't happen).
+### 7. Automated ingest / watch scheduling 🟡 (local Dagster path landed)
+- **Where:** [`src/regwatch/watch/run.py`](../src/regwatch/watch/run.py),
+  [`src/regwatch/orchestration/definitions.py`](../src/regwatch/orchestration/definitions.py),
+  and Compose Dagster services in [`compose.yaml`](../compose.yaml).
+- **Now in place:** `regwatch watch` runs crawl → match → ingest matched PSGs
+  → build alerts → write digest; Dagster defines `watch_digest_job` and a daily
+  06:00 UTC schedule for the local/Compose orchestration path.
+- **Remaining gap:** the production Fly/Vercel deploy keeps Watch/Dagster out
+  of scope and suggests ad hoc runs. A known residual remains: if a version row
+  commits before chunks embed and the run errors, a later run may treat it as
+  unchanged and never alert without an `alerted_at` marker or durable-diff
+  derivation.
+- **Done when:** production has a supported scheduled worker/cron/Dagster
+  deployment, monitored run history, failure recovery for partial ingest, and
+  alerting that still respects INV-4.
 
 ### 8. Eval hardening
 - **Where:** [`src/regwatch/eval/`](../src/regwatch/eval/), `gold_set.jsonl`,
@@ -94,9 +131,10 @@ Each item notes where it lives in the tree so the work is actionable cold.
 - **Have:** a deterministic, offline eval gate (`tests/test_eval_gate.py`) that
   fires in CI on every `uv run pytest`; `fact_recall` scores answer content
   (`expected_facts`), and `faithfulness`/`fact_recall` print on `run_eval`.
-- **Gap:** gold set is 11 items (spec §10.11 wants 30–50); live-corpus scoring
-  is still mechanical `(short_name, page)` + `expected_facts` substrings;
-  LLM-as-judge not wired, so semantically-equivalent answers undercount.
+- **Gap:** gold sets are still small (12 Q&A JSON rows, 16 white-paper cell
+  rows; spec wants 30–50 for Q&A); live-corpus scoring is still mechanical
+  `(short_name, page)` + `expected_facts` substrings; LLM-as-judge is not wired,
+  so semantically-equivalent answers undercount.
 - **Done when:** gold set expanded to 30–50 paired to what the seed actually
   ingests; LLM-as-judge added alongside mechanical metrics; thresholds
   (`recall@k≥0.90`, `citation_precision≥0.95`, `refusal_accuracy≥0.95`) hold.
@@ -118,9 +156,13 @@ Each item notes where it lives in the tree so the work is actionable cold.
 
 ### 10. Secrets management
 - **Where:** `.env` on disk, [`config/settings.py`](../config/settings.py).
-- **Gap:** demo-grade secret handling.
-- **Done when:** secrets sourced from a secret manager (Vault / cloud KMS /
-  platform env), not a checked-out file; key rotation documented.
+- **Have:** `.env`, `.env.local`, local data, Chroma stores, generated docs, and
+  logs are gitignored; the production runbook uses platform secrets for
+  `DATABASE_URL`, `OPENAI_API_KEY`, `SENTRY_DSN`, and optional `OPENFDA_API_KEY`.
+- **Gap:** production still needs an approved secret manager/platform policy and
+  documented key rotation.
+- **Done when:** secrets are sourced from approved platform/secret-manager
+  injection and rotation is documented/tested.
 
 ### 11. Supply-chain & security in CI
 - **Where:** [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
@@ -149,10 +191,10 @@ Each item notes where it lives in the tree so the work is actionable cold.
 ---
 
 ## Suggested order
-1. **#1 API auth + rate limit** — cheapest big win, unblocks any exposure.
-2. **#5 LLM/data-handling decision** — needs you; gates compliance sign-off.
-3. **#2 + #3 datastore + migration discipline** — infra foundation.
-4. **#6 observability** + **#7 scheduling** — operability.
-5. **#8 eval** + **#9 sources** — answer quality at scale.
-6. **#10 secrets** + **#11 CI security** — harden.
-7. **#4 production UI** — parallelizable once the API contract is auth-gated.
+1. **#5 LLM/data-handling decision** — needs business/compliance sign-off.
+2. **#1 gateway/SSO/distributed rate limiting** — final exposure boundary.
+3. **#2 + #3 production datastore proof + migration release gate**.
+4. **#6 observability** + **#7 production Watch worker** — operability.
+5. **#8 eval expansion** + **#9 source persistence beyond White Paper**.
+6. **#10 secrets policy** + **#11 CI security scans**.
+7. **#4 UI production smoke/load/product-management polish**.

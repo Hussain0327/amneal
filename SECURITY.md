@@ -4,16 +4,27 @@ REGWATCH is currently an internal proof-of-concept / pilot application. It is
 not approved for direct external exposure or production use until the blocking
 items in `docs/PROD_READINESS.md` are closed.
 
+This is the current security policy. Older planning notes may describe missing
+auth, missing rate limits, or retired UI surfaces; treat those as archived
+history when they conflict with this file, `README.md`, `docs/ARCHITECTURE.md`,
+or `docs/PROD_READINESS.md`.
+
 ## Current Security Status
 
 Do not deploy this service on a public network as-is.
 
 Known launch blockers:
 
-- No application authentication or authorization is enforced by FastAPI.
-- No per-caller rate limit is enforced on cost-bearing LLM endpoints.
-- CORS is allow-listed for local UI development, but CORS is not an
-  authentication control.
+- Application authentication and authorization are enforced by FastAPI for all
+  non-health endpoints, but broad production exposure still needs an approved
+  identity boundary: TLS, gateway controls, and either enterprise SSO/OIDC in
+  front of the app or a formal decision accepting the app-layer cookie sessions
+  for the pilot boundary.
+- Per-caller rate limits are enforced in-process for cost-bearing routes and
+  login attempts. Multi-process or multi-replica production still needs
+  distributed/gateway rate limiting and abuse controls.
+- CORS is allow-listed for the deployed UI origin and local development, but
+  CORS is not an authentication control.
 - Local development uses `.env` files; production must use a secret manager or
   approved platform secret injection.
 - The default local Compose stack uses demo-friendly defaults and is not a
@@ -73,7 +84,7 @@ or explicitly authorized pilot environments.
 
 Allowed testing includes:
 
-- Authentication and authorization checks once auth is implemented.
+- Authentication and authorization checks.
 - CORS and browser-origin validation.
 - Input validation and prompt-injection testing using non-sensitive data.
 - Dependency, static-analysis, and container scanning.
@@ -101,8 +112,9 @@ Do not perform:
 
 Before any external or broad internal production launch, REGWATCH needs:
 
-- Authentication and authorization on all non-health endpoints.
-- Rate limiting and abuse controls for LLM-backed routes.
+- An approved production identity boundary: enterprise gateway/SSO or a signed
+  acceptance of the app-layer cookie-session model for the launch scope.
+- Distributed rate limiting and abuse controls for LLM-backed routes.
 - A documented CORS allowlist for the deployed UI origin.
 - Production datastore controls: managed database/vector store, encryption,
   backups, restore testing, and least-privilege access.

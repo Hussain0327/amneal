@@ -35,9 +35,11 @@ brew install cloudflared        # once
 It starts the API + UI and prints an `https://….trycloudflare.com` link — send
 that to your manager. Ctrl-C tears it all down.
 
-> The link is **open** (no auth) and every query spends your OpenAI key while
-> the tunnel is live. Share it only with the manager and Ctrl-C when done. The
-> URL changes each time you start the tunnel, and it dies if your laptop sleeps.
+> The tunnel makes the login page publicly reachable, but the app still requires
+> a provisioned REGWATCH user. Every authenticated query spends your OpenAI key
+> while the tunnel is live. Share it only with provisioned users and Ctrl-C when
+> done. The URL changes each time you start the tunnel, and it dies if your
+> laptop sleeps.
 
 Manual equivalent, in three terminals:
 
@@ -57,6 +59,8 @@ cloudflared tunnel --url http://localhost:3000          # 3) public link
   `audit_id`, so they render without the affordance.
 - **Assemble** (`/assemble`) — cited dossier for a target product.
 - **Watch** (`/watch`) — recent change-feed alerts + the watchlist.
+- **White Paper** (`/whitepaper`) — CRA White Paper population + `.docx`
+  download from the reviewed result.
 
 ## Error monitoring (Sentry, opt-in)
 

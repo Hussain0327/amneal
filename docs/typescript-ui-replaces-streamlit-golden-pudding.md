@@ -1,9 +1,13 @@
 # Plan: Multi-source RegWatch — Router → Handlers → Synthesizer, Next.js UI, in-house LLM
 
-> **Status: planning only. Nothing is built yet.** This document is the "what we
-> need to do before we start" reference for the full rebuild. Execution happens in
-> later, approved passes — sequenced below with the **eval gate as the hard
-> checkpoint between every phase**.
+> **Archived planning doc.** The Next.js migration described here has landed,
+> Streamlit has been retired, and the current UI lives in `regwatch/frontend/`.
+> Keep this file as history only; use `README.md`, `docs/ARCHITECTURE.md`,
+> `docs/PROD_READINESS.md`, and `docs/DEPLOY.md` for current state.
+
+> **Original status when written:** planning only. That status is now historical;
+> the rebuild has since shipped. The text below remains the original "what we
+> need to do before we start" reference, preserved for context.
 >
 > Current path note: the Next.js UI now lives in `regwatch/frontend/`, not the
 > originally planned `web/` path used later in this document.

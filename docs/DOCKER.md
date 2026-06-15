@@ -282,21 +282,20 @@ Needed next:
 - eventually a scheduled job or orchestrated worker instead of manual
   `docker compose run` or manual Dagster launches
 
-## Not Done Yet
+## Not Done Yet For Production
 
-This is not a full production deployment story yet.
+This remains the local/container baseline. The active production runbook is
+`docs/DEPLOY.md`; do not use older Docker-only notes as the production source
+of truth when they conflict with that runbook.
 
 Still needed:
 
 - secrets injection policy
 - SSO / gateway-level auth in front of the app-layer login
   (cookie-session auth shipped; see `docs/PROD_READINESS.md` #1)
-- TLS termination
-- deployment target decision
-- backup and restore plan for `data/`
+- production deployment smoke/load testing
 - observability and alerts
 - resource limits
 - image vulnerability scan
 - Kubernetes manifests or Helm chart, if the hosting decision requires them
-- decision on SQLite/Chroma vs Postgres/pgvector or managed vector storage
-- automatic Dagster schedules, once the manual seed job is validated
+- production Watch/Dagster worker deployment and monitoring

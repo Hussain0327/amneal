@@ -1,5 +1,10 @@
 # Work Log — June 8, 2026
 
+> **Archived work log.** This is a point-in-time record from June 8, 2026.
+> It is not a current readiness checklist. When it conflicts with current code,
+> `README.md`, `docs/ARCHITECTURE.md`, `docs/PROD_READINESS.md`, or
+> `docs/DEPLOY.md`, the current docs win.
+
 Everything done today on `regwatch`, and the two commits that captured it.
 
 ---
