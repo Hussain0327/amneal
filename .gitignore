@@ -19,7 +19,7 @@ data/
 # local tool state
 supabase/.branches/
 supabase/.temp/
-.claude/settings.local.json
+.claude/
 
 # frontend build/install artifacts
 node_modules/
