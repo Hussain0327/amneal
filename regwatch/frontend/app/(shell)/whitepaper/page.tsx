@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useCurrentProduct } from "@/components/CurrentProductProvider";
 import { PageHeader } from "@/components/PageHeader";
@@ -63,11 +63,19 @@ function tally(result: WhitepaperResponse) {
 export default function WhitepaperPage() {
   // The reference product name + application number ARE the scoped product, so
   // this surface both reads it (prefill) and writes it (on a successful
-  // resolve). Seed from the URL scope on mount; route navigation remounts, so
-  // arriving here with a product scoped fills the form.
+  // resolve). Seed from the URL scope, then keep each field in sync with the
+  // scope as it changes in place (a query-only scope change does NOT remount) —
+  // but only for fields the analyst hasn't edited, so in-progress typing is
+  // never clobbered (the dirty-guard below).
   const { referenceProductName, applicationNumber, setProduct } = useCurrentProduct();
   const [rld, setRld] = useState(() => referenceProductName);
   const [applNo, setApplNo] = useState(() => applicationNumber);
+  const lastScope = useRef({ rld: referenceProductName, applNo: applicationNumber });
+  useEffect(() => {
+    setRld((cur) => (cur === lastScope.current.rld ? referenceProductName : cur));
+    setApplNo((cur) => (cur === lastScope.current.applNo ? applicationNumber : cur));
+    lastScope.current = { rld: referenceProductName, applNo: applicationNumber };
+  }, [referenceProductName, applicationNumber]);
   const [result, setResult] = useState<WhitepaperResponse | null>(null);
   // 422 (spine could not resolve) is an expected, explanatory outcome and is
   // rendered inline as its own state — distinct from transport/server errors.

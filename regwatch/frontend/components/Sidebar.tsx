@@ -176,7 +176,7 @@ export function Sidebar() {
           </div>
         ) : (
           <div className="code" style={{ fontSize: "0.72rem", color: "var(--oxblood)" }}>
-            API unreachable — start it &amp; set NEXT_PUBLIC_API_BASE
+            Can&rsquo;t reach RegWatch right now — retry in a moment.
           </div>
         )}
       </div>
@@ -196,12 +196,16 @@ function History() {
 
   async function remove(id: string) {
     setConfirming(null);
+    let ok = true;
     try {
       await deleteSession(id);
     } catch {
-      // refresh below resyncs the list either way
+      // A 401 already routes to /login via the central handler; any other
+      // failure means the row is still there — don't clear the active session
+      // or navigate away as if the delete had succeeded.
+      ok = false;
     }
-    if (id === activeSessionId) {
+    if (ok && id === activeSessionId) {
       setActiveSessionId(null);
       // Only reset the Ask page if we're on it; don't yank other pages. Keep
       // the scoped product on the reset URL.

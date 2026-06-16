@@ -182,8 +182,10 @@ function AskView() {
       setAnnouncement(lead ? `${label}: ${lead}` : `${label}.`);
       if (urlSession !== next.session_id) {
         // Preserve any scoped-product params (rp/appl) when stamping the new
-        // session into the URL — only `session` changes here.
-        const params = new URLSearchParams(searchParams.toString());
+        // session into the URL — only `session` changes here. Read the LIVE URL
+        // (not the render-time searchParams snapshot) so a product pinned DURING
+        // this in-flight query isn't wiped by a stale snapshot.
+        const params = new URLSearchParams(window.location.search);
         params.set("session", next.session_id);
         router.replace(`/?${params.toString()}`, { scroll: false });
       }

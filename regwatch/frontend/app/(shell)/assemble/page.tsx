@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useCurrentProduct } from "@/components/CurrentProductProvider";
 import { PageHeader } from "@/components/PageHeader";
@@ -10,13 +10,20 @@ import { assemble, type AssembleResponse } from "@/lib/api";
 export default function AssemblePage() {
   // The RLD field maps to the scoped reference product: prefill it (application
   // number preferred, else the product name) so a product scoped elsewhere
-  // carries in. The field stays fully editable — this surface only READS the
-  // scope, never writes it back, because an "ingredient + brand/appl. no."
-  // intake can't honestly produce both halves of the scope.
+  // carries in, and keep it in sync as the scope changes in place — unless the
+  // analyst has edited the field (the dirty-guard below). This surface only
+  // READS the scope, never writes it back, because an "ingredient + brand/appl.
+  // no." intake can't honestly produce both halves of the scope.
   const { applicationNumber, referenceProductName } = useCurrentProduct();
+  const scopeRld = applicationNumber || referenceProductName;
   const [ingredient, setIngredient] = useState("");
   const [dosage, setDosage] = useState("");
-  const [rld, setRld] = useState(() => applicationNumber || referenceProductName);
+  const [rld, setRld] = useState(() => scopeRld);
+  const lastScopeRld = useRef(scopeRld);
+  useEffect(() => {
+    setRld((cur) => (cur === lastScopeRld.current ? scopeRld : cur));
+    lastScopeRld.current = scopeRld;
+  }, [scopeRld]);
   const [result, setResult] = useState<AssembleResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
