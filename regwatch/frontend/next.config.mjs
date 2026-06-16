@@ -72,10 +72,11 @@ const nextConfig = {
   },
 };
 
-// withSentryConfig wires sentry.client.config.ts into the client bundle. The
-// SDK itself initializes only when NEXT_PUBLIC_SENTRY_DSN is set (see the
-// sentry.*.config.ts files) — without it the wrapper adds no behavior. Source
-// map upload is explicitly disabled: no org/project/auth-token plumbing here.
+// withSentryConfig wires instrumentation-client.ts into the client bundle (and
+// instrumentation.ts loads the server/edge configs). The SDK itself initializes
+// only when NEXT_PUBLIC_SENTRY_DSN is set (see those files) — without it the
+// wrapper adds no behavior. Source map upload is explicitly disabled: no
+// org/project/auth-token plumbing here.
 export default withSentryConfig(nextConfig, {
   silent: true,
   telemetry: false,

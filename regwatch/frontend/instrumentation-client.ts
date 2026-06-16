@@ -2,10 +2,11 @@
 // the variable is unset this file initializes nothing and every Sentry call
 // elsewhere (captureException in global-error) is a safe no-op.
 //
-// NOTE: the SDK suggests renaming this to instrumentation-client.ts at build
-// time; that convention is Next >= 15.3. On Next 14 this filename is the
-// supported mechanism (injected by withSentryConfig) — rename only when the
-// Next.js dependency moves past 15.3.
+// Named instrumentation-client.ts: this is the @sentry/nextjs convention for the
+// browser config and is injected by the Sentry webpack/Turbopack plugin on Next
+// 14 too. (Next's NATIVE instrumentation-client support is 15.3+, but Sentry's
+// own plugin loads this file regardless of Next version.) The old
+// sentry.client.config.ts name is deprecated and stops working under Turbopack.
 //
 // Privacy posture mirrors the API: no PII, no session replay. Replay records
 // DOM content, and analyst questions/answers are exactly what we keep out of
@@ -27,3 +28,9 @@ if (dsn) {
     replaysOnErrorSampleRate: 0,
   });
 }
+
+// App Router navigation instrumentation. Next 14 ignores this export; Sentry
+// uses it to trace client-side route transitions on Next 15+/Turbopack.
+// Available since @sentry/nextjs 9.12 (we're on ^10). Mirrors instrumentation.ts's
+// onRequestError — harmless to export on 14, correct for the future.
+export const onRouterTransitionStart = Sentry.captureRouterTransitionStart;
