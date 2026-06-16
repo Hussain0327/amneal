@@ -226,7 +226,9 @@ function AskView() {
     if (!loading) return;
     controllerRef.current?.abort();
     setTurns((prev) => (prev.length && prev[prev.length - 1].role === "user" ? prev.slice(0, -1) : prev));
-    if (lastQuestionRef.current) setQuestion(lastQuestionRef.current);
+    // Hand the in-flight question back — but never clobber text the user has
+    // started typing into the composer mid-query.
+    if (lastQuestionRef.current && !question.trim()) setQuestion(lastQuestionRef.current);
     refocusRef.current = true;
   }
 

@@ -72,8 +72,10 @@ export default function WhitepaperPage() {
   const [applNo, setApplNo] = useState(() => applicationNumber);
   const lastScope = useRef({ rld: referenceProductName, applNo: applicationNumber });
   useEffect(() => {
-    setRld((cur) => (cur === lastScope.current.rld ? referenceProductName : cur));
-    setApplNo((cur) => (cur === lastScope.current.applNo ? applicationNumber : cur));
+    // Adopt a NEW non-empty scope onto an untouched field; never let a scope
+    // *clear* blank a prefilled-but-untouched field (the trailing && guards).
+    setRld((cur) => (cur === lastScope.current.rld && referenceProductName ? referenceProductName : cur));
+    setApplNo((cur) => (cur === lastScope.current.applNo && applicationNumber ? applicationNumber : cur));
     lastScope.current = { rld: referenceProductName, applNo: applicationNumber };
   }, [referenceProductName, applicationNumber]);
   const [result, setResult] = useState<WhitepaperResponse | null>(null);

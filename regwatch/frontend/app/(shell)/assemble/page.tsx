@@ -21,7 +21,9 @@ export default function AssemblePage() {
   const [rld, setRld] = useState(() => scopeRld);
   const lastScopeRld = useRef(scopeRld);
   useEffect(() => {
-    setRld((cur) => (cur === lastScopeRld.current ? scopeRld : cur));
+    // Adopt a NEW non-empty scope onto an untouched field; never let a scope
+    // *clear* blank a prefilled-but-untouched field (the `&& scopeRld` guard).
+    setRld((cur) => (cur === lastScopeRld.current && scopeRld ? scopeRld : cur));
     lastScopeRld.current = scopeRld;
   }, [scopeRld]);
   const [result, setResult] = useState<AssembleResponse | null>(null);

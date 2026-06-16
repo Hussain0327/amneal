@@ -71,7 +71,7 @@ export default function WatchPage() {
           </h2>
           <hr className="hair grow" />
           <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
-            {alerts ? `${alerts.length} entries` : "…"}
+            {error ? "—" : alerts ? `${alerts.length} entries` : "…"}
           </span>
         </div>
 
@@ -81,9 +81,12 @@ export default function WatchPage() {
           </p>
         )}
 
-        <div className="mt-3 flex flex-col gap-3">
-          {(alerts ?? []).map((r) => (
-            <article key={`${r.psg_document_id}-${r.psg_version_id}-${r.product_id}`} className="doc doc--seal doc--pad">
+        {/* On a failed (re)load the error stamp above owns the display — don't
+            also render a now-stale bulletin beneath it. */}
+        {!error && (
+          <div className="mt-3 flex flex-col gap-3">
+            {(alerts ?? []).map((r) => (
+              <article key={`${r.psg_document_id}-${r.psg_version_id}-${r.product_id}`} className="doc doc--seal doc--pad">
               <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                 <span className="display" style={{ fontSize: "1.15rem", fontWeight: 600 }}>
                   {str(r.active_ingredient) || "—"}
@@ -108,7 +111,8 @@ export default function WatchPage() {
               </div>
             </article>
           ))}
-        </div>
+          </div>
+        )}
       </section>
 
       <section className="mt-10 rise d4">
@@ -118,7 +122,7 @@ export default function WatchPage() {
           </h2>
           <hr className="hair grow" />
           <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
-            {products ? `${products.length} products` : "…"}
+            {productError ? "—" : products ? `${products.length} products` : "…"}
           </span>
         </div>
         <div className="mt-3">
