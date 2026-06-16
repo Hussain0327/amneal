@@ -5,6 +5,7 @@ import { Markdown } from "@/components/Markdown";
 import { SuggestionChips, SuggestionOptions } from "@/components/Suggestions";
 import type { Citation, Suggestion } from "@/lib/api";
 import type { Turn } from "@/lib/turns";
+import { safeHref } from "@/lib/url";
 
 // Ask renders as a cited chat: the user's line as a bubble, the assistant as a
 // gold avatar + message. Epistemic status still governs the register — a cited
@@ -42,7 +43,7 @@ function AuditLine({ turn }: { turn: Turn }) {
 // One citation, compact: links straight to its FDA source.
 function CiteChip({ c }: { c: Citation }) {
   return (
-    <a className="cite" href={c.source_url} target="_blank" rel="noreferrer" title={`${c.short_name} · p.${c.page}`}>
+    <a className="cite" href={safeHref(c.source_url)} target="_blank" rel="noreferrer" title={`${c.short_name} · p.${c.page}`}>
       <FileGlyph />
       <span className="cite__label">
         {c.short_name} · p.{c.page}
@@ -193,7 +194,7 @@ function Reference({ n, c }: { n: number; c: Citation }) {
         <span className="ref__page"> · p.{c.page}</span>
       </div>
       <blockquote className="ref__quote">{c.snippet}</blockquote>
-      <a className="link code" style={{ fontSize: "0.76rem" }} href={c.source_url} target="_blank" rel="noreferrer">
+      <a className="link code" style={{ fontSize: "0.76rem" }} href={safeHref(c.source_url)} target="_blank" rel="noreferrer">
         {c.source_url}
       </a>
     </div>

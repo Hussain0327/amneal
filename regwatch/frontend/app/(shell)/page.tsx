@@ -28,6 +28,14 @@ function ArrowUp() {
   );
 }
 
+function StopGlyph() {
+  return (
+    <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true" fill="currentColor">
+      <rect x="5" y="5" width="10" height="10" rx="1.5" />
+    </svg>
+  );
+}
+
 export default function AskPage() {
   // useSearchParams needs a Suspense boundary during prerender.
   return (
@@ -53,6 +61,10 @@ function AskView() {
   const [error, setError] = useState<string | null>(null);
   // SSE status frames for the in-flight query; cleared when the answer lands.
   const [statusFrames, setStatusFrames] = useState<string[]>([]);
+  // Polite, screen-reader-only announcement of a settled answer — the visible
+  // ticker unmounts on completion, so this is the only "answer ready" cue AT
+  // gets (WCAG 4.1.3). A short lead keeps it from re-reading the transcript.
+  const [announcement, setAnnouncement] = useState("");
   // Mirrors sessionId so the URL-sync effect can tell "we just created this
   // session live" (skip refetch) from "another session was selected" (fetch).
   const sessionIdRef = useRef<string | null>(null);
@@ -69,6 +81,8 @@ function AskView() {
   // keyboard never drops to <body> mid-conversation.
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const refocusRef = useRef(false);
+  // The question of the in-flight run, handed back to the composer if stopped.
+  const lastQuestionRef = useRef("");
 
   useEffect(() => {
     if (!urlSession) {
@@ -146,6 +160,7 @@ function AskView() {
     setError(null);
     setStatusFrames([]);
     scrollArmedRef.current = true;
+    lastQuestionRef.current = q;
     // The inquiry joins the thread immediately; the ticker answers it in place.
     setTurns((prev) => [...prev, userTurn(q)]);
     setQuestion("");
@@ -168,10 +183,20 @@ function AskView() {
       setTurns((prev) => [...prev, assistantTurn(next)]);
       setActiveSessionId(next.session_id);
       refocusRef.current = true;
+      const label =
+        next.status === "clarify"
+          ? "Clarification requested"
+          : next.refused || next.status === "scope_warning"
+            ? "Request declined — see the reply"
+            : "Answer ready";
+      const lead = (next.answer || next.interpretation || "").replace(/\s+/g, " ").trim().slice(0, 140);
+      setAnnouncement(lead ? `${label}: ${lead}` : `${label}.`);
       if (urlSession !== next.session_id) {
         // Preserve any scoped-product params (rp/appl) when stamping the new
-        // session into the URL — only `session` changes here.
-        const params = new URLSearchParams(searchParams.toString());
+        // session into the URL — only `session` changes here. Read the LIVE URL
+        // (not the render-time searchParams snapshot) so a product pinned DURING
+        // this in-flight query isn't wiped by a stale snapshot.
+        const params = new URLSearchParams(window.location.search);
         params.set("session", next.session_id);
         router.replace(`/?${params.toString()}`, { scroll: false });
       }
@@ -192,6 +217,19 @@ function AskView() {
         controllerRef.current = null;
       }
     }
+  }
+
+  // Cancel an in-flight query. Aborting makes run()'s catch return early and
+  // its finally clear loading/status; here we undo the optimistic inquiry turn
+  // and hand the question back to the composer so it can be edited and resent.
+  function stop() {
+    if (!loading) return;
+    controllerRef.current?.abort();
+    setTurns((prev) => (prev.length && prev[prev.length - 1].role === "user" ? prev.slice(0, -1) : prev));
+    // Hand the in-flight question back — but never clobber text the user has
+    // started typing into the composer mid-query.
+    if (lastQuestionRef.current && !question.trim()) setQuestion(lastQuestionRef.current);
+    refocusRef.current = true;
   }
 
   function submitQuestion() {
@@ -287,14 +325,20 @@ function AskView() {
             onKeyDown={onKeyDown}
             aria-label={clarifyPending ? "Reply" : "Ask the guidance corpus"}
           />
-          <button
-            className="composer__send"
-            type="submit"
-            disabled={busy || !question.trim()}
-            aria-label={clarifyPending ? "Send reply" : "Submit inquiry"}
-          >
-            <ArrowUp />
-          </button>
+          {loading ? (
+            <button className="composer__send" type="button" onClick={stop} aria-label="Stop generating">
+              <StopGlyph />
+            </button>
+          ) : (
+            <button
+              className="composer__send"
+              type="submit"
+              disabled={busy || !question.trim()}
+              aria-label={clarifyPending ? "Send reply" : "Submit inquiry"}
+            >
+              <ArrowUp />
+            </button>
+          )}
         </div>
       </form>
     </div>
@@ -303,9 +347,9 @@ function AskView() {
   return (
     <div className="chat">
       <header className="chat__head rise">
-        <div className="kicker" style={{ color: "var(--ink-soft)" }}>
+        <h1 className="kicker" style={{ color: "var(--ink-soft)", margin: 0 }}>
           01 · Ask
-        </div>
+        </h1>
         <p className="chat__sub">
           Plain-language Q&amp;A over FDA product-specific guidance — every claim cited to its source, and if a
           question is unclear it asks rather than guesses.
@@ -362,6 +406,10 @@ function AskView() {
         )}
 
         <div ref={threadEndRef} aria-hidden />
+      </div>
+
+      <div className="sr-only" aria-live="polite" aria-atomic="true">
+        {announcement}
       </div>
 
       {composer}

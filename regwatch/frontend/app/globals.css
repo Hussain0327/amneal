@@ -86,6 +86,54 @@ body::before {
   max-width: var(--maxw);
 }
 
+/* ---------- Accessibility ---------- */
+/* Visually hidden, but available to assistive tech (live-region announcers). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+/* Skip to main content — the first focusable element; slides in on keyboard
+   focus so it never forces a keyboard/SR user through the whole sidebar. */
+.skip-link {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 50;
+  transform: translateY(-130%);
+  background: var(--ink);
+  color: var(--paper);
+  padding: 0.55rem 0.9rem;
+  border-radius: 0 0 4px 0;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-decoration: none;
+  transition: transform 0.12s ease;
+}
+.skip-link:focus {
+  transform: translateY(0);
+  outline: 2px solid var(--gold);
+}
+/* A single branded keyboard-focus ring for interactive elements that don't
+   carry their own focus treatment (the .field inputs keep their gold glow).
+   Navy for a guaranteed 3:1 contrast on the cream/gold palette. Zero
+   specificity via :where() so component styles can still override it. */
+:where(a, button, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+main:focus {
+  outline: none;
+}
+
 /* ---------- Canvas top: product-under-review bar ---------- */
 /* Negative margins break it out of the canvas padding to a full-bleed strip;
    its own padding re-aligns the content with the column. Sticky so it persists
@@ -564,7 +612,7 @@ body::before {
 .field::placeholder {
   color: var(--ink-faint);
 }
-.field:focus {
+.field:focus-visible {
   outline: none;
   background: #fff;
   border-color: var(--gold-deep);
@@ -582,7 +630,7 @@ body::before {
   border-radius: 0;
   resize: vertical;
 }
-.field--inquiry:focus {
+.field--inquiry:focus-visible {
   background: transparent;
   box-shadow: none;
   border-bottom-color: var(--gold-deep);
@@ -1337,5 +1385,49 @@ button.chip:disabled {
   .ticker__line--live .ticker__rule,
   .ticker__dot {
     animation: none;
+  }
+}
+
+/* ---------- Sidebar geometry (a class, not inline styles, so a media query
+   can actually override it — inline styles can't be) ---------- */
+.sidebar {
+  flex-shrink: 0;
+  width: 18.5rem;
+  background: linear-gradient(180deg, var(--paper-2), var(--paper-3));
+  border-right: 1px solid var(--edge);
+  padding: 2.1rem 1.6rem;
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+
+/* ---------- Responsive: stack the shell below the desktop breakpoint ----------
+   The app is desktop-first. Below ~860px (phones, narrow split-screen) the
+   fixed-width sidebar would crush the content column, so stack them: the sidebar
+   becomes a full-width banner on top with a capped, scrollable history, and the
+   content takes the full width. The skip-to-content link lets keyboard / screen-
+   reader users jump straight past the sidebar. (A polished off-canvas drawer is
+   a follow-up; it needs on-device QA.) */
+@media (max-width: 860px) {
+  .shell {
+    flex-direction: column;
+    min-height: 100vh;
+  }
+  .sidebar {
+    position: static;
+    width: 100%;
+    height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--edge);
+    padding: 1.4rem 1.25rem;
+  }
+  /* Keep the history list from dominating the stacked banner. */
+  .sidebar__hist-scroll {
+    max-height: 30vh;
+  }
+  .scopebar {
+    flex-wrap: wrap;
   }
 }

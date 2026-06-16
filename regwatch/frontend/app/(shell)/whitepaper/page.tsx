@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useCurrentProduct } from "@/components/CurrentProductProvider";
 import { PageHeader } from "@/components/PageHeader";
@@ -15,11 +15,20 @@ import {
   type WhitepaperResponse,
   type WhitepaperSpine,
 } from "@/lib/api";
+import { safeHref } from "@/lib/url";
 
 const MODE_LABEL: Record<WhitepaperCellMode, string> = {
   auto: "auto",
   evidence_only: "evidence",
   manual: "manual",
+};
+
+// Text equivalent for the status glyph so the populated/absent/pending state is
+// not conveyed by color alone (WCAG 1.1.1 / 1.4.1).
+const STATUS_LABEL: Record<WhitepaperCellStatus, string> = {
+  populated: "Populated",
+  verified_absent: "Verified absent",
+  analyst_input_required: "Analyst input required",
 };
 
 // Timestamps may arrive without an offset (naive UTC from SQLite) — treat a
@@ -54,11 +63,21 @@ function tally(result: WhitepaperResponse) {
 export default function WhitepaperPage() {
   // The reference product name + application number ARE the scoped product, so
   // this surface both reads it (prefill) and writes it (on a successful
-  // resolve). Seed from the URL scope on mount; route navigation remounts, so
-  // arriving here with a product scoped fills the form.
+  // resolve). Seed from the URL scope, then keep each field in sync with the
+  // scope as it changes in place (a query-only scope change does NOT remount) —
+  // but only for fields the analyst hasn't edited, so in-progress typing is
+  // never clobbered (the dirty-guard below).
   const { referenceProductName, applicationNumber, setProduct } = useCurrentProduct();
   const [rld, setRld] = useState(() => referenceProductName);
   const [applNo, setApplNo] = useState(() => applicationNumber);
+  const lastScope = useRef({ rld: referenceProductName, applNo: applicationNumber });
+  useEffect(() => {
+    // Adopt a NEW non-empty scope onto an untouched field; never let a scope
+    // *clear* blank a prefilled-but-untouched field (the trailing && guards).
+    setRld((cur) => (cur === lastScope.current.rld && referenceProductName ? referenceProductName : cur));
+    setApplNo((cur) => (cur === lastScope.current.applNo && applicationNumber ? applicationNumber : cur));
+    lastScope.current = { rld: referenceProductName, applNo: applicationNumber };
+  }, [referenceProductName, applicationNumber]);
   const [result, setResult] = useState<WhitepaperResponse | null>(null);
   // 422 (spine could not resolve) is an expected, explanatory outcome and is
   // rendered inline as its own state — distinct from transport/server errors.
@@ -146,7 +165,7 @@ export default function WhitepaperPage() {
           />
         </div>
         <div className="mt-5">
-          <button className="btn" type="submit" disabled={loading}>
+          <button className="btn" type="submit" disabled={loading || !rld.trim() || !applNo.trim()}>
             {loading ? "Populating…" : "Populate white paper"}
           </button>
         </div>
@@ -347,7 +366,7 @@ function Cell({ cell }: { cell: WhitepaperCell }) {
   return (
     <div className="wp-cell">
       <div className="wp-cell__head">
-        <span className={`wp-dot wp-dot--${cell.status}`} aria-hidden />
+        <span className={`wp-dot wp-dot--${cell.status}`} role="img" aria-label={STATUS_LABEL[cell.status]} />
         <span className="wp-cell__label">{cell.label}</span>
         <span className={`wp-badge wp-badge--${cell.mode}`}>{MODE_LABEL[cell.mode]}</span>
       </div>
@@ -407,7 +426,7 @@ function EvidenceRow({ n, ev }: { n: number; ev: WhitepaperEvidence }) {
       </div>
       {ev.snippet && <blockquote className="ref__quote">{ev.snippet}</blockquote>}
       {ev.source_url && (
-        <a className="link code" style={{ fontSize: "0.76rem" }} href={ev.source_url} target="_blank" rel="noreferrer">
+        <a className="link code" style={{ fontSize: "0.76rem" }} href={safeHref(ev.source_url)} target="_blank" rel="noreferrer">
           {ev.source_url}
         </a>
       )}

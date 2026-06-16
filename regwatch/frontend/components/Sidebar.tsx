@@ -61,20 +61,7 @@ export function Sidebar() {
   }, []);
 
   return (
-    <aside
-      className="shrink-0"
-      style={{
-        width: "18.5rem",
-        background: "linear-gradient(180deg, var(--paper-2), var(--paper-3))",
-        borderRight: "1px solid var(--edge)",
-        padding: "2.1rem 1.6rem",
-        display: "flex",
-        flexDirection: "column",
-        position: "sticky",
-        top: 0,
-        height: "100vh",
-      }}
-    >
+    <aside className="sidebar">
       <Wordmark size="sm" />
       <div className="kicker" style={{ marginTop: "0.9rem", color: "var(--ink)" }}>
         REGWATCH
@@ -176,7 +163,7 @@ export function Sidebar() {
           </div>
         ) : (
           <div className="code" style={{ fontSize: "0.72rem", color: "var(--oxblood)" }}>
-            API unreachable — start it &amp; set NEXT_PUBLIC_API_BASE
+            Can&rsquo;t reach RegWatch right now — retry in a moment.
           </div>
         )}
       </div>
@@ -196,12 +183,16 @@ function History() {
 
   async function remove(id: string) {
     setConfirming(null);
+    let ok = true;
     try {
       await deleteSession(id);
     } catch {
-      // refresh below resyncs the list either way
+      // A 401 already routes to /login via the central handler; any other
+      // failure means the row is still there — don't clear the active session
+      // or navigate away as if the delete had succeeded.
+      ok = false;
     }
-    if (id === activeSessionId) {
+    if (ok && id === activeSessionId) {
       setActiveSessionId(null);
       // Only reset the Ask page if we're on it; don't yank other pages. Keep
       // the scoped product on the reset URL.
@@ -225,7 +216,7 @@ function History() {
           + New chat
         </Link>
       </div>
-      <div style={{ marginTop: "0.5rem", overflowY: "auto", minHeight: 0 }}>
+      <div className="sidebar__hist-scroll" style={{ marginTop: "0.5rem", overflowY: "auto", minHeight: 0 }}>
         {!loaded ? (
           <div className="code" style={{ fontSize: "0.7rem", color: "var(--ink-faint)", padding: "0.4rem 0.65rem" }}>
             …

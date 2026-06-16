@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { useCurrentProduct } from "@/components/CurrentProductProvider";
 import { PageHeader } from "@/components/PageHeader";
 import { listProducts, watchLatest, type AlertRecord, type ProductRecord } from "@/lib/api";
+import { safeHref } from "@/lib/url";
 
 function str(v: unknown): string {
   return v === null || v === undefined ? "" : String(v);
@@ -25,20 +26,22 @@ export default function WatchPage() {
   const [error, setError] = useState<string | null>(null);
   const [productError, setProductError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setError(null);
     watchLatest()
       .then((d) => setAlerts(d.alerts))
-      .catch((e) => {
-        setAlerts([]);
-        setError(e instanceof Error ? e.message : String(e));
-      });
+      // Leave `alerts` untouched on failure — an error must not masquerade as a
+      // loaded-but-empty feed (the empty state below is gated on !error).
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+    setProductError(null);
     listProducts()
       .then((d) => setProducts(d.products))
-      .catch((e) => {
-        setProducts([]);
-        setProductError(e instanceof Error ? e.message : String(e));
-      });
+      .catch((e) => setProductError(e instanceof Error ? e.message : String(e)));
   }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   return (
     <div className="measure">
@@ -55,6 +58,9 @@ export default function WatchPage() {
           <p className="code mt-1" style={{ fontSize: "0.82rem" }}>
             {error}
           </p>
+          <button className="btn btn--ghost mt-3" type="button" onClick={load}>
+            Try again
+          </button>
         </div>
       )}
 
@@ -65,20 +71,22 @@ export default function WatchPage() {
           </h2>
           <hr className="hair grow" />
           <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
-            {alerts ? `${alerts.length} entries` : "…"}
+            {error ? "—" : alerts ? `${alerts.length} entries` : "…"}
           </span>
         </div>
 
-        {alerts && alerts.length === 0 && (
+        {!error && alerts && alerts.length === 0 && (
           <p className="mt-3" style={{ color: "var(--ink-soft)", fontSize: "0.95rem" }}>
-            No alerts yet. Run <span className="code">regwatch watch</span> to crawl the feed and build alerts
-            against your watchlist.
+            No alerts yet. New and revised product-specific guidances will appear here as they’re detected.
           </p>
         )}
 
-        <div className="mt-3 flex flex-col gap-3">
-          {(alerts ?? []).map((r, i) => (
-            <article key={i} className="doc doc--seal doc--pad">
+        {/* On a failed (re)load the error stamp above owns the display — don't
+            also render a now-stale bulletin beneath it. */}
+        {!error && (
+          <div className="mt-3 flex flex-col gap-3">
+            {(alerts ?? []).map((r) => (
+              <article key={`${r.psg_document_id}-${r.psg_version_id}-${r.product_id}`} className="doc doc--seal doc--pad">
               <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                 <span className="display" style={{ fontSize: "1.15rem", fontWeight: 600 }}>
                   {str(r.active_ingredient) || "—"}
@@ -91,7 +99,7 @@ export default function WatchPage() {
               )}
               <div className="mt-3 flex items-center gap-4">
                 {str(r.source_url) && (
-                  <a className="link code" style={{ fontSize: "0.76rem" }} href={str(r.source_url)} target="_blank" rel="noreferrer">
+                  <a className="link code" style={{ fontSize: "0.76rem" }} href={safeHref(str(r.source_url))} target="_blank" rel="noreferrer">
                     View source ↗
                   </a>
                 )}
@@ -103,7 +111,8 @@ export default function WatchPage() {
               </div>
             </article>
           ))}
-        </div>
+          </div>
+        )}
       </section>
 
       <section className="mt-10 rise d4">
@@ -113,32 +122,53 @@ export default function WatchPage() {
           </h2>
           <hr className="hair grow" />
           <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
-            {products ? `${products.length} products` : "…"}
+            {productError ? "—" : products ? `${products.length} products` : "…"}
           </span>
         </div>
         <div className="mt-3">
           {productError && (
-            <p className="mb-3 code" style={{ color: "var(--oxblood)", fontSize: "0.82rem" }}>
-              {productError}
-            </p>
+            <div className="mb-3 flex items-center gap-3">
+              <p className="code" style={{ color: "var(--oxblood)", fontSize: "0.82rem", margin: 0 }}>
+                {productError}
+              </p>
+              <button className="btn btn--ghost" type="button" onClick={load}>
+                Try again
+              </button>
+            </div>
           )}
-          <WatchlistTable products={products} />
+          <WatchlistTable products={products} error={productError} />
         </div>
       </section>
     </div>
   );
 }
 
-function WatchlistTable({ products }: { products: ProductRecord[] | null }) {
+// Humanized headers for the ledger — the table reads object keys for data, but
+// shows analyst-facing labels rather than raw snake_case column names.
+const COLUMN_LABELS: Record<string, string> = {
+  active_ingredient: "Active ingredient",
+  dosage_form: "Dosage form",
+  route: "Route",
+  rld_name: "RLD name",
+  rld_application_number: "Application no.",
+  company_status: "Company status",
+  source: "Source",
+  source_url: "Source URL",
+};
+
+function WatchlistTable({ products, error }: { products: ProductRecord[] | null; error: string | null }) {
   // Watch is the second place a product can be scoped: a watchlist row carries
   // both halves (rld_name + rld_application_number), so scoping from here is a
   // faithful set, not a guess.
   const { applicationNumber, referenceProductName, setProduct } = useCurrentProduct();
+  // The error (with its own retry) is shown above the table — don't also render
+  // a misleading "Loading…" / empty message under it.
+  if (error) return null;
   if (products === null) return <p style={{ color: "var(--ink-soft)", fontSize: "0.9rem" }}>Loading…</p>;
   if (products.length === 0)
     return (
       <p style={{ color: "var(--ink-soft)", fontSize: "0.9rem" }}>
-        Watchlist is empty. Add products via the API: <span className="code">POST /products</span>.
+        Your watchlist is empty. Scope a product — from the bar, Watch, or White Paper — to start tracking it.
       </p>
     );
   const columns: Array<keyof ProductRecord> = [
@@ -157,13 +187,13 @@ function WatchlistTable({ products }: { products: ProductRecord[] | null }) {
         <thead>
           <tr>
             {columns.map((c) => (
-              <th key={c}>{c}</th>
+              <th key={c}>{COLUMN_LABELS[c] ?? c}</th>
             ))}
             <th aria-label="scope" />
           </tr>
         </thead>
         <tbody>
-          {products.map((p, i) => {
+          {products.map((p) => {
             // Canonical name + number, so a product scoped from here is the
             // SAME rp=/appl= pair the top bar and White Paper pin (all three
             // write the normalized name and the six-digit application number).
@@ -177,7 +207,7 @@ function WatchlistTable({ products }: { products: ProductRecord[] | null }) {
             // name-only row still reflects correctly (its appl is "" on both sides).
             const scoped = scopeable && name === referenceProductName && appl === applicationNumber;
             return (
-              <tr key={i}>
+              <tr key={p.id ?? `${appl}|${str(p.active_ingredient)}|${str(p.dosage_form)}`}>
                 {columns.map((c) => (
                   <td key={c} className={/no|number|appl|ndc|id/i.test(c) ? "code" : undefined}>
                     {str(p[c])}

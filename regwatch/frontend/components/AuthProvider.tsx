@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname, useRouter } from "next/navigation";
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 
 import { logout as apiLogout, me, setUnauthorizedHandler, type User } from "@/lib/api";
 import { Wordmark } from "./Wordmark";
@@ -34,9 +34,11 @@ export function broadcastAuthChange(): void {
 }
 
 // Paths that render bare — no auth, no sidebar shell. /login is the gate
-// itself; /fixtures is the static design gallery (fake data only, and it
-// 404s in production builds).
-const BARE_PATHS = new Set(["/login", "/fixtures"]);
+// itself. /fixtures (the static design gallery) deliberately stays OUT of this
+// set so it sits behind the auth gate: it already 404s in production builds,
+// and gating it keeps its sample feedback controls from being reachable by a
+// signed-out visitor in any non-prod build.
+const BARE_PATHS = new Set(["/login"]);
 
 // Session gate for the whole app. Bare paths render as-is; protected routes
 // render their children — the sidebar shell (see app/(shell)/layout.tsx) — only
@@ -48,13 +50,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
 
+  // Coalesce concurrent re-validations (mount + focus + cross-tab can overlap):
+  // a last-issued-wins token drops stale resolves so an out-of-order /auth/me
+  // can't clobber a newer result. lastValidated gates the focus re-check.
+  const refreshSeq = useRef(0);
+  const lastValidated = useRef(0);
+
   const refresh = useCallback(async () => {
+    const seq = ++refreshSeq.current;
     try {
-      setUser(await me());
+      const u = await me();
+      if (seq === refreshSeq.current) setUser(u);
     } catch {
-      setUser(null);
+      if (seq === refreshSeq.current) setUser(null);
     } finally {
-      setLoading(false);
+      if (seq === refreshSeq.current) {
+        setLoading(false);
+        lastValidated.current = Date.now();
+      }
     }
   }, []);
 
@@ -70,9 +83,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [refresh]);
 
   // Re-validate when another tab changes auth, and on focus (covers a cookie
-  // that changed while this tab sat idle, even without a broadcast).
+  // that changed while this tab sat idle, even without a broadcast). The focus
+  // path is throttled to once a minute so tab-switching doesn't spray /auth/me;
+  // a cross-tab broadcast (an actual auth change) always re-validates at once.
   useEffect(() => {
-    const onFocus = () => void refresh();
+    const onFocus = () => {
+      if (Date.now() - lastValidated.current > 60_000) void refresh();
+    };
     window.addEventListener("focus", onFocus);
     let channel: BroadcastChannel | null = null;
     if (typeof BroadcastChannel !== "undefined") {
@@ -116,7 +133,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
-function QuietShell() {
+export function QuietShell() {
   return (
     <div className="shell" style={{ alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.9rem", opacity: 0.7 }}>

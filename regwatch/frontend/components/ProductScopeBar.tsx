@@ -70,7 +70,13 @@ export function ProductScopeBar() {
     <div className="scopebar" role="status" aria-live="polite">
       <span className="scopebar__eye">Under review</span>
       {open ? (
-        <form onSubmit={onPin} className="scopebar__picker">
+        <form
+          onSubmit={onPin}
+          className="scopebar__picker"
+          onKeyDown={(e) => {
+            if (e.key === "Escape" && !pinning) cancel();
+          }}
+        >
           <input
             className="field scopebar__field"
             value={rld}
