@@ -3,7 +3,6 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 
-import { PageHeader } from "@/components/PageHeader";
 import { StatusTicker } from "@/components/StatusTicker";
 import { AssistantTurn, UserTurn } from "@/components/Turns";
 import { useSessions } from "@/components/SessionsProvider";
@@ -19,6 +18,14 @@ const EXAMPLES = [
 
 function isAbortError(e: unknown): boolean {
   return e instanceof Error && e.name === "AbortError";
+}
+
+function ArrowUp() {
+  return (
+    <svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true" fill="none">
+      <path d="M10 16V4.5M10 4.5l-4.5 4.5M10 4.5l4.5 4.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
 }
 
 export default function AskPage() {
@@ -125,8 +132,13 @@ function AskView() {
     composerRef.current?.focus();
   }, [loading]);
 
+  // One in-flight operation at a time — a live query OR a session-history
+  // fetch. Every dispatch path (free-text submit, Enter, chip pick) gates on
+  // this, so a turn can never be sent into a session being swapped away from.
+  const busy = loading || historyLoading;
+
   async function run(q: string, filters: Record<string, string> | null) {
-    if (loading) return; // race guard: one send at a time
+    if (busy) return; // race guard: one query or history fetch at a time
     const seq = ++runSeqRef.current;
     const controller = new AbortController();
     controllerRef.current = controller;
@@ -182,19 +194,29 @@ function AskView() {
     }
   }
 
-  function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  function submitQuestion() {
     const q = question.trim();
-    if (!q || loading) return;
+    if (!q || busy) return;
     const filters: Record<string, string> = {};
     if (ingredient.trim()) filters["normalized_name"] = ingredient.trim().toLowerCase();
     if (dosage.trim()) filters["dosage_form"] = dosage.trim();
     void run(q, Object.keys(filters).length ? filters : null);
   }
 
-  // Picking a chip while history is loading would send into the session being
-  // swapped away from — so the same guard covers both kinds of in-flight work.
-  const busy = loading || historyLoading;
+  function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    submitQuestion();
+  }
+
+  // Enter sends; Shift+Enter is a newline — the chat convention. Skip while an
+  // IME is composing (CJK / accent dead-keys), where Enter commits the
+  // candidate rather than the message.
+  function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      submitQuestion();
+    }
+  }
 
   // Clarify options and grounded suggestions share a shape: the exact query +
   // filters to resend — click, no retyping. Sync BOTH visible filter fields so
@@ -217,83 +239,88 @@ function AskView() {
   // options are actually on screen.
   const clarifyHasOptions = clarifyPending && (lastAssistant?.clarify.length ?? 0) > 0;
 
+  const filtersActive = [ingredient.trim(), dosage.trim()].filter(Boolean).length;
   const composer = (
-    <form onSubmit={onSubmit} className={hasThread ? "mt-10" : "rise d3"}>
-      <label className="kicker" htmlFor="q" style={{ color: clarifyPending ? "var(--gold-ink)" : "var(--ink-soft)" }}>
-        {clarifyPending ? "Reply" : hasThread ? "Follow-up inquiry" : "Inquiry"}
-      </label>
-      <textarea
-        id="q"
-        ref={composerRef}
-        className="field field--inquiry"
-        style={{ marginTop: "0.5rem", minHeight: "3.4rem" }}
-        placeholder={
-          clarifyHasOptions
-            ? "Pick an option above, or reply in your own words"
-            : clarifyPending
-              ? "Reply in your own words"
-              : "propranolol   ·   What BE study design is recommended for metformin?"
-        }
-        rows={2}
-        value={question}
-        onChange={(e) => setQuestion(e.target.value)}
-      />
-      <div className="mt-5 flex flex-wrap items-end gap-4">
-        <div className="grow" style={{ minWidth: "12rem" }}>
-          <label className="kicker" htmlFor="filter-ingredient" style={{ color: "var(--ink-faint)" }}>
-            Active ingredient · optional
-          </label>
-          <input
-            id="filter-ingredient"
-            className="field mt-1"
-            value={ingredient}
-            onChange={(e) => setIngredient(e.target.value)}
-            placeholder="e.g. albuterol sulfate"
+    <div className="composer">
+      {error && (
+        <p className="composer__error code" role="alert">
+          {error}
+        </p>
+      )}
+      <form onSubmit={onSubmit}>
+        {/* The ingredient/dosage filters live on, just folded away — the clarify
+            flow still sets them, and a manual pre-filter is one click open. */}
+        <details className="composer__filters">
+          <summary className="kicker">Filters{filtersActive ? ` · ${filtersActive} active` : ""}</summary>
+          <div className="composer__filters-grid">
+            <input
+              className="field"
+              value={ingredient}
+              onChange={(e) => setIngredient(e.target.value)}
+              placeholder="Active ingredient · e.g. albuterol sulfate"
+              aria-label="Active ingredient filter"
+            />
+            <input
+              className="field"
+              value={dosage}
+              onChange={(e) => setDosage(e.target.value)}
+              placeholder="Dosage form · e.g. inhalation aerosol"
+              aria-label="Dosage form filter"
+            />
+          </div>
+        </details>
+        <div className="composer__bar">
+          <textarea
+            id="q"
+            ref={composerRef}
+            className="composer__input"
+            rows={1}
+            placeholder={
+              clarifyHasOptions
+                ? "Pick an option above, or reply in your own words…"
+                : clarifyPending
+                  ? "Reply in your own words…"
+                  : "Ask about an FDA guidance, product, or change…"
+            }
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            onKeyDown={onKeyDown}
+            aria-label={clarifyPending ? "Reply" : "Ask the guidance corpus"}
           />
+          <button
+            className="composer__send"
+            type="submit"
+            disabled={busy || !question.trim()}
+            aria-label={clarifyPending ? "Send reply" : "Submit inquiry"}
+          >
+            <ArrowUp />
+          </button>
         </div>
-        <div className="grow" style={{ minWidth: "12rem" }}>
-          <label className="kicker" htmlFor="filter-dosage" style={{ color: "var(--ink-faint)" }}>
-            Dosage form · optional
-          </label>
-          <input
-            id="filter-dosage"
-            className="field mt-1"
-            value={dosage}
-            onChange={(e) => setDosage(e.target.value)}
-            placeholder="e.g. inhalation aerosol"
-          />
-        </div>
-        <button className="btn" type="submit" disabled={loading}>
-          {loading ? "Consulting…" : clarifyPending ? "Send reply" : "Submit inquiry"}
-        </button>
-      </div>
-    </form>
+      </form>
+    </div>
   );
 
   return (
-    <div className="measure">
-      <PageHeader
-        index="01"
-        product="Ask"
-        title="Ask the guidance corpus."
-        tagline="Plain-language Q&A over FDA product-specific guidance. Every claim is cited to its source — and if a question is unclear, it asks rather than guesses."
-      />
+    <div className="chat">
+      <header className="chat__head rise">
+        <div className="kicker" style={{ color: "var(--ink-soft)" }}>
+          01 · Ask
+        </div>
+        <p className="chat__sub">
+          Plain-language Q&amp;A over FDA product-specific guidance — every claim cited to its source, and if a
+          question is unclear it asks rather than guesses.
+        </p>
+      </header>
 
-      {/* Empty state: the inquiry desk up top, examples beneath. Once a thread
-          exists, the composer moves below the latest turn — you sign the next
-          line of the correspondence. */}
-      {!hasThread && (
-        <>
-          {composer}
-          <div className="rise d4 mt-7">
-            <span className="kicker" style={{ color: "var(--ink-faint)" }}>
-              Try
-            </span>
-            <div className="mt-2.5 flex flex-wrap gap-2">
+      <div className="chat__thread">
+        {!hasThread && (
+          <div className="chat__empty rise d2">
+            <p className="chat__empty-lead">Ask about an FDA guidance, product, or change.</p>
+            <div className="chat__examples">
               {EXAMPLES.map((ex) => (
                 <button
                   key={ex.q}
-                  className="chip"
+                  className="pill"
                   onClick={() => {
                     setIngredient("");
                     setDosage("");
@@ -305,44 +332,39 @@ function AskView() {
               ))}
             </div>
           </div>
-        </>
-      )}
+        )}
 
-      {historyLoading && (
-        <p className="code mt-8" style={{ fontSize: "0.74rem", color: "var(--ink-faint)" }}>
-          Opening conversation…
-        </p>
-      )}
+        {historyLoading && <p className="chat__note code">Opening conversation…</p>}
 
-      {turns.length > 0 && (
-        <section className="mt-2">
-          {turns.map((t, i) => {
-            // Prefer a stable identity (live assistant turns carry meta.turn_id)
-            // over the array index, so a turn's child state (feedback, details)
-            // tracks the turn rather than its position.
-            const key = `${t.role}-${t.meta?.turn_id ?? i}`;
-            return t.role === "user" ? (
-              <UserTurn key={key} content={t.content} />
-            ) : (
-              <AssistantTurn key={key} turn={t} sessionId={sessionId} onPick={onPick} busy={busy} />
-            );
-          })}
-        </section>
-      )}
+        {turns.map((t, i) => {
+          // Prefer a stable identity (live assistant turns carry meta.turn_id)
+          // over the array index, so a turn's child state (feedback, details)
+          // tracks the turn rather than its position.
+          const key = `${t.role}-${t.meta?.turn_id ?? i}`;
+          return t.role === "user" ? (
+            <UserTurn key={key} content={t.content} />
+          ) : (
+            <AssistantTurn key={key} turn={t} sessionId={sessionId} onPick={onPick} busy={busy} />
+          );
+        })}
 
-      {loading && <StatusTicker frames={statusFrames} />}
+        {/* While the (currently blocking) /query runs, the assistant slot shows
+            the docket ticker — honest motion, no faked token stream. */}
+        {loading && (
+          <div className="chat-row rise">
+            <span className="avatar" aria-hidden>
+              RW
+            </span>
+            <div className="msg">
+              <StatusTicker frames={statusFrames} />
+            </div>
+          </div>
+        )}
 
-      {error && (
-        <div className="stamp mt-9" style={{ borderColor: "var(--oxblood)" }}>
-          <div className="stamp__tag">Request failed</div>
-          <p className="code mt-1" style={{ fontSize: "0.82rem" }}>
-            {error}
-          </p>
-        </div>
-      )}
+        <div ref={threadEndRef} aria-hidden />
+      </div>
 
-      {hasThread && !historyLoading && composer}
-      <div ref={threadEndRef} aria-hidden />
+      {composer}
     </div>
   );
 }

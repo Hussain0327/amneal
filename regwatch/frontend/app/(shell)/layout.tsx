@@ -4,6 +4,7 @@ import { Suspense } from "react";
 
 import { useAuth } from "@/components/AuthProvider";
 import { CurrentProductProvider } from "@/components/CurrentProductProvider";
+import { ProductScopeBar } from "@/components/ProductScopeBar";
 import { SessionsProvider } from "@/components/SessionsProvider";
 import { Sidebar } from "@/components/Sidebar";
 
@@ -27,7 +28,10 @@ export default function ShellLayout({ children }: { children: React.ReactNode })
         <CurrentProductProvider>
           <div className="shell">
             <Sidebar />
-            <main className="canvas">{children}</main>
+            <main className="canvas">
+              <ProductScopeBar />
+              {children}
+            </main>
           </div>
         </CurrentProductProvider>
       </Suspense>

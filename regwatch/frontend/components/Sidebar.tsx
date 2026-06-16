@@ -118,8 +118,6 @@ export function Sidebar() {
         })}
       </nav>
 
-      <ProductScope />
-
       <History />
 
       {/* User box + colophon, set like a print imprint */}
@@ -183,35 +181,6 @@ export function Sidebar() {
         )}
       </div>
     </aside>
-  );
-}
-
-// The product all four surfaces are scoped to, shown in the shell so the
-// shared focus is unmistakable. Set on White Paper (on resolve) or Watch (per
-// row); cleared here. The state of record is the URL — this only reflects it.
-function ProductScope() {
-  const { referenceProductName, applicationNumber, hasProduct, clearProduct } = useCurrentProduct();
-  return (
-    <div className="scope">
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "0.5rem" }}>
-        <span className="kicker" style={{ fontSize: "0.6rem", color: "var(--ink-faint)" }}>
-          Current product
-        </span>
-        {hasProduct && (
-          <button className="scope__clear" onClick={clearProduct} aria-label="Clear current product">
-            clear
-          </button>
-        )}
-      </div>
-      {hasProduct ? (
-        <div className="scope__body">
-          {referenceProductName && <div className="scope__name">{referenceProductName}</div>}
-          {applicationNumber && <span className="chip code scope__appl">{applicationNumber}</span>}
-        </div>
-      ) : (
-        <p className="scope__empty">None scoped — set one on White Paper or Watch to focus all four surfaces.</p>
-      )}
-    </div>
   );
 }
 
