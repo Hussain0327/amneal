@@ -4,7 +4,11 @@ Use this file as the map for the docs folder.
 
 ## Start Here
 
-Read these in order if you are new to the project:
+Open **`MAP.md`** first — the visual hub: a diagram of how the surfaces, API,
+sources, and stores connect, plus links to every doc grouped by purpose. It is
+also the center of the Obsidian graph view.
+
+Then read these in order if you are new to the project:
 
 1. `../README.md` - project overview, current stack, quick start, API surface.
 2. `NON_TECH_GUIDE.md` - plain-English explanation for regulatory and business readers.
@@ -21,6 +25,7 @@ Read these in order if you are new to the project:
 
 | File | Audience | Purpose |
 |---|---|---|
+| `MAP.md` | Everyone | Visual hub: a system diagram of how the four surfaces, API, FDA sources, and stores connect, plus links to every doc grouped by purpose. The center of the Obsidian graph. |
 | `NON_TECH_GUIDE.md` | Non-technical stakeholders | Explains what REGWATCH does, what it must not do, and why citations/refusals matter. |
 | `TECH_GUIDE_SIMPLE.md` | Technical readers | Explains folder structure, core flows, and the files to read first. |
 | `ARCHITECTURE.md` | Engineers / reviewers | Canonical system design: Router -> Handlers -> Synthesizer, pluggable Embedding/LLM providers, the unified four-surface Next.js shell, and INV-1..9. |
