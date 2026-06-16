@@ -111,6 +111,15 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
             "sentry_disabled_in_production",
             detail="SENTRY_ENVIRONMENT=production but no SENTRY_DSN — errors are not being reported",
         )
+    # Same fail-loud posture for the session cookie: a production deploy that
+    # forgets AUTH_COOKIE_SECURE=true ships the cookie without Secure. Everything
+    # still works, so the gap is silent — make it visible instead.
+    if s.sentry_environment == "production" and not s.auth_cookie_secure:
+        log.warning(
+            "insecure_session_cookie_in_production",
+            detail="SENTRY_ENVIRONMENT=production but AUTH_COOKIE_SECURE is false — "
+            "the session cookie ships without the Secure flag",
+        )
     if os.getenv("REGWATCH_DB_INITIALIZED") != "1":
         init_db()
     elif s.database_url:
@@ -350,7 +359,9 @@ class QueryRequest(BaseModel):
     # question while refusing a megabyte payload.
     question: str = Field(..., min_length=2, max_length=4000)
     filters: dict[str, Any] | None = None
-    k: int | None = Field(None, ge=1)
+    # le mirrors SourceSearchRequest.limit: an authed caller must not be able to
+    # request an unbounded k that materializes the whole corpus into one search.
+    k: int | None = Field(None, ge=1, le=50)
     session_id: str | None = None
 
 
@@ -511,13 +522,15 @@ def feedback(req: FeedbackRequest, user: User = Depends(require_user)) -> Feedba
 
 # ---------- /sources/search ----------
 class SourceSearchRequest(BaseModel):
-    query_text: str = ""
-    active_ingredient: str | None = None
-    brand_name: str | None = None
-    application_number: str | None = None
-    ndc: str | None = None
-    dosage_form: str | None = None
-    route: str | None = None
+    # These fields are interpolated into outbound FDA query params; cap them so a
+    # single authed caller can't push a multi-megabyte value into the request.
+    query_text: str = Field("", max_length=1000)
+    active_ingredient: str | None = Field(None, max_length=200)
+    brand_name: str | None = Field(None, max_length=200)
+    application_number: str | None = Field(None, max_length=40)
+    ndc: str | None = Field(None, max_length=40)
+    dosage_form: str | None = Field(None, max_length=200)
+    route: str | None = Field(None, max_length=200)
     limit: int = Field(10, ge=1, le=50)
     sources: list[SourceKind] | None = None
 
@@ -573,9 +586,13 @@ def sources_search(
 
 # ---------- /assemble ----------
 class AssembleRequest(BaseModel):
-    active_ingredient: str = Field(..., min_length=2)
-    dosage_form: str | None = None
-    rld: str | None = Field(None, description="RLD brand name or application number")
+    # max_length mirrors QueryRequest.question's rationale — these free-text
+    # fields reach the grounded-QA prompt and the audit row, so cap them.
+    active_ingredient: str = Field(..., min_length=2, max_length=200)
+    dosage_form: str | None = Field(None, max_length=200)
+    rld: str | None = Field(
+        None, max_length=200, description="RLD brand name or application number"
+    )
 
 
 class AssembleResponse(BaseModel):
@@ -809,14 +826,16 @@ def watch_latest(since: datetime | None = None) -> dict[str, Any]:
 
 # ---------- /products ----------
 class ProductCreate(BaseModel):
-    active_ingredient: str
-    dosage_form: str | None = None
-    route: str | None = None
-    rld_name: str | None = None
-    rld_application_number: str | None = None
-    company_status: str | None = None
-    source: str = Field(..., description=f"one of {sorted(ALLOWED_SOURCES)}")
-    source_url: str | None = None
+    # Persisted to the watchlist — cap free-text fields for the same reason the
+    # rest of the surface does (consistency + bounded per-row storage).
+    active_ingredient: str = Field(..., max_length=200)
+    dosage_form: str | None = Field(None, max_length=200)
+    route: str | None = Field(None, max_length=200)
+    rld_name: str | None = Field(None, max_length=200)
+    rld_application_number: str | None = Field(None, max_length=40)
+    company_status: str | None = Field(None, max_length=200)
+    source: str = Field(..., max_length=200, description=f"one of {sorted(ALLOWED_SOURCES)}")
+    source_url: str | None = Field(None, max_length=2000)
 
 
 @protected.get("/products")

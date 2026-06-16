@@ -238,6 +238,13 @@ async function handle<T>(res: Response, method: string, path: string, gate: bool
     } catch {
       // non-JSON error body
     }
+    // 429 surfaces on six expensive routes but the backend detail is the terse
+    // "rate limit exceeded"; give every consumer one friendly default so a
+    // rate-limited query/assemble/whitepaper/docx reads as guidance, not a code.
+    // (login keys its own copy off err.status, so this message doesn't affect it.)
+    if (res.status === 429) {
+      throw new ApiError(429, "You're sending requests too fast — wait a moment and try again.");
+    }
     throw new ApiError(res.status, detail || `${method} ${path} → ${res.status}`);
   }
   if (res.status === 204) {

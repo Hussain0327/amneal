@@ -10,6 +10,19 @@ import { withSentryConfig } from "@sentry/nextjs";
 
 const API_PROXY_TARGET = process.env.API_PROXY_TARGET ?? "http://127.0.0.1:8000";
 
+// Fail the BUILD loudly on Vercel if API_PROXY_TARGET is missing/still the local
+// loopback default — otherwise every /api/* rewrite would 502 against the
+// function's own 127.0.0.1 at request time, a green-but-broken frontend. This
+// mirrors the backend's fail-loud posture (REQUIRE_DATABASE_URL). A correctly
+// configured deploy (the var set to the https API origin) is unaffected.
+if (process.env.VERCEL === "1" && API_PROXY_TARGET === "http://127.0.0.1:8000") {
+  throw new Error(
+    "API_PROXY_TARGET must be set to the https API origin on Vercel (e.g. https://amneal.fly.dev); " +
+      "it is unset, so /api/* would proxy to the function loopback and 502. " +
+      "Set it via `vercel env add API_PROXY_TARGET production` (see docs/DEPLOY.md §4.3).",
+  );
+}
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   // Next 14 gates instrumentation.ts (where Sentry's server/edge configs load)

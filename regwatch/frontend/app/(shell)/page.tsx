@@ -159,6 +159,9 @@ function AskView() {
     setLoading(true);
     setError(null);
     setStatusFrames([]);
+    // Clear the SR live region so an identical consecutive answer/label still
+    // changes the DOM text and re-announces (polite regions skip unchanged text).
+    setAnnouncement("");
     scrollArmedRef.current = true;
     lastQuestionRef.current = q;
     // The inquiry joins the thread immediately; the ticker answers it in place.
