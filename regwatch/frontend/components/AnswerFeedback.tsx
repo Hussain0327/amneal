@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { sendFeedback } from "@/lib/api";
 
@@ -18,6 +18,24 @@ export function AnswerFeedback({ auditId }: { auditId: number }) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [note, setNote] = useState("");
   const [noteSent, setNoteSent] = useState(false);
+  // The last thing we tried to POST, so an explicit Retry can re-fire exactly
+  // it after a transient failure (rather than relying on a re-click).
+  const lastAttempt = useRef<{ rating: 1 | -1; comment: string | null } | null>(null);
+
+  function submit(nextRating: 1 | -1, comment: string | null) {
+    lastAttempt.current = { rating: nextRating, comment };
+    void (async () => {
+      setPhase("saving");
+      try {
+        await sendFeedback(auditId, nextRating, comment);
+        setRating(nextRating);
+        if (comment !== null) setNoteSent(true);
+        setPhase("saved");
+      } catch {
+        setPhase("error");
+      }
+    })();
+  }
 
   function rate(next: 1 | -1) {
     // Ignore a no-op re-click of the already-saved thumb (buttons stay enabled
@@ -25,41 +43,28 @@ export function AnswerFeedback({ auditId }: { auditId: number }) {
     if (phase === "saving" || next === rating) return;
     setNoteSent(false);
     if (next === 1) setNote("");
-    void (async () => {
-      setPhase("saving");
-      try {
-        await sendFeedback(auditId, next, null);
-        setRating(next);
-        setPhase("saved");
-      } catch {
-        setPhase("error");
-      }
-    })();
+    submit(next, null);
   }
 
   function onNoteSubmit(e: React.FormEvent) {
     e.preventDefault();
     const text = note.trim();
     if (!text || phase === "saving" || rating !== -1) return;
-    void (async () => {
-      setPhase("saving");
-      try {
-        await sendFeedback(auditId, -1, text);
-        setNoteSent(true);
-        setPhase("saved");
-      } catch {
-        setPhase("error");
-      }
-    })();
+    submit(-1, text);
+  }
+
+  function retry() {
+    if (phase === "saving" || !lastAttempt.current) return;
+    submit(lastAttempt.current.rating, lastAttempt.current.comment);
   }
 
   const status =
     phase === "saving"
       ? "recording…"
       : phase === "error"
-        ? "Could not record — try again."
+        ? "Could not record."
         : phase === "saved"
-          ? "Noted — thank you."
+          ? "✓ Noted — thank you."
           : null;
 
   return (
@@ -90,10 +95,15 @@ export function AnswerFeedback({ auditId }: { auditId: number }) {
           <span
             className="code fb__status"
             role="status"
-            style={{ color: phase === "error" ? "var(--oxblood)" : "var(--ink-faint)" }}
+            style={{ color: phase === "error" ? "var(--oxblood)" : "var(--ink-soft)" }}
           >
             {status}
           </span>
+        )}
+        {phase === "error" && (
+          <button type="button" className="fb__btn" onClick={retry}>
+            Retry
+          </button>
         )}
       </div>
 

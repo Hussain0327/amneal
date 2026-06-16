@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
-import { broadcastAuthChange, useAuth } from "@/components/AuthProvider";
+import { broadcastAuthChange, QuietShell, useAuth } from "@/components/AuthProvider";
 import { Wordmark } from "@/components/Wordmark";
 import { ApiError, login } from "@/lib/api";
 
@@ -43,6 +43,10 @@ export default function LoginPage() {
       setSubmitting(false);
     }
   }
+
+  // Don't paint the sign-in form for a visitor who is already (or just became)
+  // authenticated — the redirect effect above is about to leave for the app.
+  if (loading || user) return <QuietShell />;
 
   return (
     <main style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: "2rem 1.5rem" }}>

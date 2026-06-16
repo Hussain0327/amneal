@@ -55,7 +55,7 @@ export default function AssemblePage() {
           <Field label="RLD · brand or appl. no. · optional" value={rld} onChange={setRld} placeholder="e.g. 020503" />
         </div>
         <div className="mt-5">
-          <button className="btn" type="submit" disabled={loading}>
+          <button className="btn" type="submit" disabled={loading || !ingredient.trim()}>
             {loading ? "Compiling…" : "Compile dossier"}
           </button>
         </div>

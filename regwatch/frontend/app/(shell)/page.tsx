@@ -53,6 +53,10 @@ function AskView() {
   const [error, setError] = useState<string | null>(null);
   // SSE status frames for the in-flight query; cleared when the answer lands.
   const [statusFrames, setStatusFrames] = useState<string[]>([]);
+  // Polite, screen-reader-only announcement of a settled answer — the visible
+  // ticker unmounts on completion, so this is the only "answer ready" cue AT
+  // gets (WCAG 4.1.3). A short lead keeps it from re-reading the transcript.
+  const [announcement, setAnnouncement] = useState("");
   // Mirrors sessionId so the URL-sync effect can tell "we just created this
   // session live" (skip refetch) from "another session was selected" (fetch).
   const sessionIdRef = useRef<string | null>(null);
@@ -168,6 +172,14 @@ function AskView() {
       setTurns((prev) => [...prev, assistantTurn(next)]);
       setActiveSessionId(next.session_id);
       refocusRef.current = true;
+      const label =
+        next.status === "clarify"
+          ? "Clarification requested"
+          : next.refused || next.status === "scope_warning"
+            ? "Request declined — see the reply"
+            : "Answer ready";
+      const lead = (next.answer || next.interpretation || "").replace(/\s+/g, " ").trim().slice(0, 140);
+      setAnnouncement(lead ? `${label}: ${lead}` : `${label}.`);
       if (urlSession !== next.session_id) {
         // Preserve any scoped-product params (rp/appl) when stamping the new
         // session into the URL — only `session` changes here.
@@ -303,9 +315,9 @@ function AskView() {
   return (
     <div className="chat">
       <header className="chat__head rise">
-        <div className="kicker" style={{ color: "var(--ink-soft)" }}>
+        <h1 className="kicker" style={{ color: "var(--ink-soft)", margin: 0 }}>
           01 · Ask
-        </div>
+        </h1>
         <p className="chat__sub">
           Plain-language Q&amp;A over FDA product-specific guidance — every claim cited to its source, and if a
           question is unclear it asks rather than guesses.
@@ -362,6 +374,10 @@ function AskView() {
         )}
 
         <div ref={threadEndRef} aria-hidden />
+      </div>
+
+      <div className="sr-only" aria-live="polite" aria-atomic="true">
+        {announcement}
       </div>
 
       {composer}

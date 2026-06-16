@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { useCurrentProduct } from "@/components/CurrentProductProvider";
 import { PageHeader } from "@/components/PageHeader";
@@ -26,20 +26,22 @@ export default function WatchPage() {
   const [error, setError] = useState<string | null>(null);
   const [productError, setProductError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setError(null);
     watchLatest()
       .then((d) => setAlerts(d.alerts))
-      .catch((e) => {
-        setAlerts([]);
-        setError(e instanceof Error ? e.message : String(e));
-      });
+      // Leave `alerts` untouched on failure — an error must not masquerade as a
+      // loaded-but-empty feed (the empty state below is gated on !error).
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+    setProductError(null);
     listProducts()
       .then((d) => setProducts(d.products))
-      .catch((e) => {
-        setProducts([]);
-        setProductError(e instanceof Error ? e.message : String(e));
-      });
+      .catch((e) => setProductError(e instanceof Error ? e.message : String(e)));
   }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   return (
     <div className="measure">
@@ -56,6 +58,9 @@ export default function WatchPage() {
           <p className="code mt-1" style={{ fontSize: "0.82rem" }}>
             {error}
           </p>
+          <button className="btn btn--ghost mt-3" type="button" onClick={load}>
+            Try again
+          </button>
         </div>
       )}
 
@@ -70,10 +75,9 @@ export default function WatchPage() {
           </span>
         </div>
 
-        {alerts && alerts.length === 0 && (
+        {!error && alerts && alerts.length === 0 && (
           <p className="mt-3" style={{ color: "var(--ink-soft)", fontSize: "0.95rem" }}>
-            No alerts yet. Run <span className="code">regwatch watch</span> to crawl the feed and build alerts
-            against your watchlist.
+            No alerts yet. New and revised product-specific guidances will appear here as they’re detected.
           </p>
         )}
 
@@ -119,27 +123,48 @@ export default function WatchPage() {
         </div>
         <div className="mt-3">
           {productError && (
-            <p className="mb-3 code" style={{ color: "var(--oxblood)", fontSize: "0.82rem" }}>
-              {productError}
-            </p>
+            <div className="mb-3 flex items-center gap-3">
+              <p className="code" style={{ color: "var(--oxblood)", fontSize: "0.82rem", margin: 0 }}>
+                {productError}
+              </p>
+              <button className="btn btn--ghost" type="button" onClick={load}>
+                Try again
+              </button>
+            </div>
           )}
-          <WatchlistTable products={products} />
+          <WatchlistTable products={products} error={productError} />
         </div>
       </section>
     </div>
   );
 }
 
-function WatchlistTable({ products }: { products: ProductRecord[] | null }) {
+// Humanized headers for the ledger — the table reads object keys for data, but
+// shows analyst-facing labels rather than raw snake_case column names.
+const COLUMN_LABELS: Record<string, string> = {
+  active_ingredient: "Active ingredient",
+  dosage_form: "Dosage form",
+  route: "Route",
+  rld_name: "RLD name",
+  rld_application_number: "Application no.",
+  company_status: "Company status",
+  source: "Source",
+  source_url: "Source URL",
+};
+
+function WatchlistTable({ products, error }: { products: ProductRecord[] | null; error: string | null }) {
   // Watch is the second place a product can be scoped: a watchlist row carries
   // both halves (rld_name + rld_application_number), so scoping from here is a
   // faithful set, not a guess.
   const { applicationNumber, referenceProductName, setProduct } = useCurrentProduct();
+  // The error (with its own retry) is shown above the table — don't also render
+  // a misleading "Loading…" / empty message under it.
+  if (error) return null;
   if (products === null) return <p style={{ color: "var(--ink-soft)", fontSize: "0.9rem" }}>Loading…</p>;
   if (products.length === 0)
     return (
       <p style={{ color: "var(--ink-soft)", fontSize: "0.9rem" }}>
-        Watchlist is empty. Add products via the API: <span className="code">POST /products</span>.
+        Your watchlist is empty. Scope a product — from the bar, Watch, or White Paper — to start tracking it.
       </p>
     );
   const columns: Array<keyof ProductRecord> = [
@@ -158,7 +183,7 @@ function WatchlistTable({ products }: { products: ProductRecord[] | null }) {
         <thead>
           <tr>
             {columns.map((c) => (
-              <th key={c}>{c}</th>
+              <th key={c}>{COLUMN_LABELS[c] ?? c}</th>
             ))}
             <th aria-label="scope" />
           </tr>

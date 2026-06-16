@@ -118,7 +118,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
-function QuietShell() {
+export function QuietShell() {
   return (
     <div className="shell" style={{ alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.9rem", opacity: 0.7 }}>

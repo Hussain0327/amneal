@@ -27,8 +27,11 @@ export default function ShellLayout({ children }: { children: React.ReactNode })
       <Suspense fallback={null}>
         <CurrentProductProvider>
           <div className="shell">
+            <a href="#main" className="skip-link">
+              Skip to content
+            </a>
             <Sidebar />
-            <main className="canvas">
+            <main id="main" tabIndex={-1} className="canvas">
               <ProductScopeBar />
               {children}
             </main>

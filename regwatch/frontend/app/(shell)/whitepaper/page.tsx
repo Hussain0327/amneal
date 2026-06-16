@@ -23,6 +23,14 @@ const MODE_LABEL: Record<WhitepaperCellMode, string> = {
   manual: "manual",
 };
 
+// Text equivalent for the status glyph so the populated/absent/pending state is
+// not conveyed by color alone (WCAG 1.1.1 / 1.4.1).
+const STATUS_LABEL: Record<WhitepaperCellStatus, string> = {
+  populated: "Populated",
+  verified_absent: "Verified absent",
+  analyst_input_required: "Analyst input required",
+};
+
 // Timestamps may arrive without an offset (naive UTC from SQLite) — treat a
 // missing offset as UTC, same convention as the sidebar history times.
 function fmtWhen(iso: string): string {
@@ -147,7 +155,7 @@ export default function WhitepaperPage() {
           />
         </div>
         <div className="mt-5">
-          <button className="btn" type="submit" disabled={loading}>
+          <button className="btn" type="submit" disabled={loading || !rld.trim() || !applNo.trim()}>
             {loading ? "Populating…" : "Populate white paper"}
           </button>
         </div>
@@ -348,7 +356,7 @@ function Cell({ cell }: { cell: WhitepaperCell }) {
   return (
     <div className="wp-cell">
       <div className="wp-cell__head">
-        <span className={`wp-dot wp-dot--${cell.status}`} aria-hidden />
+        <span className={`wp-dot wp-dot--${cell.status}`} role="img" aria-label={STATUS_LABEL[cell.status]} />
         <span className="wp-cell__label">{cell.label}</span>
         <span className={`wp-badge wp-badge--${cell.mode}`}>{MODE_LABEL[cell.mode]}</span>
       </div>
