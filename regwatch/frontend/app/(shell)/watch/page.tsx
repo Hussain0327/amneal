@@ -82,8 +82,8 @@ export default function WatchPage() {
         )}
 
         <div className="mt-3 flex flex-col gap-3">
-          {(alerts ?? []).map((r, i) => (
-            <article key={i} className="doc doc--seal doc--pad">
+          {(alerts ?? []).map((r) => (
+            <article key={`${r.psg_document_id}-${r.psg_version_id}-${r.product_id}`} className="doc doc--seal doc--pad">
               <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                 <span className="display" style={{ fontSize: "1.15rem", fontWeight: 600 }}>
                   {str(r.active_ingredient) || "—"}
@@ -189,7 +189,7 @@ function WatchlistTable({ products, error }: { products: ProductRecord[] | null;
           </tr>
         </thead>
         <tbody>
-          {products.map((p, i) => {
+          {products.map((p) => {
             // Canonical name + number, so a product scoped from here is the
             // SAME rp=/appl= pair the top bar and White Paper pin (all three
             // write the normalized name and the six-digit application number).
@@ -203,7 +203,7 @@ function WatchlistTable({ products, error }: { products: ProductRecord[] | null;
             // name-only row still reflects correctly (its appl is "" on both sides).
             const scoped = scopeable && name === referenceProductName && appl === applicationNumber;
             return (
-              <tr key={i}>
+              <tr key={p.id ?? `${appl}|${str(p.active_ingredient)}|${str(p.dosage_form)}`}>
                 {columns.map((c) => (
                   <td key={c} className={/no|number|appl|ndc|id/i.test(c) ? "code" : undefined}>
                     {str(p[c])}

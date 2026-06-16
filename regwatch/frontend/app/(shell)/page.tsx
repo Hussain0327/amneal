@@ -28,6 +28,14 @@ function ArrowUp() {
   );
 }
 
+function StopGlyph() {
+  return (
+    <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true" fill="currentColor">
+      <rect x="5" y="5" width="10" height="10" rx="1.5" />
+    </svg>
+  );
+}
+
 export default function AskPage() {
   // useSearchParams needs a Suspense boundary during prerender.
   return (
@@ -73,6 +81,8 @@ function AskView() {
   // keyboard never drops to <body> mid-conversation.
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const refocusRef = useRef(false);
+  // The question of the in-flight run, handed back to the composer if stopped.
+  const lastQuestionRef = useRef("");
 
   useEffect(() => {
     if (!urlSession) {
@@ -150,6 +160,7 @@ function AskView() {
     setError(null);
     setStatusFrames([]);
     scrollArmedRef.current = true;
+    lastQuestionRef.current = q;
     // The inquiry joins the thread immediately; the ticker answers it in place.
     setTurns((prev) => [...prev, userTurn(q)]);
     setQuestion("");
@@ -206,6 +217,17 @@ function AskView() {
         controllerRef.current = null;
       }
     }
+  }
+
+  // Cancel an in-flight query. Aborting makes run()'s catch return early and
+  // its finally clear loading/status; here we undo the optimistic inquiry turn
+  // and hand the question back to the composer so it can be edited and resent.
+  function stop() {
+    if (!loading) return;
+    controllerRef.current?.abort();
+    setTurns((prev) => (prev.length && prev[prev.length - 1].role === "user" ? prev.slice(0, -1) : prev));
+    if (lastQuestionRef.current) setQuestion(lastQuestionRef.current);
+    refocusRef.current = true;
   }
 
   function submitQuestion() {
@@ -301,14 +323,20 @@ function AskView() {
             onKeyDown={onKeyDown}
             aria-label={clarifyPending ? "Reply" : "Ask the guidance corpus"}
           />
-          <button
-            className="composer__send"
-            type="submit"
-            disabled={busy || !question.trim()}
-            aria-label={clarifyPending ? "Send reply" : "Submit inquiry"}
-          >
-            <ArrowUp />
-          </button>
+          {loading ? (
+            <button className="composer__send" type="button" onClick={stop} aria-label="Stop generating">
+              <StopGlyph />
+            </button>
+          ) : (
+            <button
+              className="composer__send"
+              type="submit"
+              disabled={busy || !question.trim()}
+              aria-label={clarifyPending ? "Send reply" : "Submit inquiry"}
+            >
+              <ArrowUp />
+            </button>
+          )}
         </div>
       </form>
     </div>
