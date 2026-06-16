@@ -61,20 +61,7 @@ export function Sidebar() {
   }, []);
 
   return (
-    <aside
-      className="shrink-0"
-      style={{
-        width: "18.5rem",
-        background: "linear-gradient(180deg, var(--paper-2), var(--paper-3))",
-        borderRight: "1px solid var(--edge)",
-        padding: "2.1rem 1.6rem",
-        display: "flex",
-        flexDirection: "column",
-        position: "sticky",
-        top: 0,
-        height: "100vh",
-      }}
-    >
+    <aside className="sidebar">
       <Wordmark size="sm" />
       <div className="kicker" style={{ marginTop: "0.9rem", color: "var(--ink)" }}>
         REGWATCH
@@ -229,7 +216,7 @@ function History() {
           + New chat
         </Link>
       </div>
-      <div style={{ marginTop: "0.5rem", overflowY: "auto", minHeight: 0 }}>
+      <div className="sidebar__hist-scroll" style={{ marginTop: "0.5rem", overflowY: "auto", minHeight: 0 }}>
         {!loaded ? (
           <div className="code" style={{ fontSize: "0.7rem", color: "var(--ink-faint)", padding: "0.4rem 0.65rem" }}>
             …

@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Fraunces, IBM_Plex_Mono, Public_Sans, Yellowtail } from "next/font/google";
 
 import { AuthProvider } from "@/components/AuthProvider";
@@ -30,6 +30,11 @@ const yellowtail = Yellowtail({ subsets: ["latin"], variable: "--font-script", w
 export const metadata: Metadata = {
   title: "Amneal REGWATCH",
   description: "FDA guidance intelligence. Public data only; every claim is cited.",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

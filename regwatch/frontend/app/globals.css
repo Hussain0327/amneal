@@ -1387,3 +1387,47 @@ button.chip:disabled {
     animation: none;
   }
 }
+
+/* ---------- Sidebar geometry (a class, not inline styles, so a media query
+   can actually override it — inline styles can't be) ---------- */
+.sidebar {
+  flex-shrink: 0;
+  width: 18.5rem;
+  background: linear-gradient(180deg, var(--paper-2), var(--paper-3));
+  border-right: 1px solid var(--edge);
+  padding: 2.1rem 1.6rem;
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+
+/* ---------- Responsive: stack the shell below the desktop breakpoint ----------
+   The app is desktop-first. Below ~860px (phones, narrow split-screen) the
+   fixed-width sidebar would crush the content column, so stack them: the sidebar
+   becomes a full-width banner on top with a capped, scrollable history, and the
+   content takes the full width. The skip-to-content link lets keyboard / screen-
+   reader users jump straight past the sidebar. (A polished off-canvas drawer is
+   a follow-up; it needs on-device QA.) */
+@media (max-width: 860px) {
+  .shell {
+    flex-direction: column;
+    min-height: 100vh;
+  }
+  .sidebar {
+    position: static;
+    width: 100%;
+    height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--edge);
+    padding: 1.4rem 1.25rem;
+  }
+  /* Keep the history list from dominating the stacked banner. */
+  .sidebar__hist-scroll {
+    max-height: 30vh;
+  }
+  .scopebar {
+    flex-wrap: wrap;
+  }
+}
