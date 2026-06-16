@@ -15,6 +15,7 @@ import {
   type WhitepaperResponse,
   type WhitepaperSpine,
 } from "@/lib/api";
+import { safeHref } from "@/lib/url";
 
 const MODE_LABEL: Record<WhitepaperCellMode, string> = {
   auto: "auto",
@@ -407,7 +408,7 @@ function EvidenceRow({ n, ev }: { n: number; ev: WhitepaperEvidence }) {
       </div>
       {ev.snippet && <blockquote className="ref__quote">{ev.snippet}</blockquote>}
       {ev.source_url && (
-        <a className="link code" style={{ fontSize: "0.76rem" }} href={ev.source_url} target="_blank" rel="noreferrer">
+        <a className="link code" style={{ fontSize: "0.76rem" }} href={safeHref(ev.source_url)} target="_blank" rel="noreferrer">
           {ev.source_url}
         </a>
       )}

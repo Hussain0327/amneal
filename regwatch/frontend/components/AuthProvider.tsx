@@ -34,9 +34,11 @@ export function broadcastAuthChange(): void {
 }
 
 // Paths that render bare — no auth, no sidebar shell. /login is the gate
-// itself; /fixtures is the static design gallery (fake data only, and it
-// 404s in production builds).
-const BARE_PATHS = new Set(["/login", "/fixtures"]);
+// itself. /fixtures (the static design gallery) deliberately stays OUT of this
+// set so it sits behind the auth gate: it already 404s in production builds,
+// and gating it keeps its sample feedback controls from being reachable by a
+// signed-out visitor in any non-prod build.
+const BARE_PATHS = new Set(["/login"]);
 
 // Session gate for the whole app. Bare paths render as-is; protected routes
 // render their children — the sidebar shell (see app/(shell)/layout.tsx) — only

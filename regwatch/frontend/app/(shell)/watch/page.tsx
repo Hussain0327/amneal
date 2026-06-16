@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { useCurrentProduct } from "@/components/CurrentProductProvider";
 import { PageHeader } from "@/components/PageHeader";
 import { listProducts, watchLatest, type AlertRecord, type ProductRecord } from "@/lib/api";
+import { safeHref } from "@/lib/url";
 
 function str(v: unknown): string {
   return v === null || v === undefined ? "" : String(v);
@@ -91,7 +92,7 @@ export default function WatchPage() {
               )}
               <div className="mt-3 flex items-center gap-4">
                 {str(r.source_url) && (
-                  <a className="link code" style={{ fontSize: "0.76rem" }} href={str(r.source_url)} target="_blank" rel="noreferrer">
+                  <a className="link code" style={{ fontSize: "0.76rem" }} href={safeHref(str(r.source_url))} target="_blank" rel="noreferrer">
                     View source ↗
                   </a>
                 )}
