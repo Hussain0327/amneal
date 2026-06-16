@@ -59,7 +59,11 @@ it **guides with clickable options** instead of guessing.
 
 ## 2. Deployment topology
 
-Three tiers, one browser-visible origin.
+Three tiers, one browser-visible origin. This is the **target topology** the code
+and runbook ([`DEPLOY.md`](DEPLOY.md)) are built for; the dual-mode storage path
+(§9) is implemented and rehearsable, but managed Postgres/pgvector is **not yet
+provisioned**, and a gateway/TLS/SSO front-door is still open work (see
+`docs/ROADMAP.md`). Locally and in CI the stack runs entirely on SQLite + Chroma.
 
 ```
                          Browser (analyst)
@@ -122,20 +126,52 @@ The entire stack swap is driven by one variable — see §9.
 
 The frontend (`regwatch/frontend/`) is a deliberately thin Next.js 14 App Router
 app. All intelligence and all secrets live server-side. `lib/api.ts` is the fetch
-wrapper; `lib/turns.ts` models a conversation turn.
+wrapper; `lib/turns.ts` models a conversation turn. (Streamlit is fully retired;
+this Next.js app is the only UI.)
+
+All **four** product surfaces (Ask, Assemble, Watch, White Paper) render inside a
+single `app/(shell)/` App Router route-group — **one sidebar, one canvas, one set
+of design tokens, one scoped-product context**. The bare routes (`login`,
+`fixtures`) sit *outside* the group and never inherit the shell.
 
 | Route (`app/`) | Backend endpoint(s) | Purpose |
 |---|---|---|
-| `page.tsx` | `POST /query` | Conversational grounded Q&A + per-user history sidebar |
-| `assemble/page.tsx` | `POST /assemble` | Cited dossier for a target product |
-| `whitepaper/page.tsx` | `POST /whitepaper`, `POST /whitepaper/docx` | CRA White Paper populator → filled `.docx` |
-| `watch/page.tsx` | `GET /watch/latest` | Recent change-detection alerts |
-| `login/page.tsx` | `POST /auth/login` | Cookie-session login gate |
-| `fixtures/page.tsx` | (static) | Demo/fixture inputs for testing |
+| `(shell)/page.tsx` | `POST /query` | Cited conversational **chat** + per-user history sidebar |
+| `(shell)/assemble/page.tsx` | `POST /assemble` | Cited dossier for a target product |
+| `(shell)/whitepaper/page.tsx` | `POST /whitepaper`, `POST /whitepaper/docx` | CRA White Paper populator → filled `.docx` |
+| `(shell)/watch/page.tsx` | `GET /watch/latest` | Recent change-detection alerts |
+| `login/page.tsx` | `POST /auth/login` | Cookie-session login gate (outside the shell) |
+| `fixtures/page.tsx` | (static) | Demo/fixture inputs for testing (outside the shell) |
 
-Cross-cutting frontend pieces: `app/layout.tsx` (AuthProvider gate + history
-sidebar), `app/icon.svg` (Amneal favicon), `app/global-error.tsx` +
-`sentry.*.config.ts` (Sentry, off unless `NEXT_PUBLIC_SENTRY_DSN` is set).
+The **Ask** surface is a cited conversational chat, not the old editorial
+document/ledger cards: right-aligned user bubbles, a gold RW assistant avatar,
+citation chips that link to the FDA sources (full snippets behind a Sources
+disclosure), clarify-option pills, a bottom-pinned composer, and Enter-to-send.
+
+### URL-scoped CurrentProduct + the "Under review" scope bar
+
+A single reference product is scoped across all four surfaces and mirrored into
+the URL query (`?rp=<reference product name>&appl=<application number>`), so the
+scope is **shareable and survives reload**. `components/CurrentProductProvider.tsx`
+is the state of record (the URL itself); every surface reads it, and any surface
+that re-scopes rewrites *only* the `rp`/`appl` params (never the Ask page's
+`session`, so scoping never drops an open conversation).
+
+`components/ProductScopeBar.tsx` is a slim sticky **"Under review"** strip across
+the top of every surface (it replaced the old sidebar product badge) and is the
+**front-door SETTER** for the whole pipeline. Pinning runs the same deterministic
+resolve the White Paper uses — `POST /resolve` (§5) — so the scope is always the
+canonical `{normalized_name, six-digit application number}`; a 422 leaves it
+**unset** and shows the resolver's explanation verbatim (refuse over guess).
+
+The scope is settable from **three** surfaces, all writing the same canonical
+pair: the bar's picker, the White Paper on a successful populate, and a Watch row.
+
+Cross-cutting frontend pieces: `app/layout.tsx` (the `AuthProvider` gate +
+fonts), `app/(shell)/layout.tsx` (sidebar + canvas + scope bar + the history
+sidebar via `SessionsProvider`/`CurrentProductProvider`), `app/icon.svg` (Amneal
+favicon), `app/global-error.tsx` + `sentry.*.config.ts` (Sentry, off unless
+`NEXT_PUBLIC_SENTRY_DSN` is set).
 
 ---
 
@@ -200,6 +236,7 @@ visitors through the proxy.
 | POST | `/query` | ✅ | Grounded Q&A (the conversational engine) |
 | POST | `/feedback` | ✅ | Thumbs up/down on one of the caller's own answers |
 | POST | `/sources/search` | ✅ | Structured FDA source lookup |
+| POST | `/resolve` | ✅ | Deterministic entity resolution (RLD + appl no) → canonical spine; pins the scope bar without a populate |
 | POST | `/assemble` | ✅ | Build a cited dossier |
 | POST | `/whitepaper` | ✅ | Populate the CRA White Paper (RLD + appl no) |
 | POST | `/whitepaper/docx` | ✅ | Render a returned White Paper result as `.docx` |
@@ -209,6 +246,22 @@ visitors through the proxy.
 | GET / DELETE | `/sessions/{id}` | ✅ | One session with messages / delete it |
 | GET | `/settings` | ✅ | Non-secret config |
 | GET | `/health` | open | Liveness + component diagnostics |
+
+### `POST /resolve` is deliberately not an LLM turn
+
+`/resolve` reuses the White Paper's spine resolver (`resolve_spine`, which calls
+the same `_build_context`) to map an RLD name + application number to the
+canonical `{normalized_name, application_number}` spine that the scope bar pins.
+Because it is **deterministic entity resolution, not a synthesis turn**, it:
+
+- writes **no `query_log` audit row** on either success or failure (nothing was
+  answered — there is no "turn" to audit),
+- returns **no answer text**, only the resolved spine, and
+- **422s with the resolver's own detail** (and leaves the scope unset) when the
+  pair doesn't resolve or the application doesn't match — refuse over guess.
+
+It *is* rate-limited like `/query` / `/assemble` / `/whitepaper`, because it hits
+live FDA sources the same way they do.
 
 ### Boot sequence (`_lifespan`)
 
@@ -316,6 +369,16 @@ routing context.
 Every state runs through `_finish_turn`, which records the assistant message and
 (on answerable states) updates the session's product filter.
 
+### No real streaming yet (by design, for now)
+
+The Ask chat client targets `/query/stream` (SSE) but **transparently falls back
+to a blocking `POST /query`** — and the backend has **no `/query/stream` endpoint
+today**, so every Ask turn is a single blocking call. The "thinking" ticker is
+honest (real client-side phase labels), not a faked token stream. Real
+token-by-token streaming is open work (`docs/ROADMAP.md`): it must still respect
+INV-1 (no answer text emitted before a validated citation) and write exactly one
+audit row per turn.
+
 ---
 
 ## 7. Source layer (rules-first router + handlers)
@@ -410,8 +473,9 @@ entire persistence stack**, and no caller changes.
   `score = 1 - cosine_distance / 2` (1.0 identical, 0.5 orthogonal, 0.0 opposite).
   Because the score means the same thing on both backends, the **refusal
   threshold (0.30) is calibrated once** and behaves identically in dev and prod.
-  This was the #1 migration risk and is why the SQLite→Supabase cutover was
-  rehearsed against a snapshot before going live.
+  This is the #1 migration risk and is why the SQLite→Supabase cutover must be
+  rehearsed against a snapshot before going live (that restore drill is open work
+  — see `docs/ROADMAP.md`).
 
 - **Embedding provider is paired to the vector dimension.** Production uses
   OpenAI `text-embedding-3-small` (1536-dim) — chosen over local `bge-small`
@@ -432,10 +496,11 @@ entire persistence stack**, and no caller changes.
   on both dialects.
 
 - **Schema bootstrap:** a fresh Postgres database is created via `create_all` +
-  `alembic stamp head` (no history replay — migrations 0001–0006 are
-  SQLite-batch). SQLite/dev uses the normal alembic upgrade path. Constraints and
-  composite indexes are declared in SQLModel `__table_args__` so `create_all`,
-  alembic autogenerate, and the hand-written migrations all agree.
+  `alembic stamp head` (no history replay — the migration history 0001–0008 is
+  SQLite-oriented, including SQLite-batch ops). SQLite/dev uses the normal alembic
+  upgrade path. Constraints and composite indexes are declared in SQLModel
+  `__table_args__` so `create_all`, alembic autogenerate, and the hand-written
+  migrations all agree.
 
 ---
 
@@ -562,9 +627,12 @@ boundary.
 - **`require_user` is the swap boundary.** Every protected route depends on it;
   swapping cookie-lookup for JWT/JWKS (Microsoft/Entra SSO, the planned
   fast-follow) is a localized change.
-- **Rate limiting** (`common/ratelimit.py`): per-user **30/min** on the
-  LLM-bearing endpoints (`/query`, `/assemble`, `/whitepaper`,
-  `/whitepaper/docx`); a separate **10/email/min** login brute-force guard.
+- **Rate limiting** (`common/ratelimit.py`): per-user **30/min**
+  (`RATE_LIMIT_PER_MINUTE`) on the expensive / outbound-FDA routes — `/query`,
+  `/sources/search`, `/resolve`, `/assemble`, `/whitepaper`, `/whitepaper/docx`;
+  a separate **10/email/min** login brute-force guard. The limiter is in-memory
+  / per-process, so a multi-replica deploy needs distributed (gateway) limiting —
+  open work, see `docs/ROADMAP.md`.
 - **Session ownership.** `/sessions/{id}` and `/feedback` and `/whitepaper/docx`
   all return **404, not 403**, on a foreign or non-existent row — the response
   never confirms that someone else's resource exists. Legacy NULL-owner sessions
@@ -613,6 +681,9 @@ form, clarify) that backstops any caller who bypassed the resolver.
 - **Docker:** the CRA template `.docx` is gitignored, so a deploy-time patch adds
   its `COPY` to the Dockerfile (documented in `DEPLOY.md`) rather than committing
   a COPY that would break CI's docker build.
+- **Open observability work** (`docs/ROADMAP.md`): exporting request/latency/cost
+  metrics, a real readiness probe (DB + vector store + LLM reachability — distinct
+  from `/health`'s liveness), and a Sentry DSN actually configured in prod.
 
 ---
 
@@ -624,11 +695,18 @@ form, clarify) that backstops any caller who bypassed the resolver.
   over-refusal rate for grounded Q&A.
 - `whitepaper_metrics.py` — White Paper cell-level checks.
 
-Production calibration at launch: recall 1.0, citation precision 1.0, zero
-over-refusals. (One known gold-semantics item — an absent product now drawing a
-*safe* brand-suggestion clarify on the full corpus instead of a hard refuse — is
-a stale-gold fix, not a regression: the gold set should accept refuse-OR-clarify
-for absent products.)
+The CI gate holds **recall@8 ≥ 0.90, citation_precision ≥ 0.95,
+refusal_accuracy ≥ 0.95** (`run_eval.py --check-thresholds`; a deterministic eval
+gate also runs inside `pytest`). Measured calibration currently clears these
+comfortably (recall/precision at 1.0, zero over-refusals). (One known
+gold-semantics item — an absent product now drawing a *safe* brand-suggestion
+clarify on the full corpus instead of a hard refuse — is a stale-gold fix, not a
+regression: the gold set should accept refuse-OR-clarify for absent products.)
+
+The current gold set is `gold_set.jsonl` (26 Q&A items) + `whitepaper_gold.jsonl`
+(21 White-Paper rows), scored mechanically on `(short_name, page)` +
+`expected_facts`. Open work (`docs/ROADMAP.md`): grow the gold set toward 30–50
+and add an LLM-as-judge pass alongside the mechanical checks.
 
 `answer_feedback` thumbs feed new candidate gold items, closing the loop.
 

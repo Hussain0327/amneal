@@ -12,19 +12,26 @@ questions only from that evidence, and refuses when it cannot support an answer.
 
 ## Current Shape
 
-The current app is a Python proof of concept.
+REGWATCH is a working Python application with a Next.js front end. It is not
+yet provisioned for production (see `docs/ROADMAP.md` for the open
+launch-blockers), but the code paths described below are all shipped on `main`.
 
 Main stack:
 
-- Python 3.11+
+- Python 3.11+ / 3.12
 - FastAPI API (conversational `POST /query` with session/turn IDs)
 - Next.js (App Router, TypeScript) UI in `regwatch/frontend/`
-- SQLite through SQLModel
-- Chroma vector store
+- Authenticated: cookie-session auth on every endpoint except `GET /health`
+  (DB-backed opaque tokens, bcrypt passwords, per-user chat history + rate
+  limiting)
+- Dual-mode storage: SQLite + Chroma by default; set `DATABASE_URL` to switch
+  the structured store to Postgres and vectors to pgvector in the same DB
+- SQLModel / SQLAlchemy over the structured store
 - `httpx` and `selectolax` for FDA crawling
 - `pdfplumber` and `pypdf` for PDF parsing
 - pluggable LLM providers (OpenAI Responses API, role-specific models)
 - pluggable embedding providers
+- Alembic migrations (baseline + incremental, currently through `0008`)
 - Docker / Compose for the local API + ingest baseline
 - pytest, ruff, black, mypy
 
@@ -45,7 +52,7 @@ FDA PSG index
   -> chunk text with page metadata
   -> embed chunks
   -> store chunks in Chroma
-  -> store document/version/BE fields in SQLite
+  -> store document/version/BE fields in the structured store (SQLite or Postgres)
 ```
 
 Q&A flow:
@@ -78,19 +85,22 @@ docker/
 src/regwatch/
   ingest/                  crawl FDA PSGs and parse PDFs
   process/                 chunk, embed, extract BE fields, detect changes
-  store/                   SQLite models/session and Chroma wrapper
+  store/                   structured models/session (SQLite or Postgres) + vector store (Chroma or pgvector)
   common/conversation.py    chat session/message persistence and safe context
   retrieve/                product resolution and vector retrieval
   generate/                prompts, LLM providers, grounded Q&A
   watch/                   watchlist, alias discovery, matching, alerts
   assemble/                product dossier builder
+  whitepaper/              cited White Paper populator + .docx export + entity-resolution spine
+  sources/                 rules-first source router + FDA source handlers (OB, Drugs@FDA, NDC, DailyMed, Shortages, REMS, PSG)
+  auth/                    cookie-session auth: opaque tokens, request deps
   api/                     FastAPI endpoints
   eval/                    gold set, metrics, deterministic eval gate
-  common/                  citations, audit, logging, text normalization, conversation (chat sessions)
+  common/                  citations, audit, logging, text normalization, conversation, rate limiting, observability
 
 regwatch/
   backend/                 backend workspace docs; source stays in src/regwatch
-  frontend/                Next.js (App Router, TypeScript) UI — Ask / Assemble / Watch
+  frontend/                Next.js (App Router, TypeScript) UI — all four surfaces (Ask / Assemble / Watch / White Paper) in one (shell) route group
 tests/                     unit, integration, invariant, eval-gate tests
 docs/                      specs, decisions, plans, onboarding docs
 ```
@@ -112,8 +122,11 @@ Important tables:
 - `PsgVersion`: captured PSG version.
 - `BeRequirement`: extracted BE fields with citations.
 - `QueryLog`: durable audit log for Q&A and related paths.
+- `User` / session tables: auth identities, opaque session tokens, and
+  per-user chat ownership (see migration `0004`).
 
-Chroma stores PSG text chunks and metadata.
+The vector store (Chroma by default, pgvector when `DATABASE_URL` is set)
+holds PSG text chunks and metadata.
 
 Each vector chunk carries metadata like:
 
@@ -133,16 +146,17 @@ That metadata is what makes citations and scoped retrieval possible.
 Best first pass:
 
 1. `README.md`
-2. `docs/PROJECT_SPEC.md`
-3. `docs/DECISIONS.md`
-4. `docs/DOCKER.md`
-5. `config/settings.py`
-6. `src/regwatch/store/models.py`
-7. `src/regwatch/ingest/pipeline.py`
-8. `src/regwatch/generate/grounded_qa.py`
-9. `src/regwatch/retrieve/resolver.py`
-10. `src/regwatch/common/citations.py`
-11. `tests/test_invariants.py`
+2. `docs/ARCHITECTURE.md`
+3. `docs/PROJECT_SPEC.md`
+4. `docs/DECISIONS.md`
+5. `docs/DOCKER.md`
+6. `config/settings.py`
+7. `src/regwatch/store/models.py`
+8. `src/regwatch/ingest/pipeline.py`
+9. `src/regwatch/generate/grounded_qa.py`
+10. `src/regwatch/retrieve/resolver.py`
+11. `src/regwatch/common/citations.py`
+12. `tests/test_invariants.py`
 
 If those make sense, the rest of the repo will be much easier.
 
@@ -350,7 +364,7 @@ Concepts:
 - Products must come from verified sources.
 - Applicant aliases are discovered from Drugs@FDA instead of guessed.
 - PSG listings are matched to watchlist products.
-- Alerts are emitted only when the PSG version exists in SQLite.
+- Alerts are emitted only when the PSG version exists in the structured store.
 
 ## Dossier System
 
@@ -371,29 +385,61 @@ It is a research scaffold, not submission content.
 
 ### `api/main.py`
 
-FastAPI exposes:
+FastAPI exposes (auth + chat routes plus the read paths):
 
-- `GET /health`
+- `GET /health` — the only unauthenticated endpoint
+- `POST /auth/login`, `POST /auth/logout`, `GET /auth/me` — cookie-session auth
 - `POST /query` — conversational; accepts `session_id`/`user_id`, returns
   `session_id`/`turn_id`/`status` (`answer`/`summary`/`clarify`/`scope_warning`/`refused`)
+- `POST /feedback` — per-turn answer feedback against an audit row
+- `POST /resolve` — deterministic entity resolution to a canonical spine
+  (`{normalized_name, six-digit application number}`). It is NOT an LLM turn:
+  it writes NO audit row and returns no answer text; a mismatch 422s with no
+  scope set (refuse over guess).
 - `POST /sources/search`
 - `POST /assemble`
+- `POST /whitepaper`, `POST /whitepaper/docx` — White Paper populate + export
 - `GET /watch/latest`
-- `GET /products`
-- `POST /products`
+- `GET /products`, `POST /products`
+- `GET /sessions`, `GET /sessions/{id}`, `DELETE /sessions/{id}` — per-user
+  chat history (foreign `session_id` 404s)
 - `GET /settings`
 
-CORS is allow-listed via `CORS_ALLOW_ORIGINS_CSV` (defaults to the Next.js dev
-origins). No auth layer yet.
+Every endpoint except `GET /health` is behind a `require_user` dependency.
+Auth is a DB-backed cookie session (opaque token hashed at rest, bcrypt
+passwords, CLI-provisioned users) with per-user rate limiting
+(`RATE_LIMIT_PER_MINUTE`, default 30) and a 10/email/min login brute-force cap.
+CORS is allow-listed with credentials via `CORS_ALLOW_ORIGINS_CSV` (defaults to
+the Next.js dev origins).
+
+> Note: there is **no `/query/stream` endpoint** in the backend yet. The
+> frontend has a streaming-capable client that transparently falls back to the
+> blocking `POST /query`, so nothing actually streams today. Real
+> token-by-token streaming is an open item in `docs/ROADMAP.md`.
 
 ### `regwatch/frontend/` (Next.js, TypeScript)
 
-The production UI is the Next.js App Router app in `regwatch/frontend/` —
-pages Ask / Assemble / Watch, a typed client in `regwatch/frontend/lib/api.ts`
-mirroring the Pydantic models, and a same-origin `/api` proxy
-(`regwatch/frontend/next.config.mjs`) so one origin exposes the whole app. Run
-it with `cd regwatch/frontend && npm run dev`, or use `scripts/share-demo.sh`
-to start API + UI behind one public link.
+The production UI is the Next.js App Router app in `regwatch/frontend/`. All
+**four surfaces** (Ask / Assemble / Watch / White Paper) render inside one
+`(shell)` route-group layout — one sidebar, one set of design tokens, and a
+shared **"Under review" product-scope bar** across all four surfaces.
+
+- The current product is **URL-scoped** (`?rp=&appl=`) so it is shareable and
+  survives reload; all four surfaces read it.
+- Product scope is settable from three places — the bar's resolve-backed
+  picker, a successful White Paper populate, and a Watch row — each writing the
+  canonical `{normalized_name, six-digit application number}`.
+- **Ask** is a cited conversational chat (right-aligned user bubbles, gold RW
+  avatar, citation chips that link to FDA sources with full snippets in a
+  Sources disclosure, clarify-option pills, bottom-pinned composer,
+  Enter-to-send), not an editorial document/ledger view.
+
+It uses a typed client in `regwatch/frontend/lib/api.ts` mirroring the Pydantic
+models, and a same-origin `/api` proxy (`regwatch/frontend/next.config.mjs`) so
+one origin exposes the whole app. Run it with
+`cd regwatch/frontend && npm run dev`, or use `scripts/share-demo.sh` to start
+API + UI behind one public link. (The earlier Streamlit POC has been fully
+retired.)
 
 ## Eval
 
@@ -417,6 +463,11 @@ empty store). `tests/test_eval_gate.py` is a deterministic, offline gate: it
 seeds a fixed corpus and a faithful LLM stub and hard-gates every metric, so the
 gate fires inside `uv run pytest` (and therefore in CI). The eval is
 intentionally mechanical and auditable; it does not yet use an LLM-as-judge.
+
+Open eval work (see `docs/ROADMAP.md`): expand the gold set (12 Q&A + 16
+white-paper rows -> 30-50), add an LLM-as-judge alongside the mechanical
+`(short_name, page)` + `expected_facts` scoring, and hold thresholds
+recall@k >= 0.90, citation_precision >= 0.95, refusal_accuracy >= 0.95.
 
 ## Tests
 
@@ -457,9 +508,9 @@ Current state (this is implemented, not planned):
   - `gpt-5.4-nano` for answer synthesis and BE extraction
 - Reasoning models that reject `temperature` are retried without it.
 
-## Future Architecture
+## Multi-Source Architecture
 
-Recommended future flow:
+Full Router -> Handlers -> Synthesizer flow:
 
 ```text
 Question
@@ -473,19 +524,31 @@ Question
   -> audit
 ```
 
-Source handlers (these exist today in `src/regwatch/sources/` with a rules-first
-router, reachable via `POST /sources/search`, but are not yet persisted, cached,
-or synthesized into the main `/query` answer path):
+Source handlers exist today in `src/regwatch/sources/` behind a rules-first
+router (`sources/router.py`) and are reachable via `POST /sources/search`:
 
 - PSG: scoped RAG over PDF chunks
 - Orange Book: structured lookup
 - Drugs@FDA: structured lookup
 - Drug Shortages: structured lookup
 - NDC: structured lookup
+- DailyMed (SPL): structured lookup
 - REMS: structured lookup
 
-The core idea is that only PSG needs RAG. Most other FDA sources should be
-queried as structured records.
+The core idea is that only PSG needs RAG. Most other FDA sources are queried as
+structured records.
+
+The **White Paper populator** (`src/regwatch/whitepaper/`) is the shipped
+instance of multi-source synthesis: it fuses Orange Book + Drugs@FDA + NDC +
+DailyMed + Shortages + REMS + PSG into a cited cell graph with tri-state cells
+(`populated` / `verified_absent -> 'No'` / `analyst_input_required`), persists
+OB/SPL provenance with `last_fetched_at` freshness (migration `0005`), and
+exports a `.docx` rendered from the exact reviewed result.
+
+Still open (see `docs/ROADMAP.md`): the main `POST /query` answer path still
+runs PSG-scoped RAG only (it does not yet synthesize the structured source
+handlers), and the persist-and-cite + freshness pattern proven in the White
+Paper has not yet been applied to the Ask/Assemble read paths.
 
 ## Local Commands
 
@@ -495,9 +558,12 @@ Common commands:
 uv sync --extra dev --extra llm
 uv run pytest -q
 uv run regwatch init-db
+uv run regwatch create-user                              # provision a login (auth gates every endpoint but /health)
 uv run regwatch aliases --refresh
 uv run regwatch seed
+uv run regwatch ingest-all                               # full ~1,795-PSG A-Z catalog crawl
 uv run python -m regwatch.eval.run_eval
+uv run python -m regwatch.eval.run_eval --check-thresholds   # CI eval gate
 uv run uvicorn regwatch.api.main:app --reload
 cd regwatch/frontend && npm install && npm run dev      # Next.js UI on http://localhost:3000
 ```

@@ -33,24 +33,36 @@ REGWATCH is meant to reduce that research time.
 
 ## What It Does Today
 
-The current project is a proof of concept. It already focuses on FDA
-Product-Specific Guidances, usually called PSGs.
+REGWATCH is a working system, not just a sketch. It is not yet a fully
+provisioned production deployment (see "Important Current Limitations"), but the
+core research features are built and tested.
 
 Today, it can:
 
-- Download and store PSG records from FDA.
+- Download and store the full FDA PSG catalog — roughly 1,795 Product-Specific
+  Guidances, pulled across the A-Z letter listings (not just the ~70 the FDA
+  index page shows at a glance).
 - Parse PSG PDFs page by page.
 - Split the PDF text into searchable pieces.
 - Store those searchable pieces in a vector database.
-- Ask questions over the PSG corpus.
-- Return cited answers with page references.
+- Ingest and store the other FDA sources as structured records: Orange Book
+  (products, patents, exclusivity), Drugs@FDA, the NDC Directory, DailyMed SPL
+  labels, Drug Shortages, and REMS.
+- Ask questions over the FDA corpus through a cited conversational chat.
+- Return cited answers with page references and links to the FDA source.
 - Refuse to answer when it cannot find support in the FDA source text.
-- Build a simple product dossier from stored PSG data.
+- Resolve a question to one exact product before answering, and ask for
+  clarification when the product is ambiguous.
+- Build a product dossier ("Assemble") from stored FDA data.
+- Build a multi-source White Paper for a product, with every cell traced to its
+  FDA source, and export it to a Word (.docx) file.
 - Track a product watchlist.
-- Match FDA PSG changes against watchlist products.
+- Match FDA PSG changes against watchlist products and write an alert digest.
+- Require sign-in: every user has their own account, their own chat history, and
+  their own rate limits.
 - Log every Q&A interaction for auditability.
 
-## What It Should Eventually Cover
+## The Six FDA Source Areas
 
 Your manager provided six FDA database areas:
 
@@ -61,24 +73,26 @@ Your manager provided six FDA database areas:
 5. NDC Directory
 6. REMS
 
-REGWATCH should eventually treat each of these as a first-class FDA source.
+REGWATCH treats each of these as a first-class FDA source today (DailyMed SPL
+labels are also ingested as a seventh source).
 
-The important point: not every source should be handled the same way.
+The important point: not every source is handled the same way.
 
-Product-Specific Guidances are PDFs, so they need text search and citations.
-Orange Book, NDC, shortages, Drugs@FDA, and REMS are better handled as
+Product-Specific Guidances are PDFs, so they get text search and citations.
+Orange Book, NDC, shortages, Drugs@FDA, DailyMed, and REMS are handled as
 structured records, like database rows.
 
 ## The Six FDA Sources In Plain English
 
-| FDA source | What people use it for | How REGWATCH should use it |
+| FDA source | What people use it for | How REGWATCH uses it |
 |---|---|---|
-| Orange Book | RLD, reference standard, TE codes, patents, exclusivity | Store as structured data and look it up |
-| Product-Specific Guidances | FDA product-specific bioequivalence guidance | Parse PDFs, search text, cite pages |
-| Drugs@FDA | Applications, sponsors, approval history, labels | Store as structured data and look it up |
-| Drug Shortages | Current shortage status | Store as structured data and refresh often |
-| NDC Directory | NDC product/package information | Store as structured data and look it up |
-| REMS | REMS programs and requirements | Store as structured data and cite the source |
+| Orange Book | RLD, reference standard, TE codes, patents, exclusivity | Stored as structured data and looked up |
+| Product-Specific Guidances | FDA product-specific bioequivalence guidance | PDFs parsed, text searched, pages cited |
+| Drugs@FDA | Applications, sponsors, approval history, labels | Stored as structured data and looked up |
+| Drug Shortages | Current shortage status | Stored as structured data and refreshed |
+| NDC Directory | NDC product/package information | Stored as structured data and looked up |
+| REMS | REMS programs and requirements | Stored as structured data with source cited |
+| DailyMed SPL | Structured product labels for the RLD | Stored as structured data and cited |
 
 ## What A User Experience Should Feel Like
 
@@ -184,6 +198,11 @@ The code has compliance invariants. These are hard rules, not suggestions.
 | INV-5 Verified provenance | Product facts must come from verified sources |
 | INV-6 Auditability | Log every query and answer path |
 
+The White Paper feature adds three more guards (INV-7, INV-8, INV-9) that stop
+one product's facts from leaking into another product's white paper and collapse
+any cell whose citation does not actually back it. All of these rules are
+enforced as automated tests, not just written down.
+
 ## What The Watch Feature Does
 
 The watch feature is meant to help the team notice relevant FDA guidance
@@ -215,6 +234,24 @@ It can include:
 
 The checklist is not saying what the company has done. It is only organizing
 what FDA source material appears to call for.
+
+## What The White Paper Feature Does
+
+The White Paper feature builds a structured product brief that pulls from all of
+the FDA sources at once — Orange Book, Drugs@FDA, NDC, DailyMed, Drug Shortages,
+REMS, and the PSGs.
+
+Each cell in the white paper is one of three things:
+
+- Populated — filled from an FDA source, with the citation attached.
+- "No" — the system checked and the source confirms the answer is absent.
+- Analyst input required — the system could not confirm it from FDA evidence, so
+  it leaves the cell for a human to fill.
+
+Some cells are marked as analyst-authored on purpose. The system never writes
+those; only a person does. The finished white paper can be exported to a Word
+(.docx) file that matches exactly what was reviewed on screen, and the FDA
+source freshness (when each source was last fetched) is recorded with it.
 
 ## What The Audit Log Does
 
@@ -254,33 +291,61 @@ its own.) This is useful groundwork, but it is not the same as a full
 production deployment. Production still needs security, hosting, backups,
 monitoring, and an approved way to manage secrets.
 
+## How The Web App Is Organized
+
+The web app (built with Next.js) puts all four surfaces — Ask, Assemble, Watch,
+and White Paper — inside one shell, with a single sidebar and a shared design.
+
+A few things to know as a user:
+
+- Ask is a chat. You type a question and get a cited answer back, with the FDA
+  sources shown as clickable chips; if the product is ambiguous, it offers you
+  clarify options to pick from.
+- At the top of every surface there is an "Under review" product-scope bar. It
+  shows which product the whole app is currently focused on, and you can change
+  the focus there with a product picker.
+- The product focus is shareable: it lives in the page address, so a link you
+  send to a colleague opens on the same product. You can also set the focus from
+  the White Paper (after a successful build) or from a Watch row.
+- The picker is backed by a deterministic resolver. If your product can't be
+  matched to a single FDA application, it declines rather than guessing.
+
 ## Important Current Limitations
 
-This is still a proof of concept.
+The research features are built, but REGWATCH is not yet a fully provisioned,
+launched production service. The consolidated list of remaining work lives in
+`docs/ROADMAP.md`. The headline items:
 
-Important limitations:
-
-- It has a Docker/container baseline, but it is not a full production deployment.
-- The UI is a Next.js web app (Ask / Assemble / Watch). It is functional for a
-  demo; it still needs the production hardening below (auth, hosting, etc.).
-- Most current work focuses on PSGs.
-- Other FDA databases still need stronger structured loaders and handlers.
-- The model provider supports OpenAI Responses API, but the final in-house or
-  enterprise model target still needs a production decision.
-- More evaluation examples are needed before production use.
+- It has a Docker/container baseline, but it is not yet running on approved
+  hosting behind a gateway with TLS and single sign-on.
+- A managed Postgres / pgvector datastore is supported in code (the app can
+  switch from the local SQLite/Chroma files to Postgres) but has not actually
+  been provisioned, migrated from a clean snapshot, or restore-tested.
+- The biggest open decision is how the language model handles data — for example
+  a BAA, a zero-retention arrangement, or an in-house model. This is a
+  business/compliance call and must be logged in `DECISIONS.md` before launch.
+- The watch scheduler is not yet deployed and monitored as a production job.
+- The evaluation gold set should grow (from 12 Q&A + 16 white-paper rows toward
+  30-50) before production use.
+- The Ask chat does not yet stream answers token-by-token; it returns the full
+  cited answer at once.
 - Human review is still required.
 
-## Future Direction
+## The Architecture (Now Built)
 
-The recommended future architecture is:
+The system is organized exactly the way it was originally recommended:
 
-1. A TypeScript web UI for users.
+1. A TypeScript web UI for users (the Next.js app described above).
 2. A Python backend for FDA evidence, retrieval, citations, and AI.
 3. A router that decides which FDA source should answer.
 4. Source handlers for each FDA database.
 5. A final answer synthesizer that writes cited answers.
 6. Strong validation before anything is shown to users.
 7. Audit logs for every decision.
+
+The language model and embedding model are pluggable: no specific model name is
+hard-coded into the logic, so the model can be swapped once the data-handling
+decision (see Limitations and `docs/ROADMAP.md`) is made.
 
 The goal is not to build a chatbot that guesses. The goal is to build a
 research system that knows where to look and shows the source.

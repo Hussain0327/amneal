@@ -9,11 +9,13 @@ Read these in order if you are new to the project:
 1. `../README.md` - project overview, current stack, quick start, API surface.
 2. `NON_TECH_GUIDE.md` - plain-English explanation for regulatory and business readers.
 3. `TECH_GUIDE_SIMPLE.md` - simplified technical walkthrough of how the code connects.
-4. `CONVERSATIONAL_SESSIONS.md` - chat sessions, follow-up context, and audit rules.
-5. `DOCKER.md` - container setup, services, data mounts, and ingest notes.
-6. `PROD_READINESS.md` - active production-readiness checklist.
-7. `DEPLOY.md` - active production cutover and operations runbook.
-8. `DECISIONS.md` - append-only history of important engineering decisions.
+4. `ARCHITECTURE.md` - canonical system design: Router -> Handlers -> Synthesizer, the four UI surfaces, and the compliance invariants.
+5. `CONVERSATIONAL_SESSIONS.md` - chat sessions, follow-up context, and audit rules.
+6. `DOCKER.md` - container setup, services, data mounts, and ingest notes.
+7. `PROD_READINESS.md` - active production-readiness checklist.
+8. `DEPLOY.md` - active production cutover and operations runbook.
+9. `ROADMAP.md` - consolidated list of open / not-yet-done work (launch blockers and future workstreams).
+10. `DECISIONS.md` - append-only history of important engineering decisions.
 
 ## Current Reference Docs
 
@@ -21,10 +23,13 @@ Read these in order if you are new to the project:
 |---|---|---|
 | `NON_TECH_GUIDE.md` | Non-technical stakeholders | Explains what REGWATCH does, what it must not do, and why citations/refusals matter. |
 | `TECH_GUIDE_SIMPLE.md` | Technical readers | Explains folder structure, core flows, and the files to read first. |
+| `ARCHITECTURE.md` | Engineers / reviewers | Canonical system design: Router -> Handlers -> Synthesizer, pluggable Embedding/LLM providers, the unified four-surface Next.js shell, and INV-1..9. |
 | `CONVERSATIONAL_SESSIONS.md` | Product / engineering / compliance reviewers | Explains session IDs, follow-up context, response statuses, and auditability. |
 | `DOCKER.md` | Engineers / deployment owners | Documents the Dockerfile, Compose services, embedding modes, and ingest implications. |
 | `DECISIONS.md` | Engineers / reviewers | Append-only decision log. Read this before changing architecture. |
 | `PROD_READINESS.md` | Engineers / deployment owners | Tracks what stands between the POC and a real production deployment, prioritized and mapped to the tree. |
+| `ROADMAP.md` | Engineers / product / reviewers | Consolidated open / not-done work: launch blockers (LLM data-handling decision, provisioned Postgres/pgvector, gateway/TLS/SSO) and future workstreams (Ask streaming, eval expansion, observability, Watch scheduler). |
+| `whitepaper_schema.md` | Engineers / regulatory reviewers | DRAFT one-row-per-cell field-extraction map for the White Paper populator: {source, endpoint/query or SPL section, lookup key, mode} per template cell. |
 | `DEPLOY.md` | Engineers / deployment owners | Production cutover runbook (Supabase + Fly.io/Railway + Vercel) plus the Operations section: rollback levers, uptime monitoring, and the monthly staging restore drill (`scripts/restore_drill.sh`). |
 | `../regwatch/backend/README.md` | Backend engineers | Explains why backend source remains in `src/regwatch` and how to run the FastAPI API. |
 | `../regwatch/frontend/README.md` | Frontend engineers | Explains how to run the Next.js UI and how it proxies to the API. |

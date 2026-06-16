@@ -23,6 +23,11 @@ auth cookie (see the Auth section in the top-level README). Sessions are bound
 to the authenticated user, and `GET /sessions` / `GET /sessions/{id}` /
 `DELETE /sessions/{id}` expose only the caller's own threads.
 
+The Ask surface in the Next.js frontend (`regwatch/frontend`, `components/Turns.tsx`)
+is the cited conversational client for this endpoint: right-aligned user bubbles,
+citation chips linking to FDA sources, and clarify-option pills, all driven by the
+response fields below.
+
 Response fields now include:
 
 - `session_id`: the durable chat thread.
@@ -77,6 +82,16 @@ This makes every conversational answer traceable to:
 - citations,
 - refusal or scope-warning reason.
 
+Every `POST /query` turn writes exactly one audit row. By contrast, the
+`POST /resolve` endpoint that backs the product-scope picker is *not* a
+conversational turn: it is deterministic entity resolution (it reuses the white
+paper's context builder to map an RLD name + application number to the canonical
+spine) and is not an LLM call. It writes **no** audit row on success or failure,
+creates no chat session or turn, and returns no answer text — a mismatch is a
+422 (refuse over guess), not a refused turn. Setting the active product scope
+therefore never appears in the conversational audit trail; only the `/query`
+turns that consume that scope do.
+
 ## Compliance Boundary
 
 REGWATCH should sound helpful, not abrupt, but it must keep these boundaries:
@@ -87,4 +102,15 @@ REGWATCH should sound helpful, not abrupt, but it must keep these boundaries:
 - It cannot author submission strategy.
 - It cannot recommend what to file or how to persuade FDA.
 - It cannot turn conversation history into evidence.
+
+## Not Yet: Token-by-Token Streaming
+
+Conversational answers are returned whole. There is **no `/query/stream`
+endpoint in the backend today**: the streaming-capable Ask client
+(`askQueryStream`) falls back to a blocking `POST /query`, and the frontend's
+"thinking" ticker is an honest progress indicator, not faked streamed text.
+
+Real streaming is a future item (see `docs/ROADMAP.md`). When built it must
+preserve the invariants above: no answer text may be emitted before a validated
+citation exists (INV-1), and the turn must still write **exactly one** audit row.
 

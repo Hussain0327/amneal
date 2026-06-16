@@ -1,8 +1,10 @@
 # REGWATCH Frontend Workspace
 
-Next.js (App Router, TypeScript) UI for RegWatch — replaces the Streamlit POC
-feature-for-feature (Ask / Assemble / Watch) on the Amneal brand. It is a thin
-client over the FastAPI backend; all logic and compliance live in the API.
+Next.js (App Router, TypeScript) UI for RegWatch on the Amneal brand. All four
+surfaces (Ask / Assemble / Watch / White Paper) render inside one shared App
+Router shell — one sidebar, one set of design tokens, one URL-scoped current
+product. (The earlier Streamlit POC is fully retired.) It is a thin client over
+the FastAPI backend; all logic and compliance live in the API.
 
 ## Run
 
@@ -49,18 +51,51 @@ cd regwatch/frontend && npm run build && npm run start  # 2) UI (:3000, proxies 
 cloudflared tunnel --url http://localhost:3000          # 3) public link
 ```
 
+## Shell & current product
+
+All four surfaces live in one App Router route-group layout
+(`app/(shell)/layout.tsx`): a single sidebar, one canvas, and a slim sticky
+**"Under review"** product-scope bar (`components/ProductScopeBar.tsx`) across
+the top of every page. The login and fixtures routes sit outside the group and
+never see it.
+
+The scoped current product is URL-encoded (`?rp=<reference product>&appl=<six-
+digit application number>`), so it is shareable, survives reload, and is read by
+all four surfaces. It is settable from three places — the scope-bar picker,
+White Paper on a successful populate, and a Watch row — each writing the same
+canonical `{normalized_name, application_number}`.
+
+Pinning a product is **not** an LLM turn. The scope-bar picker calls
+`POST /resolve` (`resolveProduct` in `lib/api.ts`), the backend's deterministic
+entity resolution that reuses the White Paper's spine builder. On a mismatch it
+returns 422 with a `detail` explaining what *was* found, and the scope is left
+unset — refuse over guess. `/resolve` writes no audit row and returns no answer
+text.
+
 ## Pages
 
-- **Ask** (`/`) — cited Q&A. Renders by status: `answer` (markdown + clickable
-  sources), `clarify` (interpretation line + clickable options that resend the
-  query/filters), `refused` (plain refusal text). Answer turns carry a quiet
-  thumbs up/down (`POST /feedback`, upsert per answer+user; thumbs-down offers
-  a one-line optional note). Turns restored from session history have no
-  `audit_id`, so they render without the affordance.
+- **Ask** (`/`) — a cited conversational **chat** over FDA product-specific
+  guidance: right-aligned user bubbles, the gold RW assistant avatar, a
+  bottom-pinned composer (Enter sends, Shift+Enter newlines). Answers render
+  markdown with citation chips that link to FDA sources (full snippets in a
+  Sources disclosure). A `clarify` turn shows an interpretation line plus
+  clickable option pills that resend the query/filters; you can also reply to a
+  clarify in your own words. A `refused` turn shows plain refusal text. Answer
+  turns carry a quiet thumbs up/down (`POST /feedback`, upsert per answer+user;
+  thumbs-down offers a one-line optional note). Turns restored from session
+  history have no `audit_id`, so they render without the affordance.
+
+  Sends go through `askQueryStream`, which posts to `/query/stream` and falls
+  back transparently to the blocking `POST /query` on any stream-level failure.
+  There is **no `/query/stream` endpoint in the backend today**, so every send
+  currently takes the fallback path — nothing streams token-by-token. While the
+  query runs, the assistant slot shows an honest status ticker (real docket
+  motion, not a faked token stream). See `docs/ROADMAP.md` for real streaming.
 - **Assemble** (`/assemble`) — cited dossier for a target product.
-- **Watch** (`/watch`) — recent change-feed alerts + the watchlist.
+- **Watch** (`/watch`) — recent change-feed alerts + the watchlist; a row can
+  set the current product scope.
 - **White Paper** (`/whitepaper`) — CRA White Paper population + `.docx`
-  download from the reviewed result.
+  download from the reviewed result; a successful populate sets the scope.
 
 ## Error monitoring (Sentry, opt-in)
 

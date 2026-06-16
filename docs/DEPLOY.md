@@ -311,18 +311,28 @@ Do these in order; stop at the first failure.
    policy" infos.
 4. Open the Vercel URL → login page renders (no console errors).
 5. Wrong-password login → "invalid email or password"; no cookie set.
-6. **Analyst logs in** (provisioned user) → lands on the chat UI; reload keeps
+6. **Analyst logs in** (provisioned user) → lands inside the unified shell with
+   the Ask chat in view (one sidebar, the "Under review" product-scope bar
+   across all four surfaces — Ask, Assemble, Watch, White Paper); reload keeps
    the session (cookie survives).
-7. **Asks a question**: "What bioequivalence studies does FDA recommend for
-   albuterol sulfate metered aerosol?" → cited answer with `[PSG_xxxxxx, p.N]`
-   citations that open the FDA source; an off-corpus question still refuses.
-8. **Populates a white paper**: White Paper tab → RLD name + NDA number (e.g.
+7. **Sets product scope**: from the "Under review" bar's picker, resolve an RLD
+   name + application number (POST `/resolve`) → the scope pins to the canonical
+   `{normalized_name, six-digit appl}` and the URL gains `?rp=&appl=` (shareable,
+   survives reload). A mismatched application 422s and leaves the scope unset
+   (refuse over guess); `/resolve` writes NO audit row.
+8. **Asks a question**: "What bioequivalence studies does FDA recommend for
+   albuterol sulfate metered aerosol?" → right-aligned user bubble, then a cited
+   answer with `[PSG_xxxxxx, p.N]` citation chips that open the FDA source (full
+   snippets under the Sources disclosure); an off-corpus question still refuses.
+9. **Populates a white paper**: White Paper tab → RLD name + NDA number (e.g.
    one of the seeded products) → cells fill with provenance
-   (source/locator/fetched-at), manual cells say "Analyst input required".
-9. **Downloads the docx** → file opens in Word, populated cells and the
-   Provenance appendix are present.
+   (source/locator/fetched-at), manual cells say "Analyst input required" (a
+   successful populate also sets product scope).
+10. **Downloads the docx** → file opens in Word, populated cells and the
+    Provenance appendix are present (rendered verbatim from the reviewed
+    populate result).
 
-If 6–9 pass, the deploy is good.
+If 6–10 pass, the deploy is good.
 
 ## 6. Operations
 

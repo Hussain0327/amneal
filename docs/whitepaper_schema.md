@@ -1,14 +1,16 @@
 # White-Paper Field-Extraction Schema
 
-**Status:** DRAFT for review — confirm per-field sources with Arlin before any build.
+**Status:** SHIPPED — this schema is implemented. The White Paper populator (PR #2, commit
+`04f760e`; hardened in PR #3, `96ecd86`) builds the per-cell mapping below into
+`src/regwatch/whitepaper/` (`populator.py`, `template.py`, `docx_writer.py`), backed by
+migration `0005_whitepaper_sources`. This file remains the **field-extraction contract**: the
+authoritative one-row-per-cell map of {source, endpoint/query or SPL section, lookup key, mode}
+that the populator must honor. Edit this contract first when a cell's source or mode changes.
 **Source template:** `CRA White Paper Template May 2026 - Raja.docx` (Arlin's per-field source
 annotations preserved as Word comments in that file).
 **Feature:** A populate-on-demand mode. **Input:** RLD name + NDA/application number.
 **Output:** every template cell, each carrying provenance (source + record id/row + fetched
 timestamp; page/section for PSG/SPL).
-
-This document is **STEP 1**: a one-row-per-cell map of {source, endpoint/query or SPL
-section, lookup key, mode}. No code is built until this is signed off.
 
 ---
 
@@ -129,13 +131,14 @@ These are the open items the schema surfaces — please confirm with Arlin befor
 3. **Patents / Priority / First-to-Market / eFTF / Labeling Carveouts.** Annotated "Orange
    Book". OB supplies the *raw* patent and exclusivity rows (numbers, expiry, use-codes,
    exclusivity codes), but the *classification* (which paragraph, eligibility) is regulatory
-   judgment → `manual` with the rows attached as evidence. **Build dependency:** the Orange
-   Book loader currently parses only `Products.txt`; `patent.txt` + `exclusivity.txt` (same
-   ZIP) must be added to supply this evidence.
+   judgment → `manual` with the rows attached as evidence. *(Shipped: the Orange Book loader
+   now parses `patent.txt` + `exclusivity.txt` from the same ZIP — see
+   `src/regwatch/sources/orange_book.py` `patent_rows()` / `exclusivity_rows()` — surfacing
+   these rows raw.)*
 4. **DailyMed is a new source.** Arlin annotated "DailyMed" / "Drugs@FDA, DailyMed" for the
-   labeling block. There is no DailyMed handler today (current labeling pulls only Indications
-   + Dosage from openFDA `label.json`). Build dependency: resolve `appl_no → setid` via
-   DailyMed REST v2, then extract SPL LOINC sections.
+   labeling block. *(Shipped: `src/regwatch/sources/dailymed.py` resolves `appl_no → setid` via
+   DailyMed REST v2 and extracts SPL LOINC sections, replacing the prior openFDA `label.json`
+   Indications + Dosage pull.)*
 5. **PLR-format detection is heuristic.** "PLR format Y/N" is a formatting determination, not a
    discrete SPL field — marked `evidence-only` with a stated confidence note and analyst
    override, never a bare auto Y/N.
@@ -152,6 +155,9 @@ These are the open items the schema surfaces — please confirm with Arlin befor
 
 ---
 
-*Next step after sign-off:* build the populator (new `whitepaper/` module + DailyMed source +
-Orange Book patent/exclusivity parsing + persistence/caching + structured citations + eval
-expansion). Tracked separately; not started until this schema is approved.
+*Implemented:* the populator (`src/regwatch/whitepaper/` module + DailyMed source + Orange Book
+patent/exclusivity parsing + persistence/caching with `last_fetched_at` freshness via migration
+`0005_whitepaper_sources` + structured citations + `.docx` export) shipped in PR #2
+(`04f760e`) and was hardened in PR #3 (`96ecd86`). Remaining/forward work — gold-set white-paper
+row expansion (16 → 30-50) and applying the persist-and-cite + freshness pattern to the
+Ask/Assemble read paths — is tracked in `docs/ROADMAP.md`.

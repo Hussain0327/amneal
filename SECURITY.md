@@ -5,9 +5,14 @@ not approved for direct external exposure or production use until the blocking
 items in `docs/PROD_READINESS.md` are closed.
 
 This is the current security policy. Older planning notes may describe missing
-auth, missing rate limits, or retired UI surfaces; treat those as archived
+auth, missing rate limits, or the retired Streamlit UI; treat those as archived
 history when they conflict with this file, `README.md`, `docs/ARCHITECTURE.md`,
-or `docs/PROD_READINESS.md`.
+`docs/PROD_READINESS.md`, or `docs/ROADMAP.md`. The current UI is a single
+Next.js App Router shell (Streamlit is fully retired). Application
+authentication, in-process rate limiting, and a dual-mode Postgres/pgvector
+datastore path are all implemented in code; the remaining gaps are operational
+(production identity boundary, distributed limiting, a provisioned managed
+datastore, secrets management, and CI supply-chain scanning).
 
 ## Current Security Status
 
@@ -16,10 +21,13 @@ Do not deploy this service on a public network as-is.
 Known launch blockers:
 
 - Application authentication and authorization are enforced by FastAPI for all
-  non-health endpoints, but broad production exposure still needs an approved
-  identity boundary: TLS, gateway controls, and either enterprise SSO/OIDC in
-  front of the app or a formal decision accepting the app-layer cookie sessions
-  for the pilot boundary.
+  endpoints except `GET /health` (DB-backed opaque cookie sessions, sha256 at
+  rest, bcrypt passwords, per-user ownership of chat history). Broad production
+  exposure still needs an approved identity boundary: TLS, gateway controls, and
+  either enterprise SSO/OIDC in front of the app or a formal decision accepting
+  the app-layer cookie sessions for the pilot boundary. `AUTH_COOKIE_SECURE`
+  defaults to false and must be set to true once TLS terminates in front of the
+  app.
 - Per-caller rate limits are enforced in-process for cost-bearing routes and
   login attempts. Multi-process or multi-replica production still needs
   distributed/gateway rate limiting and abuse controls.
@@ -101,7 +109,8 @@ Do not perform:
 ## Secret Handling
 
 - Never commit `.env`, `.env.local`, API keys, service account files, database
-  dumps, Chroma stores, raw FDA ingest caches, or logs containing request data.
+  dumps (SQLite or Postgres/pgvector), Chroma stores, raw FDA ingest caches, or
+  logs containing request data.
 - Use `.env.example` only for empty placeholders and documented configuration.
 - For production, use an approved secret manager or platform-managed
   environment variables.
@@ -116,12 +125,20 @@ Before any external or broad internal production launch, REGWATCH needs:
   acceptance of the app-layer cookie-session model for the launch scope.
 - Distributed rate limiting and abuse controls for LLM-backed routes.
 - A documented CORS allowlist for the deployed UI origin.
-- Production datastore controls: managed database/vector store, encryption,
-  backups, restore testing, and least-privilege access.
-- Alembic migrations run as a gated deploy step, not during application boot.
+- Production datastore controls: the dual-mode Postgres/pgvector path is
+  implemented in code (`DATABASE_URL` switches the structured store to Postgres
+  and vectors to pgvector in the same DB; `REQUIRE_DATABASE_URL=true` refuses a
+  SQLite fallback; pgvector dimension checks fail fast; Postgres boot verifies
+  the Alembic stamp equals head and refuses to start on mismatch), but a managed
+  database/vector store is not yet provisioned. Still required: provisioning,
+  encryption, backups, restore-drill testing, and least-privilege app DB creds.
+- Alembic migrations run as a gated deploy step, not during application boot
+  (app boot verification is the safety net, not the migration mechanism).
 - Centralized logs, metrics, tracing, error reporting, and security alerts.
 - Dependency audit and container image scanning in CI.
 - Approved LLM/data-handling decision documented in `docs/DECISIONS.md`.
 - Incident response and rollback procedures.
 
-See `docs/PROD_READINESS.md` for the full production-readiness checklist.
+See `docs/PROD_READINESS.md` for the full production-readiness checklist and
+`docs/ROADMAP.md` for the consolidated list of open security and operational
+items.

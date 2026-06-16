@@ -35,18 +35,29 @@ encode this.
   generated value** — the system surfaces and cites, it never renders the
   regulatory judgment. Output is JSON or a filled Word document. See
   [`docs/whitepaper_schema.md`](docs/whitepaper_schema.md).
-- **Ask.** Plain-language Q&A over the corpus. Inline `[short_name, p.N]`
-  citations on every claim, exact-string refusal when the corpus does not
-  contain the answer. **Conversational**: `/query` carries a chat session so
-  follow-ups like "What about dissolution?" reuse the prior product — but only
-  the product *filter* carries over, never prior chat text as evidence; every
-  answer re-retrieves and re-validates citations. When a question names no
-  product (or names several), it **clarifies** with clickable options instead
-  of guessing; regulatory-strategy asks get a `scope_warning`, not a guess.
+- **Ask.** Plain-language Q&A over the corpus, rendered as a **cited
+  conversational chat**: right-aligned user bubbles, a gold RW assistant
+  avatar, citation chips that link to the FDA source (full snippets behind a
+  Sources disclosure), clickable clarify pills, and a bottom-pinned composer
+  (Enter to send). Inline `[short_name, p.N]` citations on every claim,
+  exact-string refusal when the corpus does not contain the answer.
+  **Conversational**: `/query` carries a chat session so follow-ups like
+  "What about dissolution?" reuse the prior product — but only the product
+  *filter* carries over, never prior chat text as evidence; every answer
+  re-retrieves and re-validates citations. When a question names no product
+  (or names several), it **clarifies** with clickable options instead of
+  guessing; regulatory-strategy asks get a `scope_warning`, not a guess.
 
 The product is **resolved before retrieval** and retrieval is **constrained to
 the current PSG version**, so shared FDA boilerplate can't leak a wrong-drug or
 a superseded citation. See [`docs/CONVERSATIONAL_SESSIONS.md`](docs/CONVERSATIONAL_SESSIONS.md).
+
+All four surfaces share one **current product**. It is settable from three
+places — the scope-bar picker, a successful White Paper populate, or a Watch
+row — and every setter writes the same canonical `{normalized_name, six-digit
+application number}`. The picker is resolve-backed: it calls `POST /resolve`
+(deterministic entity resolution, not an LLM turn), so a name≠number mismatch
+422s and leaves the scope unset rather than guessing (refuse-over-guess).
 
 ## Non-goals
 
@@ -87,7 +98,7 @@ These are code with tests, not guidelines. See `tests/test_invariants.py`.
 | Retrieval | Two-stage. Stage 1: `VECTOR_TOP_K=50` (wide). Stage 2: rerank → `RERANK_TOP_K=8`. Reranker off by default; when off, stage 2 is `passages[:rerank_top_k]` |
 | LLM | Pluggable behind `LLMProvider`. OpenAI via the **Responses API** (`OPENAI_API_MODE=responses`, default; `chat` falls back to Chat Completions). Role-specific models: router `gpt-5-nano` (reasoning), synthesizer + extractor `gpt-5.4-nano`, each falling back to `LLM_MODEL`. `anthropic` and `echo` (test-only) also supported |
 | API | FastAPI. `POST /query` is conversational — accepts/returns `session_id`+`turn_id`, with response `status` ∈ `answer`/`summary`/`clarify`/`scope_warning`/`refused` |
-| UI | **Next.js 14 (App Router, TypeScript) in `regwatch/frontend/`** — Ask / Assemble / Watch. Talks to the API through a same-origin `/api` proxy. (The earlier Streamlit POC was retired.) |
+| UI | **Next.js 14 (App Router, TypeScript) in `regwatch/frontend/`** — all four surfaces (Ask / Assemble / Watch / White Paper) render inside one `(shell)` route-group layout: one sidebar, one set of design tokens, and a shared **"Under review" product-scope bar**. The current product is **URL-scoped** (`?rp=&appl=`) so it is shareable and survives reload. Talks to the API through a same-origin `/api` proxy. (The earlier Streamlit POC was retired.) |
 | Orchestration | Dagster OSS in Docker Compose. Manual `seed_corpus_job` over `regwatch seed`, plus `watch_digest_job` over `regwatch watch` with a daily 06:00 UTC schedule (`watch_daily_schedule`) |
 | Tooling | ruff, black, mypy strict on `src/`, pytest |
 
@@ -232,6 +243,10 @@ POST   /whitepaper   populate the CRA White Paper for {rld_name, application_num
 POST   /whitepaper/docx  body {"result": <exact JSON from POST /whitepaper>} → the filled
                      Word document (.docx attachment) (auth; renders from the
                      reviewed result — no re-populate, no live fetches)
+POST   /resolve      deterministic entity resolution for {rld_name, application_number}
+                     → canonical product spine (auth). NOT an LLM turn: writes no
+                     audit row and returns no answer text; 422 {detail} on a
+                     name≠number mismatch. Backs the product-scope picker.
 POST   /feedback     rate a Q&A answer {audit_id, rating: -1|1, comment?} —
                      upserts per (audit row, user); 404 unless the audit row is
                      the caller's own /query answer (auth)
@@ -335,7 +350,8 @@ src/regwatch/
   common/                 logging, audit, citations, text_normalize, conversation, ratelimit
 regwatch/
   backend/                backend workspace docs; source stays in src/regwatch
-  frontend/               Next.js (App Router, TS) UI — Ask / Assemble / Watch
+  frontend/               Next.js (App Router, TS) UI — one (shell) for all four
+                          surfaces: Ask / Assemble / Watch / White Paper
 tests/                    smoke, invariants (INV-1..6, INV-9), eval gate, per-module
 ```
 
@@ -352,32 +368,55 @@ Definition of Done passed before moving on.
 | 3 | Drugs@FDA watchlist, alias discovery, fuzzy matcher, version diff, JSONL digest |
 | 4 | Dossier builder + FastAPI |
 | 5 | Eval harness + gold set + CI thresholds |
-| 6+ | Next.js UI (`regwatch/frontend/`), OpenAI Responses API + role-specific models, conversational sessions, current-version retrieval, entity-resolution hardening, deterministic eval gate |
+| 6+ | Next.js UI (`regwatch/frontend/`), OpenAI Responses API + role-specific models, conversational sessions, current-version retrieval, entity-resolution hardening, deterministic eval gate, cookie-session auth, White Paper populator, dual-mode Postgres/pgvector storage path |
+| 7+ | Unified `(shell)` route-group (all four surfaces, one sidebar), URL-scoped current product (`?rp=&appl=`), Ask rebuilt as a cited chat, "Under review" product-scope bar + resolve-backed picker (`POST /resolve`) |
 
 ## What's not done
 
+- **The LLM/data-handling decision is still open (D1).** Whether the team runs
+  on a BAA/zero-retention vendor agreement or an in-house OpenAI-compatible
+  model is a business/compliance call that must be logged in
+  [`docs/DECISIONS.md`](docs/DECISIONS.md). It blocks a real launch.
 - **Auth is app-layer only.** Cookie-session auth, CLI-provisioned users,
   per-user chat history, and per-user rate limiting exist, but TLS, OIDC/SSO,
   and a production gateway are still environment work before external exposure.
-- **Datastores are single-node in dev** (SQLite + on-disk Chroma; Supabase
-  Postgres + pgvector when `DATABASE_URL` is set); no HA or pooling beyond
-  Supabase's. Rollback, uptime monitoring, and the monthly staging restore
-  drill (`scripts/restore_drill.sh`) are documented in
-  [`docs/DEPLOY.md`](docs/DEPLOY.md) (Operations). Migrations still run on app
-  boot rather than as a deploy step.
+  Set `AUTH_COOKIE_SECURE=true` once TLS terminates. The rate limiter is
+  in-memory/per-process, so distributed (gateway) rate limiting is a gap on
+  multi-replica deploys.
+- **The Postgres/pgvector path is code + runbook ready, not yet provisioned.**
+  `DATABASE_URL` switches the structured store to Postgres and vectors to
+  pgvector in the same DB; `REQUIRE_DATABASE_URL=true` refuses the SQLite
+  fallback in prod; pgvector dimension checks fail fast; and a Postgres boot
+  verifies the Alembic stamp == head and refuses to start on a mismatch. Still
+  open: a managed Postgres/pgvector actually provisioned, migration from a
+  clean snapshot, a restore drill (`scripts/restore_drill.sh`) exercised
+  against staging, and least-privilege app DB creds. Migrations still run on
+  app boot (verification only) rather than as a gated deploy step — that gate
+  and a rehearsed rollback/roll-forward are open. Rollback and uptime
+  monitoring are documented in [`docs/DEPLOY.md`](docs/DEPLOY.md) (Operations).
 - The gold set is 12 items, not the spec's 30–50, and scoring is mechanical
   (`(short_name, page)` + `expected_facts` substrings). LLM-as-judge is not wired.
 - The cross-encoder reranker exists as a hook but is off by default. Turn
   on with `RERANKER_ENABLED=true` and tune `VECTOR_TOP_K` upward.
 - Scheduling covers only the watch pipeline (`regwatch watch`, daily via the
-  Dagster schedule). Broad corpus ingest (`regwatch ingest-all`) is still run
-  on demand.
-- FDA source handlers exist (`sources/`: PSG, Orange Book, Drugs@FDA, Shortages,
-  NDC, REMS) but are live-HTTP only — no persisted source tables, freshness
-  metadata, caching, or cross-source answer synthesis yet.
+  Dagster schedule). A production Watch worker/scheduler with monitored run
+  history and partial-ingest recovery is not yet deployed, and broad corpus
+  ingest (`regwatch ingest-all`) is still run on demand.
+- The **persist-and-cite + freshness** pattern is wired for the White Paper —
+  it persists Orange Book and DailyMed SPL provenance with `last_fetched_at`
+  (migration 0005) and synthesizes across Orange Book, Drugs@FDA, NDC,
+  DailyMed, Shortages, REMS, and PSG. It is **not yet applied to the
+  Ask/Assemble read paths**, whose source handlers (`sources/`) still query
+  live HTTP without persisting source rows or freshness on those paths.
+- **Ask does not stream token-by-token.** There is no `/query/stream`
+  endpoint; the streaming-capable client falls back to a blocking `POST /query`
+  (the thinking ticker is honest, not faked). Building it must preserve INV-1
+  (no answer text before a validated citation) and still write exactly one
+  audit row.
 
 See [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md) for the full,
-prioritized path from POC to production.
+prioritized path from POC to production, and the consolidated `docs/ROADMAP.md`
+for the open-items list.
 
 ## License
 

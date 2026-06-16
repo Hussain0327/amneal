@@ -6,12 +6,29 @@ Status: v1.0, build-ready. Rename the codename freely.
 
 > **Note — this is the original build spec.** It is preserved as the foundational
 > design document. Where the shipped implementation has since evolved, the
-> current-state docs win: the UI is now **Next.js** in `regwatch/frontend/` (the
-> Streamlit references below are retired), the OpenAI provider uses the
-> **Responses API** with role-specific models, and conversational sessions,
-> current-version retrieval, and entity-resolution hardening have been added. See
-> the root `README.md`, `docs/DECISIONS.md`, and `docs/PROD_READINESS.md` for what
-> is true today.
+> current-state docs win:
+>
+> - **UI:** now a **Next.js** App Router app in `regwatch/frontend/` — Streamlit is
+>   fully retired (the `ui/app.py` and "Streamlit / three pages" references below
+>   no longer reflect reality). The four surfaces (Ask, Assemble, Watch, White
+>   Paper) render inside one unified shell with a URL-scoped CurrentProduct
+>   (`?rp=&appl=`) and a shared "Under review" product-scope bar. **Ask** is a
+>   cited conversational chat (citation chips, clarify pills, bottom-pinned
+>   composer), not the editorial/three-page layout described below.
+> - **LLM:** the OpenAI provider uses the **Responses API** with role-specific
+>   models.
+> - **Backend additions:** conversational sessions with per-turn audit,
+>   current-version retrieval, entity-resolution hardening, a White Paper populator
+>   (multi-source cited cells), `POST /resolve` (deterministic entity resolution,
+>   not an LLM turn), DB-backed auth on every endpoint except `GET /health`, and a
+>   dual-mode datastore (SQLite/Chroma by default; Postgres + pgvector when
+>   `DATABASE_URL` is set). Alembic migrations through `0005`.
+> - **Invariants:** Section 4 below codifies INV-1..6; three later invariants
+>   (INV-7..9, cross-product / structured-citation / resolution-before-retrieval
+>   guards) are now also enforced as tests — see the note in Section 4.
+>
+> See the root `README.md`, `docs/DECISIONS.md`, `docs/PROD_READINESS.md`, and
+> `docs/ROADMAP.md` (consolidated open items) for what is true today.
 
 ---
 
@@ -63,6 +80,15 @@ These encode both FDA expectations (the Jan 2025 draft guidance treats AI that s
 - **INV-6 Auditability.** Every query, its retrieved sources with scores, the generated answer, and whether it refused are logged to a durable store (Section 10.10).
 
 If a requested behavior would violate an invariant, do not implement it; flag it in `DECISIONS.md`.
+
+> **Implementation status (current).** INV-1..6 above remain the enduring
+> constraints and are tested in `tests/test_invariants.py`. Three additional
+> invariants have since been added and are enforced as tests across the
+> resolution, white-paper, and citation code: **INV-7..9** (cross-product
+> integrity — never blend two applications' data; structured-citation grammar with
+> a central validation guard that collapses any cell whose token is not backed; and
+> product-resolution-before-retrieval to prevent cross-drug citation leak). They
+> extend, and do not supersede, INV-1..6.
 
 ## 5. System overview
 
@@ -296,6 +322,13 @@ Input: a product (active ingredient + dosage form + RLD). Gather and assemble in
   Acceptance: OpenAPI docs render; every response is reproducible in Postman without internal access.
 
 ### 10.17 UI (`ui/app.py`, Streamlit)
+
+> **Superseded — see the top-of-file note.** The UI is no longer Streamlit and is
+> no longer three pages. It is a Next.js App Router app in `regwatch/frontend/`
+> with four unified surfaces (Ask, Assemble, Watch, White Paper) sharing one
+> shell, a URL-scoped CurrentProduct, and an "Under review" product-scope bar; Ask
+> is a cited conversational chat. The original three-page intent below is
+> preserved for design context.
 
 Three pages: Ask (Q&A with inline sources), Assemble (pick a product to a brief), Watch (recent alerts). Sources are always visible and clickable. Acceptance: a non-technical user can ask a question, get a cited answer or a clear "not found," and open the source, with zero command line.
 
