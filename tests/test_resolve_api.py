@@ -31,9 +31,7 @@ def test_resolve_success_returns_bare_spine(
     auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     install_fake_sources(monkeypatch)
-    r = auth_client.post(
-        "/resolve", json={"rld_name": RLD_NAME, "application_number": APPL_NO}
-    )
+    r = auth_client.post("/resolve", json={"rld_name": RLD_NAME, "application_number": APPL_NO})
     assert r.status_code == 200, r.text
     body = r.json()
     # The response IS the spine (not wrapped in {"spine": ...}, unlike /whitepaper).
@@ -50,9 +48,7 @@ def test_resolve_422_on_name_number_mismatch(
     auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     install_fake_sources(monkeypatch)
-    r = auth_client.post(
-        "/resolve", json={"rld_name": "ibuprofen", "application_number": APPL_NO}
-    )
+    r = auth_client.post("/resolve", json={"rld_name": "ibuprofen", "application_number": APPL_NO})
     assert r.status_code == 422
     # The resolver's own detail is surfaced verbatim (refuse over guess).
     assert "ibuprofen" in r.json()["detail"]
@@ -60,9 +56,7 @@ def test_resolve_422_on_name_number_mismatch(
 
 def test_resolve_requires_auth() -> None:
     with TestClient(app) as client:
-        r = client.post(
-            "/resolve", json={"rld_name": RLD_NAME, "application_number": APPL_NO}
-        )
+        r = client.post("/resolve", json={"rld_name": RLD_NAME, "application_number": APPL_NO})
     assert r.status_code == 401
 
 
@@ -71,9 +65,7 @@ def test_resolve_success_writes_no_audit_row(
 ) -> None:
     install_fake_sources(monkeypatch)
     before = _query_log_count()
-    r = auth_client.post(
-        "/resolve", json={"rld_name": RLD_NAME, "application_number": APPL_NO}
-    )
+    r = auth_client.post("/resolve", json={"rld_name": RLD_NAME, "application_number": APPL_NO})
     assert r.status_code == 200, r.text
     assert _query_log_count() == before
 
@@ -83,18 +75,14 @@ def test_resolve_failure_writes_no_audit_row(
 ) -> None:
     install_fake_sources(monkeypatch)
     before = _query_log_count()
-    r = auth_client.post(
-        "/resolve", json={"rld_name": "ibuprofen", "application_number": APPL_NO}
-    )
+    r = auth_client.post("/resolve", json={"rld_name": "ibuprofen", "application_number": APPL_NO})
     assert r.status_code == 422
     # Unlike /whitepaper (which logs a status="resolution_failed" row), /resolve
     # writes nothing on failure either.
     assert _query_log_count() == before
 
 
-def test_resolve_rate_limited(
-    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_resolve_rate_limited(auth_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """/resolve draws on the same per-user query budget as /whitepaper."""
     import config.settings as cs
 
