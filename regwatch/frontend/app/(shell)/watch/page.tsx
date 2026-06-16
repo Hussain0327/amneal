@@ -10,6 +10,15 @@ function str(v: unknown): string {
   return v === null || v === undefined ? "" : String(v);
 }
 
+// Canonical application number: digits only, zero-padded to six — mirroring the
+// backend's clean_application_number (NDA/ANDA prefix stripped). The watchlist
+// stores the raw FDA value (e.g. "NDA020503"); canonicalizing here makes a row
+// scoped from Watch write — and match — the SAME value the bar / White Paper pin.
+function canonAppl(v: unknown): string {
+  const digits = str(v).replace(/\D/g, "");
+  return digits ? digits.padStart(6, "0") : "";
+}
+
 export default function WatchPage() {
   const [alerts, setAlerts] = useState<AlertRecord[] | null>(null);
   const [products, setProducts] = useState<ProductRecord[] | null>(null);
@@ -155,10 +164,13 @@ function WatchlistTable({ products }: { products: ProductRecord[] | null }) {
         </thead>
         <tbody>
           {products.map((p, i) => {
-            const appl = str(p.rld_application_number);
-            const name = str(p.rld_name) || str(p.active_ingredient);
+            // Canonical name + number, so a product scoped from here is the
+            // SAME rp=/appl= pair the top bar and White Paper pin (all three
+            // write the normalized name and the six-digit application number).
+            const appl = canonAppl(p.rld_application_number);
+            const name = str(p.normalized_name) || str(p.rld_name) || str(p.active_ingredient);
             // Nothing to scope to unless the row names a reference product.
-            const scopeable = Boolean(appl || str(p.rld_name));
+            const scopeable = Boolean(appl || str(p.rld_name) || str(p.normalized_name));
             // Scoped iff this row's (name, appl) identity IS the active scope —
             // both halves, matching exactly what the button writes. Keys on the
             // pair so duplicate ANDAs sharing one RLD don't all light up, and a

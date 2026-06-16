@@ -83,7 +83,13 @@ export default function WhitepaperPage() {
       // Only scope to a product that actually resolved; use the spine's
       // canonical application number. A 422 (could not resolve) throws above,
       // so an unresolvable input never becomes the scope.
-      setProduct({ referenceProductName: r, applicationNumber: built.spine.application_number });
+      // Scope to the spine's CANONICAL identity (normalized name + number), so
+      // the same product pinned from the bar, Watch, or here is one URL value.
+      // Fall back to the typed name if the spine carries no canonical one.
+      setProduct({
+        referenceProductName: built.spine.normalized_name || r,
+        applicationNumber: built.spine.application_number,
+      });
     } catch (er) {
       setResult(null);
       if (er instanceof ApiError && er.status === 422) {

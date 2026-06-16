@@ -465,6 +465,21 @@ export function buildWhitepaper(
   });
 }
 
+// Validate an RLD name + application number into the canonical spine, without
+// running a populate. Deterministic entity resolution — the backend writes no
+// audit row and returns no answer text. Same 422 contract as buildWhitepaper:
+// `detail` explains what WAS found; postJSON surfaces it as an ApiError, never
+// a guess. Returns the bare spine.
+export function resolveProduct(
+  rldName: string,
+  applicationNumber: string,
+): Promise<WhitepaperSpine> {
+  return postJSON<WhitepaperSpine>("/resolve", {
+    rld_name: rldName,
+    application_number: applicationNumber,
+  });
+}
+
 // Content-Disposition: attachment; filename=whitepaper_020503.docx — also
 // tolerates the quoted and RFC 5987 (filename*=UTF-8''…) forms.
 function filenameFromDisposition(header: string | null): string | null {

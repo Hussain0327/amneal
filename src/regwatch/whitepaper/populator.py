@@ -2133,6 +2133,47 @@ def result_fingerprint(sections: Any) -> str:
     return hashlib.sha256(canon.encode("utf-8")).hexdigest()
 
 
+def _spine_from_ctx(ctx: _Ctx) -> dict[str, Any]:
+    """The canonical spine for a resolved context.
+
+    Single source of truth for the spine shape, shared by ``build_whitepaper``
+    and the deterministic ``resolve_spine`` (which writes no audit row).
+    """
+    return {
+        "application_number": ctx.appl_no,
+        "application_type": ctx.application_type,
+        "ingredient": ctx.ingredient,
+        "normalized_name": ctx.normalized_name,
+        "product_numbers": _unique(
+            r.get("product_no") for r in ctx.product_rows if r.get("product_no")
+        ),
+        "setid": ctx.setid,
+        "warnings": ctx.warnings,
+    }
+
+
+def resolve_spine(
+    rld_name: str,
+    application_number: str,
+    *,
+    user_id: str | None = None,
+) -> dict[str, Any]:
+    """Resolve an RLD name + application number to the canonical spine ONLY.
+
+    Runs the SAME deterministic entity resolution ``build_whitepaper`` does
+    (``_build_context``), but populates no cells, calls no LLM, and writes NO
+    ``log_query`` audit row (success or failure) — it is not an LLM turn. On an
+    unresolved or mismatched application it raises ``SpineResolutionError``
+    (the API maps it to 422 with ``.detail`` — refuse over guess).
+
+    Like ``build_whitepaper`` it performs live FDA fetches and refreshes the
+    Orange Book / SPL provenance snapshot (via ``_build_context`` → ``_persist``);
+    it simply records no audit row.
+    """
+    ctx = _build_context(rld_name, application_number, user_id=user_id)
+    return _spine_from_ctx(ctx)
+
+
 def build_whitepaper(
     rld_name: str,
     application_number: str,
@@ -2172,17 +2213,7 @@ def build_whitepaper(
 
     sections = _build_sections(ctx)
     counts = _status_counts(sections)
-    spine = {
-        "application_number": ctx.appl_no,
-        "application_type": ctx.application_type,
-        "ingredient": ctx.ingredient,
-        "normalized_name": ctx.normalized_name,
-        "product_numbers": _unique(
-            r.get("product_no") for r in ctx.product_rows if r.get("product_no")
-        ),
-        "setid": ctx.setid,
-        "warnings": ctx.warnings,
-    }
+    spine = _spine_from_ctx(ctx)
     answer_text = (
         f"White paper for {ctx.application_type} {ctx.appl_no} ({ctx.ingredient or 'n/a'}): "
         f"{counts['populated']} populated, {counts['analyst_input_required']} analyst-input, "
@@ -2220,4 +2251,5 @@ __all__ = [
     "EXTRACTORS",
     "SpineResolutionError",
     "build_whitepaper",
+    "resolve_spine",
 ]

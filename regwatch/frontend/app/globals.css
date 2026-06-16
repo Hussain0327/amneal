@@ -145,6 +145,28 @@ body::before {
   font-size: 0.76rem;
   color: var(--ink-faint);
 }
+/* Inline product picker living in the bar — resolve-backed setter. */
+.scopebar__picker {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  flex: 1;
+}
+.scopebar__field {
+  width: auto;
+  max-width: 15rem;
+  padding: 0.3rem 0.55rem;
+  font-size: 0.86rem;
+  border-radius: 6px;
+}
+.scopebar__picker .btn {
+  padding: 0.42rem 0.9rem;
+}
+.scopebar__error {
+  font-size: 0.7rem;
+  color: var(--oxblood);
+}
 
 /* ---------- Ask: conversational thread ---------- */
 .chat {

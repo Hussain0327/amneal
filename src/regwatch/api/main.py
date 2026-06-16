@@ -64,6 +64,7 @@ from regwatch.whitepaper.docx_writer import docx_media_type, write_whitepaper_do
 from regwatch.whitepaper.populator import (
     SpineResolutionError,
     build_whitepaper,
+    resolve_spine,
     result_fingerprint,
 )
 
@@ -611,6 +612,30 @@ def whitepaper(req: WhitepaperRequest, user: User = Depends(require_user)) -> di
     _enforce_query_rate_limit(user)
     try:
         return build_whitepaper(req.rld_name, req.application_number, user_id=str(user.id))
+    except SpineResolutionError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
+
+
+# ---------- /resolve ----------
+class ResolveRequest(BaseModel):
+    rld_name: str = Field(..., min_length=1, max_length=200)
+    application_number: str = Field(..., min_length=1, max_length=40)
+
+
+@protected.post("/resolve")
+def resolve(req: ResolveRequest, user: User = Depends(require_user)) -> dict[str, Any]:
+    """Resolve an RLD name + application number to the canonical spine.
+
+    Deterministic entity resolution, NOT an LLM turn: it writes NO audit row
+    (success or failure) and returns no answer text — it lets a surface pin a
+    canonical product without running a full populate. On an unresolved or
+    mismatched application it 422s with the resolver's own detail (refuse over
+    guess). Rate-limited like /query, /assemble, /whitepaper (it hits live FDA
+    sources just as they do).
+    """
+    _enforce_query_rate_limit(user)
+    try:
+        return resolve_spine(req.rld_name, req.application_number, user_id=str(user.id))
     except SpineResolutionError as exc:
         raise HTTPException(status_code=422, detail=exc.detail) from exc
 
