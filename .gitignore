@@ -36,6 +36,7 @@ build/
 # editor
 .idea/
 .vscode/
+.obsidian/
 
 # private planning notes (kept locally, not pushed)
 docs/*.txt
