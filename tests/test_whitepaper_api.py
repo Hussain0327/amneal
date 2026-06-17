@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any, NoReturn
 
 import pytest
@@ -303,10 +304,35 @@ def test_whitepaper_docx_rate_limited(
         cs.get_settings.cache_clear()
 
 
+def _all_route_paths(routes: Iterable[Any]) -> set[str]:
+    """Every route path reachable from ``routes``, recursing through routers.
+
+    FastAPI 0.137 / Starlette 1.3 stopped flattening ``include_router`` into
+    ``app.routes``: an included router now appears as an opaque ``_IncludedRouter``
+    wrapper (no ``.path``) that exposes its real routes via ``original_router``.
+    Recurse so this INV-3 check still inspects /query, /whitepaper, … instead of
+    passing vacuously over just the wrapper objects.
+    """
+    paths: set[str] = set()
+    for route in routes:
+        path = getattr(route, "path", None)
+        if isinstance(path, str):
+            paths.add(path)
+        original = getattr(route, "original_router", None)
+        sub = getattr(original, "routes", None)
+        if sub is not None:
+            paths |= _all_route_paths(sub)
+    return paths
+
+
 def test_no_draft_or_submit_endpoints() -> None:
     # The system surfaces and cites; it never authors/files (INV-3). No route may
     # be named to imply submission drafting.
-    paths = {route.path for route in app.routes}  # type: ignore[attr-defined]
+    paths = _all_route_paths(app.routes)
+    # Guard against vacuous success: if route introspection ever stops surfacing
+    # the real endpoints (as the FastAPI 0.137 upgrade did), fail loudly rather
+    # than silently asserting over an empty set.
+    assert {"/query", "/whitepaper"} <= paths
     for path in paths:
         lowered = path.lower()
         assert "draft" not in lowered

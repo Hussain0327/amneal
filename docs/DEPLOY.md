@@ -240,10 +240,20 @@ combination.
 Notes:
 
 - **White-paper template:** `CRA White Paper Template May 2026 - Raja.docx` is
-  gitignored and not in the image, so `/whitepaper/docx` generates the
-  structurally-equivalent document from scratch. To ship the real template,
-  add a `COPY` for it (or mount a volume) and point `WHITEPAPER_TEMPLATE_PATH`
-  at it.
+  gitignored (internal artifact) and deliberately **not** baked into the image.
+  The image defaults `WHITEPAPER_TEMPLATE_PATH` to
+  `/app/data/templates/cra_white_paper_template.docx` (under the data volume),
+  and the entrypoint creates that directory. To enable real-template fill:
+    - **Compose:** drop the file at `./data/templates/cra_white_paper_template.docx`
+      (the `./data:/app/data` mount makes it visible at the default path — no
+      config change needed).
+    - **Fly (this runbook attaches no volume):** either bake it into a *private*
+      overlay image (`FROM regwatch:… ; COPY cra_white_paper_template.docx
+      /app/data/templates/`) so it never enters this public repo, or attach a Fly
+      volume mounted at `/app/data/templates` and `fly sftp` the file up.
+  Absent the file, `/whitepaper/docx` returns a structurally-equivalent document
+  stamped `(generated without the official CRA template file)` and logs a
+  `whitepaper_template_missing` warning — never a silent or failed render.
 - **`data/` inside the container is scratch** in Postgres mode (raw PDFs from
   ingest runs land there). Q&A/whitepaper serving needs only Postgres; don't
   attach a volume unless you run ingest/watch on this machine.

@@ -8,8 +8,9 @@ set -eu
 : "${PROCESSED_DIR:=/app/data/processed}"
 : "${DAGSTER_CONFIG_DIR:=/app/dagster_config}"
 : "${DAGSTER_HOME:=/app/data/dagster/home}"
+: "${WHITEPAPER_TEMPLATE_PATH:=/app/data/templates/cra_white_paper_template.docx}"
 
-mkdir -p "$DATA_DIR" "$CHROMA_DIR" "$RAW_PDF_DIR" "$PROCESSED_DIR" "$(dirname "$SQLITE_PATH")" "$DAGSTER_HOME"
+mkdir -p "$DATA_DIR" "$CHROMA_DIR" "$RAW_PDF_DIR" "$PROCESSED_DIR" "$(dirname "$SQLITE_PATH")" "$DAGSTER_HOME" "$(dirname "$WHITEPAPER_TEMPLATE_PATH")"
 
 if [ -d "$DAGSTER_CONFIG_DIR" ]; then
   cp "$DAGSTER_CONFIG_DIR/dagster.yaml" "$DAGSTER_HOME/dagster.yaml"
