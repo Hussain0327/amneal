@@ -17,7 +17,8 @@ file plus [`PROD_READINESS.md`](PROD_READINESS.md) win.
   (#1–#11) where applicable. This file additionally captures product/quality and
   future items that aren't strictly launch gates.
 
-_Status: 2026-06-16, against `main` @ 9ae072e._
+_Status: 2026-06-17, against `main` — after the CI-scan hardening / Next.js 16
+upgrade (#11) that turned the newly-added supply-chain + Trivy gates green._
 
 Legend: 🔴 blocks external exposure · 🟡 should-have before launch · ⚪ decision needed · 🔵 future / optional
 
@@ -93,14 +94,27 @@ key rotation.
 - Where: `.env`, `config/settings.py`, [`DEPLOY.md`](DEPLOY.md).
 
 ### CI supply-chain & container security  (PROD_READINESS #11)
-_Largely landed 2026-06-17:_ CI now gates on `pip-audit` (Python deps, via
-`uv export`), `npm audit` (frontend), and Trivy image scans (API + web images);
-the lockfile was bumped to clear all fixable advisories. **Still open:** container
-resource limits (`compose.yaml`, `fly.toml` have none), and the one accepted
-`pip-audit` ignore — chromadb `CVE-2026-45829` (ChromaToast, server-only RCE; we
-use the embedded client + pgvector in prod) — should be dropped the moment an
-upstream fix ships.
-- Where: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), `compose.yaml`, `fly.toml`.
+_Landed 2026-06-17 (CI green):_ CI gates on `pip-audit` (Python deps, via
+`uv export`), `npm audit` (frontend prod deps), and Trivy scans of the API + web
+images. The scans were added in #10 but failed `main` on first run; #11 cleared
+all of them:
+- **`npm audit`** — `next@14.2.35` carried HIGH advisories with no patched 14.x,
+  so the frontend was upgraded **Next.js 14.2 → 16.2.9** (React stays 18.3.1; Next
+  16 peer-supports React ^18.2). This forced the ESLint-9 flat-config migration
+  (`next lint` was removed in 16; `eslint.config.mjs` replaces `.eslintrc.json`).
+- **Trivy (web image)** — two layers: the `node:20-slim` Debian packages
+  (`libgnutls30`, `libcap2`) are cleared by `apt-get upgrade`, and the npm-bundled
+  deps (`tar`/`glob`/`minimatch`/`cross-spawn`, which ship inside npm 10.8.2 — not
+  the app) are cleared by pinning **npm 11.17.0** in the web `Dockerfile`.
+- **`npm ci`** on the linux runners also needed the frontend lockfile regenerated
+  cross-platform: the macOS-generated lock omitted the linux/wasm `@emnapi` branch
+  (`@img/sharp-wasm32`), so strict `npm ci` rejected it.
+
+**Still open:** container resource limits (`compose.yaml`, `fly.toml` have none),
+and the one accepted `pip-audit` ignore — chromadb `CVE-2026-45829` (ChromaToast,
+server-only RCE; we use the embedded client + pgvector in prod) — should be
+dropped the moment an upstream fix ships.
+- Where: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), [`regwatch/frontend/`](../regwatch/frontend/), `compose.yaml`, `fly.toml`.
 
 ### Operations runbook hardening
 Incident-response + rollback procedures and an external uptime monitor (a CI

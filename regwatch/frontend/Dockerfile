@@ -11,10 +11,12 @@ RUN apt-get update \
 
 # node:20-slim ships npm 10.8.2, whose *bundled* deps (tar, glob, minimatch,
 # cross-spawn under /usr/local/lib/node_modules/npm) carry fixable CRITICAL/HIGH
-# CVEs that trivy flags. Upgrade npm to pull its current bundled set (tar 7.5.x,
-# cross-spawn dropped, etc.). This is npm's own toolchain, not the app — the
-# app's deps are pinned separately by package-lock.json below.
-RUN npm install -g npm@latest
+# CVEs that trivy flags. Pin a known-good npm whose bundled set is patched:
+# 11.17.0 ships tar 7.5.16, glob 13, minimatch 10 and drops cross-spawn. This is
+# npm's own toolchain, not the app — app deps are pinned by package-lock.json
+# below. Bump this pin when a future CVE forces it; don't float to @latest, which
+# would re-pull an unverified npm on every build (supply-chain surface).
+RUN npm install -g npm@11.17.0
 
 ENV NEXT_TELEMETRY_DISABLED=1
 

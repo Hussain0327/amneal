@@ -178,11 +178,19 @@ Each item notes where it lives in the tree so the work is actionable cold.
 - **Done when:** secrets are sourced from approved platform/secret-manager
   injection and rotation is documented/tested.
 
-### 11. Supply-chain & security in CI
+### 11. Supply-chain & security in CI  ✅ landed 2026-06-17
 - **Where:** [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
-- **Gap:** runs ruff/black/mypy/pytest/eval/docker-build, but no dependency
-  audit or container image scan.
-- **Done when:** `pip-audit`/`uv` audit + container scan (e.g. Trivy) gate CI.
+- **Done:** CI gates on `pip-audit` (Python, via `uv export`), `npm audit`
+  (frontend prod deps), and Trivy scans of the API + web images. The scans were
+  added in #10 and turned green in #11: Next.js 14.2 → 16.2.9 (React stays 18;
+  no patched 14.x existed for the HIGH advisories) with the ESLint-9 flat-config
+  migration (`next lint` removed in 16); the web image runs `apt-get upgrade` +
+  pins npm 11.17.0 (clearing the base image's Debian + npm-bundled-dep CVEs); and
+  the frontend lockfile was regenerated cross-platform (it had omitted the
+  linux/wasm `@emnapi` branch, which broke `npm ci` on the runners).
+- **Residual:** container resource limits (none in `compose.yaml`/`fly.toml`), and
+  the one accepted `pip-audit` ignore (chromadb `CVE-2026-45829`, server-only RCE;
+  embedded client + pgvector in prod) — drop it when an upstream fix ships.
 
 ---
 
