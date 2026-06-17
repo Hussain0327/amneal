@@ -9,6 +9,13 @@ RUN apt-get update \
     && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/*
 
+# node:20-slim ships npm 10.8.2, whose *bundled* deps (tar, glob, minimatch,
+# cross-spawn under /usr/local/lib/node_modules/npm) carry fixable CRITICAL/HIGH
+# CVEs that trivy flags. Upgrade npm to pull its current bundled set (tar 7.5.x,
+# cross-spawn dropped, etc.). This is npm's own toolchain, not the app — the
+# app's deps are pinned separately by package-lock.json below.
+RUN npm install -g npm@latest
+
 ENV NEXT_TELEMETRY_DISABLED=1
 
 WORKDIR /app
