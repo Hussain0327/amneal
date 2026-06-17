@@ -678,9 +678,12 @@ form, clarify) that backstops any caller who bypassed the resolver.
   prices it from a settings table, leaving the column `NULL` rather than guessing.
 - **Runbook:** rollback one-liner, restore drill, and operations notes live in
   [`DEPLOY.md`](DEPLOY.md) §6.
-- **Docker:** the CRA template `.docx` is gitignored, so a deploy-time patch adds
-  its `COPY` to the Dockerfile (documented in `DEPLOY.md`) rather than committing
-  a COPY that would break CI's docker build.
+- **Docker:** the CRA template `.docx` is gitignored (internal), so it is never
+  baked in. `WHITEPAPER_TEMPLATE_PATH` defaults to
+  `/app/data/templates/cra_white_paper_template.docx` under the mounted data
+  volume; an operator drops the file there (or, on Fly, bakes a private overlay)
+  per `DEPLOY.md`. Absent it the writer falls back loudly — CI's docker build and
+  `/whitepaper/docx` both stay green either way.
 - **Open observability work** (`docs/ROADMAP.md`): exporting request/latency/cost
   metrics, a real readiness probe (DB + vector store + LLM reachability — distinct
   from `/health`'s liveness), and a Sentry DSN actually configured in prod.

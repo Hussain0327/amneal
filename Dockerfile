@@ -25,6 +25,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     RAW_PDF_DIR=/app/data/raw \
     PROCESSED_DIR=/app/data/processed \
     EMBEDDING_PROVIDER=echo \
+    WHITEPAPER_TEMPLATE_PATH=/app/data/templates/cra_white_paper_template.docx \
     DAGSTER_CONFIG_DIR=/app/dagster_config \
     DAGSTER_HOME=/app/data/dagster/home \
     API_HOST=0.0.0.0 \
@@ -64,6 +65,13 @@ RUN chmod +x /usr/local/bin/regwatch-entrypoint \
         uv sync --frozen --extra llm --extra orchestration --no-dev; \
     fi
 
+# The CRA White Paper Word template is gitignored (internal artifact) and is
+# deliberately NOT baked into the image. WHITEPAPER_TEMPLATE_PATH (set above)
+# defaults to a path under the mounted /app/data volume, so an operator drops
+# the official .docx at data/templates/cra_white_paper_template.docx to enable
+# real-template fill. Absent it, POST /whitepaper/docx still returns a
+# structurally-equivalent document stamped "(generated without the official CRA
+# template file)" — see docs/DEPLOY.md and src/regwatch/whitepaper/docx_writer.py.
 EXPOSE 8000 4000
 
 ENTRYPOINT ["regwatch-entrypoint"]

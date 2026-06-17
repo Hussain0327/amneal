@@ -93,15 +93,22 @@ key rotation.
 - Where: `.env`, `config/settings.py`, [`DEPLOY.md`](DEPLOY.md).
 
 ### CI supply-chain & container security  (PROD_READINESS #11)
-CI runs ruff/black/mypy/pytest/eval/docker-build but no dependency audit or image
-scan. Add `pip-audit`/`uv` audit + a container scan (e.g. Trivy) as CI gates, and
-container resource limits.
-- Where: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
+_Largely landed 2026-06-17:_ CI now gates on `pip-audit` (Python deps, via
+`uv export`), `npm audit` (frontend), and Trivy image scans (API + web images);
+the lockfile was bumped to clear all fixable advisories. **Still open:** container
+resource limits (`compose.yaml`, `fly.toml` have none), and the one accepted
+`pip-audit` ignore — chromadb `CVE-2026-45829` (ChromaToast, server-only RCE; we
+use the embedded client + pgvector in prod) — should be dropped the moment an
+upstream fix ships.
+- Where: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), `compose.yaml`, `fly.toml`.
 
 ### Operations runbook hardening
-Incident-response + rollback procedures, an external uptime monitor (+ a CI uptime
-backstop), and a baked-in or volume-mounted CRA White Paper template (the
-`CRA White Paper Template May 2026 - Raja.docx` is not in the image).
+Incident-response + rollback procedures and an external uptime monitor (a CI
+uptime backstop already exists in `uptime-eval.yml`). The CRA White Paper template
+is now wired via a documented mount convention (`WHITEPAPER_TEMPLATE_PATH` defaults
+to `/app/data/templates/cra_white_paper_template.docx`; absent it the docx writer
+falls back loudly) — _resolved 2026-06-17_; the remaining piece is operationally
+*placing* the file on the chosen platform (Compose volume vs. Fly private overlay).
 - Where: [`DEPLOY.md`](DEPLOY.md) (Operations), `docker/`.
 
 ---

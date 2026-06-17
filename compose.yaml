@@ -14,6 +14,12 @@ x-regwatch-environment: &regwatch-environment
   SQLITE_PATH: /app/data/regwatch.db
   RAW_PDF_DIR: /app/data/raw
   PROCESSED_DIR: /app/data/processed
+  # CRA White Paper Word template. Lives under the mounted ./data volume, so
+  # dropping the official .docx at ./data/templates/cra_white_paper_template.docx
+  # enables real-template fill; absent it the docx writer falls back to a
+  # structurally-equivalent document with a visible "(generated without the
+  # official CRA template file)" marker. The template is gitignored (internal).
+  WHITEPAPER_TEMPLATE_PATH: /app/data/templates/cra_white_paper_template.docx
   # Empty -> SQLite + Chroma under /app/data (local default). Set to a Postgres
   # URL (Supabase session pooler) to move the structured store AND vectors
   # (pgvector) to Postgres — see docs/DEPLOY.md.

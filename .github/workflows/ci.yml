@@ -74,6 +74,38 @@ jobs:
         if: env.OPENAI_API_KEY == ''
         run: echo "Skipping live eval because OPENAI_API_KEY is not configured; pytest runs the deterministic eval gate."
 
+  python-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+
+      # Audit the SHIPPED production closure: the slim image installs llm +
+      # orchestration (Dockerfile default INSTALL_LOCAL_EMBEDDINGS=false; Fly runs
+      # EMBEDDING_PROVIDER=openai), so torch/transformers from `local-embeddings`
+      # never reach prod and are intentionally out of scope here — gating prod CI
+      # on that heavyweight ML extra's noisy, slow-to-fix CVE cadence would add
+      # churn with no prod exposure. --frozen also asserts uv.lock matches pyproject.
+      - name: export runtime dependency set
+        run: >-
+          uv export --frozen --no-emit-project --no-dev
+          --extra llm --extra orchestration
+          --format requirements-txt --output-file requirements-audit.txt
+
+      # chromadb CVE-2026-45829 (ChromaToast) is a pre-auth RCE in the standalone
+      # Chroma HTTP *server*; REGWATCH uses the embedded PersistentClient (and
+      # pgvector in prod), so the vulnerable path is never reachable. No upstream
+      # fix is published — remove this ignore the moment one ships.
+      - name: pip-audit (python deps)
+        run: uvx pip-audit -r requirements-audit.txt --ignore-vuln CVE-2026-45829
+
   docker-build:
     runs-on: ubuntu-latest
     steps:
@@ -89,6 +121,28 @@ jobs:
 
       - name: frontend docker build
         run: docker build -t regwatch-web:ci regwatch/frontend
+
+      # Container image scan. Fails on FIXABLE CRITICAL/HIGH vulns only
+      # (--ignore-unfixed): base-image OS packages routinely carry CVEs with no
+      # released fix, and failing on those would just pin the build to a moving
+      # target with no action to take. Trivy caches its DB across runs.
+      - name: trivy scan (API image)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            aquasec/trivy:latest image \
+            --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
+            --scanners vuln regwatch:ci
+
+      - name: trivy scan (web image)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            aquasec/trivy:latest image \
+            --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
+            --scanners vuln regwatch-web:ci
 
   frontend:
     runs-on: ubuntu-latest
@@ -107,6 +161,13 @@ jobs:
       - name: install frontend deps
         working-directory: regwatch/frontend
         run: npm ci
+
+      # Supply-chain gate on what actually ships: production deps only
+      # (--omit=dev), failing on high/critical advisories. Dev-only build-tool
+      # advisories don't reach the served app and shouldn't block the build.
+      - name: npm audit (production deps)
+        working-directory: regwatch/frontend
+        run: npm audit --omit=dev --audit-level=high
 
       - name: frontend lint
         working-directory: regwatch/frontend
