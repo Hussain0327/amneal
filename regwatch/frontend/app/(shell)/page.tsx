@@ -84,6 +84,11 @@ function AskView() {
   // The question of the in-flight run, handed back to the composer if stopped.
   const lastQuestionRef = useRef("");
 
+  // This effect synchronizes local chat state to the URL `session` param: every
+  // setState in it is an intentional reset/sync (new chat, switch, or load), not
+  // a cascading-render bug. set-state-in-effect is a new rule in
+  // eslint-config-next 16's react-hooks plugin; disable it for the whole effect.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!urlSession) {
       // New chat: abort anything in flight, back to the empty state. Reset
@@ -128,6 +133,7 @@ function AskView() {
       cancelled = true;
     };
   }, [urlSession, refreshSessions, setActiveSessionId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Abort any in-flight stream on unmount.
   useEffect(() => () => controllerRef.current?.abort(), []);

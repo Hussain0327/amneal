@@ -40,6 +40,9 @@ export default function WatchPage() {
   }, []);
 
   useEffect(() => {
+    // load() clears error state and fetches on mount; the synchronous
+    // setError(null)/setProductError(null) reset inside load() is intentional.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
   }, [load]);
 

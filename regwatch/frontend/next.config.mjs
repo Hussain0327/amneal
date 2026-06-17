@@ -25,17 +25,15 @@ if (process.env.VERCEL === "1" && API_PROXY_TARGET === "http://127.0.0.1:8000") 
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Next 14 gates instrumentation.ts (where Sentry's server/edge configs load)
-  // behind this flag; it is on by default from Next 15.
-  experimental: {
-    instrumentationHook: true,
-  },
+  // instrumentation.ts (where Sentry's server/edge configs load) is on by
+  // default from Next 15+, so the old experimental.instrumentationHook flag is
+  // gone — no config needed here.
   async rewrites() {
     return [{ source: "/api/:path*", destination: `${API_PROXY_TARGET}/:path*` }];
   },
   // Security response headers. The app is a cookie-authed origin reachable over
   // a public tunnel, so the simple anti-clickjacking / sniffing / referrer
-  // headers are enforced immediately. The CSP ships Report-Only first: Next 14's
+  // headers are enforced immediately. The CSP ships Report-Only first: Next's
   // App Router emits unnonced inline bootstrap/hydration scripts and the UI uses
   // inline style attributes, so an enforced default-src would need 'unsafe-inline'
   // anyway — observe violations in Report-Only, then promote to enforced once the
@@ -50,7 +48,7 @@ const nextConfig = {
       "img-src 'self' data:",
       "font-src 'self'",
       "style-src 'self' 'unsafe-inline'",
-      // Next 14 App Router injects inline bootstrap scripts without a nonce.
+      // Next App Router injects inline bootstrap scripts without a nonce.
       "script-src 'self' 'unsafe-inline'",
       // Same-origin /api proxy covers the backend; Sentry ingest is allowed for
       // when NEXT_PUBLIC_SENTRY_DSN is set (no-op otherwise).
@@ -81,7 +79,9 @@ export default withSentryConfig(nextConfig, {
   silent: true,
   telemetry: false,
   sourcemaps: { disable: true },
-  // Tree-shake the SDK's debug logging out of the production bundle.
-  webpack: { treeshake: { removeDebugLogging: true } },
+  // Tree-shake the SDK's debug logging out of the production bundle. Bundler-
+  // agnostic, so it still applies under Next 16's default Turbopack build (the
+  // old webpack.treeshake option was silently ignored once Turbopack took over).
+  bundleSizeOptimizations: { excludeDebugStatements: true },
   // Replay and tunneling intentionally not configured.
 });
