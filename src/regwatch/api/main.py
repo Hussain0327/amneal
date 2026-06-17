@@ -8,6 +8,7 @@ Endpoints (per spec §10.16):
     POST   /auth/logout    — revoke the session cookie
     GET    /auth/me        — current user
     POST   /query          — grounded Q&A (auth)
+    POST   /query/stream   — grounded Q&A, streamed as Server-Sent Events (auth)
     POST   /feedback       — thumbs up/down on one of the caller's answers (auth)
     POST   /sources/search — structured FDA source lookup (auth)
     POST   /assemble       — build a cited dossier for a target product (auth)
@@ -25,6 +26,8 @@ Endpoints (per spec §10.16):
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import re
 from collections.abc import AsyncIterator
@@ -34,8 +37,9 @@ from typing import Any
 
 from config.settings import Settings, get_settings
 from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, text, update
@@ -51,7 +55,7 @@ from regwatch.common.conversation import SessionOwnershipError
 from regwatch.common.logging import configure_logging, get_logger
 from regwatch.common.observability import capture_exception, init_sentry
 from regwatch.common.ratelimit import LOGIN_ATTEMPTS_PER_MINUTE, login_limiter, query_limiter
-from regwatch.generate.grounded_qa import ask
+from regwatch.generate.grounded_qa import QAResult, ask
 from regwatch.process.embedder import assert_embedding_runtime_available
 from regwatch.sources.router import search_sources
 from regwatch.sources.types import SourceKind, SourceQuery
@@ -420,6 +424,33 @@ def _authorize_session_access(session_id: str, user_id: str) -> None:
             raise HTTPException(status_code=404, detail="session not found")
 
 
+def _build_query_response(result: QAResult) -> QueryResponse:
+    """Serialize a validated QAResult into the wire QueryResponse.
+
+    Shared by POST /query and POST /query/stream so the two endpoints can never
+    drift in shape. The missing-session-metadata guard is a real 500 for the
+    buffered /query path; the streaming path catches it and closes without a
+    result frame (the client then falls back to /query, which surfaces the 500).
+    """
+    if result.session_id is None or result.turn_id is None:
+        raise HTTPException(status_code=500, detail="query did not produce session metadata")
+    return QueryResponse(
+        answer=result.answer,
+        citations=[QueryCitation(**c.__dict__) for c in result.citations],
+        refused=result.refused,
+        model_name=result.model_name,
+        audit_id=result.audit_id,
+        session_id=result.session_id,
+        turn_id=result.turn_id,
+        status=result.status,
+        interpretation=result.interpretation,
+        clarify=[
+            ClarifyOptionOut(label=o.label, query=o.query, filters=o.filters)
+            for o in result.clarify
+        ],
+    )
+
+
 @protected.post("/query", response_model=QueryResponse)
 def query(req: QueryRequest, user: User = Depends(require_user)) -> QueryResponse:
     _enforce_query_rate_limit(user)
@@ -438,22 +469,101 @@ def query(req: QueryRequest, user: User = Depends(require_user)) -> QueryRespons
         # An ownership race lost after the pre-check above — same 404 as any
         # other foreign session, never confirming the session exists.
         raise HTTPException(status_code=404, detail="session not found") from exc
-    if result.session_id is None or result.turn_id is None:
-        raise HTTPException(status_code=500, detail="query did not produce session metadata")
-    return QueryResponse(
-        answer=result.answer,
-        citations=[QueryCitation(**c.__dict__) for c in result.citations],
-        refused=result.refused,
-        model_name=result.model_name,
-        audit_id=result.audit_id,
-        session_id=result.session_id,
-        turn_id=result.turn_id,
-        status=result.status,
-        interpretation=result.interpretation,
-        clarify=[
-            ClarifyOptionOut(label=o.label, query=o.query, filters=o.filters)
-            for o in result.clarify
-        ],
+    return _build_query_response(result)
+
+
+def _sse_event(name: str, data: dict[str, Any]) -> str:
+    """One Server-Sent Events frame. The Ask client (askQueryStream) parses only
+    two event names: ``status`` (``{"text": ...}`` progress) and ``result`` (the
+    full QueryResponse). Any other name is ignored, so we emit only these."""
+    return f"event: {name}\ndata: {json.dumps(data)}\n\n"
+
+
+async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[str]:
+    """SSE body for POST /query/stream.
+
+    Streams real pipeline progress as ``status`` frames, then the validated
+    answer as exactly ONE terminal ``result`` frame — never any answer text
+    before it (INV-1: the answer only exists post citation-validation, inside
+    ask()). ask() runs in a worker thread so its progress callback can push
+    status lines onto the event loop while it works, and writes exactly one audit
+    row internally (INV-6, never duplicated). Once ask() has been dispatched onto
+    its thread it runs to completion even if the client then disconnects (the
+    threadpool is non-abandoning), so that turn is still audited; a disconnect in
+    the narrow window BEFORE dispatch cancels the work before it starts and writes
+    no row — correct, since nothing ran to audit. On any unexpected failure the
+    stream closes with no ``result`` frame, which makes the client fall back to
+    blocking POST /query exactly once.
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+    def on_progress(textline: str) -> None:
+        # Runs on the ask() worker thread — hand the line to the loop thread.
+        loop.call_soon_threadsafe(queue.put_nowait, ("status", textline))
+
+    async def _run() -> None:
+        try:
+            result = await run_in_threadpool(
+                ask,
+                req.question,
+                filters=req.filters,
+                k=req.k,
+                session_id=req.session_id,
+                user_id=user_id,
+                on_progress=on_progress,
+            )
+            queue.put_nowait(("result", result))
+        except SessionOwnershipError:
+            # Ownership lost after the pre-flight check — close, let /query 404.
+            queue.put_nowait(("error", None))
+        except Exception as exc:  # broad: any escape closes the stream for fallback
+            log.warning("query_stream_failed", exc_info=True)
+            capture_exception(exc)
+            queue.put_nowait(("error", None))
+
+    worker = asyncio.create_task(_run())
+    try:
+        yield _sse_event("status", {"text": "Consulting the corpus…"})
+        while True:
+            kind, payload = await queue.get()
+            if kind == "status":
+                yield _sse_event("status", {"text": payload})
+                continue
+            if kind == "result":
+                try:
+                    response = _build_query_response(payload)
+                except HTTPException:
+                    log.warning("query_stream_missing_session_metadata")
+                    return  # close without a result frame -> client falls back
+                yield f"event: result\ndata: {response.model_dump_json()}\n\n"
+                return
+            # kind == "error": close without a result frame -> client falls back.
+            return
+    finally:
+        worker.cancel()
+
+
+@protected.post("/query/stream")
+def query_stream(req: QueryRequest, user: User = Depends(require_user)) -> StreamingResponse:
+    """Streaming twin of POST /query (Server-Sent Events).
+
+    Same auth, rate limit, ownership, pipeline, and single audit row as /query;
+    it streams live progress as ``status`` frames and the SAME validated
+    QueryResponse as one terminal ``result`` frame (both built via
+    _build_query_response, so the shapes cannot drift). The Ask UI consumes this
+    and transparently falls back to POST /query if the stream fails. Rate-limit
+    (429), ownership (404), and auth (401) are enforced BEFORE the stream opens,
+    as real HTTP statuses — never mid-stream.
+    """
+    _enforce_query_rate_limit(user)
+    user_id = str(user.id)
+    if req.session_id:
+        _authorize_session_access(req.session_id, user_id)
+    return StreamingResponse(
+        _query_event_stream(req, user_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

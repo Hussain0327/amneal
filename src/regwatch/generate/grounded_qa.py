@@ -16,6 +16,7 @@ Flow:
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -589,6 +590,7 @@ def ask(
     user_id: str | None = None,
     turn_id: str | None = None,
     bind_session: bool = True,
+    on_progress: Callable[[str], None] | None = None,
 ) -> QAResult:
     """Grounded Q&A entry point — answer with citations, clarify, or refuse.
 
@@ -596,8 +598,22 @@ def ask(
     the bookkeeping ChatSession stays unowned (user_id NULL) and so invisible
     to /sessions — for internal callers like the dossier, whose synthetic Q&A
     must not appear in the caller's chat history.
+
+    ``on_progress`` (optional) receives short, cosmetic phase strings as the
+    pipeline advances, for a live status ticker (POST /query/stream). It carries
+    NO answer text or citations — INV-1 lives entirely in the post-validation
+    answer path below — and a failing sink can never break or slow the query.
     """
     s = get_settings()
+
+    def _emit(textline: str) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(textline)
+        except Exception:  # broad: progress is best-effort, never fatal
+            log.debug("on_progress_failed", exc_info=True)
+
     model_name = current_model_name(role="synthesizer")
     # Session bookkeeping is best-effort: a DB hiccup here must never stop the query
     # from being processed and audited (INV-6). Degrade to a fresh id on failure.
@@ -890,6 +906,7 @@ def ask(
         context_applied=context_applied,
         response_mode=response_mode,
     )
+    _emit("Searching the FDA guidance corpus…")
     passages = retrieve(question, k=k, filters=active_filters)
     # Stage 2: optional rerank, then trim to RERANK_TOP_K.
     passages = rerank_passages(question, passages)
@@ -991,12 +1008,14 @@ def ask(
             route_json=route_json,
         )
 
+    _emit(f"Reading {len(passages)} matching guidance passage(s)…")
     user_prompt = GROUNDED_QA_USER.format(
         question=question,
         passages=_format_passages(passages),
     )
     system_prompt = GROUNDED_QA_SYSTEM.format(refusal=s.refusal_text)
 
+    _emit("Composing a cited answer…")
     provider = get_llm_provider(role="synthesizer")
     try:
         response = provider.complete(
