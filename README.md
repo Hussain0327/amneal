@@ -5,9 +5,11 @@ It replaces a multi-day manual FDA research task with cited answers in minutes:
 every answer carries a source and a page, or an explicit "not found."
 
 REGWATCH synthesizes across six FDA sources (Orange Book, Drugs@FDA, DailyMed/NDC,
-Drug Shortages, REMS, and Product-Specific Guidances). It watches PSGs, matches
-changes against the company's product pipeline, extracts cited bioequivalence
-requirements, and answers plain-language questions over the guidance corpus.
+Drug Shortages, REMS, and Product-Specific Guidances), always scoped to one
+product "under review" at a time so citations can't cross drugs. It watches PSGs,
+matches changes against the company's product pipeline, extracts cited
+bioequivalence requirements, and answers plain-language questions over the
+guidance corpus.
 
 **This is a POC, not a production deployment.** It surfaces, organizes,
 compares, and cites public FDA information. It does not author submission
@@ -53,6 +55,9 @@ flowchart TD
     REFUSE3 --> FINAL
     ANSWER --> FINAL
 ```
+
+The canonical system design lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md);
+this is the request-level view of the Ask path.
 
 ## Screenshots
 
@@ -141,14 +146,12 @@ These are code with tests, not guidelines. See `tests/test_invariants.py`.
 | INV-6 | Every query is audited | `common/audit.py` writes a `query_log` row on every Q&A path (now with `session_id`/`turn_id`/`status`/`route_json`) |
 | INV-9 | PSG answers are always product-resolved and ingredient-filtered — no cross-drug citation can survive | `retrieve/resolver.py` resolves the product before retrieval; `generate/grounded_qa.py` forces a `normalized_name` filter; `tests/test_cross_drug_leak.py` |
 
-<!--
-INV numbering: this table runs INV-1..INV-6 then jumps to INV-9. Add a one-line
-note here on why 7 and 8 are absent (retired / merged into the rows above /
-renumbered) and link docs/DECISIONS.md - OR renumber INV-9 to INV-7 if nothing
-references the ID. Caution: tests/test_cross_drug_leak.py and several docs
-reference INV-9 by name, so confirm and update those references before any
-renumber. Pick one and delete this comment.
--->
+> Invariant IDs are stable identifiers, not a contiguous range. There is no
+> INV-7 or INV-8 in force; the IDs are kept fixed so that code and docs that
+> reference an invariant by name (for example `INV-9` in
+> `tests/test_cross_drug_leak.py`) stay valid. See
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full set and
+> [`docs/DECISIONS.md`](docs/DECISIONS.md) for rationale.
 
 ## Stack
 
@@ -217,21 +220,15 @@ instead of relying on `SQLModel.metadata.create_all`.
 
 ## Docs
 
-Start with [`docs/README.md`](docs/README.md) for the documentation map.
-Key guides:
+Start with [`docs/map.md`](docs/map.md), the Map of Content: how the system fits
+together, plus a link to every living doc grouped by purpose. Highest-value
+entry points:
 
-- [`docs/NON_TECH_GUIDE.md`](docs/NON_TECH_GUIDE.md) for business and
-  regulatory stakeholders.
-- [`docs/TECH_GUIDE_SIMPLE.md`](docs/TECH_GUIDE_SIMPLE.md) for technical
-  onboarding.
-- [`docs/CONVERSATIONAL_SESSIONS.md`](docs/CONVERSATIONAL_SESSIONS.md) for the
-  chat-session / follow-up model.
-- [`docs/DOCKER.md`](docs/DOCKER.md) for container setup and ingest notes.
-- [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md) for the POC→production path.
-- [`docs/DEPLOY.md`](docs/DEPLOY.md) for the production runbook (Supabase +
-  Fly.io/Railway + Vercel) and the Operations section: rollback, uptime
-  monitoring, and the monthly staging restore drill.
-- [`docs/DECISIONS.md`](docs/DECISIONS.md) for the append-only decision log.
+- [Architecture](docs/ARCHITECTURE.md): canonical system design.
+- [Non-technical guide](docs/NON_TECH_GUIDE.md): plain English for business and
+  regulatory readers.
+- [Production readiness](docs/PROD_READINESS.md): the POC-to-production path.
+- [Decisions](docs/DECISIONS.md): append-only log of what was picked and why.
 
 ## Docker
 
