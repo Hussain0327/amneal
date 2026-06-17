@@ -1,17 +1,74 @@
 # regwatch
 
 A regulatory prep accelerator for a generic-drug Clinical Regulatory Affairs team.
+It replaces a multi-day manual FDA research task with cited answers in minutes:
+every answer carries a source and a page, or an explicit "not found."
 
-It watches FDA Product-Specific Guidances (PSGs), matches changes against the
-company's product pipeline, extracts cited bioequivalence requirements, and
-answers plain-language questions over the FDA guidance corpus. Every answer
-carries a source and a page, or an explicit "not found."
+REGWATCH synthesizes across six FDA sources (Orange Book, Drugs@FDA, DailyMed/NDC,
+Drug Shortages, REMS, and Product-Specific Guidances). It watches PSGs, matches
+changes against the company's product pipeline, extracts cited bioequivalence
+requirements, and answers plain-language questions over the guidance corpus.
 
 **This is a POC, not a production deployment.** It surfaces, organizes,
 compares, and cites public FDA information. It does not author submission
 content, render regulatory judgment, or take autonomous action. See
 [Section 4 of the spec](#compliance-invariants) for the invariants that
 encode this.
+
+## Request flow
+
+How a question moves through the **Ask** path, from input to an audited answer
+or an explicit refusal. Assemble and White Paper follow the same discipline
+(resolve the product first, then cite or decline) over structured FDA sources.
+
+```mermaid
+flowchart TD
+    Q["User question<br/>(+ session, filters, k)"] --> AUTH{"Authenticated?"}
+    AUTH -- "no" --> E401["401"]
+    AUTH -- "yes" --> AUDIT["Write query_log row<br/>INV-6 - every query audited"]
+    AUDIT --> ROUTER["Router LLM<br/>classify intent and route"]
+
+    ROUTER --> NAMED{"Product resolvable?"}
+    NAMED -- "none or several" --> CLARIFY["clarify<br/>return clickable options"]
+    NAMED -- "strategy ask" --> SCOPE["scope_warning<br/>report, never advise (INV-3)"]
+    NAMED -- "one product" --> RESOLVE["Resolve product, deterministic<br/>canonical name + application no."]
+
+    RESOLVE --> MATCH{"Name matches number?"}
+    MATCH -- "no" --> REFUSE1["refused<br/>refuse-over-guess (422)"]
+    MATCH -- "yes" --> RETRIEVE["Stage 1, vector top-k 50<br/>ingredient-filtered, current PSG version<br/>INV-9 - no cross-drug citation"]
+
+    RETRIEVE --> RERANK["Stage 2, rerank to top-k 8<br/>reranker optional"]
+    RERANK --> PRECHK{"Top score above threshold?"}
+    PRECHK -- "no" --> REFUSE2["refused<br/>INV-2 - weak retrieval refuses"]
+    PRECHK -- "yes" --> SYNTH["Synthesize LLM<br/>grounded answer + inline citations"]
+
+    SYNTH --> VALID{"Every claim cited to<br/>a retrievable source?"}
+    VALID -- "no" --> REFUSE3["refused<br/>INV-1 - cite or refuse"]
+    VALID -- "yes" --> ANSWER["answer<br/>answer + citation chips"]
+
+    CLARIFY --> FINAL["Finalize audit row<br/>status, route, citations"]
+    SCOPE --> FINAL
+    REFUSE1 --> FINAL
+    REFUSE2 --> FINAL
+    REFUSE3 --> FINAL
+    ANSWER --> FINAL
+```
+
+## Screenshots
+
+<!-- TODO: add the three PNGs to docs/img/ and commit them. Until then these render as broken-image placeholders. Claude cannot generate your actual UI screenshots. -->
+
+**Ask: cited conversational Q&A**
+
+![Ask: cited chat with citation chips, clarify pills, and refuse-or-cite](docs/img/ask-chat.png)
+
+**White Paper: cell-by-cell provenance**
+
+![White Paper: filled CRA template, each cell carrying source, locator, and fetched_at](docs/img/whitepaper.png)
+
+**Eval: CI gates passing**
+
+![Eval scorecard: recall@k, citation precision, and refusal accuracy above their gates](docs/img/eval-scorecard.png)
 
 ## What it does, exactly
 
@@ -83,6 +140,15 @@ These are code with tests, not guidelines. See `tests/test_invariants.py`.
 | INV-5 | Verified provenance only | `WatchlistEntry.__post_init__` rejects sources outside `{drugsfda, anda_letter, manual}` |
 | INV-6 | Every query is audited | `common/audit.py` writes a `query_log` row on every Q&A path (now with `session_id`/`turn_id`/`status`/`route_json`) |
 | INV-9 | PSG answers are always product-resolved and ingredient-filtered — no cross-drug citation can survive | `retrieve/resolver.py` resolves the product before retrieval; `generate/grounded_qa.py` forces a `normalized_name` filter; `tests/test_cross_drug_leak.py` |
+
+<!--
+INV numbering: this table runs INV-1..INV-6 then jumps to INV-9. Add a one-line
+note here on why 7 and 8 are absent (retired / merged into the rows above /
+renumbered) and link docs/DECISIONS.md - OR renumber INV-9 to INV-7 if nothing
+references the ID. Caution: tests/test_cross_drug_leak.py and several docs
+reference INV-9 by name, so confirm and update those references before any
+renumber. Pick one and delete this comment.
+-->
 
 ## Stack
 
@@ -373,46 +439,53 @@ Definition of Done passed before moving on.
 
 ## What's not done
 
-- **The LLM/data-handling decision is still open (D1).** Whether the team runs
-  on a BAA/zero-retention vendor agreement or an in-house OpenAI-compatible
-  model is a business/compliance call that must be logged in
+### Intentional POC scope (deliberate boundaries, not gaps)
+
+- **Starter gold set.** 12 items (6 real + 5 must-refuse + 1 must-clarify) with
+  mechanical scoring (`(short_name, page)` + `expected_facts` substrings).
+  Expansion to the spec's 30–50 items plus LLM-as-judge is the planned hardening
+  step, fed by the answer-feedback candidate pool.
+- **Reranker is a hook, off by default.** Turn on with `RERANKER_ENABLED=true`
+  and tune `VECTOR_TOP_K` upward.
+- **persist-and-cite + freshness is White-Paper-first.** It persists Orange Book
+  and DailyMed SPL provenance with `last_fetched_at` (migration 0005) and
+  synthesizes across Orange Book, Drugs@FDA, NDC, DailyMed, Shortages, REMS, and
+  PSG. It is **not yet applied to the Ask/Assemble read paths**, whose source
+  handlers (`sources/`) still query live HTTP without persisting source rows or
+  freshness. Proven on one surface before generalizing.
+- **Ask returns a blocking answer, not token-by-token streaming.** There is no
+  `/query/stream` endpoint; the streaming-capable client falls back to a
+  blocking `POST /query` (the thinking ticker is honest, not faked). Building it
+  must preserve INV-1 (no answer text before a validated citation) and still
+  write exactly one audit row.
+
+### Production checklist (IT/QA owns this before external exposure)
+
+- **D1, the LLM/data-handling decision.** Whether the team runs on a
+  BAA/zero-retention vendor agreement or an in-house OpenAI-compatible model is a
+  business/compliance call that must be logged in
   [`docs/DECISIONS.md`](docs/DECISIONS.md). It blocks a real launch.
-- **Auth is app-layer only.** Cookie-session auth, CLI-provisioned users,
+- **Auth and network hardening.** Cookie-session auth, CLI-provisioned users,
   per-user chat history, and per-user rate limiting exist, but TLS, OIDC/SSO,
-  and a production gateway are still environment work before external exposure.
-  Set `AUTH_COOKIE_SECURE=true` once TLS terminates. The rate limiter is
+  and a production gateway are still environment work. Set
+  `AUTH_COOKIE_SECURE=true` once TLS terminates. The rate limiter is
   in-memory/per-process, so distributed (gateway) rate limiting is a gap on
   multi-replica deploys.
-- **The Postgres/pgvector path is code + runbook ready, not yet provisioned.**
-  `DATABASE_URL` switches the structured store to Postgres and vectors to
-  pgvector in the same DB; `REQUIRE_DATABASE_URL=true` refuses the SQLite
-  fallback in prod; pgvector dimension checks fail fast; and a Postgres boot
-  verifies the Alembic stamp == head and refuses to start on a mismatch. Still
-  open: a managed Postgres/pgvector actually provisioned, migration from a
-  clean snapshot, a restore drill (`scripts/restore_drill.sh`) exercised
-  against staging, and least-privilege app DB creds. Migrations still run on
-  app boot (verification only) rather than as a gated deploy step — that gate
-  and a rehearsed rollback/roll-forward are open. Rollback and uptime
-  monitoring are documented in [`docs/DEPLOY.md`](docs/DEPLOY.md) (Operations).
-- The gold set is 12 items, not the spec's 30–50, and scoring is mechanical
-  (`(short_name, page)` + `expected_facts` substrings). LLM-as-judge is not wired.
-- The cross-encoder reranker exists as a hook but is off by default. Turn
-  on with `RERANKER_ENABLED=true` and tune `VECTOR_TOP_K` upward.
-- Scheduling covers only the watch pipeline (`regwatch watch`, daily via the
-  Dagster schedule). A production Watch worker/scheduler with monitored run
-  history and partial-ingest recovery is not yet deployed, and broad corpus
-  ingest (`regwatch ingest-all`) is still run on demand.
-- The **persist-and-cite + freshness** pattern is wired for the White Paper —
-  it persists Orange Book and DailyMed SPL provenance with `last_fetched_at`
-  (migration 0005) and synthesizes across Orange Book, Drugs@FDA, NDC,
-  DailyMed, Shortages, REMS, and PSG. It is **not yet applied to the
-  Ask/Assemble read paths**, whose source handlers (`sources/`) still query
-  live HTTP without persisting source rows or freshness on those paths.
-- **Ask does not stream token-by-token.** There is no `/query/stream`
-  endpoint; the streaming-capable client falls back to a blocking `POST /query`
-  (the thinking ticker is honest, not faked). Building it must preserve INV-1
-  (no answer text before a validated citation) and still write exactly one
-  audit row.
+- **Managed Postgres/pgvector.** The code + runbook are ready: `DATABASE_URL`
+  switches the structured store to Postgres and vectors to pgvector in the same
+  DB; `REQUIRE_DATABASE_URL=true` refuses the SQLite fallback in prod; pgvector
+  dimension checks fail fast; and a Postgres boot verifies the Alembic stamp ==
+  head and refuses to start on a mismatch. Still open: a managed instance
+  actually provisioned, migration from a clean snapshot, a restore drill
+  (`scripts/restore_drill.sh`) exercised against staging, least-privilege app DB
+  creds, and a gated deploy-step migration (rather than verify-on-boot) with a
+  rehearsed rollback/roll-forward. Rollback and uptime monitoring are documented
+  in [`docs/DEPLOY.md`](docs/DEPLOY.md) (Operations).
+- **Production Watch worker/scheduler.** Scheduling currently covers only the
+  watch pipeline (`regwatch watch`, daily via the Dagster schedule). A
+  production worker with monitored run history and partial-ingest recovery is
+  not yet deployed, and broad corpus ingest (`regwatch ingest-all`) still runs
+  on demand.
 
 See [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md) for the full,
 prioritized path from POC to production, and the consolidated `docs/ROADMAP.md`
