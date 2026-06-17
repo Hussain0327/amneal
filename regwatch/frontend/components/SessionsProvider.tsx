@@ -40,6 +40,9 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
+    // refresh() sets state only after the awaited listSessions() resolves, not
+    // synchronously in this effect body.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [refresh]);
 
