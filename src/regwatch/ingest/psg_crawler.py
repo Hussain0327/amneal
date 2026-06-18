@@ -295,8 +295,66 @@ def filter_listings(
     return [r for r in rows if r.appl_no in appl_set or _name_hit(r)]
 
 
+class PdfTooLargeError(RuntimeError):
+    """A fetched PDF body exceeded the configured byte cap (DoS/OOM guard)."""
+
+
+class PdfInvalidError(RuntimeError):
+    """A fetched body was not a PDF (missing the %PDF header)."""
+
+
+class _RetryableHTTP(Exception):
+    """Internal: a 5xx/429 worth retrying (mirrors _fetch's retry trigger)."""
+
+
+def _looks_like_pdf(data: bytes) -> bool:
+    # The PDF spec tolerates some leading bytes before %PDF; check the first ~1KB.
+    return b"%PDF-" in data[:1024]
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
+    retry=retry_if_exception_type((httpx.TransportError, _RetryableHTTP)),
+    reraise=True,
+)
+def _stream_capped(client: httpx.Client, url: str, max_bytes: int) -> bytes:
+    """GET `url`, returning the body but aborting once it exceeds max_bytes.
+
+    Streams so an oversized (or lying-Content-Length) body is cut off before it
+    is fully buffered — the OOM guard. Retries 5xx/429 exactly like _fetch; a 4xx
+    is surfaced via raise_for_status and is NOT retried (it is not in the retry
+    set). max_bytes<=0 disables the cap. The response is always closed (the
+    `with` block) on every path, including the cap/again abort.
+    """
+    with client.stream("GET", url) as resp:
+        if resp.status_code >= 500 or resp.status_code == 429:
+            raise _RetryableHTTP(f"retryable status {resp.status_code}")
+        resp.raise_for_status()
+        if max_bytes > 0:
+            declared = resp.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > max_bytes:
+                raise PdfTooLargeError(
+                    f"PDF Content-Length {declared} exceeds cap {max_bytes} bytes ({url})"
+                )
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in resp.iter_bytes():
+            total += len(chunk)
+            if max_bytes > 0 and total > max_bytes:
+                raise PdfTooLargeError(f"PDF body exceeded cap {max_bytes} bytes ({url})")
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+
 def download_pdf(url: str, *, client: httpx.Client | None = None) -> tuple[Path, bytes, str]:
-    """Fetch a PSG PDF, cache to disk, return (path, bytes, sha256 hex)."""
+    """Fetch a PSG PDF, cache to disk, return (path, bytes, sha256 hex).
+
+    Validates at the boundary: the body is byte-capped while streaming
+    (PdfTooLargeError) and must carry a %PDF header (PdfInvalidError) — so a
+    server error page or an oversized blob never reaches the parser. Callers
+    (ingest_listing) already degrade these to a logged 'error' for that listing.
+    """
     s = get_settings()
     s.ensure_dirs()
     owned = False
@@ -309,9 +367,9 @@ def download_pdf(url: str, *, client: httpx.Client | None = None) -> tuple[Path,
         owned = True
     try:
         _polite_pause()
-        resp = _fetch(client, url)
-        resp.raise_for_status()
-        data = resp.content
+        data = _stream_capped(client, url, s.pdf_max_bytes)
+        if not _looks_like_pdf(data):
+            raise PdfInvalidError(f"fetched body is not a PDF (no %PDF header): {url}")
         digest = hashlib.sha256(data).hexdigest()
         appl_match = APPL_FROM_PDF.search(url)
         appl_no = appl_match.group(1) if appl_match else digest[:12]

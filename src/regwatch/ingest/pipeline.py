@@ -354,9 +354,12 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
 
         return "added" if is_new else "revised"
     except Exception as exc:
+        # error_type lets a watch run be triaged by which guard fired
+        # (PdfTooLargeError / PdfInvalidError / PdfParseTimeoutError / ...).
         log.error(
             "ingest_failed",
             appl_no=listing.appl_no,
+            error_type=type(exc).__name__,
             error=str(exc),
         )
         return "error"
