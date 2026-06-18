@@ -17,7 +17,13 @@ if [ -d "$DAGSTER_CONFIG_DIR" ]; then
   cp "$DAGSTER_CONFIG_DIR/workspace.yaml" "$DAGSTER_HOME/workspace.yaml"
 fi
 
-if [ "${REGWATCH_INIT_DB:-true}" = "true" ]; then
+# Boot-time DB init runs the stamp guard (refuses if the live schema != the
+# build's alembic head) + idempotent ensures + RLS. Skip it for the Fly
+# release_command (`alembic upgrade head`, see fly.toml [deploy]): that command
+# must run the migration to MOVE the stamp to head, and the guard would
+# otherwise refuse and abort the whole deploy before the migration ever ran.
+# The real app boot (CMD = uvicorn) still runs init-db normally.
+if [ "${REGWATCH_INIT_DB:-true}" = "true" ] && [ "${1:-}" != "alembic" ]; then
   regwatch init-db
   export REGWATCH_DB_INITIALIZED=1
 fi

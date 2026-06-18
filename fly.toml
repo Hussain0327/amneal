@@ -5,6 +5,18 @@ primary_region = "iad"
   [build.args]
     INSTALL_LOCAL_EMBEDDINGS = "false"
 
+# Run pending Alembic migrations in a one-off machine BEFORE the rolling deploy
+# of the app machines. This moves the live schema to the build's head so the
+# app's boot guard (store/db.py::_init_postgres) passes instead of crash-looping
+# — the 2026-06-18 incident, where deploying a 0009 image against a 0008 DB took
+# prod down. The entrypoint skips its own init-db for the `alembic` command (see
+# docker/entrypoint.sh) so this isn't blocked by that same guard. DATABASE_URL +
+# secrets are injected into the release machine automatically.
+# Assumes an already-bootstrapped/stamped DB (incremental upgrade); a fresh empty
+# Postgres is still bootstrapped by init-db's create_all+stamp path, not here.
+[deploy]
+  release_command = "alembic upgrade head"
+
 [env]
   EMBEDDING_PROVIDER = "openai"
   AUTH_COOKIE_SECURE = "true"
