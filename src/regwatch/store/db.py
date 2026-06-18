@@ -16,10 +16,15 @@ from threading import Lock
 
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
-from config.settings import get_settings
+from config.settings import Settings, get_settings
 from sqlalchemy import Engine, inspect, text
 from sqlalchemy.engine import URL, make_url
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, SQLModel, create_engine
+
+from regwatch.common.logging import get_logger
+
+log = get_logger(__name__)
 
 _engine: Engine | None = None
 _engine_lock = Lock()
@@ -199,6 +204,30 @@ def _enforce_sslmode(database_url: str) -> URL:
     return url.update_query_dict({"sslmode": "require"}, append=False)
 
 
+def _pg_connect_args(s: Settings) -> dict[str, str]:
+    """libpq startup options that bound how long a connection holds resources.
+
+    The app connects as the ``postgres`` role, which — unlike Supabase's
+    anon/authenticated roles — has NO server-side statement/lock/idle timeouts,
+    so a connection stalled mid-transaction would hold its locks indefinitely.
+    On 2026-06-18 an idle-in-transaction chunk read blocked the boot-time
+    ``ALTER TABLE chunk ENABLE RLS`` and wedged prod. Setting these per
+    connection makes such a stall self-heal: Postgres terminates the idle
+    transaction, releases its locks, and the pool replaces the connection on the
+    next checkout. Empty/``0`` values are omitted so a timeout can be disabled.
+    """
+    opts = [
+        f"-c {guc}={value.strip()}"
+        for guc, value in (
+            ("statement_timeout", s.db_statement_timeout),
+            ("idle_in_transaction_session_timeout", s.db_idle_in_tx_timeout),
+            ("lock_timeout", s.db_lock_timeout),
+        )
+        if value and value.strip() and value.strip() != "0"
+    ]
+    return {"options": " ".join(opts)} if opts else {}
+
+
 def get_engine() -> Engine:
     global _engine
     if _engine is None:
@@ -207,13 +236,17 @@ def get_engine() -> Engine:
                 s = get_settings()
                 if s.database_url:
                     # Hosted Postgres (Supabase session pooler): small pool,
-                    # pre-ping to survive pooler-side connection recycling.
+                    # pre-ping to survive pooler-side connection recycling, and
+                    # per-connection timeouts (see _pg_connect_args) so a stalled
+                    # transaction can never hold a lock indefinitely.
                     _engine = create_engine(
                         _enforce_sslmode(s.database_url),
                         echo=False,
                         pool_pre_ping=True,
                         pool_size=5,
                         max_overflow=5,
+                        pool_recycle=s.db_pool_recycle_s,
+                        connect_args=_pg_connect_args(s),
                     )
                 else:
                     # B1: never fall through to SQLite in production. A missing
@@ -298,15 +331,44 @@ def _ensure_postgres_objects(engine: Engine) -> None:
 
 
 def _enable_row_level_security(engine: Engine) -> None:
-    """ALTER every public table to ENABLE ROW LEVEL SECURITY, with NO policies.
+    """Enable deny-all RLS on public tables that don't already have it.
 
     Supabase auto-exposes public tables over its Data API (PostgREST) to the
     anon/authenticated roles; RLS-without-policies is deny-all for them. Our
-    API connects as the ``postgres`` role, which bypasses RLS. Idempotent.
+    API connects as the ``postgres`` role, which bypasses RLS.
+
+    Lock-safe and idempotent. ``ALTER TABLE`` takes an ACCESS EXCLUSIVE lock, so
+    re-running it on already-protected tables under live read traffic is exactly
+    what wedged prod on 2026-06-18 (the boot-time ALTER on the hot ``chunk``
+    table blocked behind an idle-in-transaction reader, and a queued ACCESS
+    EXCLUSIVE request in turn blocked every new reader). So:
+      * skip tables that already have RLS — a steady-state boot takes NO locks;
+      * run each ALTER in its own transaction under a short ``lock_timeout``;
+      * if a table can't be locked right now, log and move on rather than crash
+        the boot — an already-running instance keeps serving and the next boot
+        re-attempts once the contended lock is free.
     """
-    with engine.begin() as conn:
-        for name in inspect(conn).get_table_names():
-            conn.execute(text(f'ALTER TABLE public."{name}" ENABLE ROW LEVEL SECURITY'))
+    with engine.connect() as conn:
+        pending = (
+            conn.execute(
+                text(
+                    "SELECT c.relname FROM pg_class c "
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = 'public' AND c.relkind = 'r' "
+                    "AND NOT c.relrowsecurity"
+                )
+            )
+            .scalars()
+            .all()
+        )
+    for name in pending:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("SET LOCAL lock_timeout = '3s'"))
+                conn.execute(text(f'ALTER TABLE public."{name}" ENABLE ROW LEVEL SECURITY'))
+        except OperationalError as exc:
+            # lock_timeout -> LockNotAvailable: leave it for a later boot.
+            log.warning("rls_enable_skipped", table=name, error=str(getattr(exc, "orig", exc)))
 
 
 def _init_postgres(engine: Engine) -> None:

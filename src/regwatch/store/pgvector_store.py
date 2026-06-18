@@ -30,10 +30,13 @@ from config.settings import get_settings
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, Engine, create_engine
 from sqlalchemy import text as sa_text
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlmodel import Field, SQLModel
 
+from regwatch.common.logging import get_logger
 from regwatch.process.embedder import get_embedding_provider
+
+log = get_logger(__name__)
 
 if TYPE_CHECKING:  # runtime import is deferred to avoid an import cycle
     from regwatch.store.vector_store import Hit
@@ -224,9 +227,33 @@ def ensure_schema(engine: Engine) -> None:
             conn.execute(
                 sa_text(f"CREATE INDEX IF NOT EXISTS ix_chunk_{column} ON chunk ({column})")
             )
-        # Deny-all for Supabase's auto-exposed Data API roles; the app's
-        # `postgres` role bypasses RLS. Mandatory per the K2 contract.
-        conn.execute(sa_text("ALTER TABLE chunk ENABLE ROW LEVEL SECURITY"))
+    # Deny-all for Supabase's auto-exposed Data API roles; the app's `postgres`
+    # role bypasses RLS. Mandatory per the K2 contract — but enabled OUT of the
+    # DDL transaction above and only when not already on, so a first-query path
+    # on a live corpus takes no ACCESS EXCLUSIVE lock on the hot `chunk` table
+    # (the 2026-06-18 boot deadlock). See store/db.py:_enable_row_level_security.
+    _enable_chunk_rls(engine)
+
+
+def _enable_chunk_rls(engine: Engine) -> None:
+    """Lock-safe, idempotent deny-all RLS on `chunk` (skip if already enabled)."""
+    with engine.connect() as conn:
+        already = conn.execute(
+            sa_text(
+                "SELECT c.relrowsecurity FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = 'public' AND c.relname = 'chunk'"
+            )
+        ).scalar()
+    if already:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa_text("SET LOCAL lock_timeout = '3s'"))
+            conn.execute(sa_text("ALTER TABLE chunk ENABLE ROW LEVEL SECURITY"))
+    except OperationalError as exc:
+        # Contended ACCESS EXCLUSIVE lock: never let it wedge the first query.
+        log.warning("chunk_rls_enable_skipped", error=str(getattr(exc, "orig", exc)))
 
 
 def assert_embedding_provider_dim() -> None:

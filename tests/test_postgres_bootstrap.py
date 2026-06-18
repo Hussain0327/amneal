@@ -15,6 +15,7 @@ real database.
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Iterator
 from types import ModuleType
 
@@ -104,6 +105,59 @@ def test_bootstrap_enables_rls_on_every_public_table(pg_db: ModuleType) -> None:
     assert not without_rls, f"tables missing RLS: {without_rls}"
     # Deny-all: RLS enabled with NO policies (Data-API roles get nothing).
     assert policies == 0
+
+
+def test_rls_enable_skips_already_protected_table_under_read_lock(pg_db: ModuleType) -> None:
+    """Steady-state boot must take NO ACCESS EXCLUSIVE lock on a table that
+    already has RLS — the 2026-06-18 incident was re-ALTERing the already-
+    protected `chunk` table on every boot, blocking behind a live reader.
+
+    With a reader holding an ACCESS SHARE lock on `chunk`, a (wrongly) re-issued
+    ALTER would block until the 3s lock_timeout; skipping already-RLS tables
+    returns near-instantly instead.
+    """
+    pg_db.init_db()
+    engine = pg_db.get_engine()
+    holder = engine.connect()
+    trans = holder.begin()
+    holder.execute(text("SELECT * FROM chunk"))  # ACCESS SHARE lock, held open
+    try:
+        start = time.monotonic()
+        pg_db._enable_row_level_security(engine)  # must not touch `chunk`
+        elapsed = time.monotonic() - start
+    finally:
+        trans.rollback()
+        holder.close()
+    assert elapsed < 2.0, "boot RLS-enable blocked on an already-protected table"
+
+
+def test_rls_enable_degrades_gracefully_on_contended_lock(pg_db: ModuleType) -> None:
+    """A genuinely-pending table whose lock is held during boot must NOT crash
+    the process: the ALTER hits lock_timeout, is logged and skipped, and the
+    boot proceeds (an already-running instance keeps serving; a later boot
+    re-attempts once the lock frees)."""
+    pg_db.init_db()
+    engine = pg_db.get_engine()
+    # A fresh table with RLS still OFF -> it lands in the "pending" set.
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE lock_probe (id int)"))
+
+    holder = engine.connect()
+    trans = holder.begin()
+    holder.execute(text("SELECT * FROM lock_probe"))  # blocks the ALTER's lock
+    try:
+        # Returns (swallows the lock_timeout) rather than raising -> boot lives.
+        pg_db._enable_row_level_security(engine)
+    finally:
+        trans.rollback()
+        holder.close()
+
+    with engine.connect() as conn:
+        probe_rls = conn.execute(
+            text("SELECT relrowsecurity FROM pg_class WHERE relname = 'lock_probe'")
+        ).scalar()
+    # The contended table was skipped (still no RLS) and nothing crashed.
+    assert probe_rls is False
 
 
 def test_bootstrap_creates_chunk_table_and_indexes(pg_db: ModuleType) -> None:

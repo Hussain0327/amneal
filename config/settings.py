@@ -176,6 +176,25 @@ class Settings(BaseSettings):
     # trail (INV-6 evidence) on the next machine recycle. Set in fly.toml.
     require_database_url: bool = False
 
+    # Postgres connection-level timeouts (Supabase session pooler). The app
+    # connects as the `postgres` role, which — unlike Supabase's
+    # anon/authenticated roles — ships with NO server-side statement/lock/idle
+    # timeouts. Without them a connection that stalls mid-transaction holds its
+    # locks forever: on 2026-06-18 an idle-in-transaction chunk read blocked the
+    # boot-time `ALTER TABLE chunk ENABLE RLS` and wedged prod. These are applied
+    # per-connection via libpq `options` in store/db.py:get_engine(). Each takes
+    # a GUC duration string ('30s', '500ms'); set to '0' or '' to disable one.
+    # idle_in_transaction + lock timeouts are the load-bearing fix and are safe
+    # for bulk work (idle-in-tx never fires on an actively-running statement);
+    # a one-off bulk migration that needs a long single statement can relax
+    # DB_STATEMENT_TIMEOUT via env.
+    db_statement_timeout: str = "30s"
+    db_idle_in_tx_timeout: str = "60s"
+    db_lock_timeout: str = "10s"
+    # Recycle pooled connections before Supavisor's own idle cutoff so a stale
+    # server-side socket is never handed to a request (pairs with pool_pre_ping).
+    db_pool_recycle_s: int = 1800
+
     @field_validator("database_url", mode="before")
     @classmethod
     def _normalize_database_url(cls, v: object) -> str | None:
