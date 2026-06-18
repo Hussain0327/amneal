@@ -293,3 +293,21 @@ def test_enforce_sslmode_respects_explicit_sslmode() -> None:
     assert dict(keep.query)["sslmode"] == "verify-full"
     disable = _enforce_sslmode("postgresql+psycopg://u:p@some.remote.host:5432/db?sslmode=disable")
     assert dict(disable.query)["sslmode"] == "disable"
+
+
+def test_migration_connect_args_bounds_lock_timeout_only() -> None:
+    """The release migration connection gets a lock_timeout (so a contended
+    migration self-cancels) but NOT a statement_timeout (a long index build must
+    be allowed to finish) — the deliberate divergence from the app engine."""
+    from config.settings import Settings
+
+    from regwatch.store.db import _migration_connect_args
+
+    args = _migration_connect_args(Settings(db_lock_timeout="10s"))
+    assert args == {"options": "-c lock_timeout=10s"}
+    # The whole point: no statement_timeout / idle_in_transaction on migrations.
+    assert "statement_timeout" not in args["options"]
+    assert "idle_in_transaction_session_timeout" not in args["options"]
+    # Disabled when unset/0.
+    assert _migration_connect_args(Settings(db_lock_timeout="0")) == {}
+    assert _migration_connect_args(Settings(db_lock_timeout="")) == {}

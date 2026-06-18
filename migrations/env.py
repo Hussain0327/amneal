@@ -6,7 +6,8 @@ from logging.config import fileConfig
 
 from alembic import context
 from config.settings import get_settings
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, engine_from_config, pool
+from sqlalchemy.engine import make_url
 from sqlmodel import SQLModel
 
 from regwatch.store import models  # noqa: F401  (register SQLModel tables)
@@ -53,14 +54,28 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    url = _database_url()
     # ConfigParser interpolation: escape literal '%' (e.g. percent-encoded
     # Postgres passwords) before storing the URL back into the config.
-    config.set_main_option("sqlalchemy.url", _database_url().replace("%", "%%"))
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
+
+    if make_url(url).drivername.startswith("postgresql"):
+        # Remote Postgres (the Fly release_command, manual ops): enforce TLS like
+        # the app engine (store/db.py::get_engine) and bound the lock wait so a
+        # contended migration self-cancels instead of wedging the release machine.
+        from regwatch.store.db import _enforce_sslmode, _migration_connect_args
+
+        connectable = create_engine(
+            _enforce_sslmode(url),
+            poolclass=pool.NullPool,
+            connect_args=_migration_connect_args(get_settings()),
+        )
+    else:
+        connectable = engine_from_config(
+            config.get_section(config.config_ini_section, {}),
+            prefix="sqlalchemy.",
+            poolclass=pool.NullPool,
+        )
 
     with connectable.connect() as connection:
         context.configure(

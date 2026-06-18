@@ -228,6 +228,22 @@ def _pg_connect_args(s: Settings) -> dict[str, str]:
     return {"options": " ".join(opts)} if opts else {}
 
 
+def _migration_connect_args(s: Settings) -> dict[str, str]:
+    """libpq options for the Alembic migration connection: ``lock_timeout`` ONLY.
+
+    Used by migrations/env.py for remote Postgres. A migration must self-cancel
+    rather than hang forever on a contended lock — the 2026-06-18 incident class,
+    now reachable on the Fly ``release_command``'s one-off machine. But it must
+    NOT inherit the app engine's ``statement_timeout``: a legitimately long DDL
+    (e.g. a large index build) has to be allowed to finish. So bound the lock
+    wait and nothing else. Empty/"0" disables it.
+    """
+    lock_timeout = (s.db_lock_timeout or "").strip()
+    if not lock_timeout or lock_timeout == "0":
+        return {}
+    return {"options": f"-c lock_timeout={lock_timeout}"}
+
+
 def get_engine() -> Engine:
     global _engine
     if _engine is None:
@@ -313,7 +329,17 @@ def _ensure_vector_extension(engine: Engine) -> None:
 
 
 def _ensure_postgres_objects(engine: Engine) -> None:
-    """Idempotent DDL that lives outside SQLModel metadata (chunk + indexes)."""
+    """Idempotent DDL outside SQLModel metadata (the pgvector ``chunk`` table).
+
+    Lock-safe like _enable_row_level_security. ``chunk`` is the hot table behind
+    the 2026-06-18 lock pileup, and ``CREATE INDEX IF NOT EXISTS`` takes a
+    ShareLock on it even when the index already exists — which conflicts with the
+    RowExclusiveLock a concurrent ingest writer holds. So the DDL runs under a
+    short ``lock_timeout`` and a contended run is logged and skipped rather than
+    crash-looping the boot: every statement is ``IF NOT EXISTS`` (a skipped object
+    is re-attempted on the next boot), and the only path that MUST succeed — a
+    fresh empty DB — has no writer to contend with and never times out.
+    """
     _ensure_vector_extension(engine)
     with engine.begin() as conn:
         vector_schema = conn.execute(
@@ -323,11 +349,26 @@ def _ensure_postgres_objects(engine: Engine) -> None:
                 "WHERE e.extname = 'vector'"
             )
         ).scalar()
-        if vector_schema is None:  # pragma: no cover - _ensure_vector_extension ran
-            raise RuntimeError("pgvector extension is not installed")
-        conn.execute(text(_CHUNK_TABLE_DDL.format(vector_schema=vector_schema)))
-        for ddl in _CHUNK_INDEX_DDL:
-            conn.execute(text(ddl.format(vector_schema=vector_schema)))
+    if vector_schema is None:  # pragma: no cover - _ensure_vector_extension ran
+        raise RuntimeError("pgvector extension is not installed")
+    # Table first, then its indexes — all target the SAME table, so once one lock
+    # is contended the rest will be too: break (don't retry each for lock_timeout)
+    # to keep boot latency bounded; the next boot re-attempts the skipped objects.
+    statements = (
+        _CHUNK_TABLE_DDL.format(vector_schema=vector_schema),
+        *(ddl.format(vector_schema=vector_schema) for ddl in _CHUNK_INDEX_DDL),
+    )
+    for ddl in statements:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("SET LOCAL lock_timeout = '3s'"))
+                conn.execute(text(ddl))
+        except OperationalError as exc:
+            # lock_timeout -> LockNotAvailable on the contended chunk lock: leave
+            # the remaining IF NOT EXISTS objects for a later boot (mirrors
+            # _enable_row_level_security) instead of crashing the process.
+            log.warning("ensure_postgres_objects_skipped", error=str(getattr(exc, "orig", exc)))
+            break
 
 
 def _enable_row_level_security(engine: Engine) -> None:
