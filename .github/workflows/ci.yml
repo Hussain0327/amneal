@@ -99,12 +99,16 @@ jobs:
           --extra llm --extra orchestration
           --format requirements-txt --output-file requirements-audit.txt
 
-      # chromadb CVE-2026-45829 (ChromaToast) is a pre-auth RCE in the standalone
-      # Chroma HTTP *server*; REGWATCH uses the embedded PersistentClient (and
-      # pgvector in prod), so the vulnerable path is never reachable. No upstream
-      # fix is published — remove this ignore the moment one ships.
+      # chromadb GHSA-f4j7-r4q5-qw2c (CVE-2026-45829, ChromaToast) is a pre-auth
+      # RCE in the standalone Chroma HTTP *server*; REGWATCH uses the embedded
+      # PersistentClient (and pgvector in prod), so the vulnerable path is never
+      # reachable. No upstream fix is published (last_affected 1.5.9) — remove
+      # this ignore the moment one ships. Both ids are listed because pip-audit
+      # keys the advisory by its GHSA id (PyPI/OSV source), not the CVE alias.
       - name: pip-audit (python deps)
-        run: uvx pip-audit -r requirements-audit.txt --ignore-vuln CVE-2026-45829
+        run: >-
+          uvx pip-audit -r requirements-audit.txt
+          --ignore-vuln GHSA-f4j7-r4q5-qw2c --ignore-vuln CVE-2026-45829
 
   docker-build:
     runs-on: ubuntu-latest
