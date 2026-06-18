@@ -120,7 +120,7 @@ def test_db_boots_and_round_trips() -> None:
     with get_engine().connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0008_token_cost_feedback"
+            == "0009_durable_alerts"
         )
     with session_scope() as s:
         s.add(
@@ -159,7 +159,7 @@ def test_init_db_stamps_complete_legacy_schema_without_version_table() -> None:
     with get_engine().connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0008_token_cost_feedback"
+            == "0009_durable_alerts"
         )
 
 
@@ -185,7 +185,7 @@ def test_init_db_stamps_complete_legacy_schema_with_empty_version_table() -> Non
     with engine.connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0008_token_cost_feedback"
+            == "0009_durable_alerts"
         )
 
 
@@ -258,3 +258,38 @@ def test_cli_status_runs() -> None:
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, result.output
     assert "echo" in result.output
+
+
+def test_enforce_sslmode_adds_require_for_remote_host() -> None:
+    """Public-internet Supabase pooler → sslmode=require is injected."""
+    from regwatch.store.db import _enforce_sslmode
+
+    url = _enforce_sslmode(
+        "postgresql+psycopg://postgres.ref:pw@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+    )
+    assert dict(url.query)["sslmode"] == "require"
+    # The password survives (URL object, not the ***-masked string).
+    assert url.password == "pw"
+
+
+def test_enforce_sslmode_leaves_local_hosts_untouched() -> None:
+    """CI's Postgres service container + local docker-compose Postgres get no sslmode."""
+    from regwatch.store.db import _enforce_sslmode
+
+    for host in ("localhost", "127.0.0.1", "[::1]"):
+        url = _enforce_sslmode(f"postgresql+psycopg://postgres:postgres@{host}:5432/postgres")
+        assert "sslmode" not in url.query, host
+    # sqlite passes through verbatim too.
+    assert "sslmode" not in _enforce_sslmode("sqlite:////tmp/x.db").query
+
+
+def test_enforce_sslmode_respects_explicit_sslmode() -> None:
+    """An operator-set sslmode (even on a remote host) is never overridden."""
+    from regwatch.store.db import _enforce_sslmode
+
+    keep = _enforce_sslmode(
+        "postgresql+psycopg://u:p@aws-1-us-east-1.pooler.supabase.com:5432/postgres?sslmode=verify-full"
+    )
+    assert dict(keep.query)["sslmode"] == "verify-full"
+    disable = _enforce_sslmode("postgresql+psycopg://u:p@some.remote.host:5432/db?sslmode=disable")
+    assert dict(disable.query)["sslmode"] == "disable"

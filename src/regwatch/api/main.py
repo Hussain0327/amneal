@@ -33,7 +33,7 @@ import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal, cast
 
 from config.settings import Settings, get_settings
 from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Request, Response
@@ -385,6 +385,13 @@ class ClarifyOptionOut(BaseModel):
     filters: dict[str, Any] | None = None
 
 
+# The status values grounded_qa emits — carried as an enum in the OpenAPI
+# schema so the generated TS union (lib/api-types.ts) is exact: response_mode
+# in {answer, summary, clarify, scope_warning, refused} plus the
+# provider-outage status="error" (grounded_qa._refuse).
+QueryStatusLiteral = Literal["answer", "summary", "clarify", "scope_warning", "refused", "error"]
+
+
 class QueryResponse(BaseModel):
     answer: str
     citations: list[QueryCitation]
@@ -393,7 +400,7 @@ class QueryResponse(BaseModel):
     audit_id: int
     session_id: str
     turn_id: str
-    status: str = "answer"  # "answer" | "summary" | "clarify" | "scope_warning" | "refused"
+    status: QueryStatusLiteral = "answer"
     interpretation: str | None = None
     clarify: list[ClarifyOptionOut] = []
 
@@ -442,7 +449,9 @@ def _build_query_response(result: QAResult) -> QueryResponse:
         audit_id=result.audit_id,
         session_id=result.session_id,
         turn_id=result.turn_id,
-        status=result.status,
+        # grounded_qa types status as a plain str; Pydantic still validates the
+        # enum at runtime, so genuine drift surfaces rather than being masked.
+        status=cast(QueryStatusLiteral, result.status),
         interpretation=result.interpretation,
         clarify=[
             ClarifyOptionOut(label=o.label, query=o.query, filters=o.filters)

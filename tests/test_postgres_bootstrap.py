@@ -78,6 +78,7 @@ def test_fresh_bootstrap_creates_schema_and_stamps_head(pg_db: ModuleType) -> No
         "ob_exclusivity",
         "spl_document",
         "chunk",
+        "alert",
         "alembic_version",
     }
     assert expected <= tables

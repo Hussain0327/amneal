@@ -18,6 +18,7 @@ from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from config.settings import get_settings
 from sqlalchemy import Engine, inspect, text
+from sqlalchemy.engine import URL, make_url
 from sqlmodel import Session, SQLModel, create_engine
 
 _engine: Engine | None = None
@@ -166,6 +167,38 @@ def _matches_head_schema() -> bool:
     return {"input_tokens", "output_tokens", "cost_usd"} <= query_columns
 
 
+# Hosts reached over a trusted/loopback path where TLS is neither configured
+# nor needed: CI's Postgres service container (localhost:5432, see
+# .github/workflows/ci.yml) and the local docker-compose Postgres. Forcing
+# sslmode=require on these would break the DB integration tests and local dev,
+# since neither speaks SSL.
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", ""})
+
+
+def _enforce_sslmode(database_url: str) -> URL:
+    """Force TLS for remote Postgres; leave local/CI Postgres untouched.
+
+    The Supabase session pooler is reached over the PUBLIC internet
+    (aws-1-us-east-1.pooler.supabase.com), so the connection MUST be encrypted.
+    We add the libpq ``sslmode=require`` connection keyword to the URL query
+    (psycopg v3 reads it natively) ONLY when:
+      * the host is not loopback/local (CI service container, docker-compose),
+      * AND no ``sslmode`` was already specified (an operator override wins).
+
+    Returns a SQLAlchemy ``URL`` object — passed straight to ``create_engine``
+    so the password is preserved (``str(url)`` would mask it as ``***``).
+    """
+    url = make_url(database_url)
+    if not url.drivername.startswith("postgresql"):
+        return url
+    if "sslmode" in url.query:
+        return url
+    host = (url.host or "").strip("[]").lower()  # strip any IPv6 brackets
+    if host in _LOCAL_HOSTS:
+        return url
+    return url.update_query_dict({"sslmode": "require"}, append=False)
+
+
 def get_engine() -> Engine:
     global _engine
     if _engine is None:
@@ -176,7 +209,7 @@ def get_engine() -> Engine:
                     # Hosted Postgres (Supabase session pooler): small pool,
                     # pre-ping to survive pooler-side connection recycling.
                     _engine = create_engine(
-                        s.database_url,
+                        _enforce_sslmode(s.database_url),
                         echo=False,
                         pool_pre_ping=True,
                         pool_size=5,

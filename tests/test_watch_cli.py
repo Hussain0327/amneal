@@ -2,8 +2,8 @@
 
 The crawl is mocked (deterministic listings, stub PDFs); providers are echo
 via conftest. Asserts the composition semantics:
-  - first run with a matched NEW listing → exactly one alert in the digest
-  - second identical run → no new alert (idempotent; empty digest)
+  - first run with a matched NEW listing → exactly one alert in the feed
+  - second identical run → no NEW alert (idempotent); the prior alert persists
   - a match whose version was never ingested → never alerts (INV-4)
 """
 
@@ -102,7 +102,13 @@ def test_watch_first_run_alerts_on_new_matched_listing(monkeypatch: pytest.Monke
 
 
 def test_watch_second_identical_run_emits_no_new_alert(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Idempotence: an unchanged PSG must NOT re-alert (INV-4)."""
+    """Idempotence: an unchanged PSG must NOT add a second alert (INV-4).
+
+    The first run's alert persists durably in the `alert` table; the identical
+    re-run builds no alert (unchanged outcome) and the ON CONFLICT DO NOTHING
+    guard means it is never duplicated — and, unlike the old per-file digest,
+    never erased either.
+    """
     _seed_watchlist()
     _patch_crawl(monkeypatch, [_listing()])
     _patch_pdf(monkeypatch, {"hash": "hash-v1", "pages": PAGES})
@@ -113,11 +119,16 @@ def test_watch_second_identical_run_emits_no_new_alert(monkeypatch: pytest.Monke
 
     second = runner.invoke(app, ["watch", "--no-extract"])
     assert second.exit_code == 0
-    assert latest_digest_records() == []
+    assert len(latest_digest_records()) == 1  # original persists; no duplicate
 
 
 def test_watch_revision_alerts_again(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A real content change after a clean run must produce a fresh alert."""
+    """A real content change after a clean run must produce a fresh alert.
+
+    Durable semantics: the revision creates a new psg_version, so it alerts on a
+    new version_id — and the original capture's alert is NOT erased. Both events
+    persist, newest first.
+    """
     _seed_watchlist()
     _patch_crawl(monkeypatch, [_listing()])
     state: dict[str, Any] = {"hash": "hash-v1", "pages": PAGES}
@@ -130,8 +141,10 @@ def test_watch_revision_alerts_again(monkeypatch: pytest.MonkeyPatch) -> None:
     result = runner.invoke(app, ["watch", "--no-extract"])
     assert result.exit_code == 0
     records = latest_digest_records()
-    assert len(records) == 1
+    assert len(records) == 2  # original capture + revision both persist
     assert records[0]["listing_appl_no"] == "020503"
+    # distinct versions: the revision (newest) and the original capture
+    assert records[0]["psg_version_id"] != records[1]["psg_version_id"]
 
 
 def test_watch_unmatched_listing_is_not_ingested_or_alerted(
