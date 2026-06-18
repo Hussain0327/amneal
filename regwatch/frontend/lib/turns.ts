@@ -1,7 +1,7 @@
 // One rendered turn of an Ask conversation, shared by the live page and the
-// design fixtures. Live assistant turns carry clarify options, suggestions and
-// provenance; turns rehydrated from GET /sessions/{id} carry only content /
-// status / citations and degrade cleanly (no chips, no feedback affordance).
+// design fixtures. Live assistant turns carry clarify options and provenance;
+// turns rehydrated from GET /sessions/{id} carry only content / status /
+// citations and degrade cleanly (no chips, no feedback affordance).
 
 import type {
   ChatMessage,
@@ -9,7 +9,6 @@ import type {
   ClarifyOption,
   QueryResponse,
   QueryStatus,
-  Suggestion,
 } from "./api";
 
 export interface Turn {
@@ -19,8 +18,6 @@ export interface Turn {
   refused: boolean;
   citations: Citation[];
   clarify: ClarifyOption[];
-  suggestions: Suggestion[];
-  unanswered: string[];
   interpretation: string | null;
   meta: { model_name: string; audit_id: number; turn_id: string } | null;
 }
@@ -31,7 +28,7 @@ const STATUSES: readonly string[] = [
   "clarify",
   "scope_warning",
   "refused",
-  "conversational",
+  "error",
 ];
 
 export function turnFromMessage(m: ChatMessage): Turn {
@@ -43,8 +40,6 @@ export function turnFromMessage(m: ChatMessage): Turn {
     refused: status === "refused",
     citations: m.citations ?? [],
     clarify: [],
-    suggestions: [],
-    unanswered: [],
     interpretation: null,
     meta: null,
   };
@@ -58,8 +53,6 @@ export function userTurn(q: string): Turn {
     refused: false,
     citations: [],
     clarify: [],
-    suggestions: [],
-    unanswered: [],
     interpretation: null,
     meta: null,
   };
@@ -73,9 +66,7 @@ export function assistantTurn(r: QueryResponse): Turn {
     refused: r.refused || r.status === "refused",
     citations: r.citations,
     clarify: r.clarify,
-    suggestions: r.suggestions,
-    unanswered: r.unanswered,
-    interpretation: r.interpretation,
+    interpretation: r.interpretation ?? null,
     meta: { model_name: r.model_name, audit_id: r.audit_id, turn_id: r.turn_id },
   };
 }

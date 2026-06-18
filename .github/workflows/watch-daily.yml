@@ -1,0 +1,95 @@
+name: watch-daily
+
+# Scheduled production run of `regwatch watch` (the daily FDA PSG crawl →
+# watchlist match → ingest → alert → digest pipeline). There is NO Dagster
+# daemon deployed (compose.yaml's scheduler is local-only), so this GitHub
+# Actions cron is the sole driver of the daily pipeline in production.
+#
+# It connects to the SAME live Supabase Postgres the API uses, over the public
+# pooler endpoint, and writes durable alerts to the DB (stream 1). It first runs
+# `alembic upgrade head` so the schema is at head before `regwatch watch` boots —
+# the Postgres init path (src/regwatch/store/db.py::_init_postgres) REFUSES to
+# start when the DB stamp != the code's head, and stream 1 adds migration 0009.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   WATCH_DATABASE_URL  postgresql://...pooler.supabase.com:5432/postgres?sslmode=require
+#                       (the prod Supabase URL WITH ?sslmode=require — see stream 2)
+#   OPENAI_API_KEY      ingest embeds every chunk and EMBEDDING_PROVIDER=openai,
+#                       so this is REQUIRED (no key => the run hard-fails).
+#   OPENFDA_API_KEY     OPTIONAL — only raises the openFDA rate limit; the run
+#                       works without it. Leave unset to omit.
+# While WATCH_DATABASE_URL is unset, the job skips cleanly (no failures).
+
+on:
+  schedule:
+    # 07:17 UTC daily — off the top of the hour to avoid the cron stampede, and
+    # early enough that a US-East analyst sees fresh alerts at the start of day.
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+# Never overlap runs against the shared prod DB; let an in-flight run finish
+# rather than cancelling it mid-ingest.
+concurrency:
+  group: watch-daily
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Mirror prod (fly.toml): OpenAI embeddings + Postgres-mode boot guard.
+      DATABASE_URL: ${{ secrets.WATCH_DATABASE_URL }}
+      REQUIRE_DATABASE_URL: "true"
+      EMBEDDING_PROVIDER: "openai"
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENFDA_API_KEY: ${{ secrets.OPENFDA_API_KEY }}
+      # entrypoint.sh runs init-db on boot; here we run alembic + watch directly,
+      # so this is informational parity with the container only.
+      SENTRY_ENVIRONMENT: "production"
+    steps:
+      - name: skipped (secret not configured)
+        if: env.DATABASE_URL == ''
+        run: |
+          echo "WATCH_DATABASE_URL secret not set — skipping the daily watch run."
+          echo "Set it to the prod Supabase URL with ?sslmode=require (stream 2)."
+
+      - uses: actions/checkout@v4
+        if: env.DATABASE_URL != ''
+        with:
+          persist-credentials: false
+
+      - name: install uv
+        if: env.DATABASE_URL != ''
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: install python
+        if: env.DATABASE_URL != ''
+        run: uv python install 3.12
+
+      # Match the SHIPPED prod closure (ci.yml python-audit): llm + orchestration.
+      # local-embeddings is intentionally omitted — prod runs EMBEDDING_PROVIDER=openai.
+      - name: sync deps
+        if: env.DATABASE_URL != ''
+        run: uv sync --extra llm --extra orchestration
+
+      # Bring the live DB to head BEFORE regwatch boots. The DB is already stamped
+      # 0008, so this applies only the 0009 delta (stream 1) — it does NOT replay
+      # the SQLite-specific 0001-0006 migrations. env.py reads DATABASE_URL.
+      - name: alembic upgrade head
+        if: env.DATABASE_URL != ''
+        run: uv run alembic upgrade head
+
+      # The pipeline: crawl → match watchlist → ingest matches → write durable
+      # alerts → digest. --extract is the default (paid per-PSG BE extraction);
+      # pass --no-extract here if you want change-detection + alerts without the
+      # LLM extraction cost (chunks are still embedded either way).
+      - name: regwatch watch
+        if: env.DATABASE_URL != ''
+        run: uv run regwatch watch

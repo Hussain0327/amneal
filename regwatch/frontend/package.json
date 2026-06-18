@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "gen:openapi": "cd ../.. && uv run python -c \"from regwatch.api.main import app; import json; print(json.dumps(app.openapi()))\" > regwatch/frontend/openapi.json",
+    "gen:types": "npm run gen:openapi && openapi-typescript openapi.json -o lib/api-types.ts"
   },
   "dependencies": {
     "@sentry/nextjs": "^10.57.0",
@@ -23,6 +25,7 @@
     "autoprefixer": "10.4.20",
     "eslint": "^9",
     "eslint-config-next": "^16.2.9",
+    "openapi-typescript": "^7.13.0",
     "postcss": "^8.5.10",
     "tailwindcss": "3.4.14",
     "typescript": "5.6.3"
