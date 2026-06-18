@@ -2,7 +2,6 @@
 
 import { AnswerFeedback } from "@/components/AnswerFeedback";
 import { Markdown } from "@/components/Markdown";
-import { SuggestionChips, SuggestionOptions } from "@/components/Suggestions";
 import type { Citation, Suggestion } from "@/lib/api";
 import type { Turn } from "@/lib/turns";
 import { safeHref } from "@/lib/url";
@@ -93,16 +92,6 @@ export function AssistantTurn({
     );
   }
 
-  if (turn.status === "conversational") {
-    return (
-      <AssistantShell>
-        <div className="msg__body">{turn.content}</div>
-        <SuggestionChips heading="Continue" suggestions={turn.suggestions} onPick={onPick} busy={busy} />
-        <AuditLine turn={turn} />
-      </AssistantShell>
-    );
-  }
-
   // A refusal and an out-of-scope warning share the declined register: the
   // reply is shown for what it is, then redirected — never passed off as an
   // answer. The redirects keep the full numbered-option weight (a dead end
@@ -115,7 +104,6 @@ export function AssistantTurn({
           <span className="msg__declined-tag">{tag}</span>
           <p>{turn.content}</p>
         </div>
-        <SuggestionOptions heading="Nearest in the corpus" suggestions={turn.suggestions} onPick={onPick} busy={busy} />
         <AuditLine turn={turn} />
       </AssistantShell>
     );
@@ -127,20 +115,6 @@ export function AssistantTurn({
       <div className="msg__body">
         <Markdown>{turn.content}</Markdown>
       </div>
-
-      {/* Partial answer: the unsupported aspects, named rather than guessed. */}
-      {turn.unanswered.length > 0 && (
-        <div className="na">
-          <div className="na__tag">Not addressed · not in the corpus</div>
-          <ul className="na__list">
-            {turn.unanswered.map((aspect, i) => (
-              <li key={i} className="na__item">
-                {aspect}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
 
       {turn.citations.length > 0 ? (
         <>
@@ -165,8 +139,6 @@ export function AssistantTurn({
         // no grounding as if it were sourced.
         <p className="msg__audit">No citations</p>
       )}
-
-      <SuggestionChips heading="Continue" suggestions={turn.suggestions} onPick={onPick} busy={busy} />
 
       {/* Thumbs only on live turns: meta (and so audit_id) is absent on turns
           rehydrated from session history, which degrade to no affordance. */}

@@ -173,6 +173,50 @@ jobs:
         working-directory: regwatch/frontend
         run: npm run lint
 
+      - name: frontend typecheck
+        working-directory: regwatch/frontend
+        run: npx tsc --noEmit
+
       - name: frontend build
         working-directory: regwatch/frontend
         run: npm run build
+
+  # The /query-family wire types in lib/api.ts are generated from the FastAPI
+  # schema (lib/api-types.ts). Regenerate here and fail if the committed copy is
+  # stale, so the frontend contract can never silently drift from the backend.
+  frontend-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: install python
+        run: uv python install 3.12
+
+      - name: sync deps (api importable for the schema dump)
+        run: uv sync --extra dev --extra llm --extra orchestration
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: regwatch/frontend/package-lock.json
+
+      - name: install frontend deps
+        working-directory: regwatch/frontend
+        run: npm ci
+
+      - name: regenerate wire types from the FastAPI schema
+        working-directory: regwatch/frontend
+        run: npm run gen:types
+
+      - name: fail if committed api-types.ts is stale
+        run: git diff --exit-code -- regwatch/frontend/lib/api-types.ts

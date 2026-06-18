@@ -5,8 +5,12 @@ match references a version we never fetched, the alert is skipped — never
 fabricated.
 
 Delivery for the POC:
-  - On-disk JSONL digest at `data/processed/alerts/digest-YYYY-MM-DD.jsonl`
-  - Returned as structured data so the API / UI can show it
+  - DURABLE: rows in the `alert` table. This is the source of truth for
+    GET /watch/latest and survives Fly redeploys (the JSONL digest below lives
+    on the container's ephemeral disk and is wiped on every recycle).
+  - On-disk JSONL digest at `data/processed/alerts/digest-YYYY-MM-DD.jsonl`,
+    kept for backward-compat: it is the `WatchRunResult.digest_path` artifact
+    and the truthful "ran, no changes" empty-file record.
 
 Future deliveries (email, Slack) plug in here.
 """
@@ -21,14 +25,34 @@ from typing import Any
 
 from config.settings import get_settings
 from sqlalchemy import desc
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import select
 
 from regwatch.common.logging import get_logger
 from regwatch.store.db import session_scope
+from regwatch.store.models import Alert as AlertRow
 from regwatch.store.models import PsgDocument, PsgVersion
 from regwatch.watch.matcher import WatchMatch
 
 log = get_logger(__name__)
+
+# The fields persisted/returned for one alert — the wire contract for
+# GET /watch/latest (lib/api.ts AlertRecord). `id`/`created_at` are storage
+# bookkeeping and never cross the wire.
+_RECORD_FIELDS = (
+    "product_id",
+    "active_ingredient",
+    "listing_appl_no",
+    "listing_psg_type",
+    "psg_document_id",
+    "psg_version_id",
+    "captured_at",
+    "diff_summary",
+    "confidence",
+    "rationale",
+    "source_url",
+)
 
 
 @dataclass
@@ -110,8 +134,49 @@ def digest_path(when: date | None = None) -> Path:
     return s.processed_dir / "alerts" / f"digest-{when.isoformat()}.jsonl"
 
 
+def _persist_alerts(alerts: list[Alert]) -> int:
+    """UPSERT alerts into the durable `alert` table; ON CONFLICT DO NOTHING.
+
+    The unique key (psg_version_id, listing_appl_no, product_id) makes a
+    same-day re-run a no-op instead of a duplicate (INV-4 idempotence). A real
+    revision creates a NEW psg_version row, so it gets a new version_id and a
+    new alert. Returns the number of rows actually inserted (conflicts skipped).
+    """
+    if not alerts:
+        return 0
+    # Core inserts don't run SQLModel's Python-side `created_at` default, so set
+    # it explicitly. One run's alerts share a timestamp; created_at DESC, id DESC
+    # then orders the feed deterministically.
+    now = datetime.now(UTC)
+    rows = [{**asdict(a), "created_at": now} for a in alerts]
+    with session_scope() as s:
+        dialect = s.get_bind().dialect.name
+        if dialect == "postgresql":
+            stmt: Any = (
+                pg_insert(AlertRow.__table__)  # type: ignore[attr-defined]
+                .values(rows)
+                .on_conflict_do_nothing(constraint="uq_alert_version_listing_product")
+            )
+        else:
+            stmt = (
+                sqlite_insert(AlertRow.__table__)  # type: ignore[attr-defined]
+                .values(rows)
+                .on_conflict_do_nothing(
+                    index_elements=["psg_version_id", "listing_appl_no", "product_id"]
+                )
+            )
+        result = s.execute(stmt)
+        return int(getattr(result, "rowcount", 0) or 0)
+
+
 def write_digest(alerts: list[Alert], *, when: date | None = None) -> Path:
-    """Write the alerts to a JSONL digest file in `data/processed/alerts/`."""
+    """Persist alerts to the DB (durable, idempotent) AND write the JSONL digest.
+
+    The DB is the source of truth for GET /watch/latest. The JSONL write is
+    retained for backward-compat: it is the `WatchRunResult.digest_path`
+    artifact and the truthful "ran, no changes" empty-file record.
+    """
+    inserted = _persist_alerts(alerts)
     s = get_settings()
     s.ensure_dirs()
     path = digest_path(when)
@@ -119,27 +184,26 @@ def write_digest(alerts: list[Alert], *, when: date | None = None) -> Path:
     with path.open("w", encoding="utf-8") as fh:
         for a in alerts:
             fh.write(json.dumps(asdict(a)) + "\n")
-    log.info("digest_written", path=str(path), n=len(alerts))
+    log.info("digest_written", path=str(path), n=len(alerts), inserted=inserted)
     return path
 
 
 def latest_digest_records(limit: int = 100) -> list[dict[str, Any]]:
-    """Return the most recent digest file's records (UI feed)."""
-    s = get_settings()
-    out_dir = s.processed_dir / "alerts"
-    if not out_dir.exists():
-        return []
-    files = sorted(out_dir.glob("digest-*.jsonl"))
-    if not files:
-        return []
-    latest = files[-1]
-    records: list[dict[str, Any]] = []
-    with latest.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            records.append(json.loads(line))
-            if len(records) >= limit:
-                break
-    return records
+    """Return the most recent durable alerts (UI feed), newest first.
+
+    Reads from the `alert` table — durable across redeploys. The returned dict
+    keys match the Alert dataclass / former JSONL shape exactly, so the
+    /watch/latest wire contract and lib/api.ts AlertRecord are unaffected.
+    """
+    with session_scope() as s:
+        rows = list(
+            s.scalars(
+                select(AlertRow)
+                .order_by(desc(AlertRow.created_at), desc(AlertRow.id))  # type: ignore[arg-type]
+                .limit(limit)
+            )
+        )
+        # Materialize INSIDE the session: expire_on_commit detaches these rows
+        # on scope exit, so reading attributes afterward would lazy-load against
+        # a closed session. The returned dicts are plain values, ORM-free.
+        return [{field: getattr(r, field) for field in _RECORD_FIELDS} for r in rows]

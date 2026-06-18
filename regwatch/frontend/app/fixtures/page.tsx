@@ -5,13 +5,13 @@ import { useEffect, useState } from "react";
 
 import { StatusTicker } from "@/components/StatusTicker";
 import { AssistantTurn, UserTurn } from "@/components/Turns";
-import type { Citation, Suggestion } from "@/lib/api";
+import type { Citation } from "@/lib/api";
 import type { Turn } from "@/lib/turns";
 
-// Design fixtures: every conversational-layer state rendered from static fake
-// data, so the UI can be exercised and polished before the backend ships the
-// contract. Renders bare (no auth, no sidebar). Not part of the product —
-// production builds 404 unless NEXT_PUBLIC_FIXTURES=1.
+// Design fixtures: the cited-chat states rendered from static fake data, so the
+// UI can be exercised and polished without the backend. Renders bare (no auth,
+// no sidebar). Not part of the product — production builds 404 unless
+// NEXT_PUBLIC_FIXTURES=1.
 
 const CITATIONS: Citation[] = [
   {
@@ -36,18 +36,6 @@ const CITATIONS: Citation[] = [
   },
 ];
 
-const SUGGESTIONS: Suggestion[] = [
-  { label: "What changed vs the previous PSG version?", query: "What changed vs the previous PSG version for albuterol sulfate inhalation aerosol?", filters: { normalized_name: "albuterol sulfate" } },
-  { label: "Show the dissolution requirements", query: "Show the dissolution requirements for albuterol sulfate", filters: { normalized_name: "albuterol sulfate" } },
-  { label: "Check shortage status", query: "Is albuterol sulfate inhalation aerosol currently in shortage?", filters: { normalized_name: "albuterol sulfate" } },
-];
-
-const REDIRECTS: Suggestion[] = [
-  { label: "albuterol sulfate · inhalation aerosol", query: "What BE study design is recommended for albuterol sulfate inhalation aerosol?", filters: { normalized_name: "albuterol sulfate" } },
-  { label: "budesonide · inhalation suspension", query: "What BE study design is recommended for budesonide inhalation suspension?", filters: { normalized_name: "budesonide" } },
-  { label: "Check Drugs@FDA for atorvastatin approvals", query: "Check Drugs@FDA for atorvastatin approvals", filters: null },
-];
-
 const META = { model_name: "gpt-5.2", audit_id: 4217, turn_id: "t_fixture" };
 
 const ANSWER: Turn = {
@@ -58,11 +46,6 @@ const ANSWER: Turn = {
     "For albuterol sulfate inhalation aerosol, the PSG recommends two routes to demonstrating bioequivalence — that is, showing the generic behaves the same as the reference product.\n\n1. **In vitro option**: single actuation content, aerodynamic particle size distribution, spray pattern, plume geometry, and priming/repriming studies.\n2. **In vivo option**: a PK BE study with the in vitro studies above.\n\nThe in vitro-only route applies when formulation and device are qualitatively (Q1) and quantitatively (Q2) the same as the reference.",
   citations: CITATIONS,
   clarify: [],
-  suggestions: SUGGESTIONS,
-  unanswered: [
-    "Pediatric dosing differences between the 90 mcg and 108 mcg presentations",
-    "Whether a counter-equipped device changes the BE recommendation",
-  ],
   interpretation: null,
   meta: META,
 };
@@ -75,24 +58,8 @@ const REFUSAL: Turn = {
     "I searched the corpus for a product-specific guidance on atorvastatin oral tablets and did not find one — 1,795 documents checked, none covering this product.",
   citations: [],
   clarify: [],
-  suggestions: REDIRECTS,
-  unanswered: [],
   interpretation: null,
   meta: { ...META, audit_id: 4218 },
-};
-
-const MEMO: Turn = {
-  role: "assistant",
-  status: "conversational",
-  refused: false,
-  content:
-    "Happy to help. I answer questions over FDA product-specific guidances, assemble dossiers, watch for PSG changes, and populate white papers — every factual claim cited to its source.",
-  citations: [],
-  clarify: [],
-  suggestions: [{ label: "What can you do?", query: "What can you do?", filters: null }],
-  unanswered: [],
-  interpretation: null,
-  meta: { ...META, audit_id: 4219 },
 };
 
 const CLARIFY: Turn = {
@@ -102,12 +69,22 @@ const CLARIFY: Turn = {
   content: "Which propranolol product do you mean?",
   citations: [],
   clarify: [
-    { label: "propranolol hydrochloride · oral tablet", query: "propranolol hydrochloride oral tablet", filters: { normalized_name: "propranolol hydrochloride", dosage_form: "tablet" } },
-    { label: "propranolol hydrochloride · extended-release capsule", query: "propranolol hydrochloride extended-release capsule", filters: { normalized_name: "propranolol hydrochloride", dosage_form: "capsule, extended release" } },
-    { label: "propranolol hydrochloride · oral solution", query: "propranolol hydrochloride oral solution", filters: { normalized_name: "propranolol hydrochloride", dosage_form: "solution" } },
+    {
+      label: "propranolol hydrochloride · oral tablet",
+      query: "propranolol hydrochloride oral tablet",
+      filters: { normalized_name: "propranolol hydrochloride", dosage_form: "tablet" },
+    },
+    {
+      label: "propranolol hydrochloride · extended-release capsule",
+      query: "propranolol hydrochloride extended-release capsule",
+      filters: { normalized_name: "propranolol hydrochloride", dosage_form: "capsule, extended release" },
+    },
+    {
+      label: "propranolol hydrochloride · oral solution",
+      query: "propranolol hydrochloride oral solution",
+      filters: { normalized_name: "propranolol hydrochloride", dosage_form: "solution" },
+    },
   ],
-  suggestions: [],
-  unanswered: [],
   interpretation: "There are three propranolol guidances in the corpus — which dosage form?",
   meta: { ...META, audit_id: 4220 },
 };
@@ -120,10 +97,6 @@ const SCOPE: Turn = {
     "That asks for a regulatory strategy recommendation. I surface and cite public FDA guidance; I don't draft, recommend, or decide.",
   citations: [],
   clarify: [],
-  suggestions: [
-    { label: "albuterol sulfate · inhalation aerosol PSG", query: "What does the albuterol sulfate inhalation aerosol PSG recommend?", filters: { normalized_name: "albuterol sulfate" } },
-  ],
-  unanswered: [],
   interpretation: null,
   meta: { ...META, audit_id: 4221 },
 };
@@ -173,11 +146,11 @@ export default function FixturesPage() {
         <header className="mb-9">
           <div className="kicker">00 · REGWATCH · Design fixtures</div>
           <h1 className="display" style={{ fontSize: "clamp(2rem, 4vw, 2.8rem)", marginTop: "0.5rem" }}>
-            Conversational layer, every state.
+            Cited chat, every state.
           </h1>
           <hr className="rule-gold draw" style={{ marginTop: "0.9rem", maxWidth: "11rem" }} />
           <p style={{ marginTop: "1rem", maxWidth: "44rem", color: "var(--ink-soft)", fontSize: "0.95rem" }}>
-            Static fake data. The suggestion and option buttons are inert; the answer-feedback thumbs are
+            Static fake data. The clarify option buttons are inert; the answer-feedback thumbs are
             the live component (they will attempt a POST).
           </p>
         </header>
@@ -186,27 +159,22 @@ export default function FixturesPage() {
           <TickerDemo />
         </Section>
 
-        <Section no="F2" title="Answer · partial (unanswered aspects) · continue chips">
-          <UserTurn content="What BE study design is recommended for albuterol sulfate inhalation aerosol, and how does pediatric dosing differ?" />
+        <Section no="F2" title="Answer · cited finding">
+          <UserTurn content="What BE study design is recommended for albuterol sulfate inhalation aerosol?" />
           <AssistantTurn turn={ANSWER} sessionId="s_fixture" onPick={noop} busy={false} />
         </Section>
 
-        <Section no="F3" title="Helpful refusal · grounded redirects">
+        <Section no="F3" title="Helpful refusal · not in corpus">
           <UserTurn content="What BE study design is recommended for atorvastatin oral tablets?" />
           <AssistantTurn turn={REFUSAL} sessionId="s_fixture" onPick={noop} busy={false} />
         </Section>
 
-        <Section no="F4" title="Conversational · memorandum">
-          <UserTurn content="hi — what is this tool?" />
-          <AssistantTurn turn={MEMO} sessionId="s_fixture" onPick={noop} busy={false} />
-        </Section>
-
-        <Section no="F5" title="Clarify · options + free-text reply">
+        <Section no="F4" title="Clarify · options + free-text reply">
           <UserTurn content="propranolol" />
           <AssistantTurn turn={CLARIFY} sessionId="s_fixture" onPick={noop} busy={false} />
         </Section>
 
-        <Section no="F6" title="Scope warning · redirect">
+        <Section no="F5" title="Scope warning · declined">
           <UserTurn content="Which BE pathway should we pick for our ANDA?" />
           <AssistantTurn turn={SCOPE} sessionId="s_fixture" onPick={noop} busy={false} />
         </Section>
@@ -214,7 +182,7 @@ export default function FixturesPage() {
         <footer style={{ margin: "4rem 0 2rem" }}>
           <hr className="hair" />
           <p className="code mt-3" style={{ fontSize: "0.7rem", color: "var(--ink-faint)" }}>
-            regwatch design fixtures · conversational layer · not a product surface
+            regwatch design fixtures · cited chat · not a product surface
           </p>
         </footer>
       </div>

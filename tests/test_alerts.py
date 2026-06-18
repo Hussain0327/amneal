@@ -90,13 +90,29 @@ def test_digest_round_trip(tmp_path: Path) -> None:
 
 
 def test_empty_digest_round_trip(tmp_path: Path) -> None:
-    """A no-change watch run writes an EMPTY digest; the UI feed reads zero alerts.
+    """A no-change watch run persists no alerts and writes an EMPTY JSONL digest.
 
-    This is the chosen semantics for `regwatch watch`: the empty file is the
-    truthful record of the latest run, so GET /watch/latest reports zero alerts
-    instead of re-surfacing a stale digest as current.
+    With no rows in the durable `alert` table, GET /watch/latest reads zero; the
+    empty file is retained only as the truthful "ran, no changes" artifact.
     """
+    init_db()
     path = write_digest([])
     assert path.exists()
     assert path.read_text(encoding="utf-8") == ""
     assert latest_digest_records() == []
+
+
+def test_write_digest_is_idempotent_on_rerun() -> None:
+    """Durable + idempotent: persisting the same alert twice yields ONE row.
+
+    Exercises the (psg_version_id, listing_appl_no, product_id) unique key /
+    ON CONFLICT DO NOTHING path directly — re-running watch never duplicates.
+    """
+    _persist_version()
+    alerts = build_alerts([_match()])
+    assert len(alerts) == 1
+    write_digest(alerts)
+    write_digest(alerts)
+    records = latest_digest_records()
+    assert len(records) == 1
+    assert records[0]["psg_version_id"] == alerts[0].psg_version_id

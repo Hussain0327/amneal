@@ -270,9 +270,13 @@ function AskView() {
   // a stale dosage form can't leak into the next free-text follow-up.
   function onPick(opt: Suggestion) {
     if (busy) return;
-    setIngredient(opt.filters?.normalized_name ?? "");
-    setDosage(opt.filters?.dosage_form ?? "");
-    void run(opt.query, opt.filters ?? null);
+    // Clarify filters are typed Record<string, unknown> (the backend models
+    // them as dict[str, Any]); they are deterministic string maps in practice,
+    // so narrow them for the outbound request + the visible filter fields.
+    const filters = (opt.filters ?? null) as Record<string, string> | null;
+    setIngredient(filters?.normalized_name ?? "");
+    setDosage(filters?.dosage_form ?? "");
+    void run(opt.query, filters);
   }
 
   const hasThread = turns.length > 0 || loading || historyLoading;

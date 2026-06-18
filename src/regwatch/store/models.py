@@ -291,3 +291,46 @@ class ChatMessage(SQLModel, table=True):
     citations_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=_json_column())
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
+
+
+class Alert(SQLModel, table=True):
+    """A durable Watch alert (INV-4: every alert refers to a real psg_version).
+
+    Persisted by ``write_digest`` so the feed survives Fly redeploys — the JSONL
+    digest lives on the container's ephemeral disk (no [[mounts]]), so it is
+    wiped on every recycle. The (psg_version_id, listing_appl_no, product_id)
+    unique key makes re-running ``regwatch watch`` the same day idempotent: the
+    repeat insert is a no-op (ON CONFLICT DO NOTHING), never a duplicate row.
+
+    ``captured_at`` is the ISO STRING the Alert dataclass already carried (the
+    source PSG version's captured_at, re-emitted verbatim on the wire and
+    re-parsed by GET /watch/latest's ``since`` filter), so it stays a string to
+    avoid tz round-trip drift. ``created_at`` is a separate server clock used
+    only to order the feed by recency.
+    """
+
+    __tablename__ = "alert"
+    # Declared in metadata (not ad-hoc DDL) so create_all (the Postgres
+    # bootstrap) and migration 0009 produce identical constraints + indexes.
+    __table_args__ = (
+        UniqueConstraint(
+            "psg_version_id",
+            "listing_appl_no",
+            "product_id",
+            name="uq_alert_version_listing_product",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    product_id: int = Field(index=True)
+    active_ingredient: str
+    listing_appl_no: str = Field(index=True)
+    listing_psg_type: str
+    psg_document_id: int = Field(index=True)
+    psg_version_id: int = Field(index=True)
+    captured_at: str  # ISO string, mirrors the Alert dataclass / JSONL
+    diff_summary: str | None = None
+    confidence: float
+    rationale: str
+    source_url: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
