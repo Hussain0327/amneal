@@ -6,10 +6,15 @@ name: watch-daily
 # Actions cron is the sole driver of the daily pipeline in production.
 #
 # It connects to the SAME live Supabase Postgres the API uses, over the public
-# pooler endpoint, and writes durable alerts to the DB (stream 1). It first runs
-# `alembic upgrade head` so the schema is at head before `regwatch watch` boots —
-# the Postgres init path (src/regwatch/store/db.py::_init_postgres) REFUSES to
-# start when the DB stamp != the code's head, and stream 1 adds migration 0009.
+# pooler endpoint, and writes durable alerts to the DB (stream 1).
+#
+# It does NOT migrate the schema. The Fly deploy is the single migration authority
+# (fly.toml `[deploy] release_command = "alembic upgrade head"` runs migrations in
+# a one-off machine before the rolling deploy). The Postgres init path
+# (src/regwatch/store/db.py::_init_postgres) REFUSES to start when the DB stamp !=
+# the code's head, so if a migration was merged but not yet deployed this cron
+# fails loudly here rather than advancing the live schema ahead of the running API
+# machines — which would crash-loop them (the 2026-06-18 failure class).
 #
 # Required repository secrets (Settings → Secrets and variables → Actions):
 #   WATCH_DATABASE_URL  postgresql://...pooler.supabase.com:5432/postgres?sslmode=require
@@ -79,12 +84,10 @@ jobs:
         if: env.DATABASE_URL != ''
         run: uv sync --extra llm --extra orchestration
 
-      # Bring the live DB to head BEFORE regwatch boots. The DB is already stamped
-      # 0008, so this applies only the 0009 delta (stream 1) — it does NOT replay
-      # the SQLite-specific 0001-0006 migrations. env.py reads DATABASE_URL.
-      - name: alembic upgrade head
-        if: env.DATABASE_URL != ''
-        run: uv run alembic upgrade head
+      # NOTE: no `alembic upgrade head` here — the Fly deploy migrates (see the
+      # header). `regwatch watch` boots through the _init_postgres stamp guard,
+      # which refuses (loudly) if the DB schema is behind this checkout's head;
+      # the fix is to deploy the pending migration, not to migrate from the cron.
 
       # The pipeline: crawl → match watchlist → ingest matches → write durable
       # alerts → digest. --extract is the default (paid per-PSG BE extraction);

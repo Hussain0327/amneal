@@ -160,6 +160,34 @@ def test_rls_enable_degrades_gracefully_on_contended_lock(pg_db: ModuleType) -> 
     assert probe_rls is False
 
 
+def test_ensure_postgres_objects_degrades_gracefully_on_contended_lock(
+    pg_db: ModuleType,
+) -> None:
+    """The boot-time chunk DDL must NOT crash the process when `chunk` is locked
+    by a concurrent writer. CREATE INDEX IF NOT EXISTS takes a ShareLock on chunk
+    even when the index already exists — the 2026-06-18 lock-pileup mechanism on
+    a sibling code path to RLS. Under a held ROW EXCLUSIVE lock the boot DDL must
+    hit lock_timeout, log, and skip — not raise — so an in-flight ingest can't
+    crash-loop a booting machine."""
+    pg_db.init_db()
+    engine = pg_db.get_engine()
+
+    holder = engine.connect()
+    trans = holder.begin()
+    # ROW EXCLUSIVE (what an INSERT/UPSERT writer holds) conflicts with the
+    # ShareLock CREATE INDEX needs -> the boot DDL must time out, not hang/raise.
+    holder.execute(text("LOCK TABLE chunk IN ROW EXCLUSIVE MODE"))
+    try:
+        start = time.monotonic()
+        pg_db._ensure_postgres_objects(engine)  # must return, not raise
+        elapsed = time.monotonic() - start
+    finally:
+        trans.rollback()
+        holder.close()
+    # Bounded: one 3s lock_timeout then break, not 3s per every index.
+    assert elapsed < 6.0, "boot chunk-DDL did not bound its lock wait"
+
+
 def test_bootstrap_creates_chunk_table_and_indexes(pg_db: ModuleType) -> None:
     pg_db.init_db()
     with pg_db.get_engine().connect() as conn:
