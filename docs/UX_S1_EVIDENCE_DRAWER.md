@@ -116,41 +116,37 @@ activated while the drawer is open — every open→verify→close is a clean cy
 later slice makes the drawer non-modal, the focus effect must be re-keyed on the
 citation identity to follow content changes.
 
-## Testing strategy & the new harness decision
+## Testing — harness deferred (see below)
 
-The frontend had **no test framework** (CI gated only `eslint` + `tsc --noEmit` +
-`next build` + an OpenAPI contract-drift check). The user standard requires every change
-to ship with tests covering the failure modes and INV invariants. So S1 also establishes
-a **minimal vitest + Testing Library** harness (separate `chore` commit), config kept to
-`vitest.config.ts` + a one-line setup. Tests added:
+S1 originally shipped a **vitest + Testing Library** harness (11 tests, incl. a
+mutation-verified INV-2 gate). It was **removed before merge**: vitest/vite pull a
+transitive toolchain (vite, esbuild) that carries **HIGH/CRITICAL advisories**
+(vite path-traversal, vitest UI/browser-mode file-read/RCE), and the dev-mode web
+Docker image does `npm ci` (all deps), so the CI **trivy image scan** failed on them.
+The only patched versions are `vite@8` / `vitest@4`, whose upgrade cascaded into peer
+conflicts (`@types/node`) and lockfile churn — not worth blocking the feature on.
 
-- `AssistantTurn` with a `refused` turn → renders **zero** citation chips / drawer
-  triggers (INV-2 gate; fails if a future change leaks a chip onto a declined turn).
-- `AssistantTurn` with a `clarify` turn → zero chips.
-- `AssistantTurn` with an `answer` turn + citations → N chip buttons; clicking one calls
-  `onCite` with that exact citation.
-- `EvidenceDrawer` given a citation → renders `snippet`, `p.{page}`, source name, and an
-  external `source_url` link; `Esc` and backdrop click call `onClose`; given `null` →
-  renders nothing.
-- The `<details className="sources">` fallback still renders for cited turns.
+So S1 ships gated by the **existing** frontend CI (`eslint` + `tsc --noEmit` +
+`next build` + OpenAPI contract-drift), plus the **structural** INV-2 guarantee below.
+A proper frontend test harness — on a CVE-clean runner, with the Docker image excluding
+test tooling — is a **dedicated follow-up** (the SWE audit's P1 "frontend tests" item).
 
-The INV-2 gate is **mutation-verified**: rendering a chip in the declined branch turns
-the refused + scope_warning tests red (the declined fixtures carry a non-empty
-`citations` array precisely so the assertion can fail on that regression — otherwise it
-would be test theater). 11 tests total.
-
-CI wiring (a `npm run test` step in `.github/workflows/ci.yml` `frontend` job) is a
-one-line follow-up flagged for go-ahead — not bundled here to keep the CI change explicit.
+INV-2 is enforced **by construction, not just by a test**: `CiteChip` is rendered only
+inside the `answer`/`summary` branch of `AssistantTurn`; the `refused` / `clarify` /
+`scope_warning` branches return early and never map citations, and `status="error"`
+turns reach the cited branch only with empty citations (`_refuse()`), hitting the
+no-citations path. There is no code path where a declined turn produces a drawer trigger.
 
 ## Reviewed (3-lens adversarial pass) — deferred follow-ups
 
 A 3-lens review (a11y/interaction, React lifecycle, standards/test-integrity) cleared
-the slice after one fix (the test-theater INV-2 gate, now corrected). Verified false
-alarms: SSR/portal safety, StrictMode double-invoke, the chip→button new-tab trade.
-Deferred, non-blocking (no baseline regression — there was no modal before S1):
+the slice. Verified false alarms: SSR/portal safety, StrictMode double-invoke, the
+chip→button new-tab trade. Deferred, non-blocking (no baseline regression — there was no
+modal before S1):
+- **Frontend test harness** on a CVE-clean runner, with the Docker image excluding test
+  tooling (the SWE audit's P1 item). Re-add the INV-2 / drawer tests there.
 - **Full `inert` background for assistive tech.** `aria-modal` + the scrim cover most
   AT/pointer cases; making the shell behind the drawer `inert` is additive hardening.
-- **CI `npm run test` step** (above).
 These are tracked for a later hardening pass, not required for S1 to be correct.
 
 ## Explicitly out of scope (smallest change)
