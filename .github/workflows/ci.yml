@@ -163,7 +163,7 @@ jobs:
           persist-credentials: false
 
       - name: setup node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: npm
@@ -215,7 +215,7 @@ jobs:
         run: uv sync --extra dev --extra llm --extra orchestration
 
       - name: setup node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: npm
