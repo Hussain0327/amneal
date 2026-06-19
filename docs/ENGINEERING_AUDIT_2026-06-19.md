@@ -120,7 +120,9 @@ Every confirmed finding is a missing safeguard or maturity gap, not an active ou
 | Date | Items | Status | Commit/Branch | Notes |
 |---|---|---|---|---|
 | 2026-06-19 | Audit | Complete | — | 16-agent 9-dim audit, B+, no P0 |
-| 2026-06-19 | **P1-S batch:** `CD-3`/`OBS-1`, `CD-2`, `TEST-2` | **Done, verified — uncommitted** | (shared tree, git on hold) | cron failure-alert + dead-man's-switch; `min_machines_running` 1→2; pytest-timeout 60s. 554→ green. |
-| 2026-06-19 | **P2-quick batch:** `ARCH-3`, `DOC-1`, `CFG-1`, `CFG-2`, `CFG-3`, `MAINT-1`, `TEST-6`, `ARCH-4`, `MOD-3` | **Done, verified — uncommitted** | (shared tree, git on hold) | docs drift fixed; .env.example + drift test; reranker→Settings; Trivy `vuln,secret`; Dependabot (`uv` ecosystem); coverage floor 80 (measured 82%); import-linter (2 contracts); sources DRY. Gate green: 557 pass/25 skip, ruff/black/mypy/lint-imports clean. |
+| 2026-06-19 | **P1-S batch:** `CD-3`/`OBS-1`, `CD-2`, `TEST-2` | **Committed + pushed to `main`** | `2382271` | cron failure-alert + dead-man's-switch; `min_machines_running` 1→2; pytest-timeout 60s. |
+| 2026-06-19 | **P2-quick batch:** `ARCH-3`, `DOC-1`, `CFG-1`, `CFG-2`, `CFG-3`, `MAINT-1`, `TEST-6`, `ARCH-4`, `MOD-3` | **Committed + pushed to `main`** | `e3a2595` + `5a6df34` | docs drift fixed; .env.example + drift test; reranker→Settings; Trivy `vuln,secret`; Dependabot (`uv` ecosystem); coverage floor 80 (measured 82%); import-linter (2 contracts); sources DRY. Gate green: 557 pass/25 skip, ruff/black/mypy/lint-imports clean. |
 | 2026-06-19 | `IMPL-2` (frontend fetch timeout) | **HELD** | — | Spec ready; `regwatch/frontend/lib/api.ts` is the concurrent agent's territory — apply after that work settles. |
 | 2026-06-19 | `.env` reconciled to `.env.example` | Done | local file | Appended 11 optional default knobs; 49/49 keys match. |
+
+> Pushed to `origin/main` on 2026-06-19: `e3a2595` (CI/deps), `2382271` (ops), `5a6df34` (config/docs), on top of `ff3f6a2` (merged PR #16, UX S1). Remaining: P1-Medium (`CD-1`, `CONT-1`, `SEC-2`/`SEC-3`) + `IMPL-2`.
