@@ -346,6 +346,10 @@ main:focus {
   margin-top: 0.7rem;
 }
 .cite {
+  /* A <button> (opens the evidence drawer), styled to read as the same gold chip
+     the old <a> did — hence the appearance/cursor resets. */
+  appearance: none;
+  cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 0.32rem;
@@ -1429,5 +1433,80 @@ button.chip:disabled {
   }
   .scopebar {
     flex-wrap: wrap;
+  }
+}
+
+/* ---------- Evidence drawer (S1): verify a citation in-app instead of bouncing
+   out to a remote FDA PDF. Portaled to <body>, fixed, above the sidebar (z 50). */
+.evidence__scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(22, 33, 58, 0.32); /* navy ink wash */
+}
+.evidence__panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 201;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  width: min(28rem, 92vw);
+  height: 100vh;
+  padding: 1.5rem 1.6rem;
+  background: linear-gradient(180deg, var(--paper), var(--paper-2));
+  border-left: 1px solid var(--edge);
+  box-shadow: var(--shadow-lift);
+  overflow-y: auto;
+  animation: evidenceIn 0.18s ease;
+}
+@keyframes evidenceIn {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+.evidence__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.evidence__close {
+  appearance: none;
+  cursor: pointer;
+  border: 1px solid var(--edge);
+  background: var(--paper-3);
+  color: var(--ink-soft);
+  border-radius: 7px;
+  width: 1.9rem;
+  height: 1.9rem;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+.evidence__close:hover {
+  color: var(--ink);
+  background: var(--paper-2);
+}
+.evidence__src {
+  margin: 0;
+  font-size: 0.74rem;
+  color: var(--ink-soft);
+}
+.evidence__quote {
+  /* Slightly larger than the inline Reference quote — this is the focal point. */
+  margin: 0;
+  font-size: 1.06rem;
+}
+.evidence__link {
+  align-self: flex-start;
+  font-size: 0.8rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .evidence__panel {
+    animation: none;
   }
 }

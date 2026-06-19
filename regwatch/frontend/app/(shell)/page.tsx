@@ -1,12 +1,13 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 
+import { EvidenceDrawer } from "@/components/EvidenceDrawer";
 import { StatusTicker } from "@/components/StatusTicker";
 import { AssistantTurn, UserTurn } from "@/components/Turns";
 import { useSessions } from "@/components/SessionsProvider";
-import { askQueryStream, getSession, type Suggestion } from "@/lib/api";
+import { askQueryStream, getSession, type Citation, type Suggestion } from "@/lib/api";
 import { assistantTurn, turnFromMessage, userTurn, type Turn } from "@/lib/turns";
 
 const EXAMPLES = [
@@ -65,6 +66,11 @@ function AskView() {
   // ticker unmounts on completion, so this is the only "answer ready" cue AT
   // gets (WCAG 4.1.3). A short lead keeps it from re-reading the transcript.
   const [announcement, setAnnouncement] = useState("");
+  // The citation whose evidence drawer is open (null = closed). Presentation-only
+  // over an already-validated citation; closeDrawer is stable so the drawer's
+  // focus effect doesn't re-run on every render.
+  const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
+  const closeDrawer = useCallback(() => setActiveCitation(null), []);
   // Mirrors sessionId so the URL-sync effect can tell "we just created this
   // session live" (skip refetch) from "another session was selected" (fetch).
   const sessionIdRef = useRef<string | null>(null);
@@ -401,7 +407,7 @@ function AskView() {
           return t.role === "user" ? (
             <UserTurn key={key} content={t.content} />
           ) : (
-            <AssistantTurn key={key} turn={t} sessionId={sessionId} onPick={onPick} busy={busy} />
+            <AssistantTurn key={key} turn={t} sessionId={sessionId} onPick={onPick} onCite={setActiveCitation} busy={busy} />
           );
         })}
 
@@ -426,6 +432,8 @@ function AskView() {
       </div>
 
       {composer}
+
+      <EvidenceDrawer citation={activeCitation} onClose={closeDrawer} />
     </div>
   );
 }

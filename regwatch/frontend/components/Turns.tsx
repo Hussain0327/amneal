@@ -39,15 +39,17 @@ function AuditLine({ turn }: { turn: Turn }) {
   );
 }
 
-// One citation, compact: links straight to its FDA source.
-function CiteChip({ c }: { c: Citation }) {
+// One citation, compact: opens the in-app evidence drawer instead of bouncing the
+// analyst out to the remote FDA PDF. The PDF link still lives inside the drawer and
+// in the <details> Sources list below (the no-JS fallback).
+function CiteChip({ c, onSelect }: { c: Citation; onSelect: (c: Citation) => void }) {
   return (
-    <a className="cite" href={safeHref(c.source_url)} target="_blank" rel="noreferrer" title={`${c.short_name} · p.${c.page}`}>
+    <button type="button" className="cite" onClick={() => onSelect(c)} title={`${c.short_name} · p.${c.page}`}>
       <FileGlyph />
       <span className="cite__label">
         {c.short_name} · p.{c.page}
       </span>
-    </a>
+    </button>
   );
 }
 
@@ -67,11 +69,13 @@ export function AssistantTurn({
   turn,
   sessionId,
   onPick,
+  onCite,
   busy,
 }: {
   turn: Turn;
   sessionId: string | null;
   onPick: (s: Suggestion) => void;
+  onCite: (c: Citation) => void;
   busy: boolean;
 }) {
   if (turn.status === "clarify") {
@@ -96,6 +100,12 @@ export function AssistantTurn({
   // reply is shown for what it is, then redirected — never passed off as an
   // answer. The redirects keep the full numbered-option weight (a dead end
   // shouldn't whisper its way out).
+  //
+  // INV-2 hinges on this: a declined turn renders no citation chips, so the
+  // evidence drawer is unreachable from it. A status="error" turn isn't matched
+  // here, but the backend's _refuse() empties its citations, so it falls through
+  // to the cited branch below and hits the no-citations path — still no chip,
+  // still no drawer. The chip (and drawer trigger) exists ONLY where citations do.
   if (turn.status === "scope_warning" || turn.refused) {
     const tag = turn.status === "scope_warning" ? "Out of scope" : "Declined · not in corpus";
     return (
@@ -120,7 +130,7 @@ export function AssistantTurn({
         <>
           <div className="cites">
             {turn.citations.map((c, i) => (
-              <CiteChip key={`${c.short_name}-${c.page}-${i}`} c={c} />
+              <CiteChip key={`${c.short_name}-${c.page}-${i}`} c={c} onSelect={onCite} />
             ))}
           </div>
           <details className="sources">

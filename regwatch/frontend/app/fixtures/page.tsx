@@ -161,22 +161,22 @@ export default function FixturesPage() {
 
         <Section no="F2" title="Answer · cited finding">
           <UserTurn content="What BE study design is recommended for albuterol sulfate inhalation aerosol?" />
-          <AssistantTurn turn={ANSWER} sessionId="s_fixture" onPick={noop} busy={false} />
+          <AssistantTurn turn={ANSWER} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} />
         </Section>
 
         <Section no="F3" title="Helpful refusal · not in corpus">
           <UserTurn content="What BE study design is recommended for atorvastatin oral tablets?" />
-          <AssistantTurn turn={REFUSAL} sessionId="s_fixture" onPick={noop} busy={false} />
+          <AssistantTurn turn={REFUSAL} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} />
         </Section>
 
         <Section no="F4" title="Clarify · options + free-text reply">
           <UserTurn content="propranolol" />
-          <AssistantTurn turn={CLARIFY} sessionId="s_fixture" onPick={noop} busy={false} />
+          <AssistantTurn turn={CLARIFY} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} />
         </Section>
 
         <Section no="F5" title="Scope warning · declined">
           <UserTurn content="Which BE pathway should we pick for our ANDA?" />
-          <AssistantTurn turn={SCOPE} sessionId="s_fixture" onPick={noop} busy={false} />
+          <AssistantTurn turn={SCOPE} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} />
         </Section>
 
         <footer style={{ margin: "4rem 0 2rem" }}>
