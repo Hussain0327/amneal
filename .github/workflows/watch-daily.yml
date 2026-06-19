@@ -24,6 +24,17 @@ name: watch-daily
 #   OPENFDA_API_KEY     OPTIONAL — only raises the openFDA rate limit; the run
 #                       works without it. Leave unset to omit.
 # While WATCH_DATABASE_URL is unset, the job skips cleanly (no failures).
+#
+# Optional alerting secrets (this cron is the SOLE prod driver of the pipeline,
+# so a silent failure leaves analysts on stale FDA guidance with nobody paged):
+#   SLACK_WEBHOOK_URL     OPTIONAL — Slack incoming-webhook URL. When set, a
+#                         failed run posts repo/workflow/run-URL to Slack. Unset
+#                         => the notify step is a graceful no-op (forks are fine).
+#   WATCH_HEALTHCHECK_URL OPTIONAL — healthchecks.io-style ping URL (see
+#                         docs/DEPLOY.md §6.2). On success we ping it; on failure
+#                         we ping `$URL/fail`. This is the dead-man's-switch that
+#                         catches a cron that NEVER STARTS (which the in-job
+#                         failure step cannot). Unset => both pings no-op.
 
 on:
   schedule:
@@ -55,6 +66,10 @@ jobs:
       # entrypoint.sh runs init-db on boot; here we run alembic + watch directly,
       # so this is informational parity with the container only.
       SENTRY_ENVIRONMENT: "production"
+      # Optional alerting (see header). Mapped to env so `if:` can test presence
+      # and the notify steps no-op cleanly when the secret is absent.
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      WATCH_HEALTHCHECK_URL: ${{ secrets.WATCH_HEALTHCHECK_URL }}
     steps:
       - name: skipped (secret not configured)
         if: env.DATABASE_URL == ''
@@ -96,3 +111,38 @@ jobs:
       - name: regwatch watch
         if: env.DATABASE_URL != ''
         run: uv run regwatch watch
+
+      # ---- Failure alerting + dead-man's-switch (see header) -----------------
+      # This cron is the sole prod driver of the pipeline; a silent failure is
+      # the failure class we guard against here. Each step is gated on BOTH the
+      # job outcome AND secret-presence, so a contributor/fork without the
+      # secrets sees no extra steps and no errors.
+
+      # Post to Slack on any failure. RUN_URL etc. are trusted GitHub context
+      # (no user input) but are passed via env and quoted per the safe pattern.
+      - name: notify slack on failure
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          WORKFLOW: ${{ github.workflow }}
+        run: |
+          set -euo pipefail
+          curl -fsS --max-time 20 --retry 2 --retry-delay 10 \
+            -X POST -H 'Content-Type: application/json' \
+            --data "$(printf '{"text":":rotating_light: *%s* / *%s* FAILED — analysts may be on stale FDA guidance. <%s|View run>"}' "$REPO" "$WORKFLOW" "$RUN_URL")" \
+            "$SLACK_WEBHOOK_URL"
+
+      # Dead-man's-switch success ping. Fires even on a clean skip (DB secret
+      # unset) — the cron DID start and finish, which is what we monitor. A cron
+      # that never starts pings nothing, so healthchecks.io pages on the miss.
+      - name: healthcheck ping on success
+        if: success() && env.WATCH_HEALTHCHECK_URL != ''
+        run: curl -fsS --max-time 20 --retry 2 --retry-delay 10 "$WATCH_HEALTHCHECK_URL"
+
+      # Signal the failure to healthchecks.io too, so it surfaces alongside the
+      # missed-start case in one place. Best-effort: `|| true` so a flaky ping
+      # never masks the real failure that already failed the job.
+      - name: healthcheck ping on failure
+        if: failure() && env.WATCH_HEALTHCHECK_URL != ''
+        run: curl -fsS --max-time 20 --retry 2 --retry-delay 10 "${WATCH_HEALTHCHECK_URL}/fail" || true

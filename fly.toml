@@ -35,7 +35,13 @@ primary_region = "iad"
   internal_port = 8000
   force_https = true
   auto_stop_machines = false
-  min_machines_running = 1
+  # CD-2: keep TWO machines running so a rolling deploy (the default strategy)
+  # always leaves one machine serving while the other is replaced — instead of
+  # stopping the single machine and booting a new one with NOTHING serving
+  # during the grace+init window. Requires `fly scale count 2` once; this floor
+  # only stops Fly from autostopping below it. The /health check below gates
+  # each machine back into rotation before the next is touched.
+  min_machines_running = 2
 
   [[http_service.checks]]
     interval = "30s"
