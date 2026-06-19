@@ -59,8 +59,13 @@ jobs:
       - name: mypy
         run: uv run mypy src tests
 
+      - name: lint-imports
+        run: uv run lint-imports
+
       - name: pytest
-        run: uv run pytest -q
+        # --cov-fail-under is a regression floor: measured coverage was ~82%, so
+        # 80 leaves headroom while still failing CI if coverage silently erodes.
+        run: uv run pytest -q --cov=src/regwatch --cov-fail-under=80
 
       - name: seed vector store
         if: env.OPENAI_API_KEY != ''
@@ -126,10 +131,12 @@ jobs:
       - name: frontend docker build
         run: docker build -t regwatch-web:ci regwatch/frontend
 
-      # Container image scan. Fails on FIXABLE CRITICAL/HIGH vulns only
-      # (--ignore-unfixed): base-image OS packages routinely carry CVEs with no
-      # released fix, and failing on those would just pin the build to a moving
-      # target with no action to take. Trivy caches its DB across runs.
+      # Container image scan: FIXABLE CRITICAL/HIGH vulns (--ignore-unfixed:
+      # base-image OS packages routinely carry CVEs with no released fix, and
+      # failing on those would just pin the build to a moving target with no
+      # action to take) PLUS any embedded secrets (--scanners vuln,secret —
+      # secret findings ignore --ignore-unfixed and gate the build the same way).
+      # Trivy caches its DB across runs.
       - name: trivy scan (API image)
         run: |
           docker run --rm \
@@ -137,7 +144,7 @@ jobs:
             -v "$HOME/.cache/trivy:/root/.cache/trivy" \
             aquasec/trivy:latest image \
             --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
-            --scanners vuln regwatch:ci
+            --scanners vuln,secret regwatch:ci
 
       - name: trivy scan (web image)
         run: |
@@ -146,7 +153,7 @@ jobs:
             -v "$HOME/.cache/trivy:/root/.cache/trivy" \
             aquasec/trivy:latest image \
             --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
-            --scanners vuln regwatch-web:ci
+            --scanners vuln,secret regwatch-web:ci
 
   frontend:
     runs-on: ubuntu-latest

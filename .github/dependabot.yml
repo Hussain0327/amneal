@@ -1,0 +1,47 @@
+# Automated dependency updates. Once merged, Dependabot starts opening update
+# PRs on the weekly schedule below — review and merge them like any other PR.
+#
+# Three ecosystems mirror what CI actually builds (.github/workflows/ci.yml):
+#   - uv:             root pyproject.toml + uv.lock (backend deps). The `uv`
+#                     ecosystem updates BOTH pyproject and the lockfile, so the
+#                     CI `uv export --frozen` check stays green (a `pip`-ecosystem
+#                     bump would leave uv.lock stale and fail --frozen).
+#   - npm:            regwatch/frontend (Next.js app)
+#   - github-actions: the action pins used by the workflows in this repo
+#
+# Minor/patch bumps are grouped into one PR per ecosystem to cut review churn;
+# majors stay separate so breaking changes get their own scrutiny.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: npm
+    directory: /regwatch/frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch

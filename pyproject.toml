@@ -52,11 +52,13 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",
+    "pytest-timeout>=2.3",
     "ruff>=0.8",
     "black>=24.10",
     "mypy>=1.13",
     "types-requests",
     "respx>=0.21",
+    "import-linter>=2.0",
 ]
 
 [project.scripts]
@@ -93,6 +95,50 @@ ignore = ["E501", "B008"]  # E501: line length handled by black; B008: typer.Opt
 [tool.black]
 line-length = 100
 target-version = ["py311"]
+
+# Layering fitness functions (ARCH-4). These guard two real seams so the
+# coupling can't silently regress; they catch DIRECT imports only
+# (allow_indirect_imports) because both targets are reachable transitively
+# through legitimate callers. Keep this set to contracts that PASS on the
+# current tree — a strict layered contract is intentionally NOT shipped because
+# domain modules import regwatch.store.db directly today.
+[tool.importlinter]
+root_package = "regwatch"
+# Required so the `openai` forbidden contract below can see the external SDK as
+# a graph node (otherwise its ignore_imports exceptions don't resolve).
+include_external_packages = "true"
+
+# The pgvector implementation is meant to sit behind the store facade
+# (store.vector_store / store.db). The two api.main / store.db edges that remain
+# are the startup embedding-dim assertion (assert_embedding_provider_dim), which
+# must run before any vector I/O — they are pinned here so new direct callers
+# of the raw implementation are rejected.
+[[tool.importlinter.contracts]]
+name = "pgvector_store is only reached through the store facade"
+type = "forbidden"
+source_modules = ["regwatch"]
+forbidden_modules = ["regwatch.store.pgvector_store"]
+allow_indirect_imports = "true"
+ignore_imports = [
+    "regwatch.store.vector_store -> regwatch.store.pgvector_store",
+    "regwatch.store.db -> regwatch.store.pgvector_store",
+    "regwatch.api.main -> regwatch.store.pgvector_store",
+]
+
+# The OpenAI SDK is an I/O detail. It belongs in the two LLM client seams; the
+# api.main edge is only the APIError type used to classify upstream failures.
+# Any other module reaching for `openai` directly is a layering smell.
+[[tool.importlinter.contracts]]
+name = "openai SDK stays in the LLM client seam"
+type = "forbidden"
+source_modules = ["regwatch"]
+forbidden_modules = ["openai"]
+allow_indirect_imports = "true"
+ignore_imports = [
+    "regwatch.common.llm_clients -> openai",
+    "regwatch.generate.llm -> openai",
+    "regwatch.api.main -> openai",
+]
 
 [tool.uv.sources]
 torch = [
@@ -142,6 +188,13 @@ disallow_untyped_defs = false
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 asyncio_mode = "auto"
+# Fail a hung test fast instead of stalling CI to its 6h ceiling (e.g. a DB
+# lock-wait — the Jun-18 incident class — or a missed network monkeypatch
+# against the CI Postgres service). thread, not signal: SIGALRM is unreliable
+# inside native extensions (pdfminer, psycopg). Per-test override via
+# @pytest.mark.timeout(N) if a specific test legitimately needs longer.
+timeout = 60
+timeout_method = "thread"
 markers = [
     "integration: integration tests (may hit the network)",
     "slow: slow tests",
