@@ -161,14 +161,14 @@ These are code with tests, not guidelines. See `tests/test_invariants.py`.
 | Scrape | `httpx` + `selectolax` (`pdfplumber` primary, `pypdf` fallback) |
 | Chunking | Heading + page-aware recursive splitter, ~1000 tokens, ~150 overlap |
 | Embeddings | Pluggable. Local `BAAI/bge-small-en-v1.5` via sentence-transformers (`--extra local-embeddings`) is the dev and Compose default; `openai` (`text-embedding-3-small`, 1536-dim) pairs with the slim no-torch image for production; `echo` is test-only (bare-image smoke boots) |
-| Vector store | ChromaDB, persistent on disk |
-| Structured store | SQLite via SQLModel |
+| Vector store | Production: **pgvector** in the same Postgres (`DATABASE_URL` set). ChromaDB persistent-on-disk is the local + CI dev default |
+| Structured store | Production: **Postgres** (Supabase) via SQLModel (`DATABASE_URL` set; `REQUIRE_DATABASE_URL=true` refuses the SQLite fallback). SQLite is the local + CI dev default |
 | DB migrations | Alembic baseline + incremental migrations |
 | Retrieval | Two-stage. Stage 1: `VECTOR_TOP_K=50` (wide). Stage 2: rerank → `RERANK_TOP_K=8`. Reranker off by default; when off, stage 2 is `passages[:rerank_top_k]` |
 | LLM | Pluggable behind `LLMProvider`. OpenAI via the **Responses API** (`OPENAI_API_MODE=responses`, default; `chat` falls back to Chat Completions). Role-specific models: router `gpt-5-nano` (reasoning), synthesizer + extractor `gpt-5.4-nano`, each falling back to `LLM_MODEL`. `anthropic` and `echo` (test-only) also supported |
 | API | FastAPI. `POST /query` is conversational — accepts/returns `session_id`+`turn_id`, with response `status` ∈ `answer`/`summary`/`clarify`/`scope_warning`/`refused` |
-| UI | **Next.js 14 (App Router, TypeScript) in `regwatch/frontend/`** — all four surfaces (Ask / Assemble / Watch / White Paper) render inside one `(shell)` route-group layout: one sidebar, one set of design tokens, and a shared **"Under review" product-scope bar**. The current product is **URL-scoped** (`?rp=&appl=`) so it is shareable and survives reload. Talks to the API through a same-origin `/api` proxy. (The earlier Streamlit POC was retired.) |
-| Orchestration | Dagster OSS in Docker Compose. Manual `seed_corpus_job` over `regwatch seed`, plus `watch_digest_job` over `regwatch watch` with a daily 06:00 UTC schedule (`watch_daily_schedule`) |
+| UI | **Next.js 16 (App Router, TypeScript) in `regwatch/frontend/`** — all four surfaces (Ask / Assemble / Watch / White Paper) render inside one `(shell)` route-group layout: one sidebar, one set of design tokens, and a shared **"Under review" product-scope bar**. The current product is **URL-scoped** (`?rp=&appl=`) so it is shareable and survives reload. Talks to the API through a same-origin `/api` proxy. (The earlier Streamlit POC was retired.) |
+| Orchestration | **Production: a GitHub Actions cron** (`.github/workflows/watch-daily.yml`, daily) runs `regwatch watch` against the live Supabase Postgres — it is the sole driver of the daily pipeline in prod. Dagster OSS in Docker Compose (`watch_daily_schedule`'s 06:00 UTC `watch_digest_job`, manual `seed_corpus_job`) is local-only; no Dagster daemon is deployed |
 | Tooling | ruff, black, mypy strict on `src/`, pytest |
 
 The LLM provider, model, and reranker are all behind interfaces. Nothing is

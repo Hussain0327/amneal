@@ -7,9 +7,10 @@ hook point exists for the IT team to slot in their own reranker later.
 
 from __future__ import annotations
 
-import os
 from threading import Lock
 from typing import Any
+
+from config.settings import get_settings
 
 from regwatch.retrieve.retriever import RetrievedPassage
 
@@ -18,7 +19,9 @@ _RERANKER_LOCK = Lock()
 
 
 def rerank_passages(query: str, passages: list[RetrievedPassage]) -> list[RetrievedPassage]:
-    if os.getenv("RERANKER_ENABLED", "").lower() not in {"1", "true", "yes"}:
+    # Read the toggle via Settings (RERANKER_ENABLED) so it is documented and
+    # validated like every other env knob, instead of a bare os.getenv read.
+    if not get_settings().reranker_enabled:
         return passages
     # Cross-encoder rerank is intentionally not loaded by default to keep cold
     # start fast and CI light. When enabled, swap in your model here.

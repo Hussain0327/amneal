@@ -11,6 +11,8 @@ to be read top-to-bottom once, then used as a reference. Companion docs:
 (the production runbook), [`whitepaper_schema.md`](whitepaper_schema.md) (the
 46-cell White Paper schema), and [`DECISIONS.md`](DECISIONS.md) (decision log).
 
+> Last verified: e06c66a / 2026-06-19
+
 ---
 
 ## Table of contents
@@ -60,17 +62,18 @@ it **guides with clickable options** instead of guessing.
 ## 2. Deployment topology
 
 Three tiers, one browser-visible origin. This is the **target topology** the code
-and runbook ([`DEPLOY.md`](DEPLOY.md)) are built for; the dual-mode storage path
-(§9) is implemented and rehearsable, but managed Postgres/pgvector is **not yet
-provisioned**, and a gateway/TLS/SSO front-door is still open work (see
-`docs/ROADMAP.md`). Locally and in CI the stack runs entirely on SQLite + Chroma.
+and runbook ([`DEPLOY.md`](DEPLOY.md)) are built for. Production is **live** on
+managed Supabase Postgres/pgvector (schema at migration `0009`, self-migrated on
+each deploy by the Fly `release_command` — see §9); a gateway/TLS/SSO front-door
+is still open work (see `docs/ROADMAP.md`). Locally and in CI the stack still runs
+entirely on SQLite + Chroma (the dual-mode path of §9).
 
 ```
                          Browser (analyst)
                                │  HTTPS, HttpOnly session cookie
                                ▼
             ┌──────────────────────────────────────┐
-            │  Vercel — Next.js 14 (App Router)       │   amneal.vercel.app
+            │  Vercel — Next.js 16 (App Router)       │   amneal.vercel.app
             │  server-side rewrite  /api/* → backend  │   FREE tier
             └───────────────────┬────────────────────┘
                                │  /api/:path*  →  API_PROXY_TARGET/:path*
@@ -124,7 +127,7 @@ The entire stack swap is driven by one variable — see §9.
 
 ## 3. Product surfaces
 
-The frontend (`regwatch/frontend/`) is a deliberately thin Next.js 14 App Router
+The frontend (`regwatch/frontend/`) is a deliberately thin Next.js 16 App Router
 app. All intelligence and all secrets live server-side. `lib/api.ts` is the fetch
 wrapper; `lib/turns.ts` models a conversation turn. (Streamlit is fully retired;
 this Next.js app is the only UI.)
@@ -495,18 +498,22 @@ entire persistence stack**, and no caller changes.
   single `_json_column()` helper (`with_variant`), so the same Python types work
   on both dialects.
 
-- **Schema bootstrap:** a fresh Postgres database is created via `create_all` +
-  `alembic stamp head` (no history replay — the migration history 0001–0008 is
-  SQLite-oriented, including SQLite-batch ops). SQLite/dev uses the normal alembic
-  upgrade path. Constraints and composite indexes are declared in SQLModel
-  `__table_args__` so `create_all`, alembic autogenerate, and the hand-written
-  migrations all agree.
+- **Schema bootstrap (two paths):** a *fresh, empty* Postgres database is created
+  via `create_all` + `alembic stamp head` (no history replay — migrations 0001–0006
+  contain SQLite-specific batch ops; `store/db.py::_init_postgres`). An *existing*
+  Supabase database is migrated *incrementally*: `fly.toml`'s
+  `[deploy] release_command = "alembic upgrade head"` runs pending migrations on a
+  one-off machine before the app machines roll, so a 0009 image never boots against
+  a 0008 DB (the 2026-06-18 incident). The live DB is at `0009`. SQLite/dev uses the
+  normal alembic upgrade path. Constraints and composite indexes are declared in
+  SQLModel `__table_args__` so `create_all`, alembic autogenerate, and the
+  hand-written migrations all agree.
 
 ---
 
 ## 10. Data model
 
-`store/models.py` — SQLModel definitions; eight Alembic migrations (0001–0008).
+`store/models.py` — SQLModel definitions; nine Alembic migrations (0001–0009).
 Embeddings live in the vector store; everything below is the structured store.
 
 ### Corpus & evidence

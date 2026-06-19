@@ -29,7 +29,12 @@ from config.settings import get_settings
 
 from regwatch.common.logging import get_logger
 from regwatch.common.text_normalize import canonical_name
-from regwatch.sources._utils import clean_application_number, clean_text, owned_client
+from regwatch.sources._utils import (
+    bare_application_number,
+    clean_application_number,
+    clean_text,
+    owned_client,
+)
 from regwatch.sources.types import SourceKind, SourceQuery, SourceRecord
 
 log = get_logger(__name__)
@@ -156,7 +161,7 @@ class OrangeBookHandler:
             else _cached_parsed(PRODUCTS_MEMBER, PRODUCT_COLUMNS, client)
         )
         records: list[SourceRecord] = []
-        app_no = _orange_book_app_no(query.application_number)
+        app_no = bare_application_number(query.application_number)
         ingredient = canonical_name(query.active_ingredient or "")
         brand = (query.brand_name or "").lower().strip()
         for row in rows:
@@ -407,13 +412,3 @@ def _record(row: dict[str, str]) -> SourceRecord:
         fields=fields,
         raw=row,
     )
-
-
-def _orange_book_app_no(value: str | None) -> str | None:
-    cleaned = clean_application_number(value)
-    if cleaned is None:
-        return None
-    for prefix in ("NDA", "ANDA", "BLA"):
-        if cleaned.startswith(prefix):
-            return cleaned.removeprefix(prefix)
-    return cleaned

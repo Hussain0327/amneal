@@ -133,6 +133,10 @@ class Settings(BaseSettings):
     # config in agreement at all times.
     vector_top_k: int = 50
     rerank_top_k: int = _DEFAULT_RERANK_TOP_K
+    # Phase-2 cross-encoder rerank. Off by default: when false, stage 2 is the
+    # identity (first rerank_top_k of the wide net). Read via Settings (not a
+    # bare os.getenv) so the knob is documented and validated like every other.
+    reranker_enabled: bool = False
     # Legacy alias — populated from RETRIEVAL_TOP_K if set (backwards compat).
     retrieval_top_k: int | None = None
     refusal_score_threshold: float = 0.30

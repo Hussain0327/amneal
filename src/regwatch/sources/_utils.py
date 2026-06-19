@@ -69,6 +69,24 @@ def application_number_candidates(value: str | None) -> list[str]:
     return [f"{prefix}{cleaned}" for prefix in APPLICATION_PREFIXES] + [cleaned]
 
 
+def bare_application_number(value: str | None) -> str | None:
+    """The bare-digit form of an application number, prefix stripped.
+
+    Some stores key on digits alone (the PSG crawler extracts digits only;
+    Orange Book ``Appl_No`` columns hold the number without its type letter),
+    so a prefixed query — "NDA020503" or the advertised "N020503", which
+    :func:`clean_application_number` normalizes to "NDA020503" — must be
+    stripped back to digits or it silently matches nothing.
+    """
+    cleaned = clean_application_number(value)
+    if cleaned is None:
+        return None
+    for prefix in APPLICATION_PREFIXES:
+        if cleaned.startswith(prefix):
+            return cleaned.removeprefix(prefix)
+    return cleaned
+
+
 def clean_ndc(value: str | None) -> str | None:
     if not value:
         return None
