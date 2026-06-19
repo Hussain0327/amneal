@@ -77,7 +77,7 @@ jobs:
           echo "WATCH_DATABASE_URL secret not set — skipping the daily watch run."
           echo "Set it to the prod Supabase URL with ?sslmode=require (stream 2)."
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: env.DATABASE_URL != ''
         with:
           persist-credentials: false
