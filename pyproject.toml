@@ -37,7 +37,7 @@ dependencies = [
 local-embeddings = [
     "sentence-transformers>=3.3",
     "torch>=2.4,<3",
-    "transformers<5",
+    "transformers<6",
 ]
 llm = [
     "openai>=1.55",
