@@ -84,7 +84,7 @@ jobs:
 
       - name: install uv
         if: env.DATABASE_URL != ''
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
           enable-cache: true
