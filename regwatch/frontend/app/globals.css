@@ -19,7 +19,10 @@
   --ink: #16213a; /* brand navy — body + headings */
   --ink-2: #283450;
   --ink-soft: #6c7286; /* meta, captions */
-  --ink-faint: #9a9784;
+  /* Darkened from #9a9784 (only ~2.4-2.7:1 — failed WCAG AA on the text it
+     carries: scopebar, captions, source summaries). #6b6859 clears 4.5:1 on
+     all three paper tones (paper 5.19, paper-2 4.84, paper-3 4.54). */
+  --ink-faint: #6b6859;
 
   /* Gold — the official accent. Used for rules, seals, markers; not body text. */
   --gold: #f5b400;
@@ -176,13 +179,18 @@ main:focus {
 .scopebar__clear {
   margin-left: auto;
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px; /* WCAG 2.5.8 target size; negative margin keeps the baseline */
+  margin-top: -0.25rem;
+  margin-bottom: -0.25rem;
   font-family: var(--font-mono), monospace;
   font-size: 0.62rem;
   letter-spacing: 0.06em;
   color: var(--ink-faint);
   background: none;
   border: none;
-  padding: 0;
+  padding: 0 0.25rem;
   cursor: pointer;
   transition: color 0.15s ease;
 }
@@ -273,8 +281,10 @@ main:focus {
   width: 1.7rem;
   height: 1.7rem;
   border-radius: 999px;
-  background: linear-gradient(180deg, var(--gold), var(--gold-deep));
-  color: #4a3608;
+  /* Gold discipline (Ask): on this surface gold == "sourced", reserved to the
+     citation stamp / sources. The avatar is navy ink, not gold. */
+  background: var(--ink);
+  color: var(--paper);
   font-family: var(--font-mono), monospace;
   font-size: 0.56rem;
   font-weight: 600;
@@ -282,7 +292,7 @@ main:focus {
   display: grid;
   place-items: center;
   margin-top: 0.1rem;
-  box-shadow: inset 0 0 0 1px rgba(138, 91, 0, 0.35);
+  box-shadow: inset 0 0 0 1px rgba(22, 33, 58, 0.4);
 }
 .bubble--user {
   max-width: 80%;
@@ -335,6 +345,68 @@ main:focus {
   font-size: 0.7rem;
   color: var(--ink-faint);
 }
+/* Why a turn was declined / clarified — a quiet mono caption under the tag or
+   prompt. Text only; carries no grounding (INV-2). */
+.msg__reason {
+  margin: 0.45rem 0 0;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--ink-soft);
+}
+.msg__declined .msg__reason {
+  color: #6a4a4a; /* readable within the oxblood wash */
+}
+/* "Interpreted as: …" — a subordinate caption ABOVE the answer body, showing how
+   a terse question was read when the rewrite adds information. */
+.msg__interp {
+  margin: 0 0 0.4rem;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--ink-soft);
+  font-style: italic;
+}
+/* Coarse confidence band on a cited answer — High/Moderate, never the raw
+   float. Reads hedged near the refusal threshold. */
+.confidence {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.7rem 0 0;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.confidence__dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--ink-faint);
+}
+.confidence--high .confidence__dot {
+  background: #3f7d54; /* settled green — a clear-cut retrieval */
+}
+.confidence--moderate .confidence__dot {
+  background: var(--gold-deep); /* hedged amber near the threshold */
+}
+/* Revision provenance on a source (drawer + reference): FDA recommended date and
+   the "what changed" note. Display-only, subordinate to the snippet. */
+.recency {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin: 0.35rem 0;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+.recency__rev {
+  color: var(--gold-ink);
+  font-weight: 600;
+}
+.recency__diff {
+  color: var(--ink-soft);
+}
 
 /* Citation chips: compact grounding, each links to its FDA source. The full
    snippet stays one tap away in the Sources disclosure, so grounding (INV-1)
@@ -354,6 +426,7 @@ main:focus {
   align-items: center;
   gap: 0.32rem;
   max-width: 18rem;
+  min-height: 24px; /* WCAG 2.5.8 target size — padding keeps the visual compact */
   font-family: var(--font-mono), monospace;
   font-size: 0.68rem;
   color: var(--gold-ink);
@@ -363,6 +436,37 @@ main:focus {
   padding: 0.14rem 0.5rem;
   text-decoration: none;
   transition: background 0.15s ease, filter 0.15s ease;
+}
+
+/* The signature: an inline, claim-anchored citation stamp. SQUARE corners +
+   mono [n] set it apart from the rounded .pill / .chip; gold marks it as the
+   one sourced element in the prose. Opens the cited passage in the drawer. */
+.cite-stamp {
+  appearance: none;
+  cursor: pointer;
+  /* inline-flex over the baseline so the [n] sits with the surrounding text. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: baseline;
+  min-width: 24px; /* WCAG 2.5.8 target size */
+  min-height: 18px;
+  margin: 0 0.12em;
+  padding: 0 0.34em;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.74em;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--gold-ink);
+  background: var(--gold-wash);
+  border: 1px solid var(--gold-deep);
+  border-radius: 2px; /* square — the anti-pill */
+  text-decoration: none;
+  transition: background 0.12s ease, filter 0.12s ease;
+}
+.cite-stamp:hover {
+  background: #f7e6bf;
+  filter: brightness(1.02);
 }
 .cite:hover {
   filter: brightness(1.02);
@@ -481,6 +585,11 @@ main:focus {
   color: var(--ink);
   padding: 0.4rem 0;
   max-height: 9rem;
+  /* Auto-grow to max-height as the analyst types a longer question. Native
+     where supported; page.tsx syncs scrollHeight as the fallback. overflow-y
+     auto so it scrolls once it hits the cap. */
+  field-sizing: content;
+  overflow-y: auto;
   outline: none;
 }
 .composer__input::placeholder {
@@ -492,8 +601,10 @@ main:focus {
   height: 2.15rem;
   border-radius: 9px;
   border: 0;
-  background: linear-gradient(180deg, var(--gold), var(--gold-deep));
-  color: #4a3608;
+  /* Gold discipline (Ask): the send CTA is navy ink with a paper glyph — gold
+     is reserved to grounding (the citation stamp / sources). */
+  background: var(--ink);
+  color: var(--paper);
   display: grid;
   place-items: center;
   cursor: pointer;
@@ -1000,13 +1111,18 @@ button.chip:disabled {
 }
 .hist__del {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px; /* WCAG 2.5.8 target size */
   border: 0;
   background: transparent;
   cursor: pointer;
   color: var(--ink-faint);
   font-size: 0.9rem;
   line-height: 1;
-  padding: 0.3rem 0.5rem 0.3rem 0.2rem;
+  padding: 0.3rem 0.4rem;
   opacity: 0;
   transition: opacity 0.15s ease, color 0.15s ease;
 }

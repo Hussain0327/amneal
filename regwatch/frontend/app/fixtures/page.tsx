@@ -23,6 +23,9 @@ const CITATIONS: Citation[] = [
     source_url: "https://www.accessdata.fda.gov/drugsatfda_docs/psg/PSG_021457.pdf",
     snippet:
       "Two options are recommended: an in vitro only approach, or an in vivo PK BE study with clinical endpoint considerations for locally acting products.",
+    score: 0.71,
+    recommended_date: "Mar 2023",
+    diff_summary: "Added the in vitro-only Q1/Q2 sameness route.",
   },
   {
     short_name: "PSG_021457_albuterol-sulfate",
@@ -33,6 +36,7 @@ const CITATIONS: Citation[] = [
     source_url: "https://www.accessdata.fda.gov/drugsatfda_docs/psg/PSG_021457.pdf",
     snippet:
       "In vitro studies should include single actuation content through container life and aerodynamic particle size distribution.",
+    score: 0.64,
   },
 ];
 
@@ -42,12 +46,16 @@ const ANSWER: Turn = {
   role: "assistant",
   status: "answer",
   refused: false,
+  // Inline citation tags ([short_name, p.N]) exercise the stamp substitution —
+  // matched tags become clickable [n] stamps, an unmatched one stays literal.
   content:
-    "For albuterol sulfate inhalation aerosol, the PSG recommends two routes to demonstrating bioequivalence — that is, showing the generic behaves the same as the reference product.\n\n1. **In vitro option**: single actuation content, aerodynamic particle size distribution, spray pattern, plume geometry, and priming/repriming studies.\n2. **In vivo option**: a PK BE study with the in vitro studies above.\n\nThe in vitro-only route applies when formulation and device are qualitatively (Q1) and quantitatively (Q2) the same as the reference.",
+    "For albuterol sulfate inhalation aerosol, the PSG recommends two routes to demonstrating bioequivalence — that is, showing the generic behaves the same as the reference product [PSG_021457_albuterol-sulfate, p.2].\n\n1. **In vitro option**: single actuation content, aerodynamic particle size distribution, spray pattern, plume geometry, and priming/repriming studies [PSG_021457_albuterol-sulfate, p.4].\n2. **In vivo option**: a PK BE study with the in vitro studies above.\n\nThe in vitro-only route applies when formulation and device are qualitatively (Q1) and quantitatively (Q2) the same as the reference.",
   citations: CITATIONS,
   clarify: [],
   related: [],
-  interpretation: null,
+  interpretation: "BE study design for albuterol sulfate inhalation aerosol",
+  reason: null,
+  live: true,
   meta: META,
 };
 
@@ -74,6 +82,8 @@ const REFUSAL: Turn = {
     },
   ],
   interpretation: null,
+  reason: "no_product",
+  live: true,
   meta: { ...META, audit_id: 4218 },
 };
 
@@ -102,6 +112,8 @@ const CLARIFY: Turn = {
   ],
   related: [],
   interpretation: "There are three propranolol guidances in the corpus — which dosage form?",
+  reason: "multi_form",
+  live: true,
   meta: { ...META, audit_id: 4220 },
 };
 
@@ -115,6 +127,8 @@ const SCOPE: Turn = {
   clarify: [],
   related: [],
   interpretation: null,
+  reason: "scope_warning",
+  live: true,
   meta: { ...META, audit_id: 4221 },
 };
 
@@ -177,22 +191,22 @@ export default function FixturesPage() {
         </Section>
 
         <Section no="F2" title="Answer · cited finding">
-          <UserTurn content="What BE study design is recommended for albuterol sulfate inhalation aerosol?" />
+          <UserTurn content="What BE study design is recommended for albuterol sulfate inhalation aerosol?" live />
           <AssistantTurn turn={ANSWER} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} />
         </Section>
 
         <Section no="F3" title="Helpful refusal · not in corpus">
-          <UserTurn content="What BE study design is recommended for atorvastatin oral tablets?" />
+          <UserTurn content="What BE study design is recommended for atorvastatin oral tablets?" live />
           <AssistantTurn turn={REFUSAL} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} />
         </Section>
 
         <Section no="F4" title="Clarify · options + free-text reply">
-          <UserTurn content="propranolol" />
+          <UserTurn content="propranolol" live />
           <AssistantTurn turn={CLARIFY} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} />
         </Section>
 
         <Section no="F5" title="Scope warning · declined">
-          <UserTurn content="Which BE pathway should we pick for our ANDA?" />
+          <UserTurn content="Which BE pathway should we pick for our ANDA?" live />
           <AssistantTurn turn={SCOPE} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} />
         </Section>
 
