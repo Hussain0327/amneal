@@ -112,6 +112,36 @@ jobs:
         if: env.DATABASE_URL != ''
         run: uv run regwatch watch
 
+      # ---- Refusal-threshold revalidation (ADVISORY observability) -----------
+      # NON-GATING. This re-runs the gold set through the REAL prod retrieval path
+      # in THIS job's PROD embedding space (EMBEDDING_PROVIDER=openai + the live
+      # Supabase DATABASE_URL => OpenAI-1536 + pgvector), which CI structurally
+      # cannot exercise (CI runs bge-384 + Chroma). It reports the two score
+      # distributions (must-answer vs must-refuse) and RECOMMENDS a refusal cutoff
+      # so a human can revalidate the provisional 0.30 default in the post-bge
+      # OpenAI vector space. See docs/DEPLOY.md §"Refusal-threshold revalidation".
+      #
+      # It is calibration OBSERVABILITY, NOT a gate: the sweep is read-only w.r.t.
+      # the safety path — it never changes REFUSAL_SCORE_THRESHOLD or the 0.30
+      # default, and exits 0 even when its recommendation differs from 0.30. The
+      # explicit `continue-on-error: true` guarantees that a sweep hiccup (or a
+      # recommendation != 0.30) can NEVER fail the daily crawl or block ingestion,
+      # and that it never trips the failure-alerting / dead-man's-switch steps
+      # below (a non-gating step's failure does not set job `failure()`).
+      - name: threshold sweep (advisory)
+        if: env.DATABASE_URL != ''
+        continue-on-error: true
+        run: uv run python -m regwatch.eval.threshold_sweep --out threshold_sweep.json
+
+      - name: upload threshold sweep artifact
+        if: env.DATABASE_URL != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: threshold-sweep
+          path: threshold_sweep.json
+          if-no-files-found: warn
+
       # ---- Failure alerting + dead-man's-switch (see header) -----------------
       # This cron is the sole prod driver of the pipeline; a silent failure is
       # the failure class we guard against here. Each step is gated on BOTH the
