@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
+import { RecencyBadge } from "@/components/RecencyBadge";
 import type { Citation } from "@/lib/api";
 import { safeHref } from "@/lib/url";
 
@@ -91,7 +92,11 @@ export function EvidenceDrawer({
         </header>
         <p className="evidence__src code">
           {citation.short_name} · p.{citation.page}
+          {/* Numeric retrieval score lives here only — the main view shows a
+              coarse band so a near-threshold answer reads hedged, not precise. */}
+          {typeof citation.score === "number" && ` · score ${citation.score.toFixed(2)}`}
         </p>
+        <RecencyBadge c={citation} />
         <blockquote className="ref__quote evidence__quote">{citation.snippet}</blockquote>
         <a className="link code evidence__link" href={safeHref(citation.source_url)} target="_blank" rel="noreferrer">
           Open source PDF ↗

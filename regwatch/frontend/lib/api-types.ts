@@ -464,6 +464,12 @@ export interface components {
             source_url: string;
             /** Snippet */
             snippet: string;
+            /** Score */
+            score?: number | null;
+            /** Recommended Date */
+            recommended_date?: string | null;
+            /** Diff Summary */
+            diff_summary?: string | null;
         };
         /** QueryRequest */
         QueryRequest: {

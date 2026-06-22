@@ -263,6 +263,24 @@ function AskView() {
     submitQuestion();
   }
 
+  // Auto-grow the composer to its CSS max-height (9rem), then let overflow
+  // scroll. field-sizing:content handles this natively where supported; this
+  // scrollHeight sync is the fallback for browsers that lack it. Reset to auto
+  // first so the textarea can also SHRINK when text is deleted.
+  function syncComposerHeight(el: HTMLTextAreaElement | null) {
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }
+  function autoGrow(e: React.FormEvent<HTMLTextAreaElement>) {
+    syncComposerHeight(e.currentTarget);
+  }
+  // Resync on programmatic value changes (cleared after send, refilled on stop)
+  // — those don't fire onInput, so the height would otherwise stick.
+  useEffect(() => {
+    syncComposerHeight(composerRef.current);
+  }, [question]);
+
   // Enter sends; Shift+Enter is a newline — the chat convention. Skip while an
   // IME is composing (CJK / accent dead-keys), where Enter commits the
   // candidate rather than the message.
@@ -343,6 +361,7 @@ function AskView() {
             }
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
+            onInput={autoGrow}
             onKeyDown={onKeyDown}
             aria-label={clarifyPending ? "Reply" : "Ask the guidance corpus"}
           />
@@ -407,7 +426,7 @@ function AskView() {
           // tracks the turn rather than its position.
           const key = `${t.role}-${t.meta?.turn_id ?? i}`;
           return t.role === "user" ? (
-            <UserTurn key={key} content={t.content} />
+            <UserTurn key={key} content={t.content} live={t.live} />
           ) : (
             <AssistantTurn key={key} turn={t} sessionId={sessionId} onPick={onPick} onCite={setActiveCitation} busy={busy} />
           );

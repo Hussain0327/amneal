@@ -32,7 +32,7 @@ import os
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Literal, cast
 
 from config.settings import Settings, get_settings
@@ -61,6 +61,7 @@ from regwatch.sources.router import search_sources
 from regwatch.sources.types import SourceKind, SourceQuery
 from regwatch.store.db import engine_dialect, get_engine, init_db, session_scope
 from regwatch.store.models import AnswerFeedback, ChatMessage, ChatSession, QueryLog, User
+from regwatch.store.queries import fetch_citation_recency
 from regwatch.store.vector_store import collection_size
 from regwatch.watch.alerts import latest_digest_records
 from regwatch.watch.watchlist import ALLOWED_SOURCES, add_manual_product, list_watchlist
@@ -377,6 +378,16 @@ class QueryCitation(BaseModel):
     version_id: int
     source_url: str
     snippet: str
+    # Tier-2 confidence: the retriever similarity score of the passage this
+    # citation traces to (copied by chunk_id from the audited retrieval, never
+    # recomputed). None when no retrieved passage matches.
+    score: float | None = None
+    # Tier-2 recency: the FDA recommended date + cited diff summary of the PSG
+    # version/document this citation traces to, joined by version_id (fallback
+    # doc_id) in a single batched lookup. Both are best-effort context: a
+    # missing row or a DB error yields null and never blocks the answer.
+    recommended_date: date | None = None
+    diff_summary: str | None = None
 
 
 class ClarifyOptionOut(BaseModel):
@@ -443,6 +454,57 @@ def _authorize_session_access(session_id: str, user_id: str) -> None:
             raise HTTPException(status_code=404, detail="session not found")
 
 
+def _parse_iso_date(value: str | None) -> date | None:
+    """Parse a stored ISO date string to a ``date``; null on anything unparseable.
+
+    recommended_date is persisted as a free string (models.py), so a malformed
+    or partial value must degrade to null rather than 500 a valid answer.
+    """
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except (ValueError, TypeError):
+        return None
+
+
+def _wire_citations(result: QAResult) -> list[QueryCitation]:
+    """Serialize domain citations to the wire, enriched with score + recency.
+
+    score is copied from the audited retrieval by chunk_id (never recomputed;
+    null when no passage matches). recommended_date + diff_summary come from one
+    batched recency lookup (no N+1) that returns nulls on any failure, so the
+    enrichment can never block or break an already-validated answer.
+    """
+    scores: dict[str, float | None] = {
+        str(p.get("chunk_id")): p.get("score") for p in result.retrieved
+    }
+    version_ids = sorted({c.version_id for c in result.citations})
+    doc_ids = sorted({c.doc_id for c in result.citations})
+    recency = fetch_citation_recency(version_ids, doc_ids)
+    out: list[QueryCitation] = []
+    for c in result.citations:
+        # Domain Citation may already carry a score; prefer an explicit retrieval
+        # match by chunk_id, else fall back to the dataclass value.
+        score = scores.get(c.chunk_id, c.score)
+        r = recency.resolve(c.version_id, c.doc_id)
+        out.append(
+            QueryCitation(
+                short_name=c.short_name,
+                page=c.page,
+                chunk_id=c.chunk_id,
+                doc_id=c.doc_id,
+                version_id=c.version_id,
+                source_url=c.source_url,
+                snippet=c.snippet,
+                score=score,
+                recommended_date=_parse_iso_date(r.recommended_date),
+                diff_summary=r.diff_summary,
+            )
+        )
+    return out
+
+
 def _build_query_response(result: QAResult) -> QueryResponse:
     """Serialize a validated QAResult into the wire QueryResponse.
 
@@ -455,7 +517,7 @@ def _build_query_response(result: QAResult) -> QueryResponse:
         raise HTTPException(status_code=500, detail="query did not produce session metadata")
     return QueryResponse(
         answer=result.answer,
-        citations=[QueryCitation(**c.__dict__) for c in result.citations],
+        citations=_wire_citations(result),
         refused=result.refused,
         model_name=result.model_name,
         audit_id=result.audit_id,
@@ -1100,6 +1162,13 @@ def get_session(session_id: str, user: User = Depends(require_user)) -> dict[str
                     "content": m.content,
                     "status": m.status,
                     "citations": list(m.citations_json or []),
+                    # Tier-2: rehydrated turns keep their provenance + next-step
+                    # affordances so a reloaded conversation is fully interactive.
+                    "audit_id": m.audit_id,
+                    "reason": m.reason,
+                    "interpretation": m.interpretation,
+                    "clarify": list(m.clarify_json or []),
+                    "related": list(m.related_json or []),
                     "created_at": m.created_at.isoformat(),
                 }
                 for m in messages

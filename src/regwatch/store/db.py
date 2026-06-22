@@ -164,6 +164,13 @@ def _matches_head_schema() -> bool:
     Discriminates a DB created from CURRENT metadata via create_all (stamp it
     head) from an older-shaped one (stamp what the shape proves, then upgrade
     so 0008's query_log token columns and answer_feedback actually land).
+
+    Probes 0008's shape (the first revision whose columns this branch must not
+    silently skip): once present, create_all produced the full current metadata
+    in one shot, so stamping head is correct. Later additive migrations (0009
+    durable alerts, 0010 chat_message provenance) are pure nullable adds in the
+    same create_all, so they ride along — there is no half-state where 0008 is
+    present but a later additive column is missing on a create_all'd DB.
     """
     inspector = inspect(get_engine())
     if "answer_feedback" not in set(inspector.get_table_names()):
