@@ -16,7 +16,22 @@ RUN apt-get update \
 # npm's own toolchain, not the app — app deps are pinned by package-lock.json
 # below. Bump this pin when a future CVE forces it; don't float to @latest, which
 # would re-pull an unverified npm on every build (supply-chain surface).
-RUN npm install -g npm@11.17.0
+#
+# Same finding class, second source: npm@11.17.0 *itself* bundles undici 6.26.0
+# (at node_modules/npm/node_modules/undici) → fixable HIGH CVE-2026-12151
+# (WebSocket DoS). 11.17.0 is the latest stable npm (only 12.0.0-pre exists), so
+# there is no newer release to bump to. Patch npm's bundled undici in place to
+# 6.27.0 — the minimal fixed 6.x, a semver-compatible patch, used by npm only as a
+# build-time registry client (not in the running app). The `test` asserts the swap
+# took, so a future npm layout change fails the build loudly instead of silently
+# shipping the vulnerable copy. Drop this once a stable npm bundles undici>=6.27.0.
+RUN npm install -g npm@11.17.0 \
+    && _u="$(npm root -g)/npm/node_modules/undici" \
+    && npm pack undici@6.27.0 --pack-destination /tmp >/dev/null \
+    && rm -rf "$_u" && mkdir -p "$_u" \
+    && tar -xzf /tmp/undici-6.27.0.tgz -C "$_u" --strip-components=1 \
+    && rm -f /tmp/undici-6.27.0.tgz \
+    && test "$(node -p "require('$_u/package.json').version")" = "6.27.0"
 
 ENV NEXT_TELEMETRY_DISABLED=1
 
