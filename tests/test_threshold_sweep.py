@@ -14,6 +14,7 @@ rule, and that the 0.30 pathology flags fire on the right items.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,7 +42,7 @@ def _retrieved(*scores: float) -> list[dict[str, Any]]:
     return [{"score": s, "short_name": "PSG_X", "page": 1, "doc_id": 1} for s in scores]
 
 
-def _stub(mapping: dict[str, FakeResult]):
+def _stub(mapping: dict[str, FakeResult]) -> Callable[[str], FakeResult]:
     """Build an ask_callable from question -> FakeResult."""
 
     def ask(question: str) -> FakeResult:
