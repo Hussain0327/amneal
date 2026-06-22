@@ -9,6 +9,7 @@ import { AssistantTurn, UserTurn } from "@/components/Turns";
 import { useSessions } from "@/components/SessionsProvider";
 import { askQueryStream, getSession, type Citation, type Suggestion } from "@/lib/api";
 import { assistantTurn, turnFromMessage, userTurn, type Turn } from "@/lib/turns";
+import { syncTextareaHeight } from "@/lib/composer";
 
 const EXAMPLES = [
   { label: "albuterol BE study", q: "What BE study design is recommended for albuterol sulfate inhalation aerosol?" },
@@ -267,18 +268,13 @@ function AskView() {
   // scroll. field-sizing:content handles this natively where supported; this
   // scrollHeight sync is the fallback for browsers that lack it. Reset to auto
   // first so the textarea can also SHRINK when text is deleted.
-  function syncComposerHeight(el: HTMLTextAreaElement | null) {
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
-  }
   function autoGrow(e: React.FormEvent<HTMLTextAreaElement>) {
-    syncComposerHeight(e.currentTarget);
+    syncTextareaHeight(e.currentTarget);
   }
   // Resync on programmatic value changes (cleared after send, refilled on stop)
   // — those don't fire onInput, so the height would otherwise stick.
   useEffect(() => {
-    syncComposerHeight(composerRef.current);
+    syncTextareaHeight(composerRef.current);
   }, [question]);
 
   // Enter sends; Shift+Enter is a newline — the chat convention. Skip while an

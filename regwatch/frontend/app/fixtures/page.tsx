@@ -15,7 +15,7 @@ import type { Turn } from "@/lib/turns";
 
 const CITATIONS: Citation[] = [
   {
-    short_name: "PSG_021457_albuterol-sulfate",
+    short_name: "PSG_021457",
     page: 2,
     chunk_id: "psg-021457-p2-c1",
     doc_id: 312,
@@ -28,7 +28,7 @@ const CITATIONS: Citation[] = [
     diff_summary: "Added the in vitro-only Q1/Q2 sameness route.",
   },
   {
-    short_name: "PSG_021457_albuterol-sulfate",
+    short_name: "PSG_021457",
     page: 4,
     chunk_id: "psg-021457-p4-c2",
     doc_id: 312,
@@ -49,7 +49,7 @@ const ANSWER: Turn = {
   // Inline citation tags ([short_name, p.N]) exercise the stamp substitution —
   // matched tags become clickable [n] stamps, an unmatched one stays literal.
   content:
-    "For albuterol sulfate inhalation aerosol, the PSG recommends two routes to demonstrating bioequivalence — that is, showing the generic behaves the same as the reference product [PSG_021457_albuterol-sulfate, p.2].\n\n1. **In vitro option**: single actuation content, aerodynamic particle size distribution, spray pattern, plume geometry, and priming/repriming studies [PSG_021457_albuterol-sulfate, p.4].\n2. **In vivo option**: a PK BE study with the in vitro studies above.\n\nThe in vitro-only route applies when formulation and device are qualitatively (Q1) and quantitatively (Q2) the same as the reference.",
+    "For albuterol sulfate inhalation aerosol, the PSG recommends two routes to demonstrating bioequivalence — that is, showing the generic behaves the same as the reference product [PSG_021457, p.2].\n\n1. **In vitro option**: single actuation content, aerodynamic particle size distribution, spray pattern, plume geometry, and priming/repriming studies [PSG_021457, p.4].\n2. **In vivo option**: a PK BE study with the in vitro studies above.\n\nThe in vitro-only route applies when formulation and device are qualitatively (Q1) and quantitatively (Q2) the same as the reference. A non-matching reference like [PSG_999999, p.9] stays plain text.",
   citations: CITATIONS,
   clarify: [],
   related: [],

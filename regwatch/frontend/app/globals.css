@@ -18,7 +18,7 @@
   /* Ink */
   --ink: #16213a; /* brand navy — body + headings */
   --ink-2: #283450;
-  --ink-soft: #6c7286; /* meta, captions */
+  --ink-soft: #686d80; /* meta, captions — darkened to clear WCAG AA (4.76:1 on paper) */
   /* Darkened from #9a9784 (only ~2.4-2.7:1 — failed WCAG AA on the text it
      carries: scopebar, captions, source summaries). #6b6859 clears 4.5:1 on
      all three paper tones (paper 5.19, paper-2 4.84, paper-3 4.54). */
@@ -449,8 +449,8 @@ main:focus {
   align-items: center;
   justify-content: center;
   vertical-align: baseline;
-  min-width: 24px; /* WCAG 2.5.8 target size */
-  min-height: 18px;
+  min-width: 24px; /* WCAG 2.5.8: >=24px wide; height tracks the inline line, */
+  min-height: 18px; /* qualifying under the 2.5.8 inline-target exception. */
   margin: 0 0.12em;
   padding: 0 0.34em;
   font-family: var(--font-mono), ui-monospace, monospace;
