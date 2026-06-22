@@ -46,6 +46,7 @@ const ANSWER: Turn = {
     "For albuterol sulfate inhalation aerosol, the PSG recommends two routes to demonstrating bioequivalence — that is, showing the generic behaves the same as the reference product.\n\n1. **In vitro option**: single actuation content, aerodynamic particle size distribution, spray pattern, plume geometry, and priming/repriming studies.\n2. **In vivo option**: a PK BE study with the in vitro studies above.\n\nThe in vitro-only route applies when formulation and device are qualitatively (Q1) and quantitatively (Q2) the same as the reference.",
   citations: CITATIONS,
   clarify: [],
+  related: [],
   interpretation: null,
   meta: META,
 };
@@ -58,6 +59,20 @@ const REFUSAL: Turn = {
     "I searched the corpus for a product-specific guidance on atorvastatin oral tablets and did not find one — 1,795 documents checked, none covering this product.",
   citations: [],
   clarify: [],
+  // "Related, not an answer": product names the analyst can re-ask about. These
+  // are re-runnable queries, never citations — they cannot open the drawer.
+  related: [
+    {
+      label: "atorvastatin calcium · oral tablet",
+      query: "atorvastatin calcium oral tablet",
+      filters: { normalized_name: "atorvastatin calcium" },
+    },
+    {
+      label: "rosuvastatin calcium · oral tablet",
+      query: "rosuvastatin calcium oral tablet",
+      filters: { normalized_name: "rosuvastatin calcium" },
+    },
+  ],
   interpretation: null,
   meta: { ...META, audit_id: 4218 },
 };
@@ -85,6 +100,7 @@ const CLARIFY: Turn = {
       filters: { normalized_name: "propranolol hydrochloride", dosage_form: "solution" },
     },
   ],
+  related: [],
   interpretation: "There are three propranolol guidances in the corpus — which dosage form?",
   meta: { ...META, audit_id: 4220 },
 };
@@ -97,6 +113,7 @@ const SCOPE: Turn = {
     "That asks for a regulatory strategy recommendation. I surface and cite public FDA guidance; I don't draft, recommend, or decide.",
   citations: [],
   clarify: [],
+  related: [],
   interpretation: null,
   meta: { ...META, audit_id: 4221 },
 };

@@ -387,9 +387,12 @@ class ClarifyOptionOut(BaseModel):
 
 # The status values grounded_qa emits — carried as an enum in the OpenAPI
 # schema so the generated TS union (lib/api-types.ts) is exact: response_mode
-# in {answer, summary, clarify, scope_warning, refused} plus the
-# provider-outage status="error" (grounded_qa._refuse).
-QueryStatusLiteral = Literal["answer", "summary", "clarify", "scope_warning", "refused", "error"]
+# in {answer, summary, clarify, scope_warning, meta, refused} plus the
+# provider-outage status="error" (grounded_qa._refuse). "meta" is the
+# deterministic, uncited "what does this system do" answer (grounded_qa._meta).
+QueryStatusLiteral = Literal[
+    "answer", "summary", "clarify", "scope_warning", "meta", "refused", "error"
+]
 
 
 class QueryResponse(BaseModel):
@@ -401,8 +404,17 @@ class QueryResponse(BaseModel):
     session_id: str
     turn_id: str
     status: QueryStatusLiteral = "answer"
+    # The route reason behind the status ("low_top_score", "no_product",
+    # "did_you_mean", …) — surfaced so the UI/eval can tell WHY we declined or
+    # clarified, mirroring QAResult.reason.
+    reason: str | None = None
     interpretation: str | None = None
     clarify: list[ClarifyOptionOut] = []
+    # Inert "related, not an answer" pointers for the decline family — same wire
+    # shape as `clarify` options (label + re-runnable query + filters), but the
+    # UI renders them as plain pills, never citation chips. Never carries passage
+    # text/score; refused/citations are unaffected (the refusal contract holds).
+    related: list[ClarifyOptionOut] = []
 
 
 def _authorize_session_access(session_id: str, user_id: str) -> None:
@@ -452,10 +464,15 @@ def _build_query_response(result: QAResult) -> QueryResponse:
         # grounded_qa types status as a plain str; Pydantic still validates the
         # enum at runtime, so genuine drift surfaces rather than being masked.
         status=cast(QueryStatusLiteral, result.status),
+        reason=result.reason,
         interpretation=result.interpretation,
         clarify=[
             ClarifyOptionOut(label=o.label, query=o.query, filters=o.filters)
             for o in result.clarify
+        ],
+        related=[
+            ClarifyOptionOut(label=o.label, query=o.query, filters=o.filters)
+            for o in result.related
         ],
     )
 

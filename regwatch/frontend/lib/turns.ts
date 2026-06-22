@@ -18,6 +18,10 @@ export interface Turn {
   refused: boolean;
   citations: Citation[];
   clarify: ClarifyOption[];
+  // "Related, not an answer" re-runnable queries surfaced beside a refusal.
+  // Live refusal turns carry them; rehydrated history leaves this [] (the wire
+  // shape from GET /sessions/{id} doesn't persist them).
+  related: ClarifyOption[];
   interpretation: string | null;
   meta: { model_name: string; audit_id: number; turn_id: string } | null;
 }
@@ -27,6 +31,7 @@ const STATUSES: readonly string[] = [
   "summary",
   "clarify",
   "scope_warning",
+  "meta",
   "refused",
   "error",
 ];
@@ -40,6 +45,7 @@ export function turnFromMessage(m: ChatMessage): Turn {
     refused: status === "refused",
     citations: m.citations ?? [],
     clarify: [],
+    related: [],
     interpretation: null,
     meta: null,
   };
@@ -53,6 +59,7 @@ export function userTurn(q: string): Turn {
     refused: false,
     citations: [],
     clarify: [],
+    related: [],
     interpretation: null,
     meta: null,
   };
@@ -66,6 +73,7 @@ export function assistantTurn(r: QueryResponse): Turn {
     refused: r.refused || r.status === "refused",
     citations: r.citations,
     clarify: r.clarify,
+    related: r.related ?? [],
     interpretation: r.interpretation ?? null,
     meta: { model_name: r.model_name, audit_id: r.audit_id, turn_id: r.turn_id },
   };
