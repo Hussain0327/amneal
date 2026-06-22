@@ -275,9 +275,18 @@ def test_get_session_returns_ordered_messages_with_shape() -> None:
             "content",
             "status",
             "citations",
+            # Tier-2: per-turn provenance + next-step affordances, persisted so a
+            # rehydrated conversation keeps them.
+            "audit_id",
+            "reason",
+            "interpretation",
+            "clarify",
+            "related",
             "created_at",
         }
         assert isinstance(m["citations"], list)
+        assert isinstance(m["clarify"], list)
+        assert isinstance(m["related"], list)
     assert messages[0]["content"] == "Shape check?"
     assert messages[0]["turn_id"] == messages[1]["turn_id"]
 
