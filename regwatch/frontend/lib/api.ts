@@ -157,6 +157,12 @@ export interface SessionSummary {
   message_count: number;
 }
 
+// GET /sessions/{id} returns a raw dict (no response_model), so these fields
+// aren't in the generated api-types.ts — type them here by hand to match the
+// backend serializer (main.py get_session). Tier-2: rehydrated turns now carry
+// their provenance (audit_id), refusal/clarify reason, interpretation, and the
+// clarify/related next-step affordances, so a reopened conversation is fully
+// interactive rather than a dead end.
 export interface ChatMessage {
   id: string;
   turn_id: string;
@@ -164,6 +170,11 @@ export interface ChatMessage {
   content: string;
   status: string | null;
   citations: Citation[];
+  audit_id: number | null;
+  reason: string | null;
+  interpretation: string | null;
+  clarify: ClarifyOption[];
+  related: ClarifyOption[];
   created_at: string;
 }
 
