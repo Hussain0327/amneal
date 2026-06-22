@@ -421,7 +421,56 @@ cleanly (no failures, no invented URLs). This complements — does not
 replace — the external monitor: GitHub cron schedules can lag or pause on
 inactive repos.
 
-### 6.3 Staging + restore drill (monthly, ~30 min)
+### 6.3 Refusal-threshold revalidation
+
+`REFUSAL_SCORE_THRESHOLD` (default `0.30`) gates the `low_top_score` refusal in
+`grounded_qa.ask`: a question is refused when the best retrieved passage's cosine
+score is below it. That `0.30` was calibrated in the **bge-384** cosine era.
+Production now embeds with **OpenAI text-embedding-3-small (1536)** — a different
+vector space with a different cosine-similarity distribution — so `0.30` is
+**PROVISIONAL** until it is revalidated in the prod space. CI cannot do this: CI
+runs bge-384 + Chroma, not OpenAI-1536 + pgvector.
+
+**Where it runs:** the daily `watch-daily` job (§ the watch cron) now emits an
+**advisory, non-gating** revalidation. After the crawl, it re-runs the gold set
+through the real `ask` path in this job's prod embedding space
+(`EMBEDDING_PROVIDER=openai` + the live `DATABASE_URL`) and uploads
+**`threshold_sweep.json`** as a workflow artifact (Actions run → **Artifacts** →
+`threshold-sweep`). It is read-only w.r.t. the safety path: it never changes
+`REFUSAL_SCORE_THRESHOLD` and never fails the crawl — `continue-on-error: true`
+means a sweep hiccup, or a recommendation that differs from `0.30`, can never
+block ingestion or alerting.
+
+**How to read `threshold_sweep.json`** (the same content is printed as a table in
+the step log):
+
+- `distributions.must_answer` and `distributions.must_refuse` — the two
+  per-question max-passage-cosine distributions (`min`/`median`/`max`,
+  `n_scored`). A healthy threshold sits **above** the must-refuse max and **at or
+  below** the must-answer min.
+- `recommendation.recommended` vs `recommendation.current` (0.30), with
+  `recommendation.rationale`. The rule: pick the cutoff that **maximizes
+  refuse_recall without refusing anything 0.30 currently answers**
+  (`answer_retention` floor). `recommendation.provisional`/`overlap` is `true`
+  when the two distributions overlap — no clean separator exists, so the
+  recommendation is the best available tradeoff, not a fix.
+- Two `0.30` **pathology flags** — these are the action triggers:
+  - `recommendation.wrongly_refused_at_current` — must-answer questions whose
+    best score is already `< 0.30` (over-refused TODAY in the prod space).
+  - `recommendation.leaking_at_current` — must-refuse questions whose best score
+    is already `>= 0.30` (leaking through TODAY).
+
+**Decision procedure (human-in-the-loop):** a human reviews the recommendation
+and the two pathology lists. **Only if warranted** — a clean (`overlap: false`)
+recommendation that differs from `0.30`, or a non-empty pathology list — update
+the live threshold by setting the `REFUSAL_SCORE_THRESHOLD` env var (Fly:
+`fly secrets set REFUSAL_SCORE_THRESHOLD=...`; Railway: `railway variables --set`)
+and redeploy. The sweep only **recommends**; it never changes the value. `0.30`
+stays PROVISIONAL until a human has reviewed at least one prod-space sweep. There
+is no gate and no auto-tune — over-tuning the refusal cutoff trades directly
+against INV safety, so it is an explicit operator decision.
+
+### 6.4 Staging + restore drill (monthly, ~30 min)
 
 A backup you have never restored is a hope, not a backup.
 
