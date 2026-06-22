@@ -7,6 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "gen:openapi": "cd ../.. && uv run python -c \"from regwatch.api.main import app; import json; print(json.dumps(app.openapi()))\" > regwatch/frontend/openapi.json",
     "gen:types": "npm run gen:openapi && openapi-typescript openapi.json -o lib/api-types.ts"
   },
@@ -19,15 +21,22 @@
     "remark-gfm": "4.0.0"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "20.16.13",
     "@types/react": "18.3.12",
     "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "^4.7.0",
     "autoprefixer": "10.4.20",
     "eslint": "^9",
     "eslint-config-next": "^16.2.9",
+    "jsdom": "^25.0.1",
     "openapi-typescript": "^7.13.0",
     "postcss": "^8.5.10",
     "tailwindcss": "3.4.14",
-    "typescript": "5.6.3"
+    "typescript": "5.6.3",
+    "vite": "^5.4.21",
+    "vitest": "^2.1.9"
   }
 }
