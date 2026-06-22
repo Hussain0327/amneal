@@ -499,7 +499,9 @@ export interface components {
              * @default answer
              * @enum {string}
              */
-            status: "answer" | "summary" | "clarify" | "scope_warning" | "refused" | "error";
+            status: "answer" | "summary" | "clarify" | "scope_warning" | "meta" | "refused" | "error";
+            /** Reason */
+            reason?: string | null;
             /** Interpretation */
             interpretation?: string | null;
             /**
@@ -507,6 +509,11 @@ export interface components {
              * @default []
              */
             clarify: components["schemas"]["ClarifyOptionOut"][];
+            /**
+             * Related
+             * @default []
+             */
+            related: components["schemas"]["ClarifyOptionOut"][];
         };
         /** ResolveRequest */
         ResolveRequest: {

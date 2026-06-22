@@ -55,6 +55,9 @@ from regwatch.retrieve.retriever import RetrievedPassage, retrieve
 from regwatch.store.db import session_scope
 from regwatch.store.models import PsgDocument
 from regwatch.store.queries import current_dosage_form_routes
+from regwatch.store.vector_store import distinct_metadata_values
+from regwatch.watch.alerts import latest_digest_records
+from regwatch.watch.watchlist import list_watchlist
 
 log = get_logger(__name__)
 
@@ -96,6 +99,12 @@ class QAResult:
     reason: str | None = None
     interpretation: str | None = None
     clarify: list[ClarifyOption] = field(default_factory=list)
+    # Sibling of `clarify` for the REFUSE family: when we decline (refused=true,
+    # citations=[]), `related` surfaces inert "related, not an answer" pointers —
+    # distinct product NAMES + their source link only, never passage text/score.
+    # It NEVER changes the refusal contract (refused stays true, citations stay
+    # []); it is purely additive context the UI renders as re-runnable pills.
+    related: list[ClarifyOption] = field(default_factory=list)
     session_id: str | None = None
     turn_id: str | None = None
 
@@ -185,6 +194,30 @@ _SCOPE_WARNING_PHRASES = (
     "regulatory strategy",
     "internal benchmarks",
 )
+# CLOSED set of "what does this system do" phrases. The bar is deliberately
+# high: every phrase must be unmistakably ABOUT the tool's scope, never about a
+# regulatory fact. False-negatives are SAFE — a missed meta phrase just falls
+# through to the grounded cite-or-refuse path. False-positives are the danger
+# (a drug question routed to the uncited meta answer), so the gate also carries
+# a named-drug HARD VETO in ask(); these phrases stay tight as defense in depth.
+_META_PHRASES = (
+    "what do you cover",
+    "what products do you cover",
+    "what drugs do you cover",
+    "what can i ask",
+    "what can i ask about",
+    "what can you do",
+    "what do you watch",
+    "what do you monitor",
+    "what are you watching",
+    "what's on the watchlist",
+    "whats on the watchlist",
+    "what changed",
+    "what's changed",
+    "whats changed",
+    "what's new",
+    "whats new",
+)
 
 
 def _looks_like_follow_up(question: str) -> bool:
@@ -203,6 +236,19 @@ def _is_summary_request(question: str) -> bool:
 def _is_scope_warning_request(question: str) -> bool:
     q = question.lower()
     return any(phrase in q for phrase in _SCOPE_WARNING_PHRASES)
+
+
+def _is_meta_request(question: str) -> bool:
+    """True when the question is a closed-set "what does this system do" phrase.
+
+    Phrase-match ONLY — no LLM judges intent (an LLM mis-call would be the exact
+    fabrication breach). A True here is necessary but NOT sufficient to route to
+    the uncited meta path: ask() additionally vetoes any question that resolves
+    to a named in-corpus drug, so "what BE study do you cover for atorvastatin?"
+    never reaches _meta.
+    """
+    q = question.lower()
+    return any(phrase in q for phrase in _META_PHRASES)
 
 
 def _audit_retrieved(passages: list[RetrievedPassage]) -> list[dict[str, Any]]:
@@ -330,6 +376,42 @@ def build_options(normalized_name: str) -> list[ClarifyOption]:
             flt,
         ),
     ]
+
+
+def _related_from_passages(passages: list[RetrievedPassage]) -> list[ClarifyOption]:
+    """ "Related, not an answer" pointers from the sub-threshold passages in hand.
+
+    Surfaces DISTINCT product NAMES + their source link ONLY — never the passage
+    text or score (chunk text would read as quasi-evidence on a refusal). Deduped
+    by product name, first occurrence wins (retrieval order = best match first).
+    Each option re-runs as a name-scoped query, so it renders as an inert,
+    re-runnable pill — never a citation chip. Refused/citations are untouched.
+    """
+    options: list[ClarifyOption] = []
+    seen: set[str] = set()
+    for p in passages:
+        name = (p.normalized_name or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        options.append(
+            ClarifyOption(
+                name.title(),
+                name,
+                {"normalized_name": name, "source_url": p.source_url},
+            )
+        )
+    return options
+
+
+def _related_from_names(names: list[str]) -> list[ClarifyOption]:
+    """ "Related, not an answer" pointers from resolver candidate product names.
+
+    Used at the no-product family of declines (did-you-mean / brand lookup): the
+    resolver already computed these names, so we surface them as inert pills with
+    no DB hit. An empty list (genuinely-absent drug) yields ``[]`` — never raises.
+    """
+    return [ClarifyOption(name.title(), name, {"normalized_name": name}) for name in names]
 
 
 def _combo_label(normalized_name: str, dosage_form: str, route: str) -> str:
@@ -470,6 +552,7 @@ def _refuse(
     status: str = "refused",
     answer_text: str | None = None,
     usage: LLMUsage | None = None,
+    related: list[ClarifyOption] | None = None,
 ) -> QAResult:
     s = get_settings()
     answer = answer_text or s.refusal_text
@@ -499,6 +582,7 @@ def _refuse(
         retrieved=audited,
         status=status,
         reason=reason,
+        related=related or [],
         session_id=session_id,
         turn_id=turn_id,
     )
@@ -516,6 +600,7 @@ def _clarify(
     user_id: str | None,
     route_json: dict[str, Any],
     usage: LLMUsage | None = None,
+    related: list[ClarifyOption] | None = None,
 ) -> QAResult:
     """Guide instead of guess: we know the product (or a near-match) but need
     direction. Carries ZERO citations (never fabricates) and logs one audit row
@@ -547,6 +632,7 @@ def _clarify(
         reason=reason,
         interpretation=interpretation,
         clarify=options,
+        related=related or [],
         session_id=session_id,
         turn_id=turn_id,
     )
@@ -578,6 +664,137 @@ def _scope_warning(
         route_json=route_json,
         status="scope_warning",
         answer_text=answer,
+    )
+
+
+# A meta phrase whose subject is "what changed / what's new" pulls the recent
+# Watch digest into the answer; everything else describes corpus + watchlist.
+_META_CHANGE_PHRASES = ("what changed", "changed", "what's new", "whats new", "new")
+
+
+def _is_change_request(question: str) -> bool:
+    q = question.lower()
+    return any(phrase in q for phrase in _META_CHANGE_PHRASES)
+
+
+def _meta_answer_text(question: str) -> str:
+    """Assemble a meta answer from VERIFIED SYSTEM STATE ONLY — never an LLM.
+
+    Three independent system facts, each read live and clearly labeled so the
+    two are NEVER conflated:
+      * corpus      — the askable PSGs (distinct normalized_name + doc count),
+      * watchlist   — the products Watch actively monitors (list_watchlist),
+      * what changed — the most recent durable alerts (latest_digest_records),
+        included only when the question is a "what changed / what's new" phrase.
+    Carries no passage text and no citations; it cannot emit a regulatory claim.
+    """
+    # Corpus: distinct products you can ASK about.
+    corpus_names = sorted(n for n in distinct_metadata_values("normalized_name") if n)
+    corpus_doc_count = sum(_doc_count(n) for n in corpus_names)
+    products = "product" if len(corpus_names) == 1 else "products"
+    docs = "document" if corpus_doc_count == 1 else "documents"
+    sample = ", ".join(n.title() for n in corpus_names[:5])
+    more = "" if len(corpus_names) <= 5 else f", and {len(corpus_names) - 5} more"
+    corpus_line = (
+        f"You can ask me about {len(corpus_names)} {products} in the FDA "
+        f"product-specific guidance corpus ({corpus_doc_count} {docs})"
+    )
+    corpus_line += f": {sample}{more}." if corpus_names else "."
+
+    # Watchlist: products Watch MONITORS — distinct from the askable corpus above.
+    watch_items = list_watchlist()
+    watch_names = sorted(
+        {
+            str(p.get("normalized_name") or p.get("active_ingredient") or "").strip()
+            for p in watch_items
+        }
+        - {""}
+    )
+    watched = "product" if len(watch_names) == 1 else "products"
+    watch_sample = ", ".join(n.title() for n in watch_names[:5])
+    watch_more = "" if len(watch_names) <= 5 else f", and {len(watch_names) - 5} more"
+    if watch_names:
+        watch_line = (
+            f"Separately, Watch monitors {len(watch_names)} {watched} for FDA "
+            f"guidance changes: {watch_sample}{watch_more}."
+        )
+    else:
+        watch_line = "Watch is not monitoring any products yet."
+
+    lines = [corpus_line, watch_line]
+
+    if _is_change_request(question):
+        records = latest_digest_records(limit=5)
+        if records:
+            # NON-PROSE system facts ONLY: product name + capture date. The
+            # alert's `diff_summary`/`rationale` are LLM output or raw PSG passage
+            # text (see process/change_detector.summarize_change) — a regulatory
+            # claim, NOT a system fact — so they must NEVER reach this uncited
+            # meta answer (INV-1). Detail lives on the cited Watch feed.
+            change_bits = []
+            for r in records:
+                name = str(r.get("active_ingredient") or "").strip().title() or "a product"
+                # captured_at is an ISO timestamp; keep only the date (system
+                # bookkeeping, never regulatory prose). Tolerate odd shapes.
+                date = str(r.get("captured_at") or "").strip()[:10]
+                change_bits.append(f"{name} ({date})" if date else name)
+            count = len(records)
+            flagged = "change" if count == 1 else "changes"
+            lines.append(
+                f"Watch flagged {count} recent guidance {flagged}: "
+                + "; ".join(change_bits)
+                + ". Open the Watch feed for the cited details of each change."
+            )
+        else:
+            lines.append("Watch has not flagged any guidance changes yet.")
+
+    return " ".join(lines)
+
+
+def _meta(
+    *,
+    question: str,
+    model_name: str,
+    session_id: str,
+    turn_id: str,
+    user_id: str | None,
+    route_json: dict[str, Any],
+) -> QAResult:
+    """Answer a "what does this system do" question from system state only.
+
+    Mirrors ``_scope_warning`` as a terminal handler — one audit row (INV-6),
+    zero citations, NO LLM call — but is NOT a refusal: ``refused`` is False and
+    ``status`` is "meta". The answer is assembled in ``_meta_answer_text`` from
+    the corpus / watchlist / digest facts, so it is structurally citation- and
+    fabrication-incapable; it can never carry a regulatory claim.
+    """
+    answer = _meta_answer_text(question)
+    audit_id = log_query(
+        mode="qa",
+        query_text=question,
+        retrieved=[],
+        answer_text=answer,
+        citations=[],
+        refused=False,
+        model_name=model_name,
+        session_id=session_id,
+        turn_id=turn_id,
+        user_id=user_id,
+        status="meta",
+        route_json=route_json,
+    )
+    log.info("qa_meta", audit_id=audit_id)
+    return QAResult(
+        answer=answer,
+        citations=[],
+        refused=False,
+        model_name=model_name,
+        audit_id=audit_id,
+        retrieved=[],
+        status="meta",
+        reason="meta",
+        session_id=session_id,
+        turn_id=turn_id,
     )
 
 
@@ -676,6 +893,39 @@ def ask(
             route_json=route_json,
         )
 
+    # Meta gate — "what does this system do" → answer from system state, no LLM,
+    # no retrieval. This sits AFTER the scope-warning check and BEFORE entity
+    # resolution/retrieval ON PURPOSE. It is a HARD VETO: fire meta only when the
+    # phrase matches AND the question does NOT resolve to a named in-corpus drug.
+    # The ordering is load-bearing — a named-drug question that happens to carry a
+    # meta phrase ("what BE study do you cover for atorvastatin?") MUST skip meta
+    # and continue to the grounded cite-or-refuse path, never the uncited answer.
+    # A caller-pinned product (API/dossier filter) is likewise a resolved context,
+    # so it also skips meta.
+    if (
+        _is_meta_request(question)
+        and not active_filters.get("normalized_name")
+        and resolve_product(question).status != "resolved"
+    ):
+        route_json = _route_json(
+            filters=active_filters,
+            reason="meta",
+            context_applied=context_applied,
+            response_mode="meta",
+        )
+        return _finish_turn(
+            _meta(
+                question=question,
+                model_name=model_name,
+                session_id=session_id,
+                turn_id=turn_id,
+                user_id=user_id,
+                route_json=route_json,
+            ),
+            filters=active_filters,
+            route_json=route_json,
+        )
+
     # Entity resolution FIRST: pin the product before semantic retrieval so FDA
     # template boilerplate shared across drugs cannot leak a wrong-drug citation.
     # Skip only when the caller already pinned the product (API / dossier).
@@ -747,6 +997,7 @@ def ask(
                             turn_id=turn_id,
                             user_id=user_id,
                             route_json=route_json,
+                            related=_related_from_names(suggestions),
                         ),
                         filters=active_filters,
                         route_json=route_json,
@@ -775,6 +1026,7 @@ def ask(
                             turn_id=turn_id,
                             user_id=user_id,
                             route_json=route_json,
+                            related=_related_from_names(brand_matches),
                         ),
                         filters=active_filters,
                         route_json=route_json,
@@ -795,6 +1047,10 @@ def ask(
                         turn_id=turn_id,
                         user_id=user_id,
                         route_json=route_json,
+                        # Resolver candidates already computed above. Both are []
+                        # on this branch (a genuinely-absent drug, e.g. romidepsin)
+                        # — so `related` is [] and the path never crashes.
+                        related=_related_from_names(suggestions + brand_matches),
                     ),
                     filters=active_filters,
                     route_json=route_json,
@@ -934,6 +1190,10 @@ def ask(
                 turn_id=turn_id,
                 user_id=user_id,
                 route_json=route_json,
+                # Surface the sub-threshold matches as inert "related" pointers
+                # (distinct product NAMES + source link only). refused/citations
+                # stay untouched — this never dresses the refusal as an answer.
+                related=_related_from_passages(passages),
             ),
             filters=active_filters,
             route_json=route_json,

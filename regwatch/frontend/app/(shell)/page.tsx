@@ -203,7 +203,9 @@ function AskView() {
           ? "Clarification requested"
           : next.refused || next.status === "scope_warning"
             ? "Request declined — see the reply"
-            : "Answer ready";
+            : next.status === "meta"
+              ? "Information ready"
+              : "Answer ready";
       const lead = (next.answer || next.interpretation || "").replace(/\s+/g, " ").trim().slice(0, 140);
       setAnnouncement(lead ? `${label}: ${lead}` : `${label}.`);
       if (urlSession !== next.session_id) {

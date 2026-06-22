@@ -96,6 +96,22 @@ export function AssistantTurn({
     );
   }
 
+  // A meta turn answers a question ABOUT the assistant (what it covers, what
+  // changed) from verified system state, not the corpus. It is citation-
+  // incapable by construction (backend returns citations=[], refused=false), so
+  // it renders as plain prose: no '.cites', no '.msg__declined' register, and
+  // no "No citations" fallback — there is nothing to cite and nothing declined.
+  if (turn.status === "meta") {
+    return (
+      <AssistantShell>
+        <div className="msg__body">
+          <Markdown>{turn.content}</Markdown>
+        </div>
+        <AuditLine turn={turn} />
+      </AssistantShell>
+    );
+  }
+
   // A refusal and an out-of-scope warning share the declined register: the
   // reply is shown for what it is, then redirected — never passed off as an
   // answer. The redirects keep the full numbered-option weight (a dead end
@@ -114,6 +130,29 @@ export function AssistantTurn({
           <span className="msg__declined-tag">{tag}</span>
           <p>{turn.content}</p>
         </div>
+        {/* "Related, not an answer": re-runnable queries (product names + source
+            links), NOT evidence. These are inert '.pill' buttons wired to the
+            same onPick as clarify — they are NEVER '.cite' chips and CANNOT open
+            the evidence drawer, so INV-2 holds (a refusal surfaces no grounding).
+            Live refusals only; rehydrated history leaves related []. */}
+        {turn.related.length > 0 && (
+          <>
+            <p className="kicker">Related, not an answer</p>
+            <div className="pills">
+              {turn.related.map((opt, i) => (
+                <button
+                  key={`${opt.query}::${i}`}
+                  type="button"
+                  className="pill"
+                  disabled={busy}
+                  onClick={() => onPick(opt)}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
         <AuditLine turn={turn} />
       </AssistantShell>
     );
