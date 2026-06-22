@@ -138,7 +138,11 @@ export function AssistantTurn({
   // still no drawer. The chip (and drawer trigger) exists ONLY where citations do.
   if (turn.status === "scope_warning" || turn.refused) {
     const tag = turn.status === "scope_warning" ? "Out of scope" : "Declined · not in corpus";
-    const why = reasonCopy(turn.reason);
+    // Scope warnings always carry reason="scope_warning", which the "Out of
+    // scope" tag already conveys — suppress the redundant caption so it never
+    // renders the raw code. The raw-string fallback in reasonCopy stays a net
+    // for unknown refusal codes on the declined-not-in-corpus path.
+    const why = turn.status === "scope_warning" ? null : reasonCopy(turn.reason);
     return (
       <AssistantShell live={turn.live}>
         <div className="msg__body msg__declined">
