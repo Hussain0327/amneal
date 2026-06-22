@@ -1,27 +1,70 @@
 # regwatch
 
-A regulatory prep accelerator for a generic-drug Clinical Regulatory Affairs team.
-It replaces a multi-day manual FDA research task with cited answers in minutes:
-every answer carries a source and a page, or an explicit "not found."
+regwatch helps a generic-drug regulatory team answer FDA research questions in
+minutes instead of days — and every answer comes back with its source and page,
+or an honest "not found."
 
-REGWATCH synthesizes across six FDA sources (Orange Book, Drugs@FDA, DailyMed/NDC,
-Drug Shortages, REMS, and Product-Specific Guidances), always scoped to one
-product "under review" at a time so citations can't cross drugs. It watches PSGs,
-matches changes against the company's product pipeline, extracts cited
-bioequivalence requirements, and answers plain-language questions over the
-guidance corpus.
+A regulatory analyst preparing a generic-drug application spends hours reading
+FDA **Product-Specific Guidances** (PSGs — the agency's per-drug instructions for
+proving a generic is equivalent to the brand) and cross-checking the Orange Book,
+Drugs@FDA, DailyMed, drug-shortage, and REMS databases. regwatch does that
+reading for them: it watches those sources, scopes every question to one product
+at a time so citations can't cross drugs, and answers in plain language with a
+citation on every claim.
 
-**This is a POC, not a production deployment.** It surfaces, organizes,
-compares, and cites public FDA information. It does not author submission
-content, render regulatory judgment, or take autonomous action. See
-[Section 4 of the spec](#compliance-invariants) for the invariants that
-encode this.
+The product **surfaces, organizes, compares, and cites public FDA information.**
+It never drafts submission content, never makes a regulatory recommendation, and
+never acts on its own — a person makes every regulatory decision.
 
-## Request flow
+## What it does
 
-How a question moves through the **Ask** path, from input to an audited answer
-or an explicit refusal. Assemble and White Paper follow the same discipline
-(resolve the product first, then cite or decline) over structured FDA sources.
+Four surfaces, one shared "product under review":
+
+- **Ask** — Plain-language Q&A over the guidance corpus, as a cited chat. Every
+  claim carries an inline `[source, p.N]` citation you can click to read the
+  exact passage; if the corpus doesn't contain the answer, Ask refuses instead
+  of guessing. Ambiguous questions ("propranolol") get clickable clarifying
+  options rather than a wrong answer.
+- **Assemble** — For a target product, build a fully cited dossier: the relevant
+  PSG(s), extracted bioequivalence requirements, the brand-drug label from
+  openFDA, applicable guidance, and a requirements checklist.
+- **Watch** — Crawl the FDA PSG database daily, detect new and revised
+  guidances, match them against the company's product pipeline, and surface a
+  cited summary of what changed.
+- **White Paper** — Given a brand-drug name and application number, fill the CRA
+  White Paper template cell by cell. Each cell carries its provenance (source +
+  locator + when it was fetched). Cells the system can't determine
+  deterministically — patents, BE strategy, every required-studies judgment —
+  are left for an analyst with the evidence attached, never auto-answered.
+
+All four share one **current product**, set from the scope-bar picker, a Watch
+row, or a White Paper run. The product is held in the URL (`?rp=&appl=`) so a
+view is shareable and survives reload.
+
+## The core rule: cite or refuse
+
+This is the whole point, and it's enforced in code with tests — not a guideline.
+
+1. **Resolve the product first.** A question is pinned to one drug (canonical
+   name + 6-digit application number) *before* anything is retrieved. Shared FDA
+   boilerplate can't leak a wrong-drug citation.
+2. **Retrieve, scoped and current.** Retrieval is filtered to that product's
+   ingredient and to the *current* PSG version, so a superseded passage can't be
+   cited as if it were live.
+3. **Refuse weak grounding.** If the best match scores below
+   `REFUSAL_SCORE_THRESHOLD` (default 0.30), the LLM is never called — the
+   request is refused. After synthesis, any claim whose citation doesn't trace
+   to a retrieved passage is stripped; if nothing valid remains, the whole answer
+   becomes a refusal.
+4. **Audit everything.** Every query — answered, clarified, or refused — writes
+   exactly one `query_log` row.
+
+A refusal is shown as a refusal, never dressed up as an answer.
+
+### How a question flows
+
+The **Ask** path, from input to an audited answer or an explicit refusal.
+Assemble and White Paper follow the same discipline over structured FDA sources.
 
 ```mermaid
 flowchart TD
@@ -56,285 +99,149 @@ flowchart TD
     ANSWER --> FINAL
 ```
 
-The canonical system design lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md);
-this is the request-level view of the Ask path.
+The canonical system design is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-## Screenshots
+## Status
 
-<!-- TODO: add the three PNGs to docs/img/ and commit them. Until then these render as broken-image placeholders. Claude cannot generate your actual UI screenshots. -->
+regwatch runs as a **limited internal pilot**, not a generally available product.
 
-**Ask: cited conversational Q&A**
+- The **daily Watch pipeline runs in production** — a GitHub Actions cron
+  ([`.github/workflows/watch-daily.yml`](.github/workflows/watch-daily.yml))
+  runs `regwatch watch` against the live Supabase Postgres each day, and is the
+  sole driver of the daily pipeline in prod.
+- The **API (Fly.io)**, **Postgres + pgvector (Supabase)**, and **frontend
+  (Vercel)** are deployed. The structured store and the vectors live in one
+  managed Postgres.
+- It is **not yet externally exposed.** The work between here and an external
+  launch — the data-handling / LLM-vendor decision (D1), an SSO + TLS gateway,
+  gated deploy-step migrations, least-privilege DB credentials, and a rehearsed
+  restore drill — is tracked in [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md)
+  and [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-![Ask: cited chat with citation chips, clarify pills, and refuse-or-cite](docs/img/ask-chat.png)
-
-**White Paper: cell-by-cell provenance**
-
-![White Paper: filled CRA template, each cell carrying source, locator, and fetched_at](docs/img/whitepaper.png)
-
-**Eval: CI gates passing**
-
-![Eval scorecard: recall@k, citation precision, and refusal accuracy above their gates](docs/img/eval-scorecard.png)
-
-## What it does, exactly
-
-- **Watch.** Crawl the PSG database, detect new and revised guidances, match
-  them against a verified watchlist built from Drugs@FDA, surface a cited
-  summary of what changed.
-- **Assemble.** For a target product (active ingredient + dosage form +
-  RLD), build a fully cited dossier: PSG(s), extracted BE requirements,
-  RLD label from openFDA, applicable guidance via retrieval, dissolution
-  method link, and a requirements checklist scaffold.
-- **White Paper.** Given an RLD name + NDA/ANDA number, populate the CRA White
-  Paper template cell by cell, each cell carrying provenance (source + locator +
-  fetched_at). Three cell modes encode the compliance line: **auto** cells are
-  deterministic source joins (Orange Book product/RLD/RS/strengths, sponsor,
-  NDC packaging) — Yes/No auto cells (REMS, Drug Shortages) are **tri-state**, so
-  a failed/ambiguous query collapses to `analyst_input_required` rather than
-  emitting a false "No"; **evidence_only** cells carry verbatim cited SPL LOINC
-  sections and the scoped PSG Q&A for Requirements; **manual** cells (patents,
-  combination type, BE strategy, every Required-Studies decision) always render
-  `analyst_input_required` with the underlying evidence attached but **no
-  generated value** — the system surfaces and cites, it never renders the
-  regulatory judgment. Output is JSON or a filled Word document. See
-  [`docs/whitepaper_schema.md`](docs/whitepaper_schema.md).
-- **Ask.** Plain-language Q&A over the corpus, rendered as a **cited
-  conversational chat**: right-aligned user bubbles, a gold RW assistant
-  avatar, citation chips that link to the FDA source (full snippets behind a
-  Sources disclosure), clickable clarify pills, and a bottom-pinned composer
-  (Enter to send). Inline `[short_name, p.N]` citations on every claim,
-  exact-string refusal when the corpus does not contain the answer.
-  **Conversational**: `/query` carries a chat session so follow-ups like
-  "What about dissolution?" reuse the prior product — but only the product
-  *filter* carries over, never prior chat text as evidence; every answer
-  re-retrieves and re-validates citations. When a question names no product
-  (or names several), it **clarifies** with clickable options instead of
-  guessing; regulatory-strategy asks get a `scope_warning`, not a guess.
-
-The product is **resolved before retrieval** and retrieval is **constrained to
-the current PSG version**, so shared FDA boilerplate can't leak a wrong-drug or
-a superseded citation. See [`docs/CONVERSATIONAL_SESSIONS.md`](docs/CONVERSATIONAL_SESSIONS.md).
-
-All four surfaces share one **current product**. It is settable from three
-places — the scope-bar picker, a successful White Paper populate, or a Watch
-row — and every setter writes the same canonical `{normalized_name, six-digit
-application number}`. The picker is resolve-backed: it calls `POST /resolve`
-(deterministic entity resolution, not an LLM turn), so a name≠number mismatch
-422s and leaves the scope unset rather than guessing (refuse-over-guess).
-
-## Non-goals
-
-- No drafting, suggestion, or generation of FDA submission content.
-- No regulatory recommendations ("you should run study X"). The system
-  reports what the guidance says; the human decides.
-- No internal or proprietary data. Public FDA sources only.
-- No autonomous action — no filing, no submitting, no email to FDA.
-- Not production-deployable. Pluggable interfaces (`EmbeddingProvider`,
-  `LLMProvider`) so the IT/AI team can swap models without touching
-  business logic.
-
-## Compliance invariants
-
-These are code with tests, not guidelines. See `tests/test_invariants.py`.
-
-| | Invariant | Where it's enforced |
-|---|---|---|
-| INV-1 | Every factual claim is traceable to a source + page | `process/extractor.py` quote-verbatim check; `generate/grounded_qa.py` citation validator |
-| INV-2 | If retrieval is weak, refuse — never guess | Two-layer refusal: pre-LLM (top score below `REFUSAL_SCORE_THRESHOLD`) and post-LLM (refusal string or no valid citations) |
-| INV-3 | Operational only — no authoring, no judgment | Prompt design + structural grep against `api/` for forbidden endpoint names |
-| INV-4 | Never report a run that didn't happen | `watch/alerts.py` skips any match whose `psg_version` is not in the DB |
-| INV-5 | Verified provenance only | `WatchlistEntry.__post_init__` rejects sources outside `{drugsfda, anda_letter, manual}` |
-| INV-6 | Every query is audited | `common/audit.py` writes a `query_log` row on every Q&A path (now with `session_id`/`turn_id`/`status`/`route_json`) |
-| INV-9 | PSG answers are always product-resolved and ingredient-filtered — no cross-drug citation can survive | `retrieve/resolver.py` resolves the product before retrieval; `generate/grounded_qa.py` forces a `normalized_name` filter; `tests/test_cross_drug_leak.py` |
-
-> Invariant IDs are stable identifiers, not a contiguous range. There is no
-> INV-7 or INV-8 in force; the IDs are kept fixed so that code and docs that
-> reference an invariant by name (for example `INV-9` in
-> `tests/test_cross_drug_leak.py`) stay valid. See
-> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full set and
-> [`docs/DECISIONS.md`](docs/DECISIONS.md) for rationale.
-
-## Stack
-
-| Layer | Choice |
-|---|---|
-| Language | Python 3.11+ via `uv` |
-| Scrape | `httpx` + `selectolax` (`pdfplumber` primary, `pypdf` fallback) |
-| Chunking | Heading + page-aware recursive splitter, ~1000 tokens, ~150 overlap |
-| Embeddings | Pluggable. Local `BAAI/bge-small-en-v1.5` via sentence-transformers (`--extra local-embeddings`) is the dev and Compose default; `openai` (`text-embedding-3-small`, 1536-dim) pairs with the slim no-torch image for production; `echo` is test-only (bare-image smoke boots) |
-| Vector store | Production: **pgvector** in the same Postgres (`DATABASE_URL` set). ChromaDB persistent-on-disk is the local + CI dev default |
-| Structured store | Production: **Postgres** (Supabase) via SQLModel (`DATABASE_URL` set; `REQUIRE_DATABASE_URL=true` refuses the SQLite fallback). SQLite is the local + CI dev default |
-| DB migrations | Alembic baseline + incremental migrations |
-| Retrieval | Two-stage. Stage 1: `VECTOR_TOP_K=50` (wide). Stage 2: rerank → `RERANK_TOP_K=8`. Reranker off by default; when off, stage 2 is `passages[:rerank_top_k]` |
-| LLM | Pluggable behind `LLMProvider`. OpenAI via the **Responses API** (`OPENAI_API_MODE=responses`, default; `chat` falls back to Chat Completions). Role-specific models: router `gpt-5-nano` (reasoning), synthesizer + extractor `gpt-5.4-nano`, each falling back to `LLM_MODEL`. `anthropic` and `echo` (test-only) also supported |
-| API | FastAPI. `POST /query` is conversational — accepts/returns `session_id`+`turn_id`, with response `status` ∈ `answer`/`summary`/`clarify`/`scope_warning`/`refused` |
-| UI | **Next.js 16 (App Router, TypeScript) in `regwatch/frontend/`** — all four surfaces (Ask / Assemble / Watch / White Paper) render inside one `(shell)` route-group layout: one sidebar, one set of design tokens, and a shared **"Under review" product-scope bar**. The current product is **URL-scoped** (`?rp=&appl=`) so it is shareable and survives reload. Talks to the API through a same-origin `/api` proxy. (The earlier Streamlit POC was retired.) |
-| Orchestration | **Production: a GitHub Actions cron** (`.github/workflows/watch-daily.yml`, daily) runs `regwatch watch` against the live Supabase Postgres — it is the sole driver of the daily pipeline in prod. Dagster OSS in Docker Compose (`watch_daily_schedule`'s 06:00 UTC `watch_digest_job`, manual `seed_corpus_job`) is local-only; no Dagster daemon is deployed |
-| Tooling | ruff, black, mypy strict on `src/`, pytest |
-
-The LLM provider, model, and reranker are all behind interfaces. Nothing is
-hard-coded in business logic.
+**Deliberate scope** (boundaries, not gaps): the reranker is a hook that's off by
+default; the eval gold set is a curated starter set, expanded by hand from real
+answer-feedback; and the persist-and-cite source-freshness path is proven on
+White Paper before being generalized to Ask and Assemble.
 
 ## Quick start
 
 ```bash
-# install
+# install (dev tools + LLM clients + local embeddings)
 uv sync --extra dev --extra llm --extra local-embeddings
 
-# copy env, fill in OPENAI_API_KEY
-cp .env.example .env
-$EDITOR .env
+# configure — fill in OPENAI_API_KEY
+cp .env.example .env && $EDITOR .env
 
-# init DB + dirs
+# initialize the DB and data directories
 uv run regwatch init-db
 
-# discover sponsor-name aliases from Drugs@FDA (no guessing)
+# discover Amneal sponsor-name aliases from Drugs@FDA (no hand-coding)
 uv run regwatch aliases --refresh
 
-# seed the verified seed PSGs (by application number — albuterol, levalbuterol,
-# beclomethasone, albuterol+budesonide); `regwatch ingest-all` loads the full catalog
+# seed the verified starter PSGs by application number
+# (`regwatch ingest-all` loads the full catalog)
 uv run regwatch seed
 
-# tests (smoke + invariants + eval metrics)
-uv run pytest -q
-
-# create a login (password is prompted — never passed as an argument)
+# create a login (password is prompted, never passed as an argument)
 uv run regwatch create-user analyst@example.com --name "Analyst"
 
-# API
+# run the tests (smoke + invariants + offline eval gate)
+uv run pytest -q
+
+# API  ->  http://localhost:8000
 uv run uvicorn regwatch.api.main:app --reload
 
-# UI — the Next.js app in regwatch/frontend/ (separate terminal)
-cd regwatch/frontend && npm install && npm run dev      # http://localhost:3000
+# UI (separate terminal)  ->  http://localhost:3000
+cd regwatch/frontend && npm install && npm run dev
 
-# eval scorecard (deterministic gate also runs inside `uv run pytest`)
+# eval scorecard against the seeded corpus
 uv run python -m regwatch.eval.run_eval
 ```
 
 To share the whole app (API + UI) over one public link, run
-`./scripts/share-demo.sh` — it builds and starts both and opens a cloudflared
-tunnel. The UI proxies `/api/*` to the backend, so only one origin is exposed.
+`./scripts/share-demo.sh` — it builds both and opens a cloudflared tunnel. The UI
+proxies `/api/*` to the backend, so only one origin is exposed.
 
-`regwatch init-db` applies Alembic migrations for the active `SQLITE_PATH`.
-When adding or changing tables, create a new migration under `migrations/versions/`
-instead of relying on `SQLModel.metadata.create_all`.
+## How it's built
 
-## Docs
+| Layer | Choice |
+|---|---|
+| Backend | Python 3.11+ (managed by `uv`), FastAPI |
+| Frontend | Next.js 16 (App Router, TypeScript) + React 18 in `regwatch/frontend/`. All four surfaces render in one `(shell)` route group — one sidebar, one product-scope bar. Talks to the API through a same-origin `/api` proxy |
+| LLM | OpenAI via the Responses API (`OPENAI_API_MODE=responses`). Role-specific models: router `gpt-5-nano`, synthesizer + extractor `gpt-5.4-nano` (each falling back to `LLM_MODEL`). Pluggable behind `LLMProvider` — `anthropic` and a test-only `echo` are also supported |
+| Embeddings | Pluggable. Prod: OpenAI `text-embedding-3-small` (1536-dim). Dev/Compose default: local `BAAI/bge-small-en-v1.5` (`--extra local-embeddings`) |
+| Vector store | Prod: **pgvector** in the same Postgres. Dev/CI: ChromaDB persistent-on-disk |
+| Structured store | Prod: **Postgres** (Supabase) via SQLModel; `REQUIRE_DATABASE_URL=true` refuses the SQLite fallback. Dev/CI: SQLite. Schema changes ship as Alembic migrations |
+| Retrieval | Two-stage. Stage 1: vector top-k 50 (`VECTOR_TOP_K`). Stage 2: rerank to top-k 8 (`RERANK_TOP_K`); reranker off by default |
+| Ingest | `httpx` + `selectolax`; `pdfplumber` (with `pypdf` fallback); heading- and page-aware chunking (~1000 tokens, ~150 overlap) |
+| Deploy | API on Fly.io, DB + vectors on Supabase, frontend on Vercel; daily Watch via GitHub Actions cron |
+| Tooling | ruff, black, mypy (strict on `src/`), pytest, import-linter layering contracts |
 
-Start with [`docs/map.md`](docs/map.md), the Map of Content: how the system fits
-together, plus a link to every living doc grouped by purpose. Highest-value
-entry points:
+The LLM provider, model, reranker, and embedding provider all sit behind
+interfaces; nothing is hard-coded in business logic.
 
-- [Architecture](docs/ARCHITECTURE.md): canonical system design.
-- [Non-technical guide](docs/NON_TECH_GUIDE.md): plain English for business and
-  regulatory readers.
-- [Production readiness](docs/PROD_READINESS.md): the POC-to-production path.
-- [Decisions](docs/DECISIONS.md): append-only log of what was picked and why.
+## Compliance invariants
 
-## Docker
+These are enforced in code with tests — see [`tests/test_invariants.py`](tests/test_invariants.py).
 
-Full details are in [`docs/DOCKER.md`](docs/DOCKER.md).
+| | Invariant | Where it's enforced |
+|---|---|---|
+| INV-1 | Every factual claim is traceable to a source + page | `process/extractor.py` quote-verbatim check; `generate/grounded_qa.py` citation validator |
+| INV-2 | If retrieval is weak, refuse — never guess | Two-layer refusal: pre-LLM (top score below `REFUSAL_SCORE_THRESHOLD`) and post-LLM (no valid citations) |
+| INV-3 | Operational only — no authoring, no judgment | Prompt design + a structural check against `api/` for forbidden endpoints |
+| INV-4 | Never report a run that didn't happen | `watch/alerts.py` skips any match whose `psg_version` is not in the DB |
+| INV-5 | Verified provenance only | `WatchlistEntry` rejects sources outside `{drugsfda, anda_letter, manual}` |
+| INV-6 | Every query is audited | `common/audit.py` writes a `query_log` row on every Q&A path |
+| INV-9 | PSG answers are always product-resolved and ingredient-filtered — no cross-drug citation survives | `retrieve/resolver.py` + `generate/grounded_qa.py`; `tests/test_cross_drug_leak.py` |
 
-The container image runs the same Python app for the API, ingest jobs, and
-Dagster code location. Startup runs `regwatch init-db`; large ingest runs are
-separate commands so API boot stays fast. Compose also runs the Next.js UI and a
-local Dagster OSS deployment.
-
-```bash
-# build the shared image
-docker build -t regwatch:local .
-
-# optional heavier image with local sentence-transformer embeddings
-docker build --build-arg INSTALL_LOCAL_EMBEDDINGS=true -t regwatch:local-embeddings .
-
-# API on http://localhost:8000
-docker compose up api
-
-# full local stack:
-# - UI:      http://localhost:3000
-# - API:     http://localhost:8000
-# - Dagster: http://localhost:3001
-docker compose up --build api web dagster-postgres dagster-code dagster-webserver dagster-daemon
-
-# one-shot seed ingest; later this becomes the broad PSG/source sync job
-docker compose --profile ingest run --rm ingest
-```
-
-Compose mounts `./data` into `/app/data` so SQLite, Chroma, raw PDFs, and
-processed files survive restarts. Compose defaults to
-`EMBEDDING_PROVIDER=local-bge-small` with `INSTALL_LOCAL_EMBEDDINGS=true` at
-build time, so the out-of-the-box stack ships sentence-transformers and real
-local embeddings. (The Dockerfile's own defaults stay slim — no torch — with
-an in-image `EMBEDDING_PROVIDER=echo` for empty-corpus smoke boots only; the
-API refuses to boot `echo` against a seeded corpus, and refuses
-`local-bge-small` on an image without sentence-transformers.) For a slim
-production stack set `INSTALL_LOCAL_EMBEDDINGS=false` and
-`EMBEDDING_PROVIDER=openai` + `OPENAI_API_KEY` together in `.env`, then run
-`docker compose build` — see `docs/DEPLOY.md`. Compose container defaults are:
-
-```
-DATA_DIR=/app/data
-CHROMA_DIR=/app/data/chroma
-SQLITE_PATH=/app/data/regwatch.db
-RAW_PDF_DIR=/app/data/raw
-PROCESSED_DIR=/app/data/processed
-EMBEDDING_PROVIDER=local-bge-small
-API_HOST=0.0.0.0
-API_PORT=8000
-```
-
-Dagster uses its own Postgres service for run/event/schedule metadata and keeps
-app data in `./data`. `seed_corpus_job` is manual-first (open
-`http://localhost:3001` and launch it); `watch_digest_job` wraps `regwatch watch`
-and runs daily at 06:00 UTC via `watch_daily_schedule` when the daemon is up.
+> Invariant IDs are stable identifiers, not a contiguous range — there is no INV-7
+> or INV-8 in force. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full
+> set and [`docs/DECISIONS.md`](docs/DECISIONS.md) for the rationale.
 
 ## API
 
+Every endpoint except `GET /health` requires a login. Full request/response
+shapes are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 ```
-POST   /auth/login   {email, password} → {user} + HttpOnly session cookie
-POST   /auth/logout  revoke the session, clear the cookie (204, never errors)
-GET    /auth/me      current user, or 401
-POST   /query        grounded, conversational Q&A (auth)
-                     in:  {question, filters?, k?, session_id?}
-                     out: {answer, citations[], refused, status, interpretation,
-                           clarify[], model_name, audit_id, session_id, turn_id}
-                     status ∈ answer | summary | clarify | scope_warning | refused
-POST   /sources/search structured FDA source lookup — {routed_sources[], records[]} (auth)
-POST   /assemble     cited dossier for {active_ingredient, dosage_form?, rld?} (auth)
-POST   /whitepaper   populate the CRA White Paper for {rld_name, application_number} (auth)
-                     out: {spine, sections[{title, cells[]}], warnings[], audit_id}
-                     422 {detail} when the spine cannot resolve or name≠number
-POST   /whitepaper/docx  body {"result": <exact JSON from POST /whitepaper>} → the filled
-                     Word document (.docx attachment) (auth; renders from the
-                     reviewed result — no re-populate, no live fetches)
-POST   /resolve      deterministic entity resolution for {rld_name, application_number}
-                     → canonical product spine (auth). NOT an LLM turn: writes no
-                     audit row and returns no answer text; 422 {detail} on a
-                     name≠number mismatch. Backs the product-scope picker.
-POST   /feedback     rate a Q&A answer {audit_id, rating: -1|1, comment?} —
-                     upserts per (audit row, user); 404 unless the audit row is
-                     the caller's own /query answer (auth)
-GET    /watch/latest matched changes since cursor (auth)
-GET    /products     watchlist (auth)
-POST   /products     add a manual product (INV-5 enforced) (auth)
-GET    /sessions     the caller's chat sessions, updated_at desc (auth)
-GET    /sessions/{id} one session + its messages, created_at asc (auth)
-DELETE /sessions/{id} delete a session and its messages (auth)
-GET    /health       liveness + component diagnostics (db, chroma, llm, embedding);
-                     503 when db or chroma is unreachable (open)
-GET    /settings     non-secret config (auth)
+POST   /auth/login        {email, password} -> {user} + HttpOnly session cookie
+POST   /auth/logout       revoke the session, clear the cookie (204)
+GET    /auth/me           current user, or 401
+
+POST   /query             grounded, conversational Q&A
+                          status in: answer | summary | clarify | scope_warning | refused
+POST   /query/stream      same, streamed over SSE: progress frames, then the
+                          validated answer as one result frame (no answer text
+                          before its citations are validated — INV-1)
+POST   /resolve           deterministic product resolution (not an LLM turn);
+                          422 on a name != number mismatch. Backs the scope picker
+POST   /feedback          rate a Q&A answer {audit_id, rating: -1|1, comment?}
+
+POST   /sources/search    structured FDA source lookup
+POST   /assemble          cited dossier for {active_ingredient, dosage_form?, rld?}
+POST   /whitepaper        populate the CRA White Paper for {rld_name, application_number}
+POST   /whitepaper/docx   render a reviewed White Paper result to a .docx
+
+GET    /watch/latest      matched changes since a cursor
+GET    /products          the watchlist
+POST   /products          add a manual product (INV-5 enforced)
+
+GET    /sessions          the caller's chat sessions (updated_at desc)
+GET    /sessions/{id}     one session + its messages
+DELETE /sessions/{id}     delete a session and its messages
+
+GET    /health            liveness + component diagnostics; 503 when db/chroma is down
+GET    /settings          non-secret config
 ```
 
 The auto-docs routes (`/docs`, `/redoc`, `/openapi.json`) are disabled — they
-register outside the auth wall and would disclose the API surface to anonymous
-visitors. Every response is reproducible in Postman from a `.env`, a
-provisioned user, and a running instance.
+register outside the auth wall and would disclose the API surface anonymously.
 
 ### Auth
 
-Every endpoint except `GET /health` requires a login. Sessions are DB-backed
-opaque tokens carried in an HttpOnly `regwatch_session` cookie (SameSite=Lax;
-the DB stores only the token's sha256; passwords are bcrypt-hashed). Users are
-provisioned from the CLI — there is no self-signup:
+Sessions are DB-backed opaque tokens in an HttpOnly `regwatch_session` cookie
+(SameSite=Lax; the DB stores only the token's sha256; passwords are bcrypt-hashed).
+There is no self-signup — users are provisioned from the CLI:
 
 ```bash
 uv run regwatch create-user analyst@example.com --name "Analyst"  # password prompted
@@ -343,150 +250,91 @@ uv run regwatch set-password analyst@example.com
 uv run regwatch deactivate-user analyst@example.com
 ```
 
-Chat history is per-user: `GET /sessions` lists only the caller's sessions,
-and a `session_id` owned by someone else 404s (existence is never confirmed).
-Audit rows in `query_log` carry the caller's `user_id` (INV-6). `POST /query`
-and `POST /assemble` share a per-user rate limit (`RATE_LIMIT_PER_MINUTE`,
-default 30; 0 disables); logins are capped at 10/email/minute. Cookie knobs:
-`AUTH_COOKIE_SECURE` (default false for the http://localhost pilot — set true
-behind TLS) and `AUTH_SESSION_TTL_HOURS` (default 72).
-
-CORS is allow-listed via `CORS_ALLOW_ORIGINS_CSV` (defaults to the Next.js dev
-origins) with credentials enabled so the browser sends the session cookie.
-TLS termination and the OIDC/SSO question remain environment work — see
+Chat history is per-user: `GET /sessions` lists only the caller's sessions, and a
+session owned by someone else 404s. `POST /query` and `POST /assemble` share a
+per-user rate limit (`RATE_LIMIT_PER_MINUTE`, default 30). Set
+`AUTH_COOKIE_SECURE=true` behind TLS. CORS is allow-listed via
+`CORS_ALLOW_ORIGINS_CSV`. TLS termination and OIDC/SSO are environment work — see
 [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md).
 
 ## Watchlist sources
 
-The watchlist is built from three allowed sources, in this order:
+The watchlist is built from three allowed sources, in order; INV-5 rejects
+anything else, including model memory:
 
-1. `drugsfda` — `api.fda.gov/drug/drugsfda.json`, filtered to applications
-   whose `sponsor_name` matches any discovered Amneal variant. Aliases are
-   discovered with `uv run regwatch aliases`, not hand-coded. On a recent
-   run this returned 8 distinct variants including `AMNEAL EU LTD`,
-   `AMNEAL IRELAND LTD`, `AMNEAL PHARMS NY`.
-2. `anda_letter` — user-uploaded approval letters, asserted by the user.
+1. `drugsfda` — `api.fda.gov/drug/drugsfda.json`, filtered to applications whose
+   sponsor matches a discovered Amneal variant. Aliases come from
+   `uv run regwatch aliases`, not hand-coding.
+2. `anda_letter` — user-uploaded approval letters.
 3. `manual` — explicit overrides.
-
-INV-5 rejects anything else, including model memory.
 
 ## Eval
 
-Two layers:
+Two layers grade the cite-or-refuse pipeline:
 
-- **`uv run python -m regwatch.eval.run_eval`** scores the gold set
-  (`src/regwatch/eval/gold_set.jsonl`, 12 items: 6 real + 5 must-refuse +
-  1 must-clarify) against the live corpus. Hard gates (fail CI when below): `recall@k ≥ 0.90`,
-  `citation_precision ≥ 0.95`, `refusal_accuracy ≥ 0.95`. `faithfulness` and
-  `fact_recall` (fraction of an item's `expected_facts` present in the answer)
-  are printed for observability. It exits clean on an empty store so a fresh
-  checkout passes; the real gate only fires once a seed has run.
-- **`tests/test_eval_gate.py`** is a deterministic, offline gate that seeds a
-  fixed corpus and a faithful LLM stub, so the full pipeline (resolve → filter →
-  retrieve → cite → refuse) is graded on every `uv run pytest` — including
-  `faithfulness` and `fact_recall` hard-gated at 1.0 — and fires in CI where the
-  live `run_eval` no-ops on an empty corpus.
+- **`uv run python -m regwatch.eval.run_eval`** scores a curated gold set
+  ([`src/regwatch/eval/gold_set.jsonl`](src/regwatch/eval/gold_set.jsonl)) of
+  real, must-refuse, and must-clarify questions against the live corpus. Hard
+  gates (fail CI when below): `recall@k >= 0.90`, `citation_precision >= 0.95`,
+  `refusal_accuracy >= 0.95`. It no-ops on an empty store, so a fresh checkout
+  passes; the gate fires once a seed has run.
+- **[`tests/test_eval_gate.py`](tests/test_eval_gate.py)** is a deterministic,
+  offline gate: it seeds a fixed corpus and a faithful LLM stub, so the full
+  pipeline (resolve -> filter -> retrieve -> cite -> refuse) is graded on every
+  `uv run pytest`, including in CI where the live `run_eval` no-ops.
 
-Growing the gold set is a human process, not code: answer-feedback rows
-(thumbs up/down from the Ask UI, stored in `answer_feedback` and keyed to the
-`query_log` audit row with its question, route, and citations) are the
-candidate pool for future gold-set items. Review them — thumbs-down with
-comments first — and promote the good ones into `gold_set.jsonl` by hand;
+Growing the gold set is a human process: thumbs up/down from the Ask UI is the
+candidate pool. Review them and promote good ones into `gold_set.jsonl` by hand —
 nothing is auto-ingested.
 
-## Layout
+## Project layout
 
 ```
-config/settings.py        pydantic-settings, all thresholds + secrets here
+config/settings.py        pydantic-settings: all thresholds + secrets
 src/regwatch/
   ingest/                 psg_crawler, pdf_parser, pipeline
   process/                chunker, embedder, extractor, change_detector
-  store/                  db, models, vector_store (Chroma wrapper)
-  retrieve/               retriever (stage 1), reranker (stage 2, off by default)
-  sources/                FDA source handlers + rules-first source router
-  generate/               llm provider interface, grounded_qa, prompts
-  watch/                  watchlist, aliases (Drugs@FDA discovery), matcher, alerts
-  assemble/               dossier
+  store/                  db, models, vector_store (Chroma), pgvector_store
+  retrieve/               retriever (stage 1), reranker (stage 2)
+  sources/                FDA source handlers + source router
+  generate/               LLM provider interface, grounded_qa, prompts
+  watch/                  watchlist, aliases, matcher, alerts
+  assemble/               dossier builder
   eval/                   metrics, run_eval, gold_set.jsonl
   api/                    FastAPI surface
-  auth/                   passwords (bcrypt), DB-backed cookie sessions, require_user dep
+  auth/                   passwords (bcrypt), cookie sessions, require_user
   common/                 logging, audit, citations, text_normalize, conversation, ratelimit
-regwatch/
-  backend/                backend workspace docs; source stays in src/regwatch
-  frontend/               Next.js (App Router, TS) UI — one (shell) for all four
-                          surfaces: Ask / Assemble / Watch / White Paper
-tests/                    smoke, invariants (INV-1..6, INV-9), eval gate, per-module
+regwatch/frontend/        Next.js (App Router, TS) UI — one (shell) for all four surfaces
+tests/                    smoke, invariants, eval gate, per-module
 ```
 
-## Build phases
+## Docs
 
-Built phase by phase. After each phase, the full test suite and the phase's
-Definition of Done passed before moving on.
+Start with the Map of Content, [`docs/MAP.md`](docs/MAP.md). Highest-value entry
+points:
 
-| Phase | Outcome |
-|---|---|
-| 0 | Scaffold, providers, CI, smoke tests |
-| 1 | PSG crawler + PDF parser + chunker + embedder + cited BE extraction, idempotent |
-| 2 | Two-stage retrieval + grounded Q&A with citations + refusal + audit |
-| 3 | Drugs@FDA watchlist, alias discovery, fuzzy matcher, version diff, JSONL digest |
-| 4 | Dossier builder + FastAPI |
-| 5 | Eval harness + gold set + CI thresholds |
-| 6+ | Next.js UI (`regwatch/frontend/`), OpenAI Responses API + role-specific models, conversational sessions, current-version retrieval, entity-resolution hardening, deterministic eval gate, cookie-session auth, White Paper populator, dual-mode Postgres/pgvector storage path |
-| 7+ | Unified `(shell)` route-group (all four surfaces, one sidebar), URL-scoped current product (`?rp=&appl=`), Ask rebuilt as a cited chat, "Under review" product-scope bar + resolve-backed picker (`POST /resolve`) |
+- [Architecture](docs/ARCHITECTURE.md) — canonical system design.
+- [Non-technical guide](docs/NON_TECH_GUIDE.md) — plain English for business and
+  regulatory readers.
+- [Production readiness](docs/PROD_READINESS.md) — the POC-to-production path.
+- [Decisions](docs/DECISIONS.md) — append-only log of what was chosen and why.
 
-## What's not done
+## Docker
 
-### Intentional POC scope (deliberate boundaries, not gaps)
+Full details in [`docs/DOCKER.md`](docs/DOCKER.md). The one image runs the API,
+ingest jobs, and the Dagster code location; Compose adds the Next.js UI and a
+local Dagster OSS stack for development.
 
-- **Starter gold set.** 12 items (6 real + 5 must-refuse + 1 must-clarify) with
-  mechanical scoring (`(short_name, page)` + `expected_facts` substrings).
-  Expansion to the spec's 30–50 items plus LLM-as-judge is the planned hardening
-  step, fed by the answer-feedback candidate pool.
-- **Reranker is a hook, off by default.** Turn on with `RERANKER_ENABLED=true`
-  and tune `VECTOR_TOP_K` upward.
-- **persist-and-cite + freshness is White-Paper-first.** It persists Orange Book
-  and DailyMed SPL provenance with `last_fetched_at` (migration 0005) and
-  synthesizes across Orange Book, Drugs@FDA, NDC, DailyMed, Shortages, REMS, and
-  PSG. It is **not yet applied to the Ask/Assemble read paths**, whose source
-  handlers (`sources/`) still query live HTTP without persisting source rows or
-  freshness. Proven on one surface before generalizing.
-- **Ask returns a blocking answer, not token-by-token streaming.** There is no
-  `/query/stream` endpoint; the streaming-capable client falls back to a
-  blocking `POST /query` (the thinking ticker is honest, not faked). Building it
-  must preserve INV-1 (no answer text before a validated citation) and still
-  write exactly one audit row.
+```bash
+docker build -t regwatch:local .          # shared image
+docker compose up api                      # API on http://localhost:8000
+docker compose up --build api web          # API + UI (http://localhost:3000)
+```
 
-### Production checklist (IT/QA owns this before external exposure)
-
-- **D1, the LLM/data-handling decision.** Whether the team runs on a
-  BAA/zero-retention vendor agreement or an in-house OpenAI-compatible model is a
-  business/compliance call that must be logged in
-  [`docs/DECISIONS.md`](docs/DECISIONS.md). It blocks a real launch.
-- **Auth and network hardening.** Cookie-session auth, CLI-provisioned users,
-  per-user chat history, and per-user rate limiting exist, but TLS, OIDC/SSO,
-  and a production gateway are still environment work. Set
-  `AUTH_COOKIE_SECURE=true` once TLS terminates. The rate limiter is
-  in-memory/per-process, so distributed (gateway) rate limiting is a gap on
-  multi-replica deploys.
-- **Managed Postgres/pgvector.** The code + runbook are ready: `DATABASE_URL`
-  switches the structured store to Postgres and vectors to pgvector in the same
-  DB; `REQUIRE_DATABASE_URL=true` refuses the SQLite fallback in prod; pgvector
-  dimension checks fail fast; and a Postgres boot verifies the Alembic stamp ==
-  head and refuses to start on a mismatch. Still open: a managed instance
-  actually provisioned, migration from a clean snapshot, a restore drill
-  (`scripts/restore_drill.sh`) exercised against staging, least-privilege app DB
-  creds, and a gated deploy-step migration (rather than verify-on-boot) with a
-  rehearsed rollback/roll-forward. Rollback and uptime monitoring are documented
-  in [`docs/DEPLOY.md`](docs/DEPLOY.md) (Operations).
-- **Production Watch worker/scheduler.** Scheduling currently covers only the
-  watch pipeline (`regwatch watch`, daily via the Dagster schedule). A
-  production worker with monitored run history and partial-ingest recovery is
-  not yet deployed, and broad corpus ingest (`regwatch ingest-all`) still runs
-  on demand.
-
-See [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md) for the full,
-prioritized path from POC to production, and the consolidated `docs/ROADMAP.md`
-for the open-items list.
+Compose mounts `./data` so SQLite, Chroma, and PDFs survive restarts, and
+defaults to local embeddings (`EMBEDDING_PROVIDER=local-bge-small`). For a slim
+production build, set `INSTALL_LOCAL_EMBEDDINGS=false` with
+`EMBEDDING_PROVIDER=openai` + `OPENAI_API_KEY` — see [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## License
 
