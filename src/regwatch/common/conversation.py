@@ -94,8 +94,12 @@ def record_message(
     status: str | None = None,
     model_name: str | None = None,
     audit_id: int | None = None,
+    reason: str | None = None,
+    interpretation: str | None = None,
     filters: dict[str, Any] | None = None,
     citations: list[dict[str, Any]] | None = None,
+    clarify: list[dict[str, Any]] | None = None,
+    related: list[dict[str, Any]] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> str:
     """Persist one chat message and return its message id."""
@@ -111,8 +115,12 @@ def record_message(
                 status=status,
                 model_name=model_name,
                 audit_id=audit_id,
+                reason=reason,
+                interpretation=interpretation,
                 filters_json=_safe_filters(filters),
                 citations_json=citations or [],
+                clarify_json=clarify or [],
+                related_json=related or [],
                 metadata_json=metadata or {},
                 created_at=datetime.now(UTC),
             )

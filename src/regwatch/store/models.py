@@ -287,8 +287,19 @@ class ChatMessage(SQLModel, table=True):
     status: str | None = None
     model_name: str | None = None
     audit_id: int | None = Field(default=None, index=True)
+    # Tier-2 history persistence: the route reason + the human-readable
+    # interpretation behind the turn's status, so a rehydrated turn shows WHY we
+    # answered/declined/clarified (mirrors QAResult.reason / .interpretation).
+    reason: str | None = None
+    interpretation: str | None = None
     filters_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
     citations_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=_json_column())
+    # Next-step affordances of the turn, persisted so they survive a reload:
+    # clarify = re-runnable disambiguation options; related = inert "related, not
+    # an answer" pointers for the refuse family (same {label, query, filters}
+    # shape as the wire ClarifyOptionOut).
+    clarify_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=_json_column())
+    related_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=_json_column())
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
 

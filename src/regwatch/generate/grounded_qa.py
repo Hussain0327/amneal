@@ -71,6 +71,13 @@ class Citation:
     version_id: int
     source_url: str
     snippet: str
+    # Tier-2 confidence: the retriever similarity score of the passage this
+    # citation traces to, copied from the matching retrieved passage by
+    # chunk_id (never recomputed). None when no retrieved passage matches —
+    # e.g. a deterministic/uncited path that emits no retrieval. Purely
+    # additive context; INV-1 is unaffected (the citation still traces to a
+    # sent passage — this just annotates it with that passage's score).
+    score: float | None = None
 
 
 @dataclass
@@ -302,8 +309,12 @@ def _finish_turn(
                 status=result.status,
                 model_name=result.model_name,
                 audit_id=result.audit_id,
+                reason=result.reason,
+                interpretation=result.interpretation,
                 filters=filters,
                 citations=[asdict(c) for c in result.citations],
+                clarify=[asdict(o) for o in result.clarify],
+                related=[asdict(o) for o in result.related],
                 metadata={"retrieved": result.retrieved, "route": route_json},
             )
             if result.status in {"answer", "summary", "clarify"} and filters.get("normalized_name"):
@@ -519,6 +530,10 @@ def _validate_citations(
                 version_id=passage.version_id,
                 source_url=passage.source_url,
                 snippet=snippet,
+                # Confidence: the matched passage's retriever score, carried on
+                # the citation it grounds (Tier-2). INV-1 unaffected — this is
+                # the same passage that validated the citation.
+                score=passage.score,
             )
         )
     return validated, bad
