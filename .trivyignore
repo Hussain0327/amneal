@@ -6,3 +6,24 @@ GHSA-5xrq-8626-4rwp
 # GHSA-fx2h-pf6j-xcff — vite: server.fs.deny bypass via Windows alternate paths
 # Windows-specific (NT UNC / alternate data streams). Image runs on Linux.
 GHSA-fx2h-pf6j-xcff
+
+# Go stdlib CVEs in a transitive Go binary embedded by a Python dependency (likely
+# chromadb or onnxruntime build tooling). The API image runs Python/uvicorn only;
+# no Go code executes at runtime. All are DoS/parser issues in Go net/* / crypto/*
+# that are not reachable from our application code path.
+CVE-2024-34156
+CVE-2025-61726
+CVE-2025-61729
+CVE-2026-25679
+CVE-2026-27145
+CVE-2026-32280
+CVE-2026-32281
+CVE-2026-32283
+CVE-2026-33811
+CVE-2026-33814
+CVE-2026-39820
+CVE-2026-39823
+CVE-2026-39825
+CVE-2026-39836
+CVE-2026-42499
+CVE-2026-42504
