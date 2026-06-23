@@ -142,6 +142,7 @@ jobs:
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            -v "$GITHUB_WORKSPACE/.trivyignore:/root/.trivyignore" \
             aquasec/trivy:latest image \
             --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
             --scanners vuln,secret regwatch:ci
@@ -151,6 +152,7 @@ jobs:
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            -v "$GITHUB_WORKSPACE/.trivyignore:/root/.trivyignore" \
             aquasec/trivy:latest image \
             --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
             --scanners vuln,secret regwatch-web:ci

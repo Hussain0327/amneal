@@ -1,0 +1,8 @@
+# GHSA-5xrq-8626-4rwp — vitest: arbitrary file read/execute via Vitest UI server
+# Requires `vitest --ui` to be explicitly started. Our frontend Docker image runs
+# Next.js dev server (`npm run dev`), never Vitest UI. Not reachable.
+GHSA-5xrq-8626-4rwp
+
+# GHSA-fx2h-pf6j-xcff — vite: server.fs.deny bypass via Windows alternate paths
+# Windows-specific (NT UNC / alternate data streams). Image runs on Linux.
+GHSA-fx2h-pf6j-xcff
