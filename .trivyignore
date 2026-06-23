@@ -1,19 +1,43 @@
-# GHSA-5xrq-8626-4rwp — vitest: arbitrary file read/execute via Vitest UI server
-# Requires `vitest --ui` to be explicitly started. Our frontend Docker image runs
-# Next.js dev server (`npm run dev`), never Vitest UI. Not reachable.
+# Trivy image-scan suppressions for the CI gate (.github/workflows/ci.yml).
+# Scope: FIXABLE CRITICAL/HIGH only (CI runs --ignore-unfixed). Remove an entry
+# the moment its finding becomes genuinely fixable in our image.
+#
+# Trivy's legacy ignorefile matches the EXACT VulnerabilityID it reports and does
+# NOT resolve CVE<->GHSA aliases. Trivy's DB has been flipping these advisories
+# from GHSA to CVE as the primary id, which silently un-suppressed them (that is
+# what broke this gate). So where an advisory can surface under either id we list
+# BOTH, to stay matched whichever one Trivy reports.
+
+# --- web image: vitest UI arbitrary file read/execute -----------------------
+# Requires `vitest --ui` to be explicitly started. The frontend image runs the
+# Next.js dev server (`npm run dev`), never the Vitest UI server. Not reachable.
+CVE-2026-47429
 GHSA-5xrq-8626-4rwp
 
-# GHSA-fx2h-pf6j-xcff — vite: server.fs.deny bypass via Windows alternate paths
-# Windows-specific (NT UNC / alternate data streams). Image runs on Linux.
+# --- web image: vite server.fs.deny bypass via Windows alternate paths -------
+# Windows-specific (NT UNC / alternate data streams). The image runs on Linux.
+CVE-2026-53571
 GHSA-fx2h-pf6j-xcff
 
-# Go stdlib CVEs in a transitive Go binary embedded by a Python dependency (likely
-# chromadb or onnxruntime build tooling). The API image runs Python/uvicorn only;
-# no Go code executes at runtime. All are DoS/parser issues in Go net/* / crypto/*
-# that are not reachable from our application code path.
+# --- web image: Go stdlib CVEs inside esbuild's bundled Go binary ------------
+# esbuild ships as a pre-compiled Go binary (@esbuild/<platform>/bin/esbuild),
+# pulled in transitively by vite/vitest as a dev/build dependency. Trivy flags
+# the Go stdlib (v1.20.12) baked into that binary. We do not build esbuild and
+# cannot bump its embedded Go toolchain; only an upstream esbuild release can.
+# esbuild runs as a local code transform, never as a network or TLS peer, so
+# these net/* (DoS, IP parsing) and crypto/tls (session-resumption certificate
+# validation) issues are not reachable in our usage. Drop entries as newer
+# esbuild ships rebuilt binaries.
+#
+# Verified Jun 2026 by reproducing the CI scan: every CVE below comes from the
+# WEB image's esbuild Go binary, NOT a Python dependency in the API image -- the
+# API image contains no Go binary at all, and its scan already passes clean.
+CVE-2023-45288
+CVE-2024-24790
 CVE-2024-34156
 CVE-2025-61726
 CVE-2025-61729
+CVE-2025-68121
 CVE-2026-25679
 CVE-2026-27145
 CVE-2026-32280
@@ -27,4 +51,3 @@ CVE-2026-39825
 CVE-2026-39836
 CVE-2026-42499
 CVE-2026-42504
-CVE-2023-45288
