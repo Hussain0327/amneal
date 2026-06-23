@@ -145,6 +145,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/.trivyignore:/root/.trivyignore" \
             aquasec/trivy:latest image \
             --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
+            --ignorefile /root/.trivyignore \
             --scanners vuln,secret regwatch:ci
 
       - name: trivy scan (web image)
@@ -155,6 +156,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/.trivyignore:/root/.trivyignore" \
             aquasec/trivy:latest image \
             --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
+            --ignorefile /root/.trivyignore \
             --scanners vuln,secret regwatch-web:ci
 
   frontend:
