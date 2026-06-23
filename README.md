@@ -318,6 +318,8 @@ points:
   regulatory readers.
 - [Production readiness](docs/PROD_READINESS.md) — the POC-to-production path.
 - [Decisions](docs/DECISIONS.md) — append-only log of what was chosen and why.
+- [CI/CD pipeline](docs/CI_CD.md) - the five-job gate and a pre-push checklist;
+  read before pushing so you do not fail CI.
 
 ## Docker
 

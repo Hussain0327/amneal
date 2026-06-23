@@ -36,6 +36,7 @@ Then read these in order if you are new to the project:
 | `ROADMAP.md` | Engineers / product / reviewers | Consolidated open / not-done work: launch blockers (LLM data-handling decision, provisioned Postgres/pgvector, gateway/TLS/SSO) and future workstreams (Ask streaming, eval expansion, observability, Watch scheduler). |
 | `whitepaper_schema.md` | Engineers / regulatory reviewers | DRAFT one-row-per-cell field-extraction map for the White Paper populator: {source, endpoint/query or SPL section, lookup key, mode} per template cell. |
 | `DEPLOY.md` | Engineers / deployment owners | Production cutover runbook (Supabase + Fly.io/Railway + Vercel) plus the Operations section: rollback levers, uptime monitoring, and the monthly staging restore drill (`scripts/restore_drill.sh`). |
+| `CI_CD.md` | Engineers / contributors | The CI gate explained: all five jobs mapped to the exact local command that satisfies each, a copy-paste pre-push checklist, and the recurring gotchas (black-not-ruff, stale `api-types.ts`, `uv.lock` drift, Trivy web-image esbuild + GHSA/CVE alias flips). Read before pushing. |
 | `../regwatch/backend/README.md` | Backend engineers | Explains why backend source remains in `src/regwatch` and how to run the FastAPI API. |
 | `../regwatch/frontend/README.md` | Frontend engineers | Explains how to run the Next.js UI and how it proxies to the API. |
 | `CLAUDE.md` | Agent operators | Working instructions for Claude Code or similar coding agents. |
@@ -73,5 +74,8 @@ These `.txt` files are retained as planning notes and conversation artifacts.
   proves it.
 - If implementation changes Docker, deployment, ingest, or source-handler
   behavior, update `DOCKER.md` or `TECH_GUIDE_SIMPLE.md` in the same change.
+- If you change `.github/workflows/ci.yml` (add/remove a job or step, change a
+  gating command, or add a vuln suppression), update `CI_CD.md` in the same change
+  so the pre-push checklist never drifts from the actual gate.
 - Keep archive notes unless they become actively misleading; prefer adding a
   current `.md` source of truth over rewriting old notes.
