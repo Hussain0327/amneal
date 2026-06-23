@@ -8,7 +8,8 @@ import { confidenceBand, reasonCopy, type Turn } from "@/lib/turns";
 import { safeHref } from "@/lib/url";
 
 // Ask renders as a cited chat: the user's line as a bubble, the assistant as a
-// gold avatar + message. Epistemic status still governs the register — a cited
+// navy avatar + message (gold is reserved to grounding). Epistemic status still
+// governs the register — a cited
 // finding carries citation chips with inspectable sources; a refusal/out-of-
 // scope reply keeps the oxblood "declined" treatment and is never dressed as an
 // answer (INV-2); clarify offers pickable options instead of guessing. The
