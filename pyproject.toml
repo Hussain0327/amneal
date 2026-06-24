@@ -10,15 +10,15 @@ dependencies = [
     "httpx>=0.27",
     "selectolax>=0.3.21",
     "tenacity>=9.0",
-    "pdfplumber>=0.11",
-    "pypdf>=6.13.3",  # 6.13.3 fixes GHSA-jm82-fx9c-mx94 (unbounded stream-length DoS)
+    "pdfplumber>=0.11.10",
+    "pypdf>=6.14.2",  # 6.13.3 fixes GHSA-jm82-fx9c-mx94 (unbounded stream-length DoS)
     "chromadb>=0.5.20",
     "sqlmodel>=0.0.22",
-    "sqlalchemy>=2.0",
+    "sqlalchemy>=2.0.51",
     "alembic>=1.14",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
-    "fastapi>=0.115",
+    "fastapi>=0.138.0",
     "uvicorn[standard]>=0.32",
     "structlog>=24.4",
     "rapidfuzz>=3.10",
@@ -35,30 +35,30 @@ dependencies = [
 
 [project.optional-dependencies]
 local-embeddings = [
-    "sentence-transformers>=3.3",
-    "torch>=2.4,<3",
+    "sentence-transformers>=5.6.0",
+    "torch>=2.12.1,<3",
     "transformers<5",
 ]
 llm = [
-    "openai>=1.55",
-    "anthropic>=0.40",
+    "openai>=2.43.0",
+    "anthropic>=0.111.0",
 ]
 orchestration = [
-    "dagster>=1.13,<1.14",
+    "dagster>=1.13.10,<1.14",
     "dagster-webserver>=1.13,<1.14",
     "dagster-postgres>=0.29,<0.30",
 ]
 dev = [
-    "pytest>=8.3",
+    "pytest>=9.1.1",
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",
     "pytest-timeout>=2.3",
-    "ruff>=0.8",
+    "ruff>=0.15.19",
     "black>=24.10",
     "mypy>=1.13",
     "types-requests",
     "respx>=0.21",
-    "import-linter>=2.0",
+    "import-linter>=2.12",
 ]
 
 [project.scripts]
