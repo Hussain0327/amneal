@@ -48,7 +48,7 @@ from regwatch.common.citations import (
 )
 from regwatch.common.logging import get_logger
 from regwatch.common.text_normalize import canonical_name, names_match, stripped_name
-from regwatch.generate.grounded_qa import ask
+from regwatch.generate.grounded_qa import QAResult, ask
 from regwatch.generate.llm import current_model_name
 from regwatch.sources import dailymed, orange_book
 from regwatch.sources._utils import clean_application_number
@@ -1698,6 +1698,25 @@ def _ext_be_guidance_available(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     )
 
 
+def _guiding_note(qa: QAResult, base: str) -> str:
+    """Turn a dead-end collapse string into a guiding note for the analyst.
+
+    Pure string assembly from fields ALREADY on the returned ``QAResult`` (no new
+    model call, no retrieval, no fabricated content). The cell still collapses to
+    ``analyst_input_required`` with ``value=None`` (INV-5) — this only enriches the
+    existing ``note`` so the analyst sees the closest match + concrete next steps.
+    Every field is None-safe: the refused path leaves ``interpretation`` None and
+    ``related``/``clarify`` empty, so the note degrades to the base string alone.
+    """
+    note = base
+    if qa.interpretation:
+        note = f"{note} Closest matching guidance: {qa.interpretation}"
+    labels = [o.label for o in (qa.related or [])] + [o.label for o in (qa.clarify or [])]
+    if labels:
+        note = f'{note} Answerable next steps: {"; ".join(labels[:3])}.'
+    return note
+
+
 def _ext_psg_requirements(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     if not ctx.normalized_name:
         return _analyst(spec, [], "No normalized ingredient resolved; cannot scope the PSG ask.")
@@ -1705,6 +1724,13 @@ def _ext_psg_requirements(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
         f"What are the recommended bioequivalence study design and acceptance criteria for "
         f"{ctx.ingredient} generic products?"
     )
+    # 2a deliberately skipped: _Ctx exposes no clean scalar dosage_form/route
+    # (forms live per-product-row as a combined string and can be multi-form),
+    # and _ob_forms_and_routes returns NORMALIZED lower-case tokens that would
+    # NOT exact-match the retriever's stored mixed-case form/route filter
+    # (retriever.py uses == on dosage_form/route) — passing them would silently
+    # zero retrieval and turn a real product into a wrong refusal. Per the
+    # spec's "verify first; if absent, skip" rule we pass normalized_name alone.
     try:
         qa = ask(
             question,
@@ -1718,15 +1744,21 @@ def _ext_psg_requirements(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
         return _analyst(
             spec,
             [],
-            "PSG corpus spans more than one dosage form for this ingredient; analyst must "
-            "select the form (forms are not blended, INV-1).",
+            _guiding_note(
+                qa,
+                "PSG corpus spans more than one dosage form for this ingredient; analyst must "
+                "select the form (forms are not blended, INV-1).",
+            ),
         )
     if qa.refused or qa.status == "refused":
         return _analyst(
             spec,
             [],
-            "Scoped PSG ask refused — the ingredient is not in the corpus or retrieval was "
-            "below threshold (INV-9).",
+            _guiding_note(
+                qa,
+                "Scoped PSG ask refused — the ingredient is not in the corpus or retrieval was "
+                "below threshold (INV-9).",
+            ),
         )
     ev = [
         _evidence(
@@ -1740,7 +1772,11 @@ def _ext_psg_requirements(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
         for c in qa.citations
     ]
     if not ev:
-        return _analyst(spec, [], "Scoped PSG ask produced no validated citations (INV-1).")
+        return _analyst(
+            spec,
+            [],
+            _guiding_note(qa, "Scoped PSG ask produced no validated citations (INV-1)."),
+        )
     return _populated(spec, qa.answer, ev)
 
 

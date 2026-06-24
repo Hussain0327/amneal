@@ -661,13 +661,54 @@ def _scope_warning(
     turn_id: str,
     user_id: str | None,
     route_json: dict[str, Any],
+    filters: dict[str, Any] | None = None,
 ) -> QAResult:
-    answer = (
+    # The decline itself never changes (INV-3: we never author the filing
+    # decision). But if the question is ABOUT a real product we can name the
+    # in-scope, citable sub-questions and hand back re-runnable pointers so the
+    # user has a next step instead of a dead end.
+    generic = (
         "I can help summarize and answer questions from FDA sources, but I cannot "
         "author submission strategy, recommend what to file, or make a regulatory "
         "judgment. If you name the product and source area, I can look up the FDA "
         "evidence and cite what the records say."
     )
+    nm = (filters or {}).get("normalized_name")
+    if not nm:
+        # Resolution hits the vector store, so it can raise/time out. A resolver
+        # failure must NOT break the refusal — fall back to the generic decline.
+        try:
+            r = resolve_product(question)
+            if r.status == "resolved" and r.normalized_name:
+                nm = r.normalized_name
+        except Exception:
+            log.warning("scope_warning_resolve_failed", exc_info=True)
+            nm = None
+
+    if nm:
+        options = build_options(str(nm))
+        product = str(nm).title()
+        answer = (
+            f"I can't author submission strategy, recommend what to file, or make "
+            f"a regulatory judgment for {product}. What I CAN do is cite the FDA "
+            f"record: the recommended bioequivalence (BE) study design, the "
+            f"dissolution method, and the strengths and dosage forms the guidance "
+            f"covers. Ask me any of those and I'll quote the source."
+        )
+        return _refuse(
+            question=question,
+            passages=[],
+            reason="scope_warning",
+            model_name=model_name,
+            session_id=session_id,
+            turn_id=turn_id,
+            user_id=user_id,
+            route_json=route_json,
+            status="scope_warning",
+            answer_text=answer,
+            related=options,
+        )
+
     return _refuse(
         question=question,
         passages=[],
@@ -678,7 +719,7 @@ def _scope_warning(
         user_id=user_id,
         route_json=route_json,
         status="scope_warning",
-        answer_text=answer,
+        answer_text=generic,
     )
 
 
@@ -903,6 +944,9 @@ def ask(
                 turn_id=turn_id,
                 user_id=user_id,
                 route_json=route_json,
+                # A caller-pinned product (API/dossier filter, already
+                # canonicalized above) short-circuits resolution.
+                filters=active_filters,
             ),
             filters=active_filters,
             route_json=route_json,

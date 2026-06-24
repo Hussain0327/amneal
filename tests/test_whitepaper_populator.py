@@ -16,7 +16,9 @@ from regwatch.whitepaper import populator
 from regwatch.whitepaper.populator import (
     SpineResolutionError,
     _cell,
+    _Ctx,
     _enforce_structured_citations,
+    _ext_psg_requirements,
     _form_compatible,
     _name_matches,
     _populated,
@@ -318,6 +320,135 @@ def test_requirements_refusal_collapses(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(populator, "ask", _refused)
     cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["requirements"]
     assert cell["status"] == "analyst_input_required"
+
+
+# --------------------------- Requirements guiding note ---------------------------
+_REQ_SPEC = "requirements"
+_CELL_KEYS = {"id", "label", "mode", "status", "value", "evidence", "note"}
+
+
+def _req_ctx() -> _Ctx:
+    """Minimal _Ctx with a resolved ingredient so the PSG ask is scoped."""
+    return _Ctx(
+        rld_name="Metformin",
+        application_number_input="NDA020357",
+        appl_no="020357",
+        application_type="NDA",
+        ingredient="metformin hydrochloride",
+        normalized_name="metformin hydrochloride",
+        now=datetime(2024, 1, 1, tzinfo=UTC),
+        user_id=None,
+    )
+
+
+def _req_cell(monkeypatch: pytest.MonkeyPatch, qa: object) -> dict:
+    from regwatch.whitepaper.template import spec_by_id
+
+    spec = spec_by_id(_REQ_SPEC)
+    assert spec is not None
+    monkeypatch.setattr(populator, "ask", lambda *a, **k: qa)
+    return _ext_psg_requirements(spec, _req_ctx())
+
+
+def test_requirements_collapse_carries_guiding_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refused collapse keeps status/value (INV-5) and key set UNCHANGED, but the
+    note now guides instead of dead-ending: it names the answerable next steps from
+    qa.related."""
+    from regwatch.generate.grounded_qa import ClarifyOption, QAResult
+
+    qa = QAResult(
+        answer="",
+        citations=[],
+        refused=True,
+        model_name="stub",
+        audit_id=0,
+        retrieved=[],
+        status="refused",
+        related=[
+            ClarifyOption(
+                "Recommended bioequivalence (BE) study",
+                "What BE study does FDA recommend for metformin hydrochloride?",
+                {"normalized_name": "metformin hydrochloride"},
+            ),
+            ClarifyOption(
+                "Dissolution method",
+                "What dissolution method does FDA recommend for metformin hydrochloride?",
+                {"normalized_name": "metformin hydrochloride"},
+            ),
+        ],
+    )
+    cell = _req_cell(monkeypatch, qa)
+
+    # INV-5: collapse stays an analyst cell with no fabricated value.
+    assert cell["status"] == "analyst_input_required"
+    assert cell["value"] is None
+    # Cell key set is pinned (no new "guidance" key — guidance rides in note).
+    assert set(cell) == _CELL_KEYS
+    # The bare dead-end string is replaced by a guiding next step.
+    assert "Answerable next steps" in cell["note"]
+    assert "Bioequivalence" in cell["note"] or "bioequivalence" in cell["note"]
+    # The base INV citation is preserved (nothing weakened).
+    assert "INV-9" in cell["note"]
+
+
+def test_requirements_collapse_note_includes_interpretation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the QAResult carries an interpretation (e.g. the clarify path), the
+    closest-match text is surfaced in the note."""
+    from regwatch.generate.grounded_qa import ClarifyOption, QAResult
+
+    qa = QAResult(
+        answer="",
+        citations=[],
+        refused=False,
+        model_name="stub",
+        audit_id=0,
+        retrieved=[],
+        status="clarify",
+        interpretation="You're asking about Metformin Hydrochloride.",
+        clarify=[
+            ClarifyOption(
+                "Metformin Hydrochloride - Tablet (Oral)",
+                "scoped question",
+                {"normalized_name": "metformin hydrochloride"},
+            )
+        ],
+    )
+    cell = _req_cell(monkeypatch, qa)
+
+    assert cell["status"] == "analyst_input_required"
+    assert cell["value"] is None
+    assert set(cell) == _CELL_KEYS
+    assert "Closest matching guidance" in cell["note"]
+    assert "Metformin Hydrochloride" in cell["note"]
+    assert "Answerable next steps" in cell["note"]
+
+
+def test_requirements_collapse_note_empty_qa_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An all-empty refused QAResult (no interpretation/related/clarify) must not
+    crash and degrades to the base collapse string."""
+    from regwatch.generate.grounded_qa import QAResult
+
+    qa = QAResult(
+        answer="",
+        citations=[],
+        refused=True,
+        model_name="stub",
+        audit_id=0,
+        retrieved=[],
+        status="refused",
+    )
+    cell = _req_cell(monkeypatch, qa)
+
+    assert cell["status"] == "analyst_input_required"
+    assert cell["value"] is None
+    assert set(cell) == _CELL_KEYS
+    assert "INV-9" in cell["note"]
+    assert "Answerable next steps" not in cell["note"]
+    assert "Closest matching guidance" not in cell["note"]
 
 
 # --------------------------- manual cells ---------------------------
