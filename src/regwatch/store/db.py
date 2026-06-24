@@ -211,8 +211,8 @@ def _enforce_sslmode(database_url: str) -> URL:
     return url.update_query_dict({"sslmode": "require"}, append=False)
 
 
-def _pg_connect_args(s: Settings) -> dict[str, str]:
-    """libpq startup options that bound how long a connection holds resources.
+def _pg_connect_args(s: Settings) -> dict[str, str | int]:
+    """libpq connect args: per-connection GUC timeouts + the handshake timeout.
 
     The app connects as the ``postgres`` role, which — unlike Supabase's
     anon/authenticated roles — has NO server-side statement/lock/idle timeouts,
@@ -222,7 +222,15 @@ def _pg_connect_args(s: Settings) -> dict[str, str]:
     connection makes such a stall self-heal: Postgres terminates the idle
     transaction, releases its locks, and the pool replaces the connection on the
     next checkout. Empty/``0`` values are omitted so a timeout can be disabled.
+
+    ``connect_timeout`` (store-1) bounds the TCP/TLS handshake to the public
+    Supabase pooler. The GUC ``options`` only take effect AFTER a session
+    exists, and ``pool_pre_ping`` opens a fresh connection on every checkout —
+    so without this keyword a stalled handshake hangs the request thread
+    forever. psycopg v3 honors the libpq ``connect_timeout`` keyword natively;
+    it is integer seconds, and '0'/'' omits it (handshake unbounded).
     """
+    args: dict[str, str | int] = {}
     opts = [
         f"-c {guc}={value.strip()}"
         for guc, value in (
@@ -232,7 +240,14 @@ def _pg_connect_args(s: Settings) -> dict[str, str]:
         )
         if value and value.strip() and value.strip() != "0"
     ]
-    return {"options": " ".join(opts)} if opts else {}
+    if opts:
+        args["options"] = " ".join(opts)
+    connect_timeout = (s.db_connect_timeout or "").strip()
+    if connect_timeout and connect_timeout != "0":
+        # Integer seconds per libpq; a non-numeric value is operator config rot
+        # — fail loudly at engine construction rather than silently unbounded.
+        args["connect_timeout"] = int(connect_timeout)
+    return args
 
 
 def _migration_connect_args(s: Settings) -> dict[str, str]:

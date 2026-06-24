@@ -170,8 +170,18 @@ def get_engine() -> Engine:
             _engine = shared
             _owns_engine = False
         else:
+            # store-1/store-7: route the fallback through the SAME hardening as
+            # db.py's engine so it inherits sslmode=require (remote hosts) plus
+            # the per-connection GUC timeouts AND the connect_timeout handshake
+            # bound. _enforce_sslmode takes the psycopg-normalized URL and
+            # returns a SQLAlchemy URL (password preserved).
+            s = get_settings()
             _engine = create_engine(
-                _normalize_url(url), pool_pre_ping=True, pool_size=5, max_overflow=5
+                db_module._enforce_sslmode(_normalize_url(url)),
+                pool_pre_ping=True,
+                pool_size=5,
+                max_overflow=5,
+                connect_args=db_module._pg_connect_args(s),
             )
             _owns_engine = True
     return _engine

@@ -33,6 +33,7 @@ from regwatch.sources._utils import (
     bare_application_number,
     clean_application_number,
     clean_text,
+    get_with_retry,
     owned_client,
 )
 from regwatch.sources.types import SourceKind, SourceQuery, SourceRecord
@@ -338,7 +339,7 @@ def _fetch_zip_files(client: httpx.Client | None) -> tuple[dict[str, str], froze
         client,
         lambda: httpx.Client(timeout=s.http_timeout_s, headers={"User-Agent": s.user_agent}),
     ) as active_client:
-        resp = active_client.get(ORANGE_BOOK_ZIP_URL)
+        resp = get_with_retry(active_client, ORANGE_BOOK_ZIP_URL)
         resp.raise_for_status()
         return _file_texts_from_zip(resp.content)
 

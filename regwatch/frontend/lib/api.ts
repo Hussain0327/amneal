@@ -194,6 +194,58 @@ export class ApiError extends Error {
   }
 }
 
+// Request timeouts. Every fetch gets a bound so a hung backend can't leave a
+// page spinning forever (it surfaces as a normal ApiError instead). JSON calls
+// get a short bound; /query/stream and /whitepaper/docx legitimately take much
+// longer (LLM synthesis / .docx render), so they get a longer one.
+const DEFAULT_TIMEOUT_MS = 30_000;
+const LONG_TIMEOUT_MS = 120_000;
+// 504-shaped: a timed-out request never reached a usable response, so the
+// closest defined status is "gateway timeout". handle()/login key their UI off
+// err.status; this keeps a timeout indistinguishable from a real upstream 504.
+const TIMEOUT_STATUS = 504;
+
+// fetch with a hard timeout that is COMPOSED with any caller-supplied signal.
+// A fired timeout aborts the request and rejects with an ApiError (so existing
+// catch/error UI fires); a caller abort (user-cancel / session switch) still
+// propagates as a DOMException("AbortError") so those paths keep working. The
+// timer is always cleared, on every path, so it can't leak.
+async function fetchWithTimeout(
+  input: string,
+  init: RequestInit,
+  timeoutMs: number,
+  callerSignal?: AbortSignal,
+): Promise<Response> {
+  // A caller signal already aborted before we start: honor it without a fetch.
+  if (callerSignal?.aborted) throw new DOMException("aborted", "AbortError");
+
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  // Forward a later caller abort onto our controller so user-cancel still
+  // aborts the in-flight fetch. Tracked so we can remove the listener on exit.
+  const onCallerAbort = () => controller.abort();
+  callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (e) {
+    // Our controller fired. If it was the timer, surface a defined ApiError;
+    // otherwise the caller aborted, so let the AbortError propagate.
+    if (timedOut && isAbortError(e)) {
+      throw new ApiError(TIMEOUT_STATUS, "The request timed out — please try again.");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", onCallerAbort);
+  }
+}
+
 // AuthProvider registers a callback here, so a 401 from ANY protected call
 // (everything except /auth/login) drops client auth state in one place; the
 // provider then routes to /login.
@@ -235,23 +287,35 @@ async function handle<T>(res: Response, method: string, path: string, gate: bool
 // mode (NEXT_PUBLIC_API_BASE on localhost) is cross-origin and would silently
 // drop the cookie without this; the backend's CORS allows credentials.
 async function postJSON<T>(path: string, body: unknown, gate = true, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(`${apiBase()}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    credentials: "include",
+  const res = await fetchWithTimeout(
+    `${apiBase()}${path}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      credentials: "include",
+    },
+    DEFAULT_TIMEOUT_MS,
     signal,
-  });
+  );
   return handle<T>(res, "POST", path, gate);
 }
 
 async function getJSON<T>(path: string): Promise<T> {
-  const res = await fetch(`${apiBase()}${path}`, { credentials: "include" });
+  const res = await fetchWithTimeout(
+    `${apiBase()}${path}`,
+    { credentials: "include" },
+    DEFAULT_TIMEOUT_MS,
+  );
   return handle<T>(res, "GET", path, true);
 }
 
 async function deleteJSON(path: string): Promise<void> {
-  const res = await fetch(`${apiBase()}${path}`, { method: "DELETE", credentials: "include" });
+  const res = await fetchWithTimeout(
+    `${apiBase()}${path}`,
+    { method: "DELETE", credentials: "include" },
+    DEFAULT_TIMEOUT_MS,
+  );
   await handle<void>(res, "DELETE", path, true);
 }
 
@@ -296,7 +360,11 @@ export async function askQuery(
 }
 
 function isAbortError(e: unknown): boolean {
-  return e instanceof Error && e.name === "AbortError";
+  // A fetch abort rejects with a DOMException named "AbortError". Match on the
+  // name alone, not `instanceof Error`: in browsers DOMException extends Error,
+  // but in some runtimes (jsdom/older Node) it does NOT, and a name check there
+  // is the only reliable signal. We require an object with that exact name.
+  return typeof e === "object" && e !== null && (e as { name?: unknown }).name === "AbortError";
 }
 
 // Minimal text/event-stream reader for /query/stream. Frames per the pinned
@@ -394,39 +462,79 @@ export async function askQueryStream(
   signal?: AbortSignal,
 ): Promise<QueryResponse> {
   const path = "/query/stream";
-  let res: Response;
-  try {
-    res = await fetch(`${apiBase()}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify({ question, filters, session_id }),
-      credentials: "include",
-      signal,
-    });
-  } catch (e) {
-    if (isAbortError(e)) throw e;
-    return askQuery(question, filters, session_id, signal);
-  }
-  if (res.status === 401) {
-    onUnauthorized?.();
-    throw new ApiError(401, "authentication required");
-  }
-  const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
-  if (!res.ok || !res.body || !contentType.includes("text/event-stream")) {
-    // 404/405 (endpoint not deployed yet) or a non-streaming response. Cancel
-    // the body so a stray non-SSE stream can't run alongside the fallback.
-    void res.body?.cancel().catch(() => {});
-    return askQuery(question, filters, session_id, signal);
-  }
-  try {
-    const result = await consumeSse(res.body, onStatus);
-    if (result) return normalizeQuery(result);
-  } catch (e) {
-    if (isAbortError(e)) throw e;
-    // fall through to the plain call
-  }
   if (signal?.aborted) throw new DOMException("aborted", "AbortError");
-  return askQuery(question, filters, session_id, signal);
+
+  // The stream bound covers only TIME-TO-FIRST-BYTE: a backend that never
+  // sends response headers can't leave the page spinning forever. Once headers
+  // arrive the timer is cleared and the body may legitimately stream for a
+  // while. We can't pass the caller signal directly because the timer must
+  // abort too, so we forward caller-cancel onto our own controller and keep
+  // that forwarding alive for the WHOLE stream lifetime (cleaned up in the
+  // outer finally) — that's what lets user-cancel still abort the body read in
+  // consumeSse mid-stream, exactly as before.
+  const ctl = new AbortController();
+  let ttfbTimedOut = false;
+  let ttfbTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    ttfbTimedOut = true;
+    ctl.abort();
+  }, LONG_TIMEOUT_MS);
+  const onCallerAbortStream = () => ctl.abort();
+  signal?.addEventListener("abort", onCallerAbortStream, { once: true });
+
+  try {
+    let res: Response;
+    try {
+      res = await fetch(`${apiBase()}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        body: JSON.stringify({ question, filters, session_id }),
+        credentials: "include",
+        signal: ctl.signal,
+      });
+    } catch (e) {
+      // Headers never arrived. A real caller abort rethrows; the TTFB timer
+      // firing is a defined failure that surfaces (don't re-run the long call);
+      // any other network error falls back to plain /query as before.
+      if (signal?.aborted) throw new DOMException("aborted", "AbortError");
+      if (ttfbTimedOut) {
+        throw new ApiError(TIMEOUT_STATUS, "The request timed out — please try again.");
+      }
+      if (isAbortError(e)) throw e;
+      return askQuery(question, filters, session_id, signal);
+    } finally {
+      // Headers are in (or the fetch failed): disarm the TTFB timer. The
+      // caller-abort forwarding stays wired so the body read can still cancel.
+      if (ttfbTimer !== null) {
+        clearTimeout(ttfbTimer);
+        ttfbTimer = null;
+      }
+    }
+    if (res.status === 401) {
+      onUnauthorized?.();
+      throw new ApiError(401, "authentication required");
+    }
+    const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
+    if (!res.ok || !res.body || !contentType.includes("text/event-stream")) {
+      // 404/405 (endpoint not deployed yet) or a non-streaming response. Cancel
+      // the body so a stray non-SSE stream can't run alongside the fallback.
+      void res.body?.cancel().catch(() => {});
+      return askQuery(question, filters, session_id, signal);
+    }
+    try {
+      const result = await consumeSse(res.body, onStatus);
+      if (result) return normalizeQuery(result);
+    } catch (e) {
+      if (isAbortError(e)) throw e;
+      // fall through to the plain call
+    }
+    if (signal?.aborted) throw new DOMException("aborted", "AbortError");
+    return askQuery(question, filters, session_id, signal);
+  } finally {
+    // Always release the timer (if the fetch path above didn't reach its own
+    // finally) and the caller-abort listener — no leak on any path.
+    if (ttfbTimer !== null) clearTimeout(ttfbTimer);
+    signal?.removeEventListener("abort", onCallerAbortStream);
+  }
 }
 
 export function assemble(
@@ -490,12 +598,16 @@ function filenameFromDisposition(header: string | null): string | null {
 // other call.
 export async function downloadWhitepaperDocx(result: WhitepaperResponse): Promise<void> {
   const path = "/whitepaper/docx";
-  const res = await fetch(`${apiBase()}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ result }),
-    credentials: "include",
-  });
+  const res = await fetchWithTimeout(
+    `${apiBase()}${path}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ result }),
+      credentials: "include",
+    },
+    LONG_TIMEOUT_MS,
+  );
   if (!res.ok) {
     await handle<never>(res, "POST", path, true); // always throws
     return;

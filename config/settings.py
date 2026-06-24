@@ -195,6 +195,12 @@ class Settings(BaseSettings):
     db_statement_timeout: str = "30s"
     db_idle_in_tx_timeout: str = "60s"
     db_lock_timeout: str = "10s"
+    # Bound the TCP/TLS connection handshake itself (libpq `connect_timeout`,
+    # integer seconds). statement_timeout only bounds a query AFTER the session
+    # exists, and pool_pre_ping opens a fresh connection on checkout — so without
+    # this a stalled handshake to the public Supabase pooler hangs a request
+    # thread forever (store-1). Integer seconds; '0' or '' disables the bound.
+    db_connect_timeout: str = "10"
     # Recycle pooled connections before Supavisor's own idle cutoff so a stale
     # server-side socket is never handed to a request (pairs with pool_pre_ping).
     db_pool_recycle_s: int = 1800
