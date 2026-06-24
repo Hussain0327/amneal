@@ -196,6 +196,13 @@ jobs:
         working-directory: regwatch/frontend
         run: npm run build
 
+      # Run the vitest suites so green CI actually means the frontend tests
+      # pass. The "test" script is `vitest run` (non-watch), safe for CI; deps
+      # were installed by `npm ci` above.
+      - name: frontend test
+        working-directory: regwatch/frontend
+        run: npm test
+
   # The /query-family wire types in lib/api.ts are generated from the FastAPI
   # schema (lib/api-types.ts). Regenerate here and fail if the committed copy is
   # stale, so the frontend contract can never silently drift from the backend.

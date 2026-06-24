@@ -29,18 +29,28 @@ def upgrade() -> None:
     # Backfill pre-existing rows from the canonical PDF URL (``PSG_<appl_no>.pdf``).
     # Rows whose source_url does not match stay NULL (a unique index permits many
     # NULLs in SQLite). A unique-constraint failure on the index below would mean
-    # pre-existing duplicate PSG rows for one appl_no — rebuild the dev DB.
-    op.execute("""
-        UPDATE psg_document
-        SET appl_no = substr(
-            source_url,
-            instr(source_url, 'PSG_') + 4,
-            instr(source_url, '.pdf') - instr(source_url, 'PSG_') - 4
-        )
-        WHERE appl_no IS NULL
-          AND instr(source_url, 'PSG_') > 0
-          AND instr(source_url, '.pdf') > instr(source_url, 'PSG_')
-        """)
+    # pre-existing duplicate PSG rows for one appl_no -- rebuild the dev DB.
+    #
+    # WHY the dialect guard: this UPDATE uses SQLite's instr()/substr(), which do
+    # not exist in Postgres (instr() would raise UndefinedFunction). On Postgres
+    # the backfill is intentionally SKIPPED, leaving the new column NULL. That is
+    # consistent with the only path that reaches Postgres here: an incremental
+    # `alembic upgrade head` (the Fly release_command) replaying 0003 on a DB
+    # stamped behind. A fresh Postgres never replays this migration -- it
+    # bootstraps via create_all + stamp head -- so there are no pre-existing rows
+    # to backfill there either. Ingestion sets appl_no on subsequent upserts.
+    if op.get_bind().dialect.name == "sqlite":
+        op.execute("""
+            UPDATE psg_document
+            SET appl_no = substr(
+                source_url,
+                instr(source_url, 'PSG_') + 4,
+                instr(source_url, '.pdf') - instr(source_url, 'PSG_') - 4
+            )
+            WHERE appl_no IS NULL
+              AND instr(source_url, 'PSG_') > 0
+              AND instr(source_url, '.pdf') > instr(source_url, 'PSG_')
+            """)
     op.create_index("ix_psg_document_appl_no", "psg_document", ["appl_no"], unique=True)
 
 

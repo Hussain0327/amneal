@@ -21,6 +21,7 @@ from regwatch.sources._utils import (
     application_number_candidates,
     clean_application_number,
     clean_text,
+    get_with_retry,
     owned_client,
 )
 from regwatch.sources.types import SourceKind, SourceQuery, SourceRecord
@@ -98,7 +99,7 @@ def _fetch_rems_html(client: httpx.Client | None) -> str:
         client,
         lambda: httpx.Client(timeout=s.http_timeout_s, headers={"User-Agent": s.user_agent}),
     ) as active_client:
-        resp = active_client.get(REMS_INDEX_URL)
+        resp = get_with_retry(active_client, REMS_INDEX_URL)
         resp.raise_for_status()
         return resp.text
 
