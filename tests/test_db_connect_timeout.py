@@ -55,9 +55,11 @@ def test_pg_connect_args_keeps_guc_timeouts_alongside_connect_timeout() -> None:
         )
     )
     assert args["connect_timeout"] == 10
-    assert "statement_timeout=30s" in args["options"]
-    assert "idle_in_transaction_session_timeout=60s" in args["options"]
-    assert "lock_timeout=10s" in args["options"]
+    options = args["options"]
+    assert isinstance(options, str)
+    assert "statement_timeout=30s" in options
+    assert "idle_in_transaction_session_timeout=60s" in options
+    assert "lock_timeout=10s" in options
 
 
 def test_db_engine_is_built_with_connect_timeout(monkeypatch: Any) -> None:

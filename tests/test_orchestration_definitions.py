@@ -61,9 +61,11 @@ def test_run_cli_timeout_raises_failure_not_silent(monkeypatch: pytest.MonkeyPat
     def _fake_run(*_args: object, **kwargs: object) -> object:
         # Mirror what subprocess.run would raise on a hung crawl, including the
         # partial output captured before the kill.
+        raw_timeout = kwargs.get("timeout", 0.0)
+        timeout_s = float(raw_timeout) if isinstance(raw_timeout, (int, float)) else 0.0
         raise subprocess.TimeoutExpired(
             cmd=["regwatch", "watch"],
-            timeout=float(kwargs.get("timeout", 0.0) or 0.0),
+            timeout=timeout_s,
             output="partial-stdout",
             stderr="partial-stderr",
         )
@@ -78,7 +80,7 @@ def test_run_cli_timeout_raises_failure_not_silent(monkeypatch: pytest.MonkeyPat
         )
 
     failure = excinfo.value
-    assert "timed out" in failure.description
+    assert "timed out" in (failure.description or "")
     # Partial output is carried in metadata so the hang is diagnosable.
     assert "stdout_tail" in failure.metadata
     assert "stderr_tail" in failure.metadata
