@@ -27,6 +27,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Ready
+         * @description Readiness probe: 200 only when the DB + vector store are reachable AND the
+         *     LLM client is constructable (key present). Distinct from /health's liveness:
+         *     a load balancer routes traffic on this. No paid LLM call is made - only the
+         *     cheap reachability checks. Both are timeout-bounded by the per-connection
+         *     connect/statement timeouts on the shared engine (the vector-store probe is a
+         *     `SELECT count(*)` in pgvector mode, so a degraded DB is capped by
+         *     DB_STATEMENT_TIMEOUT rather than hanging the probe). 503 names the FIRST
+         *     failed check so an operator sees what to fix.
+         */
+        get: operations["ready_ready_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Metrics
+         * @description Prometheus text-exposition counters derived from the query_log audit table.
+         *
+         *     Hand-rolled (no prometheus_client dependency): exposes total queries by mode
+         *     and the refusal counter. Open like /health and /ready so a scraper reaches it
+         *     without the session cookie. The body is plain text/version-0.0.4.
+         */
+        get: operations["metrics_metrics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/login": {
         parameters: {
             query?: never;
@@ -651,6 +702,48 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    ready_ready_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    metrics_metrics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
         };
