@@ -22,7 +22,13 @@ from pathlib import Path
 from regwatch.common.logging import get_logger
 from regwatch.ingest.pipeline import IngestStats, ingest_listing
 from regwatch.ingest.psg_crawler import PsgListing, fetch_all_listings
-from regwatch.watch.alerts import Alert, build_alerts, digest_path, write_digest
+from regwatch.watch.alerts import (
+    Alert,
+    appl_nos_without_alert,
+    build_alerts,
+    digest_path,
+    write_digest,
+)
 from regwatch.watch.matcher import WatchMatch, match_listings
 from regwatch.watch.watchlist import list_watchlist
 
@@ -82,7 +88,26 @@ def run_watch(*, extract: bool = True) -> WatchRunResult:
 
     stats, outcomes = _ingest_matched(matched, extract=extract)
     changed = [m for m in matches if outcomes.get(m.listing.appl_no) in _CHANGED_OUTCOMES]
-    alerts = build_alerts(changed)
+    # INV-4 crash recovery: a prior run can commit a psg_version row and then
+    # crash before its chunks/BE land (separate non-atomic stores), so this run
+    # reads the unchanged content_hash and classifies it "unchanged" -- never
+    # re-entering the alert path. Re-surface any matched version that is durably
+    # committed but has no alert row (LEFT JOIN alert on psg_version_id) so the
+    # missed alert is finally produced. build_alerts re-verifies each version and
+    # _persist_alerts is idempotent, so already-alerted versions stay no-ops and
+    # this never double-emits.
+    changed_appl_nos = {m.listing.appl_no for m in changed}
+    # `matched` is list[PsgListing] (de-duped by appl_no); `changed`/`matches` are
+    # list[WatchMatch]. Only check listings this run did NOT already alert on.
+    missed_appl_nos = appl_nos_without_alert(
+        [li.appl_no for li in matched if li.appl_no not in changed_appl_nos]
+    )
+    to_alert = changed + [
+        m
+        for m in matches
+        if m.listing.appl_no in missed_appl_nos and m.listing.appl_no not in changed_appl_nos
+    ]
+    alerts = build_alerts(to_alert)
 
     # A clean run writes its digest (even when empty: that empty file is the
     # truthful "ran, no changes" record and stops `/watch/latest` re-surfacing a

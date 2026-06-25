@@ -50,8 +50,18 @@ def cmd_status() -> None:
 
 def _prompt_password() -> str:
     # Prompted, never a flag/argv: a password argument would leak into shell
-    # history and `ps` output.
-    return str(typer.prompt("Password", hide_input=True, confirmation_prompt=True))
+    # history and `ps` output. The strength/breach policy is enforced HERE so
+    # both provisioning paths (create-user, set-password) get it for free; a
+    # weak or breached password is rejected with exit code 2 (the CLI's
+    # convention for a bad input), never silently accepted.
+    from regwatch.auth.passwords import validate_password_strength
+
+    password = str(typer.prompt("Password", hide_input=True, confirmation_prompt=True))
+    reason = validate_password_strength(password)
+    if reason is not None:
+        rprint(f"[red]error[/red] {reason}")
+        raise typer.Exit(code=2)
+    return password
 
 
 def _require_user_row(email: str) -> str:

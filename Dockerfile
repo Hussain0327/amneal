@@ -9,8 +9,13 @@
 #     EMBEDDING_PROVIDER=local-bge-small.
 # The in-image EMBEDDING_PROVIDER=echo default below is for empty-corpus smoke
 # tests only; the API refuses to boot an echo provider against a seeded corpus.
+# Digest-pinned base: the tag is mutable (Debian rebuilds republish 3.12-slim),
+# so pin the exact multi-arch index digest for a reproducible, tamper-evident
+# build. Bump the digest; resolve with:  docker manifest inspect python:3.12-slim
+# (the index/list digest, not a per-arch child). Keep PYTHON_VERSION as
+# documentation only.
 ARG PYTHON_VERSION=3.12
-FROM python:${PYTHON_VERSION}-slim
+FROM python:3.12-slim@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e
 ARG INSTALL_LOCAL_EMBEDDINGS=false
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -38,6 +43,14 @@ RUN apt-get update \
         curl \
         libgomp1 \
     && rm -rf /var/lib/apt/lists/*
+
+# Run as an unprivileged user (defense in depth: a compromised process cannot
+# write outside its own tree or escalate via root). Fixed uid/gid 1001 so the
+# identity is stable across rebuilds. Everything the app writes lives under
+# /app (the .venv, DATA_DIR=/app/data and its children); ownership is set after
+# the build copies, just before USER below.
+RUN groupadd --system --gid 1001 regwatch \
+    && useradd --system --uid 1001 --gid 1001 --home-dir /app --no-create-home regwatch
 
 RUN pip install --no-cache-dir uv
 
@@ -73,6 +86,16 @@ RUN chmod +x /usr/local/bin/regwatch-entrypoint \
 # structurally-equivalent document stamped "(generated without the official CRA
 # template file)" — see docs/DEPLOY.md and src/regwatch/whitepaper/docx_writer.py.
 EXPOSE 8000 4000
+
+# Hand /app (the .venv + everything the entrypoint writes under DATA_DIR) to the
+# unprivileged user, then drop privileges. The entrypoint runs `mkdir -p` under
+# DATA_DIR and `regwatch init-db` as this user, so /app must be writable by it;
+# pre-creating /app/data makes the writable root explicit even on a fresh
+# (ephemeral) Fly disk. On a compose bind-mount (./data:/app/data) the host owns
+# the mount, so the developer's dir must be writable by uid 1001 there.
+RUN mkdir -p "$DATA_DIR" \
+    && chown -R regwatch:regwatch /app
+USER regwatch
 
 ENTRYPOINT ["regwatch-entrypoint"]
 CMD ["uvicorn", "regwatch.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

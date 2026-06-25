@@ -22,6 +22,8 @@ Endpoints (per spec §10.16):
     DELETE /sessions/{id}  — delete a chat session (auth)
     GET    /settings       — non-secret config (auth)
     GET    /health         — liveness + component diagnostics (open)
+    GET    /ready          - readiness: db + vector store + LLM constructable (open)
+    GET    /metrics        - Prometheus counters from the query_log audit (open)
 """
 
 from __future__ import annotations
@@ -54,7 +56,12 @@ from regwatch.common.audit import log_query
 from regwatch.common.conversation import SessionOwnershipError
 from regwatch.common.logging import configure_logging, get_logger
 from regwatch.common.observability import capture_exception, init_sentry
-from regwatch.common.ratelimit import LOGIN_ATTEMPTS_PER_MINUTE, login_limiter, query_limiter
+from regwatch.common.ratelimit import (
+    LOGIN_ATTEMPTS_PER_IP_PER_MINUTE,
+    LOGIN_ATTEMPTS_PER_MINUTE,
+    login_limiter,
+    query_limiter,
+)
 from regwatch.generate.grounded_qa import QAResult, ask
 from regwatch.process.embedder import assert_embedding_runtime_available
 from regwatch.sources.router import search_sources
@@ -286,6 +293,122 @@ def health(response: Response) -> dict[str, Any]:
     return body
 
 
+# ---------- /ready ----------
+def _llm_ready(s: Settings) -> tuple[bool, str | None]:
+    """The LLM provider must be CONSTRUCTABLE (key present / valid name) - but we
+    make NO paid call here. get_llm_provider() raises on a missing key or unknown
+    provider, which is exactly the readiness signal we want; echo always
+    constructs. Returns (ok, reason) where reason is a short, non-secret label.
+    """
+    try:
+        from regwatch.generate.llm import get_llm_provider
+
+        get_llm_provider()
+        return True, None
+    except Exception as exc:
+        # Don't leak the message (it could echo a configured value); the type +
+        # provider name is enough for an operator to act on.
+        log.warning("ready_llm_unconstructable", error_type=type(exc).__name__)
+        return False, f"llm provider {s.llm_provider!r} is not constructable"
+
+
+@app.get("/ready")
+def ready(response: Response) -> dict[str, Any]:
+    """Readiness probe: 200 only when the DB + vector store are reachable AND the
+    LLM client is constructable (key present). Distinct from /health's liveness:
+    a load balancer routes traffic on this. No paid LLM call is made - only the
+    cheap reachability checks. Both are timeout-bounded by the per-connection
+    connect/statement timeouts on the shared engine (the vector-store probe is a
+    `SELECT count(*)` in pgvector mode, so a degraded DB is capped by
+    DB_STATEMENT_TIMEOUT rather than hanging the probe). 503 names the FIRST
+    failed check so an operator sees what to fix.
+    """
+    db = _db_component()
+    chroma = _chroma_component()
+    llm_ok, llm_reason = _llm_ready(get_settings())
+    checks = {"db": db["ok"], "vector_store": chroma["ok"], "llm": llm_ok}
+    if all(checks.values()):
+        return {"status": "ready", "checks": checks}
+    failed = next(name for name, ok in checks.items() if not ok)
+    response.status_code = 503
+    return {
+        "status": "not_ready",
+        "checks": checks,
+        "failed": failed,
+        "detail": llm_reason if failed == "llm" else f"{failed} is unreachable",
+    }
+
+
+# ---------- /metrics ----------
+def _query_log_counters() -> dict[str, int]:
+    """Aggregate query_log into counters for /metrics in ONE grouped query (no
+    N+1). Keys: total, refused, and per-mode totals (qa/assemble/whitepaper/...).
+    A DB error yields an empty dict so /metrics degrades to the static help/type
+    lines rather than 500-ing the scrape.
+    """
+    counters: dict[str, int] = {}
+    try:
+        with session_scope() as s:
+            for mode, refused, n in s.execute(
+                sa_select(
+                    col(QueryLog.mode),
+                    col(QueryLog.refused),
+                    func.count(),
+                ).group_by(col(QueryLog.mode), col(QueryLog.refused))
+            ):
+                count = int(n)
+                counters["total"] = counters.get("total", 0) + count
+                if refused:
+                    counters["refused"] = counters.get("refused", 0) + count
+                counters[f"mode:{mode}"] = counters.get(f"mode:{mode}", 0) + count
+    except Exception as exc:
+        log.warning("metrics_query_failed", error_type=type(exc).__name__)
+        return {}
+    return counters
+
+
+def _render_prometheus(counters: dict[str, int]) -> str:
+    """Hand-rolled Prometheus text exposition (no client dependency).
+
+    Emits HELP/TYPE then one sample per series. Modes become a `mode` label on
+    regwatch_queries_total; refusals are their own counter. All counter values,
+    so a scraper computes rates/ratios. Missing series default to 0 so a fresh
+    process still exposes the named metrics.
+    """
+    refused = counters.get("refused", 0)
+    total = counters.get("total", 0)
+    lines = [
+        "# HELP regwatch_queries_total Total audited query_log rows by mode.",
+        "# TYPE regwatch_queries_total counter",
+    ]
+    mode_keys = sorted(k for k in counters if k.startswith("mode:"))
+    if mode_keys:
+        for key in mode_keys:
+            mode = key[len("mode:") :]
+            lines.append(f'regwatch_queries_total{{mode="{mode}"}} {counters[key]}')
+    else:
+        # No rows yet: still expose the series (empty-label) so the metric exists.
+        lines.append(f"regwatch_queries_total {total}")
+    lines += [
+        "# HELP regwatch_queries_refused_total Audited query_log rows that refused.",
+        "# TYPE regwatch_queries_refused_total counter",
+        f"regwatch_queries_refused_total {refused}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+@app.get("/metrics")
+def metrics() -> Response:
+    """Prometheus text-exposition counters derived from the query_log audit table.
+
+    Hand-rolled (no prometheus_client dependency): exposes total queries by mode
+    and the refusal counter. Open like /health and /ready so a scraper reaches it
+    without the session cookie. The body is plain text/version-0.0.4.
+    """
+    body = _render_prometheus(_query_log_counters())
+    return Response(content=body, media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
 # ---------- /auth ----------
 class LoginRequest(BaseModel):
     # max_length bounds the rate limiter's per-key memory — the limiter key
@@ -311,17 +434,56 @@ def _user_out(user: User) -> UserOut:
     return UserOut(id=user.id, email=user.email, display_name=user.display_name, role=user.role)
 
 
+def _client_ip(request: Request, s: Settings) -> str:
+    """The client IP to key the per-IP login limiter on.
+
+    Any client-supplied forwarding header is spoofable: the LEFTMOST
+    X-Forwarded-For hop is whatever the browser sent, so keying on it would let
+    an attacker rotate a fake value and mint unlimited per-IP buckets, defeating
+    the spray guard. So:
+      * trust_proxy_headers OFF (direct exposure): key on the un-spoofable
+        TCP-level request.client.host.
+      * trust_proxy_headers ON (behind Fly/Vercel): prefer Fly-Client-IP, which
+        Fly's edge sets to the platform-attested real client and a client cannot
+        forge end-to-end. Only if it is absent fall back to the RIGHTMOST XFF
+        hop (the entry our trusted edge appended), never split(",")[0]. The
+        rightmost token is the closest-to-us proxy-attested address; earlier
+        tokens are attacker-controlled and ignored.
+    Falls back to "unknown" only when no source is available (no socket peer),
+    so the limiter never crashes the login path.
+    """
+    if s.trust_proxy_headers:
+        # Fly's platform-attested client IP (set by Fly's edge); not forgeable by
+        # the browser the way XFF's leftmost hop is.
+        fly_client_ip = request.headers.get("fly-client-ip", "").strip()
+        if fly_client_ip:
+            return fly_client_ip
+        forwarded = request.headers.get("x-forwarded-for", "")
+        hops = [hop.strip() for hop in forwarded.split(",") if hop.strip()]
+        if hops:
+            return hops[-1]  # rightmost = appended by our trusted edge, not the client
+    return request.client.host if request.client else "unknown"
+
+
 @auth_router.post("/login", response_model=AuthUserResponse)
-def login(req: LoginRequest, response: Response) -> AuthUserResponse:
+def login(req: LoginRequest, request: Request, response: Response) -> AuthUserResponse:
+    s = get_settings()
     email = req.email.strip().lower()
-    if not login_limiter.allow(f"login:{email}", LOGIN_ATTEMPTS_PER_MINUTE):
+    # Two independent windows: per-email (a targeted brute force on one account)
+    # AND per-IP (a credential-spray sweeping many DISTINCT emails from one host,
+    # which the per-email key alone never sees). Either tripping returns 429.
+    # NOTE: in-process limiter under min_machines_running=2 is ~2x effective; a
+    # shared-store limiter is a separate parked item, NOT built here.
+    ip = _client_ip(request, s)
+    if not login_limiter.allow(
+        f"login:{email}", LOGIN_ATTEMPTS_PER_MINUTE
+    ) or not login_limiter.allow(f"login:ip:{ip}", LOGIN_ATTEMPTS_PER_IP_PER_MINUTE):
         raise HTTPException(status_code=429, detail="rate limit exceeded")
     user = authenticate(req.email, req.password)
     if user is None or user.id is None:
         # One message for unknown email / wrong password / inactive user;
         # authenticate() burns a bcrypt verify in every branch (uniform timing).
         raise HTTPException(status_code=401, detail="invalid email or password")
-    s = get_settings()
     token, _ = create_session(user.id)  # always a fresh row — no session fixation
     response.set_cookie(
         key=SESSION_COOKIE,

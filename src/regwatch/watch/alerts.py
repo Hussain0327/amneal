@@ -96,6 +96,47 @@ def _fetch_version_for_listing(appl_no: str) -> tuple[int, int, str | None, str]
         return doc.id, v.id, v.diff_summary, v.captured_at.isoformat()
 
 
+def appl_nos_without_alert(appl_nos: list[str]) -> set[str]:
+    """Of these appl_nos, the ones whose LATEST psg_version has NO alert row.
+
+    INV-4 crash recovery: ``ingest_listing`` commits the psg_version row and
+    THEN writes chunks/BE in separate (non-atomic) stores. If that second step
+    crashes, the version is durably committed but no alert was ever built, and
+    every later run reads the matching content_hash as ``unchanged`` and so
+    never re-enters the alert path -- a permanent silent miss. We re-derive the
+    gap directly from the durable tables (LEFT JOIN alert ON psg_version_id):
+    a committed-latest-version with no alert row is exactly that missed case.
+
+    Returns only appl_nos that HAVE a latest version (a doc that was never
+    fetched has nothing to alert on) AND that version has no alert row. The
+    caller feeds these back through ``build_alerts`` (which re-verifies the
+    version) so the missed alert is finally produced; ``_persist_alerts`` is
+    idempotent, so re-surfacing an already-alerted version is a no-op.
+    """
+    if not appl_nos:
+        return set()
+    missed: set[str] = set()
+    with session_scope() as s:
+        for appl_no in appl_nos:
+            doc = s.scalars(select(PsgDocument).where(PsgDocument.appl_no == appl_no)).first()
+            if doc is None or doc.id is None:
+                continue
+            ver = s.scalars(
+                select(PsgVersion)
+                .where(PsgVersion.psg_document_id == doc.id)
+                .order_by(desc(PsgVersion.captured_at), desc(PsgVersion.id))  # type: ignore[arg-type]
+                .limit(1)
+            ).first()
+            if ver is None or ver.id is None:
+                continue
+            has_alert = s.scalars(
+                select(AlertRow.id).where(AlertRow.psg_version_id == ver.id).limit(1)
+            ).first()
+            if has_alert is None:
+                missed.add(appl_no)
+    return missed
+
+
 def build_alerts(matches: list[WatchMatch]) -> list[Alert]:
     """Build verified alerts (INV-4: every alert refers to a real DB version)."""
     alerts: list[Alert] = []

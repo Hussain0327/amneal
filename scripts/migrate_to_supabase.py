@@ -392,7 +392,32 @@ def bootstrap_target(*, truncate: bool = False) -> Engine:
         # e.g. stamped at a different alembic revision than this build's head —
         # surface it as a clean configuration error, not a traceback.
         raise MigrationError(str(exc)) from exc
+    # A fresh-bootstrap target is `create_all` + `stamp head`, which NEVER replays
+    # migration 0011 - so the `ensure_rls` event trigger that auto-RLSes
+    # future tables would be missing on a freshly-migrated DB. Apply its same
+    # idempotent DDL here so a migrated database matches an upgrade-replayed one.
+    ensure_rls_event_trigger(engine)
     return engine
+
+
+def ensure_rls_event_trigger(engine: Engine) -> None:
+    """(Re)create the `ensure_rls` event trigger on the Postgres target.
+
+    Loads the canonical idempotent DDL from migration 0011 (the single source of
+    truth for the trigger), so the fresh-bootstrap path and the
+    ``alembic upgrade`` path converge on identical objects. No-op off Postgres.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    path = ROOT / "migrations" / "versions" / "0011_ensure_rls_event_trigger.py"
+    spec = importlib.util.spec_from_file_location("migration_0011", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise MigrationError(f"cannot load migration 0011 from {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    with engine.begin() as conn:
+        for stmt in mod.rls_event_trigger_sql():
+            conn.execute(sa.text(stmt))
 
 
 def stamp_alembic_head(dst_engine: Engine) -> str:

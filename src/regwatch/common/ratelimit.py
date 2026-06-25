@@ -14,6 +14,17 @@ from collections import deque
 # Login brute-force guard: attempts per email per minute (fixed, not settings —
 # there is no legitimate reason to raise it).
 LOGIN_ATTEMPTS_PER_MINUTE = 10
+# Companion per-IP cap so spraying many DISTINCT emails from one host is also
+# throttled (the per-email key alone misses a username-enumeration sweep). Set
+# above the per-email cap: a small shared office/VPN NAT can have a few users
+# legitimately logging in within the same minute, so this guards the abusive
+# burst without locking out a shared egress IP at the first wrong password.
+LOGIN_ATTEMPTS_PER_IP_PER_MINUTE = 30
+# NOTE (scope): this limiter is in-process, so under fly.toml's
+# min_machines_running=2 each machine keeps its own window and the EFFECTIVE
+# ceiling is ~2x these numbers. A shared-store (Redis/Postgres) limiter is the
+# fix for an exact global cap, but that is a separate, parked item
+# (docs/PROD_READINESS.md #1) - do NOT build it here.
 
 
 class RateLimiter:

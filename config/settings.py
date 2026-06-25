@@ -280,6 +280,17 @@ class Settings(BaseSettings):
     auth_session_ttl_hours: int = 72
     # Per-user requests/minute on POST /query and POST /assemble. 0 disables.
     rate_limit_per_minute: int = 30
+    # Trust platform forwarding headers for the per-IP login limiter key. OFF by
+    # default: when the API is reached directly, X-Forwarded-For is
+    # client-controlled and trusting its leftmost hop lets an attacker rotate a
+    # spoofed IP to defeat the limiter. Turn ON only behind a proxy/load balancer
+    # whose edge attests the real client. Fly APPENDS the observed peer to XFF
+    # (it does NOT overwrite the leftmost hop) and exposes the attested client in
+    # the Fly-Client-IP header, which _client_ip prefers; otherwise it falls back
+    # to the RIGHTMOST XFF hop (the one our trusted edge added), never the
+    # spoofable leftmost. OFF, the limiter keys on the un-spoofable TCP-level
+    # request.client.host.
+    trust_proxy_headers: bool = False
     # Comma-separated CORS allowlist for the Next.js UI in regwatch/frontend/.
     # Defaults to the Next.js dev server. With allow_credentials=True on the
     # API, this allowlist is what stops other origins from riding the HttpOnly
