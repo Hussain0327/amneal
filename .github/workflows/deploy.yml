@@ -1,0 +1,93 @@
+name: deploy
+
+# Continuous deployment to Fly. Fires ONLY after the `ci` workflow completes
+# SUCCESSFULLY on `main`, and deploys the EXACT commit CI validated (checks out
+# workflow_run.head_sha, not a moving ref). It never runs on a pull request or
+# any non-main branch -- the `workflow_run` trigger plus the head_branch guard
+# below make that structural, not advisory.
+#
+# Required repository secret (Settings -> Secrets and variables -> Actions):
+#   FLY_API_TOKEN   Fly deploy token (`fly tokens create deploy`). Absent =>
+#                   the deploy step fails loudly; nothing partial ships.
+#
+# The image is re-scanned with Trivy here (same gate as ci.yml's docker-build
+# job) so a CVE/secret that the security DB learned about AFTER CI ran still
+# blocks the release. flyctl then builds remotely and rolls the app machines.
+
+on:
+  workflow_run:
+    # Must match `name:` in .github/workflows/ci.yml exactly.
+    workflows: ["ci"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+# One deploy at a time; never cancel an in-flight release mid-roll (that could
+# leave the app half-migrated). Queue the next one instead.
+concurrency:
+  group: deploy-fly
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Gate (every clause is load-bearing; this is a privileged path that ships to
+    # live prod with FLY_API_TOKEN, so it must reject anything not authored in
+    # this repo's own main):
+    #   conclusion == success   -> only a GREEN ci run.
+    #   head_repository == repo  -> SAME-REPO only. workflow_run always runs in
+    #     the base repo's TRUSTED context (default-branch copy, with secrets) even
+    #     when its upstream ci ran on an untrusted FORK pull_request -- the classic
+    #     pwn-request surface. head_branch alone is attacker-influenceable: a fork
+    #     PR from a branch literally named `main` carries head_branch=='main', so
+    #     without this clause attacker code could be built + flyctl-deployed. A
+    #     fork's head_repository is the fork, never this repo, so this rejects it.
+    #   event == 'push'          -> the canonical advance-of-main CI run (ci.yml
+    #     triggers `push: branches:[main]`). Fork PRs arrive as `pull_request`, so
+    #     this is a second, independent barrier against the fork-named-main case.
+    #   head_branch == main      -> only main, never a green feature branch.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    steps:
+      # Check out the precise commit CI validated. head_sha is a trusted 40-hex
+      # git SHA from GitHub context (not attacker-controllable free text), so it
+      # is safe in `ref:`; this guarantees deploy == the artifact that passed CI
+      # even if main advanced in between.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: docker build (API image)
+        run: docker build -t regwatch:deploy .
+
+      # Re-scan before shipping, honoring ./.trivyignore. Semantics mirror
+      # ci.yml's docker-build Trivy step EXACTLY: fail on FIXABLE CRITICAL/HIGH
+      # vulns (--ignore-unfixed) plus any embedded secret (--scanners vuln,secret,
+      # which ignores --ignore-unfixed and gates the same way). --exit-code 1
+      # fails the job -> no deploy. Trivy caches its DB across runs.
+      - name: trivy scan (API image)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            -v "$GITHUB_WORKSPACE/.trivyignore:/root/.trivyignore" \
+            aquasec/trivy:latest image \
+            --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
+            --ignorefile /root/.trivyignore \
+            --scanners vuln,secret regwatch:deploy
+
+      - name: setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1  # v1
+
+      # flyctl builds remotely and runs fly.toml [deploy] release_command
+      # (alembic upgrade head) before the rolling machine replace. The token is
+      # passed via env (never inlined) per the workflow-injection-safe pattern.
+      - name: flyctl deploy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy --remote-only
