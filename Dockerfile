@@ -11,11 +11,11 @@
 # tests only; the API refuses to boot an echo provider against a seeded corpus.
 # Digest-pinned base: the tag is mutable (Debian rebuilds republish 3.12-slim),
 # so pin the exact multi-arch index digest for a reproducible, tamper-evident
-# build. Bump BOTH the digest and the trailing tag comment together; resolve the
-# new digest with:  docker manifest inspect python:3.12-slim  (the index/list
-# digest, not a per-arch child). Keep PYTHON_VERSION as documentation only.
+# build. Bump the digest; resolve with:  docker manifest inspect python:3.12-slim
+# (the index/list digest, not a per-arch child). Keep PYTHON_VERSION as
+# documentation only.
 ARG PYTHON_VERSION=3.12
-FROM python:3.12-slim@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e  # 3.12-slim
+FROM python:3.12-slim@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e
 ARG INSTALL_LOCAL_EMBEDDINGS=false
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

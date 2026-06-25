@@ -1,9 +1,8 @@
 # Digest-pinned base: the tag is mutable (the node image republishes 20-slim on
 # every Debian/Node patch), so pin the exact multi-arch index digest for a
-# reproducible, tamper-evident build. Bump BOTH the digest and the trailing tag
-# comment together; resolve with:  docker manifest inspect node:20-slim  (the
-# index/list digest, not a per-arch child).
-FROM node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0  # 20-slim
+# reproducible, tamper-evident build. Bump the digest; resolve with:  docker
+# manifest inspect node:20-slim  (the index/list digest, not a per-arch child).
+FROM node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
 
 # Patch base-image OS packages before anything else. CI's trivy scan gates the
 # build on FIXABLE CRITICAL/HIGH CVEs (--ignore-unfixed), and node:20-slim's
