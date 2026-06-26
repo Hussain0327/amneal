@@ -66,8 +66,12 @@ export interface paths {
          * @description Prometheus text-exposition counters derived from the query_log audit table.
          *
          *     Hand-rolled (no prometheus_client dependency): exposes total queries by mode
-         *     and the refusal counter. Open like /health and /ready so a scraper reaches it
-         *     without the session cookie. The body is plain text/version-0.0.4.
+         *     and the refusal counter. The body is plain text/version-0.0.4.
+         *
+         *     Access is OPT-IN: open like /health and /ready by default (so a scraper
+         *     reaches it without the session cookie), but when METRICS_TOKEN is set the
+         *     request must carry `Authorization: Bearer <token>` or this returns 401.
+         *     /health and /ready are never gated this way.
          */
         get: operations["metrics_metrics_get"];
         put?: never;
