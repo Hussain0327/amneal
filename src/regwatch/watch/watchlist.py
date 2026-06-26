@@ -20,7 +20,12 @@ from typing import Any
 import httpx
 from config.settings import get_settings
 from sqlmodel import select
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from regwatch.common.logging import get_logger
 from regwatch.common.text_normalize import canonical_name, stripped_name
