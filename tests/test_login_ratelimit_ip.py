@@ -16,6 +16,9 @@ is what is under test, not the credential check.
 
 from __future__ import annotations
 
+import tomllib
+from pathlib import Path
+
 import config.settings as cs
 import pytest
 from fastapi.testclient import TestClient
@@ -170,3 +173,18 @@ def test_per_email_key_still_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
         )
     blocked = c.post("/auth/login", json={"email": "same@example.com", "password": "x"})
     assert blocked.status_code == 429
+
+
+def test_prod_fly_toml_enables_trust_proxy_headers() -> None:
+    # trust_proxy_headers defaults False, but in prod the app ONLY serves behind
+    # Fly's edge, where request.client.host is the Fly proxy - so without this flag
+    # set every caller collapses into ONE per-IP bucket and the spray guard above is
+    # gutted. The ON-branch logic of _client_ip is proven by the tests above; this
+    # is the missing guard that the prod CONFIG actually turns it on. If someone
+    # drops TRUST_PROXY_HEADERS from fly.toml [env], this fails instead of silently
+    # re-collapsing the limiter in production.
+    fly_toml = Path(__file__).resolve().parents[1] / "fly.toml"
+    cfg = tomllib.loads(fly_toml.read_text(encoding="utf-8"))
+    # Must be the string "true": pydantic-settings parses it to the bool True, and
+    # _client_ip then keys on the attested Fly-Client-IP.
+    assert cfg["env"].get("TRUST_PROXY_HEADERS") == "true"
