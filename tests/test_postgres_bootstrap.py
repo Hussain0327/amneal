@@ -107,6 +107,37 @@ def test_bootstrap_enables_rls_on_every_public_table(pg_db: ModuleType) -> None:
     assert policies == 0
 
 
+def test_fresh_bootstrap_installs_ensure_rls_event_trigger(pg_db: ModuleType) -> None:
+    """The fresh-boot path (create_all + stamp head) NEVER replays migration 0011,
+    so it must install 0011's `ensure_rls` event trigger itself -- otherwise a
+    freshly-bootstrapped DB silently diverges from a migrate-replayed one and
+    leaves tables created AFTER boot un-RLSed (auto-exposed by the Supabase Data
+    API). Regression guard for the 0011 empty-boot convergence gap."""
+    pg_db.init_db()
+    with pg_db.get_engine().connect() as conn:
+        triggers = {row[0] for row in conn.execute(text("SELECT evtname FROM pg_event_trigger"))}
+    assert "ensure_rls" in triggers, "fresh bootstrap did not install the ensure_rls trigger"
+
+
+def test_fresh_bootstrap_trigger_rls_es_table_created_after_boot(pg_db: ModuleType) -> None:
+    """End-to-end on the bootstrap path: a table created AFTER init_db must come
+    up RLS-enabled with no explicit ALTER, proving the installed trigger fires
+    (not just that the catalog row exists)."""
+    pg_db.init_db()
+    engine = pg_db.get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE public.post_boot_probe (id int)"))
+    with engine.connect() as conn:
+        relrowsecurity = conn.execute(
+            text(
+                "SELECT c.relrowsecurity FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname='public' AND c.relname='post_boot_probe'"
+            )
+        ).scalar()
+    assert relrowsecurity is True, "post-boot table was not auto-RLSed by ensure_rls"
+
+
 def test_rls_enable_skips_already_protected_table_under_read_lock(pg_db: ModuleType) -> None:
     """Steady-state boot must take NO ACCESS EXCLUSIVE lock on a table that
     already has RLS — the 2026-06-18 incident was re-ALTERing the already-
@@ -138,9 +169,15 @@ def test_rls_enable_degrades_gracefully_on_contended_lock(pg_db: ModuleType) -> 
     re-attempts once the lock frees)."""
     pg_db.init_db()
     engine = pg_db.get_engine()
-    # A fresh table with RLS still OFF -> it lands in the "pending" set.
+    # init_db() now installs 0011's `ensure_rls` event trigger, which auto-RLSes
+    # any newly CREATEd public table -- so a fresh CREATE no longer lands in the
+    # RLS-OFF "pending" set on its own. DISABLE it right back OFF to recreate the
+    # genuinely-pending state this test needs (ALTER ... DISABLE is not one of the
+    # trigger's tags -- CREATE TABLE / CREATE TABLE AS / SELECT INTO -- so it does
+    # not re-fire). This keeps the real lock-timeout degradation path exercised.
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE lock_probe (id int)"))
+        conn.execute(text("ALTER TABLE lock_probe DISABLE ROW LEVEL SECURITY"))
 
     holder = engine.connect()
     trans = holder.begin()

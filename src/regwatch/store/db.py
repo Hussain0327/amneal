@@ -9,6 +9,7 @@ because migrations 0001-0006 contain SQLite-specific batch ops.
 
 from __future__ import annotations
 
+import importlib.util
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -434,6 +435,36 @@ def _enable_row_level_security(engine: Engine) -> None:
             log.warning("rls_enable_skipped", table=name, error=str(getattr(exc, "orig", exc)))
 
 
+def _ensure_rls_event_trigger(engine: Engine) -> None:
+    """(Re)create the `ensure_rls` event trigger so FUTURE tables get deny-all RLS.
+
+    WHY here: `_enable_row_level_security` only RLSes the tables present at boot;
+    migration 0011 adds an event trigger that RLSes any table created AFTERWARD.
+    A migrate-replayed Postgres gets that trigger from 0011, but the fresh-boot
+    path (create_all + stamp head) NEVER replays migrations, so without this it
+    would be missing the trigger and silently diverge from a migrated DB. We load
+    the canonical idempotent DDL from the 0011 file by path (single source of
+    truth; do NOT inline it) -- the same block scripts/migrate_to_supabase.py
+    uses after its own bootstrap, so all bootstrap routes converge on identical
+    objects.
+
+    Lock-free + idempotent (CREATE OR REPLACE FUNCTION / DROP-then-CREATE
+    trigger, neither takes a table lock), so re-asserting it on the same-revision
+    boot path is a safe no-op and needs no lock_timeout dance. No-op off Postgres.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    path = _repo_root() / "migrations" / "versions" / "0011_ensure_rls_event_trigger.py"
+    spec = importlib.util.spec_from_file_location("migration_0011", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise RuntimeError(f"cannot load migration 0011 from {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    with engine.begin() as conn:
+        for stmt in mod.rls_event_trigger_sql():
+            conn.execute(text(stmt))
+
+
 def _init_postgres(engine: Engine) -> None:
     """Fresh-Postgres bootstrap = create_all + stamp head (NO history replay).
 
@@ -467,6 +498,9 @@ def _init_postgres(engine: Engine) -> None:
         # Same revision: ensure the idempotent extras exist, then proceed.
         _ensure_postgres_objects(engine)
         _enable_row_level_security(engine)
+        # Lock-free no-op re-assert: keep a same-revision boot converged with a
+        # migrate-replayed DB (the trigger is the only thing 0011 adds).
+        _ensure_rls_event_trigger(engine)
         return
 
     if tables & set(SQLModel.metadata.tables.keys()):
@@ -487,6 +521,10 @@ def _init_postgres(engine: Engine) -> None:
     _ensure_postgres_objects(engine)
     command.stamp(cfg, "head")
     _enable_row_level_security(engine)
+    # create_all + stamp head never replays 0011, so install its event trigger
+    # here too -- otherwise a fresh DB lacks the auto-RLS-on-new-table guard a
+    # migrate-replayed DB has. Lock-free + idempotent.
+    _ensure_rls_event_trigger(engine)
 
 
 def _init_sqlite() -> None:
