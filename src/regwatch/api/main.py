@@ -23,12 +23,14 @@ Endpoints (per spec §10.16):
     GET    /settings       — non-secret config (auth)
     GET    /health         — liveness + component diagnostics (open)
     GET    /ready          - readiness: db + vector store + LLM constructable (open)
-    GET    /metrics        - Prometheus counters from the query_log audit (open)
+    GET    /metrics        - Prometheus counters from the query_log audit
+                              (open by default; bearer-gated when METRICS_TOKEN set)
 """
 
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 import re
@@ -397,14 +399,39 @@ def _render_prometheus(counters: dict[str, int]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _metrics_authorized(request: Request, s: Settings) -> bool:
+    """Whether this /metrics request may proceed.
+
+    OPT-IN gate: when metrics_token is unset the endpoint is open (returns True),
+    preserving today's behavior so an existing Prometheus scrape keeps working.
+    Once ops sets METRICS_TOKEN the caller must present a matching
+    `Authorization: Bearer <token>`. compare_digest gives a constant-time check
+    (no token-length/prefix leak via timing); comparing on the utf-8 bytes keeps
+    a non-ASCII header from raising inside compare_digest and 500-ing the scrape.
+    """
+    if s.metrics_token is None:
+        return True
+    header = request.headers.get("authorization", "")
+    scheme, _, presented = header.partition(" ")
+    if scheme.lower() != "bearer":
+        return False
+    return hmac.compare_digest(presented.encode("utf-8"), s.metrics_token.encode("utf-8"))
+
+
 @app.get("/metrics")
-def metrics() -> Response:
+def metrics(request: Request) -> Response:
     """Prometheus text-exposition counters derived from the query_log audit table.
 
     Hand-rolled (no prometheus_client dependency): exposes total queries by mode
-    and the refusal counter. Open like /health and /ready so a scraper reaches it
-    without the session cookie. The body is plain text/version-0.0.4.
+    and the refusal counter. The body is plain text/version-0.0.4.
+
+    Access is OPT-IN: open like /health and /ready by default (so a scraper
+    reaches it without the session cookie), but when METRICS_TOKEN is set the
+    request must carry `Authorization: Bearer <token>` or this returns 401.
+    /health and /ready are never gated this way.
     """
+    if not _metrics_authorized(request, get_settings()):
+        raise HTTPException(status_code=401, detail="metrics authentication required")
     body = _render_prometheus(_query_log_counters())
     return Response(content=body, media_type="text/plain; version=0.0.4; charset=utf-8")
 

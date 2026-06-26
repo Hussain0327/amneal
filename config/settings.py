@@ -291,6 +291,26 @@ class Settings(BaseSettings):
     # spoofable leftmost. OFF, the limiter keys on the un-spoofable TCP-level
     # request.client.host.
     trust_proxy_headers: bool = False
+    # Opt-in bearer gate for GET /metrics. UNSET (default) keeps /metrics open
+    # exactly as today so an existing Prometheus scrape keeps working with no
+    # config change; ops turns the gate on by setting METRICS_TOKEN, after which
+    # /metrics requires `Authorization: Bearer <token>` (compared constant-time).
+    # Never gate /health (the Fly healthcheck) or /ready.
+    metrics_token: str | None = None
+
+    @field_validator("metrics_token", mode="before")
+    @classmethod
+    def _normalize_metrics_token(cls, v: object) -> str | None:
+        """Empty/whitespace METRICS_TOKEN means OFF (open), same as unset.
+
+        Without this, METRICS_TOKEN="" would arm the gate with a blank secret
+        that a blank/absent Authorization header could satisfy.
+        """
+        if v is None:
+            return None
+        token = str(v).strip()
+        return token or None
+
     # Comma-separated CORS allowlist for the Next.js UI in regwatch/frontend/.
     # Defaults to the Next.js dev server. With allow_credentials=True on the
     # API, this allowlist is what stops other origins from riding the HttpOnly

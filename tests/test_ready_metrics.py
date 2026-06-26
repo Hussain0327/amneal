@@ -8,12 +8,18 @@ open (no session cookie), like /health.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
+
 import config.settings as cs
 import pytest
 from fastapi.testclient import TestClient
 
 from regwatch.api import main
 from tests.conftest import create_user, login_client
+
+if TYPE_CHECKING:
+    from fastapi import Request
 
 
 def _anon() -> TestClient:
@@ -130,3 +136,66 @@ def test_metrics_degrades_to_zero_on_db_error(monkeypatch: pytest.MonkeyPatch) -
     r = _anon().get("/metrics")
     assert r.status_code == 200
     assert "regwatch_queries_refused_total 0" in r.text
+
+
+# ---------- /metrics opt-in bearer gate (METRICS_TOKEN) ----------
+
+
+def _arm_metrics_token(monkeypatch: pytest.MonkeyPatch, token: str) -> None:
+    monkeypatch.setenv("METRICS_TOKEN", token)
+    cs.get_settings.cache_clear()
+
+
+def test_metrics_open_when_token_unset() -> None:
+    # Default (METRICS_TOKEN unset): /metrics stays open with no Authorization
+    # header - the opt-in gate must not change today's behavior.
+    assert _anon().get("/metrics").status_code == 200
+
+
+def test_metrics_401_when_token_set_and_header_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    _arm_metrics_token(monkeypatch, "s3cr3t-scrape-token")
+    assert _anon().get("/metrics").status_code == 401
+
+
+def test_metrics_401_when_token_set_and_header_wrong(monkeypatch: pytest.MonkeyPatch) -> None:
+    _arm_metrics_token(monkeypatch, "s3cr3t-scrape-token")
+    r = _anon().get("/metrics", headers={"Authorization": "Bearer not-the-token"})
+    assert r.status_code == 401
+
+
+def test_metrics_200_when_token_set_and_header_correct(monkeypatch: pytest.MonkeyPatch) -> None:
+    _arm_metrics_token(monkeypatch, "s3cr3t-scrape-token")
+    r = _anon().get("/metrics", headers={"Authorization": "Bearer s3cr3t-scrape-token"})
+    assert r.status_code == 200
+    # Still the real Prometheus body, not just a 200.
+    assert "# HELP regwatch_queries_total" in r.text
+
+
+def test_metrics_401_when_non_bearer_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A correctly-valued token presented under a non-Bearer scheme is rejected;
+    # the gate is specifically `Authorization: Bearer <token>`.
+    _arm_metrics_token(monkeypatch, "s3cr3t-scrape-token")
+    r = _anon().get("/metrics", headers={"Authorization": "Basic s3cr3t-scrape-token"})
+    assert r.status_code == 401
+
+
+def test_metrics_authorized_handles_non_ascii_bearer_without_raising() -> None:
+    # A non-ASCII bearer value must be rejected as a mismatch, never raise inside
+    # compare_digest (which rejects non-ASCII str) and 500 the scrape - we compare
+    # on utf-8 bytes for exactly this. Driven at the helper because the test
+    # client's header transport itself cannot carry a non-latin-1 header value.
+    s = cs.Settings(metrics_token="s3cr3t-scrape-token")  # type: ignore[call-arg]
+    req = cast("Request", SimpleNamespace(headers={"authorization": "Bearer ééé"}))
+    assert main._metrics_authorized(req, s) is False
+
+
+def test_health_and_ready_stay_open_when_metrics_token_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # HARD CONSTRAINT: METRICS_TOKEN must gate ONLY /metrics. /health is the Fly
+    # healthcheck and /ready the readiness probe; gating either would mark
+    # machines unhealthy. Both must stay reachable with no Authorization header.
+    _arm_metrics_token(monkeypatch, "s3cr3t-scrape-token")
+    c = _anon()
+    assert c.get("/health").status_code == 200
+    assert c.get("/ready").status_code == 200
