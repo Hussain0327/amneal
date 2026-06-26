@@ -169,9 +169,15 @@ def test_rls_enable_degrades_gracefully_on_contended_lock(pg_db: ModuleType) -> 
     re-attempts once the lock frees)."""
     pg_db.init_db()
     engine = pg_db.get_engine()
-    # A fresh table with RLS still OFF -> it lands in the "pending" set.
+    # init_db() now installs 0011's `ensure_rls` event trigger, which auto-RLSes
+    # any newly CREATEd public table -- so a fresh CREATE no longer lands in the
+    # RLS-OFF "pending" set on its own. DISABLE it right back OFF to recreate the
+    # genuinely-pending state this test needs (ALTER ... DISABLE is not one of the
+    # trigger's tags -- CREATE TABLE / CREATE TABLE AS / SELECT INTO -- so it does
+    # not re-fire). This keeps the real lock-timeout degradation path exercised.
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE lock_probe (id int)"))
+        conn.execute(text("ALTER TABLE lock_probe DISABLE ROW LEVEL SECURITY"))
 
     holder = engine.connect()
     trans = holder.begin()
