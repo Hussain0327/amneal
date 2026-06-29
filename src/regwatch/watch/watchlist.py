@@ -189,11 +189,13 @@ def _status_from_marketing_status(prod: dict[str, Any]) -> str | None:
             statuses.append("discontinued")
         elif "tentative" in text:
             statuses.append("tentative")
-    if not statuses:
-        return None
-    if "approved" in statuses:
-        return "approved"
-    return statuses[0]
+    # Explicit precedence (NOT scan order): a single application can carry
+    # several marketing_status values, so return the most decision-relevant one
+    # deterministically. approved > discontinued > tentative.
+    for status in ("approved", "discontinued", "tentative"):
+        if status in statuses:
+            return status
+    return None
 
 
 def upsert_entries(entries: list[WatchlistEntry]) -> int:

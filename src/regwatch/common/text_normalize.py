@@ -42,6 +42,19 @@ SALT_TOKENS = {
     "dihydrate",
     "trihydrate",
     "anhydrous",
+    # Anions. Without these, distinct electrolytes that share a counter-ion
+    # (sodium/potassium/calcium chloride; sodium/calcium acetate; ...) collapse
+    # to the same NON-EMPTY stripped key and cross-match as the wrong drug at
+    # high confidence. With them, a mono-salt like "Potassium Chloride" strips
+    # to "" and the empty-key guard (matcher + names_match) refuses the match.
+    "chloride",
+    "bromide",
+    "iodide",
+    "acetate",
+    "gluconate",
+    "lactate",
+    "carbonate",
+    "bicarbonate",
 }
 
 

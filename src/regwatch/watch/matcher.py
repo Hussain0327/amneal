@@ -29,7 +29,12 @@ from regwatch.ingest.psg_crawler import PsgListing
 log = get_logger(__name__)
 
 
-FUZZY_THRESHOLD = 88  # rapidfuzz token_sort_ratio; tuned conservatively
+# rapidfuzz token_sort_ratio floor. Raised 88 -> 92 because 88 admitted
+# distinct near-name generics as false matches (prednisone<->prednisolone scores
+# 90.9). No string metric cleanly separates such pairs, so this is incremental
+# hardening, not a complete guard; legitimate spelling/spacing variants match via
+# the canonical/stripped exact keys above, and real typos still clear 92.
+FUZZY_THRESHOLD = 92
 
 
 @dataclass
@@ -38,6 +43,37 @@ class WatchMatch:
     product: dict[str, Any]
     confidence: float
     rationale: str  # "canonical" | "stripped" | "fuzzy" | "combo_component"
+
+
+def _norm_attr(v: Any) -> str:
+    """Lowercased, whitespace-collapsed attribute for lenient route/form compare."""
+    if not isinstance(v, str):
+        return ""
+    return " ".join(v.strip().lower().split())
+
+
+def _attr_compatible(listing_val: str | None, product_val: Any) -> bool:
+    """True if a listing's route/dosage_form is compatible with a product's.
+
+    Compatible when EITHER side is unknown (null/empty) or one normalized value
+    is a prefix of the other ("Tablet" vs "Tablet, Extended Release"). The
+    null-fallback is deliberate: a missing form/route must never DROP a real
+    match (INV-4 spirit -- prefer an over-alert to a silent miss); it only
+    narrows the fan-out when both sides positively disagree.
+    """
+    a = _norm_attr(listing_val)
+    b = _norm_attr(product_val)
+    if not a or not b:
+        return True
+    return a == b or a.startswith(b) or b.startswith(a)
+
+
+def _form_route_compatible(listing: PsgListing, product: dict[str, Any]) -> bool:
+    """Gate a name match by dosage-form/route so one PSG does not fan out to every
+    same-ingredient product the company holds across unrelated forms."""
+    return _attr_compatible(listing.route, product.get("route")) and _attr_compatible(
+        listing.dosage_form, product.get("dosage_form")
+    )
 
 
 def _index_watchlist(products: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -64,20 +100,27 @@ def match_listings(listings: list[PsgListing], products: list[dict[str, Any]]) -
         listing_canon = li.normalized_name
         listing_strip = li.stripped_name
 
+        # The name-match branches below short-circuit (`continue`) on a NAME hit
+        # regardless of form/route: once the listing's ingredient is recognized
+        # we have made our decision for it, and `_form_route_compatible` only
+        # filters WHICH of the same-named products alert (the fan-out gate).
+
         # 1. Canonical exact match
         if listing_canon in index:
             for prod in index[listing_canon]:
-                matches.append(
-                    WatchMatch(listing=li, product=prod, confidence=1.0, rationale="canonical")
-                )
+                if _form_route_compatible(li, prod):
+                    matches.append(
+                        WatchMatch(listing=li, product=prod, confidence=1.0, rationale="canonical")
+                    )
             continue
 
         # 2. Stripped exact match
         if listing_strip in index:
             for prod in index[listing_strip]:
-                matches.append(
-                    WatchMatch(listing=li, product=prod, confidence=0.92, rationale="stripped")
-                )
+                if _form_route_compatible(li, prod):
+                    matches.append(
+                        WatchMatch(listing=li, product=prod, confidence=0.92, rationale="stripped")
+                    )
             continue
 
         # 3. Combo component match: if the listing is a combination and ANY of
@@ -88,16 +131,19 @@ def match_listings(listings: list[PsgListing], products: list[dict[str, Any]]) -
             for comp in comps:
                 comp_strip = stripped_name(comp)
                 if comp_strip in index:
+                    # A component NAME hit decides this listing (sets hit), even
+                    # if form/route then filters the specific product out.
+                    hit = True
                     for prod in index[comp_strip]:
-                        matches.append(
-                            WatchMatch(
-                                listing=li,
-                                product=prod,
-                                confidence=0.80,
-                                rationale="combo_component",
+                        if _form_route_compatible(li, prod):
+                            matches.append(
+                                WatchMatch(
+                                    listing=li,
+                                    product=prod,
+                                    confidence=0.80,
+                                    rationale="combo_component",
+                                )
                             )
-                        )
-                        hit = True
             if hit:
                 continue
 
@@ -124,6 +170,8 @@ def match_listings(listings: list[PsgListing], products: list[dict[str, Any]]) -
             else:
                 fallback_hits.append((prod, prod_best))
         for prod, score in [*fuzzy_hits.values(), *fallback_hits]:
+            if not _form_route_compatible(li, prod):
+                continue
             matches.append(
                 WatchMatch(
                     listing=li,
