@@ -369,3 +369,45 @@ def test_combination_product_not_conflated_with_single(monkeypatch: pytest.Monke
     assert r.status == "answer"
     assert not r.refused
     assert {(c.short_name, c.page) for c in r.citations} == {("PSG_020003", 1)}
+
+
+# --- _combo_from_question: form-pinning correctness on the oral-tablet mass ---
+# These lock the two corrections that stop needless oral multi-form clarifies and
+# close the wrong-form-citation hole (the stopword "for" colliding with the real
+# catalog form "Tablet, For Suspension"). Pure-function tests, no DB.
+
+
+def test_combo_for_stopword_does_not_pin_for_suspension() -> None:
+    # "...recommend FOR apixaban tablet" must pin plain (Tablet), never the
+    # "Tablet, For Suspension" sibling on the stray preposition "for" (INV-1:
+    # a wrong-form pin would cite the wrong PSG).
+    combos = [("Tablet", "Oral"), ("Tablet, For Suspension", "Oral")]
+    q = "What BE study design does FDA recommend for apixaban tablet?"
+    assert qa_mod._combo_from_question(q, combos) == ("Tablet", "Oral")
+
+
+def test_combo_plain_tablet_pins_over_extended_release_sibling() -> None:
+    # "...for amantadine tablet" covers (Tablet) completely but (Tablet, ER)
+    # partially -> pin plain Tablet instead of a pointless clarify hop.
+    combos = [("Tablet", "Oral"), ("Tablet, Extended Release", "Oral")]
+    q = "What BE study design does FDA recommend for amantadine hydrochloride tablet?"
+    assert qa_mod._combo_from_question(q, combos) == ("Tablet", "Oral")
+
+
+def test_combo_extended_release_still_pins_er_variant() -> None:
+    combos = [("Tablet", "Oral"), ("Tablet, Extended Release", "Oral")]
+    q = "BE study for the extended release tablet"
+    assert qa_mod._combo_from_question(q, combos) == ("Tablet, Extended Release", "Oral")
+
+
+def test_combo_form_silent_question_still_clarifies() -> None:
+    combos = [("Tablet", "Oral"), ("Tablet, Extended Release", "Oral")]
+    q = "What bioequivalence study design does FDA recommend for amantadine?"
+    assert qa_mod._combo_from_question(q, combos) is None
+
+
+def test_combo_ambiguous_short_form_token_still_clarifies() -> None:
+    # "tablet" fits ER and ODT equally completely -> still ambiguous -> clarify.
+    combos = [("Tablet, Extended Release", "Oral"), ("Tablet, Orally Disintegrating", "Oral")]
+    q = "BE study for the tablet"
+    assert qa_mod._combo_from_question(q, combos) is None

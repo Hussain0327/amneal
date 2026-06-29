@@ -469,21 +469,38 @@ def _combo_from_question(question: str, combos: list[tuple[str, str]]) -> tuple[
     > 0 and strictly ahead of the runner-up), else None. So "albuterol sulfate
     inhalation aerosol" pins (Aerosol, Metered)/(Inhalation) instead of paying a
     pointless clarify hop, while a form-silent or ambiguous question still clarifies.
+
+    Two corrections keep this honest on the oral-tablet mass (68% of the catalog):
+      * _FILLER is stripped from the question tokens first. Otherwise the 3-letter
+        stopword "for" (which survives the len>2 cut in _form_match_tokens) collides
+        with real catalog forms like "Tablet, For Suspension" / "For Solution" and
+        SILENTLY pins the wrong form — a wrong-form citation, the worst INV-1 outcome.
+        "for"/"of"/"about" are already in _FILLER; no real form word is.
+      * Ties on raw match count are broken toward the combo the question covers most
+        COMPLETELY (fewest of the combo's own tokens left unmentioned), so a plain
+        "tablet" pins (Tablet) over its (Tablet, Extended Release) sibling instead of
+        a pointless clarify, while "extended release tablet" still pins the ER variant
+        and a token like "tablet" that fits ER and ODT equally still clarifies.
     """
-    q_tokens = {t for t in re.split(r"[^a-z0-9]+", question.lower()) if t}
+    q_tokens = {t for t in re.split(r"[^a-z0-9]+", question.lower()) if t and t not in _FILLER}
+
+    def _score(form: str, route: str) -> tuple[int, int]:
+        combo_tokens = _form_match_tokens(form) | _form_match_tokens(route)
+        matched = len(combo_tokens & q_tokens)
+        # primary: more matched tokens; secondary: fewer of the combo's own tokens
+        # left uncovered (negated so "more complete" sorts first).
+        return (matched, -(len(combo_tokens) - matched))
+
     scored = sorted(
-        (
-            (len((_form_match_tokens(form) | _form_match_tokens(route)) & q_tokens), (form, route))
-            for form, route in combos
-        ),
+        ((_score(form, route), (form, route)) for form, route in combos),
         key=lambda x: x[0],
         reverse=True,
     )
     best_score, best_combo = scored[0]
-    if best_score == 0:
-        return None
+    if best_score[0] == 0:
+        return None  # the question named no form at all — clarify
     if len(scored) > 1 and scored[1][0] == best_score:
-        return None  # two combos match the question equally well — still ambiguous
+        return None  # two combos fit equally well (match AND completeness) — clarify
     return best_combo
 
 
