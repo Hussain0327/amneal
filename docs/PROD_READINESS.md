@@ -88,11 +88,10 @@ Each item notes where it lives in the tree so the work is actionable cold.
   build, plus a frontend docker build). The Vercel + Fly/Railway deploy path is
   documented in [`DEPLOY.md`](DEPLOY.md).
 - **Remaining gap:** production smoke, load testing, approved gateway/SSO path,
-  and non-technical product/watchlist management UX are still launch work. Ask
-  has no real token-by-token streaming yet — the streaming-capable client
-  targets `/query/stream`, which the backend does not implement, so it falls
-  back to a blocking `POST /query` (the thinking ticker is honest, not faked);
-  see ROADMAP.
+  and non-technical product/watchlist management UX are still launch work.
+  `/query/stream` now exists as progress SSE plus one validated terminal result
+  frame; token-by-token answer deltas remain intentionally out of scope until
+  they can preserve INV-1 (no answer text before citation validation).
 - **Done when:** the UI is deployed behind the approved auth/gateway path; API
   origin/proxy behavior is verified for that environment; and the analyst flows
   in the deploy smoke checklist pass.
@@ -114,30 +113,38 @@ Each item notes where it lives in the tree so the work is actionable cold.
 ### 6. Observability
 - **Have:** structured logging ([`common/logging.py`](../src/regwatch/common/logging.py)),
   audit rows ([`common/audit.py`](../src/regwatch/common/audit.py)), privacy-
-  scrubbed Sentry wiring, and `/health` component diagnostics for DB, vector
-  store, provider names, key presence, corpus count, and warnings.
+  scrubbed Sentry wiring, `/health` component diagnostics for DB, vector store,
+  provider names, key presence, corpus count, and warnings; `/ready` for DB +
+  vector-store reachability plus LLM client constructability; and `/metrics`
+  Prometheus counters derived from `query_log` (bearer-gated when
+  `METRICS_TOKEN` is set).
 - **Gap:** Sentry is optional and a missing production DSN only logs a warning;
-  there are still no exported request/latency/cost metrics, tracing, or LLM
-  reachability readiness check.
-- **Done when:** request/latency/cost metrics exported; readiness probe that
-  checks DB + vector store + LLM reachability; error tracking configured in the
-  production environment.
+  there are still no exported request-latency histograms, cost gauges, tracing,
+  or live paid LLM reachability probe.
+- **Done when:** latency/cost metrics and tracing are exported; the production
+  load balancer/scraper uses `/ready` and `/metrics`; error tracking is
+  configured in the production environment; and the team decides whether a paid
+  LLM reachability probe is worth its cost/noise.
 
-### 7. Automated ingest / watch scheduling 🟡 (local Dagster path landed)
+### 7. Automated ingest / watch scheduling 🟡 (GitHub cron path landed)
 - **Where:** [`src/regwatch/watch/run.py`](../src/regwatch/watch/run.py),
   [`src/regwatch/orchestration/definitions.py`](../src/regwatch/orchestration/definitions.py),
-  and Compose Dagster services in [`compose.yaml`](../compose.yaml).
+  Compose Dagster services in [`compose.yaml`](../compose.yaml), and
+  [`.github/workflows/watch-daily.yml`](../.github/workflows/watch-daily.yml).
 - **Now in place:** `regwatch watch` runs crawl → match → ingest matched PSGs
-  → build alerts → write digest; Dagster defines `watch_digest_job` and a daily
-  06:00 UTC schedule for the local/Compose orchestration path.
-- **Remaining gap:** the production Fly/Vercel deploy keeps Watch/Dagster out
-  of scope and suggests ad hoc runs. A known residual remains: if a version row
-  commits before chunks embed and the run errors, a later run may treat it as
-  unchanged and never alert without an `alerted_at` marker or durable-diff
-  derivation.
-- **Done when:** production has a supported scheduled worker/cron/Dagster
-  deployment, monitored run history, failure recovery for partial ingest, and
-  alerting that still respects INV-4.
+  → build durable alerts → write digest; Dagster defines `watch_digest_job` and
+  a daily 06:00 UTC schedule for local/Compose; GitHub Actions defines the
+  production `watch-daily` cron with failure Slack notification, healthcheck
+  pings, and advisory threshold-sweep artifact upload. Partial-ingest recovery
+  is covered by re-surfacing committed-but-unalerted versions from durable DB
+  rows (`appl_nos_without_alert`).
+- **Remaining gap:** production ops must keep `WATCH_DATABASE_URL` and
+  `WATCH_OPENAI_API_KEY` configured, verify real scheduled runs complete, and
+  decide whether alert delivery should move beyond `/watch/latest` + optional
+  Slack failure notifications into product-facing email/Slack digests.
+- **Done when:** a recent scheduled `watch-daily` run has completed against prod
+  with monitored run history, healthcheck pings are active, analysts can see the
+  resulting durable alerts, and any desired outbound alert channel is configured.
 
 ### 8. Eval hardening
 - **Where:** [`src/regwatch/eval/`](../src/regwatch/eval/), `gold_set.jsonl`,

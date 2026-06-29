@@ -387,10 +387,16 @@ It is a research scaffold, not submission content.
 
 FastAPI exposes (auth + chat routes plus the read paths):
 
-- `GET /health` — the only unauthenticated endpoint
+- `GET /health` — open liveness + component diagnostics
+- `GET /ready` — open readiness probe for DB/vector/LLM constructability
+- `GET /metrics` — Prometheus counters; open by default, bearer-gated when
+  `METRICS_TOKEN` is set
 - `POST /auth/login`, `POST /auth/logout`, `GET /auth/me` — cookie-session auth
 - `POST /query` — conversational; accepts `session_id`/`user_id`, returns
   `session_id`/`turn_id`/`status` (`answer`/`summary`/`clarify`/`scope_warning`/`refused`)
+- `POST /query/stream` — SSE progress frames plus one validated terminal
+  `QueryResponse` frame; falls back client-side to `POST /query` if the stream
+  fails before the result
 - `POST /feedback` — per-turn answer feedback against an audit row
 - `POST /resolve` — deterministic entity resolution to a canonical spine
   (`{normalized_name, six-digit application number}`). It is NOT an LLM turn:
@@ -405,17 +411,12 @@ FastAPI exposes (auth + chat routes plus the read paths):
   chat history (foreign `session_id` 404s)
 - `GET /settings`
 
-Every endpoint except `GET /health` is behind a `require_user` dependency.
+All other endpoints are behind a `require_user` dependency.
 Auth is a DB-backed cookie session (opaque token hashed at rest, bcrypt
 passwords, CLI-provisioned users) with per-user rate limiting
-(`RATE_LIMIT_PER_MINUTE`, default 30) and a 10/email/min login brute-force cap.
-CORS is allow-listed with credentials via `CORS_ALLOW_ORIGINS_CSV` (defaults to
-the Next.js dev origins).
-
-> Note: there is **no `/query/stream` endpoint** in the backend yet. The
-> frontend has a streaming-capable client that transparently falls back to the
-> blocking `POST /query`, so nothing actually streams today. Real
-> token-by-token streaming is an open item in `docs/ROADMAP.md`.
+(`RATE_LIMIT_PER_MINUTE`, default 30), plus login brute-force caps per email and
+per source IP. CORS is allow-listed with credentials via
+`CORS_ALLOW_ORIGINS_CSV` (defaults to the Next.js dev origins).
 
 ### `regwatch/frontend/` (Next.js, TypeScript)
 

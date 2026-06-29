@@ -372,15 +372,17 @@ routing context.
 Every state runs through `_finish_turn`, which records the assistant message and
 (on answerable states) updates the session's product filter.
 
-### No real streaming yet (by design, for now)
+### Streaming boundary
 
-The Ask chat client targets `/query/stream` (SSE) but **transparently falls back
-to a blocking `POST /query`** — and the backend has **no `/query/stream` endpoint
-today**, so every Ask turn is a single blocking call. The "thinking" ticker is
-honest (real client-side phase labels), not a faked token stream. Real
-token-by-token streaming is open work (`docs/ROADMAP.md`): it must still respect
-INV-1 (no answer text emitted before a validated citation) and write exactly one
-audit row per turn.
+The Ask chat client first targets `/query/stream` (SSE). The backend emits live
+pipeline progress frames and then one terminal `result` frame containing the
+same validated `QueryResponse` returned by blocking `POST /query`. If the stream
+closes before that result frame, the client falls back to `POST /query` once.
+
+This is real progress streaming, not token-delta answer streaming. That boundary
+is intentional: INV-1 still forbids emitting answer text before citation
+validation, and both paths share the same serializer so the wire response shape
+cannot drift. Each turn still writes exactly one audit row.
 
 ---
 
