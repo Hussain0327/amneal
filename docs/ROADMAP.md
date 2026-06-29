@@ -74,18 +74,23 @@ deploy-time proof, not code.
 
 ### Observability  (PROD_READINESS #6)
 Structured logging, audit rows, privacy-scrubbed Sentry wiring, and a component
-`/health` exist. Missing: exported request/latency/**cost** metrics, a real
-readiness probe (DB + vector store + **LLM reachability**, distinct from `/health`
-liveness), and a Sentry DSN actually configured in prod.
+`/health` exist. `/ready` checks DB/vector-store reachability plus LLM client
+constructability, and `/metrics` exposes query/refusal counters from the audit
+log. Missing: exported latency/**cost** metrics, tracing, a configured
+production Sentry DSN, and a decision on whether to run a paid live LLM
+reachability probe.
 - Where: `common/logging.py`, `common/observability.py`, `common/audit.py`, `api/main.py`.
 
 ### Production Watch worker / scheduler  (PROD_READINESS #7)
-Dagster defines `watch_digest_job` + a daily 06:00 UTC schedule for the local/Compose
-path, but the Fly/Vercel deploy keeps Watch out of scope (ad-hoc runs). Needs a
-supported scheduled worker with monitored run history, **partial-ingest recovery**
-(the `alerted_at` / durable-diff residual that can silently skip an alert), and
-pluggable alert delivery (email/Slack) beyond the JSONL digest.
-- Where: `watch/run.py`, `orchestration/definitions.py`, `compose.yaml`.
+Dagster defines `watch_digest_job` + a daily 06:00 UTC schedule for the
+local/Compose path. Production scheduling is `watch-daily.yml`: a GitHub Actions
+cron that runs `regwatch watch`, pings a healthcheck URL, and can notify Slack on
+failure. Partial-ingest recovery is now implemented by deriving committed-but-
+unalerted versions from durable DB rows. Remaining work is operational proof:
+keep the required secrets configured, verify real scheduled prod runs complete,
+and add product-facing email/Slack digest delivery if analysts need push alerts.
+- Where: `watch/run.py`, `watch/alerts.py`, `orchestration/definitions.py`,
+  `.github/workflows/watch-daily.yml`, `docs/SECRETS_RUNBOOK.md`.
 
 ### Secrets management  (PROD_READINESS #10)
 `.env`/`.env.local`/data/stores/logs are gitignored and the runbook uses platform
@@ -129,14 +134,13 @@ falls back loudly) — _resolved 2026-06-17_; the remaining piece is operational
 
 ## 🟡 Product & quality
 
-### Real token-by-token streaming for Ask
-The Ask client targets `/query/stream` (SSE) but **the backend has no such
-endpoint**, so every send falls back to a blocking `POST /query` — nothing streams
-today (the "thinking" ticker is honest motion, not faked tokens). Building it must
-respect INV-1 (no answer text before a validated citation): stream the
-retrieval/thinking phase, then stream answer deltas only once grounding is attached,
-still writing exactly one audit row.
-- Where: `api/main.py` (new endpoint), `regwatch/frontend/lib/api.ts` (`askQueryStream` already consumes SSE).
+### Token-delta streaming for Ask
+`/query/stream` now streams real pipeline progress over SSE and returns one
+validated terminal `QueryResponse` frame. What is still open is token-delta
+answer streaming after validation. Building that must respect INV-1: no answer
+text may be emitted before citations are grounded and validated, and the turn
+must still write exactly one audit row.
+- Where: `api/main.py`, `generate/llm.py`, `regwatch/frontend/lib/api.ts`.
 
 ### Eval expansion  (PROD_READINESS #8)
 The deterministic offline eval gate fires in CI and thresholds hold
@@ -178,6 +182,6 @@ in-app non-technical UX to add/manage them.
 2. **Gateway/TLS/SSO** + distributed rate limiting (the exposure boundary).
 3. **Provision Postgres/pgvector** + **migration release gate** + restore drill.
 4. **Observability** + **production Watch worker** (operability).
-5. **Eval expansion** + **persist-and-cite beyond White Paper** + **Ask streaming**.
+5. **Eval expansion** + **persist-and-cite beyond White Paper** + **token-delta Ask streaming**.
 6. **Secrets policy** + **CI security scans** + **ops runbook hardening**.
 7. **UI production smoke/load** + product/watchlist management UX.

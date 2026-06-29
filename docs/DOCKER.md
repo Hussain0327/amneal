@@ -34,8 +34,8 @@ The API is a long-running service. Ingest is intentionally a separate one-shot
 command so a large 30-minute data load does not block API startup. Dagster
 wraps two CLIs as asset jobs: a manual `seed_corpus_job` (`regwatch seed`) and a
 `watch_digest_job` (`regwatch watch`) on a daily `watch_daily_schedule`
-(`0 6 * * *` UTC). This is local orchestration only; a hardened, monitored
-production Watch worker is still open (see `docs/ROADMAP.md`).
+(`0 6 * * *` UTC). This is local orchestration only; production Watch is driven
+by `.github/workflows/watch-daily.yml`, not by the Compose Dagster daemon.
 
 ```text
 docker image: regwatch:local
@@ -318,5 +318,5 @@ Still needed (cross-referenced in `docs/ROADMAP.md`):
 - CI supply-chain checks: dependency audit (pip-audit / uv) + image vuln scan
   (e.g. Trivy)
 - Kubernetes manifests or Helm chart, if the hosting decision requires them
-- production Watch/Dagster worker deployment + monitored run history +
-  partial-ingest recovery
+- verified production `watch-daily` run history, healthcheck pings, and any
+  product-facing alert delivery beyond the in-app `/watch/latest` feed

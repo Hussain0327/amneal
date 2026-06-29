@@ -6,6 +6,14 @@
 
 > This document is the canonical record of the audit so remediation does not drift. The **Remediation Log** at the bottom is updated as items land.
 
+> Current note (2026-06-29): the original findings below are historical. Several
+> P1/P2 items have since landed on `main`: deploy automation, two Fly machines,
+> non-root digest-pinned containers, pytest timeout, frontend Vitest coverage in
+> CI, password-strength/HIBP validation, per-IP login limiting, `/ready`,
+> `/metrics`, `/query/stream` progress SSE, and Watch partial-ingest recovery.
+> Treat the Remediation Log as the current status source before using the
+> original scorecard as a backlog.
+
 ---
 
 ## Verdict
@@ -124,5 +132,12 @@ Every confirmed finding is a missing safeguard or maturity gap, not an active ou
 | 2026-06-19 | **P2-quick batch:** `ARCH-3`, `DOC-1`, `CFG-1`, `CFG-2`, `CFG-3`, `MAINT-1`, `TEST-6`, `ARCH-4`, `MOD-3` | **Committed + pushed to `main`** | `e3a2595` + `5a6df34` | docs drift fixed; .env.example + drift test; reranker→Settings; Trivy `vuln,secret`; Dependabot (`uv` ecosystem); coverage floor 80 (measured 82%); import-linter (2 contracts); sources DRY. Gate green: 557 pass/25 skip, ruff/black/mypy/lint-imports clean. |
 | 2026-06-19 | `IMPL-2` (frontend fetch timeout) | **HELD** | — | Spec ready; `regwatch/frontend/lib/api.ts` is the concurrent agent's territory — apply after that work settles. |
 | 2026-06-19 | `.env` reconciled to `.env.example` | Done | local file | Appended 11 optional default knobs; 49/49 keys match. |
+| 2026-06-19..26 | **Hardening waves:** `CD-1`, `CONT-1`, `SEC-2`, `SEC-3`, `IMPL-2`, `/ready`, `/metrics`, Watch recovery, OpenAI-1536 geometry guard | **Committed + pushed to `main`** | `3d61397`, `4076c7d`, `23676e3`, `4afb150`, `e045471`, `e00c702` | CD now deploys the CI-validated SHA after green CI; API/web images are digest-pinned and non-root; password prompts reject weak/breached values; login limiter keys by email and IP; frontend fetches have hard timeouts; `/ready` and opt-in bearer-gated `/metrics` exist; Watch re-surfaces committed-but-unalerted versions; RLS event trigger lands on fresh Postgres bootstrap. |
+| 2026-06-29 | **Docs current-truth pass:** `/query/stream` progress SSE + open operational probes | **In progress on `prod-readiness-plan-codex`** | — | Current docs no longer say the backend lacks `/query/stream` or that `/health` is the only open route. Added `tests/test_current_docs.py` so those stale claims cannot re-enter current docs unnoticed. |
 
-> Pushed to `origin/main` on 2026-06-19: `e3a2595` (CI/deps), `2382271` (ops), `5a6df34` (config/docs), on top of `ff3f6a2` (merged PR #16, UX S1). Remaining: P1-Medium (`CD-1`, `CONT-1`, `SEC-2`/`SEC-3`) + `IMPL-2`.
+> Current open work after the hardening waves: D1 data-handling signoff,
+> gateway/SSO/TLS ownership, production smoke/load evidence, real threshold-sweep
+> artifact in the OpenAI-1536 + pgvector space, eval/gold-set expansion,
+> persist-and-cite beyond White Paper, token-delta streaming if needed, and the
+> large-module refactors (`grounded_qa.py`, `whitepaper/populator.py`,
+> `api/main.py`) tracked as maintainability work rather than launch defects.

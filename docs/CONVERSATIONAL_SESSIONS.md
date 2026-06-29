@@ -103,14 +103,13 @@ REGWATCH should sound helpful, not abrupt, but it must keep these boundaries:
 - It cannot recommend what to file or how to persuade FDA.
 - It cannot turn conversation history into evidence.
 
-## Not Yet: Token-by-Token Streaming
+## Streaming Boundary
 
-Conversational answers are returned whole. There is **no `/query/stream`
-endpoint in the backend today**: the streaming-capable Ask client
-(`askQueryStream`) falls back to a blocking `POST /query`, and the frontend's
-"thinking" ticker is an honest progress indicator, not faked streamed text.
+`POST /query/stream` exists and uses Server-Sent Events. It emits real progress
+frames while the pipeline runs, then exactly one terminal `result` frame with the
+same validated `QueryResponse` shape as `POST /query`. The client falls back to
+blocking `POST /query` only when the stream fails before a result frame arrives.
 
-Real streaming is a future item (see `docs/ROADMAP.md`). When built it must
-preserve the invariants above: no answer text may be emitted before a validated
-citation exists (INV-1), and the turn must still write **exactly one** audit row.
-
+It is not token-by-token answer streaming. That is deliberate: answer text is
+only emitted after citation validation has completed (INV-1), and the underlying
+`ask()` call still writes **exactly one** audit row.

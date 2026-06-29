@@ -200,8 +200,10 @@ These are enforced in code with tests — see [`tests/test_invariants.py`](tests
 
 ## API
 
-Every endpoint except `GET /health` requires a login. Full request/response
-shapes are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Every product/data endpoint requires a login. `GET /health`, `GET /ready`, and
+`GET /metrics` are operational endpoints outside the auth router; `/metrics` is
+open by default and bearer-gated when `METRICS_TOKEN` is set. Full
+request/response shapes are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ```
 POST   /auth/login        {email, password} -> {user} + HttpOnly session cookie
@@ -231,6 +233,8 @@ GET    /sessions/{id}     one session + its messages
 DELETE /sessions/{id}     delete a session and its messages
 
 GET    /health            liveness + component diagnostics; 503 when db/chroma is down
+GET    /ready             readiness: db + vector store + LLM constructability
+GET    /metrics           Prometheus counters; bearer-gated when METRICS_TOKEN is set
 GET    /settings          non-secret config
 ```
 

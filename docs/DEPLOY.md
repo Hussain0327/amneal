@@ -257,8 +257,12 @@ Notes:
 - **`data/` inside the container is scratch** in Postgres mode (raw PDFs from
   ingest runs land there). Q&A/whitepaper serving needs only Postgres; don't
   attach a volume unless you run ingest/watch on this machine.
-- **Watch/Dagster** stay out of scope for this deploy; run `regwatch watch`
-  ad hoc via `fly ssh console` if needed.
+- **Watch/Dagster:** Dagster is still local/Compose only for this deploy. The
+  production Watch path is the `watch-daily.yml` GitHub Actions cron; configure
+  `WATCH_DATABASE_URL`, `WATCH_OPENAI_API_KEY`, and optional
+  `WATCH_HEALTHCHECK_URL` / `SLACK_WEBHOOK_URL` per `docs/SECRETS_RUNBOOK.md`.
+  Keep ad hoc `regwatch watch` runs for break-glass recovery, not as the normal
+  production schedule.
 
 ### 3-alt. API on Railway (alternative)
 
