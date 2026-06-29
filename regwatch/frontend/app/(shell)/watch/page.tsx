@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useCurrentProduct } from "@/components/CurrentProductProvider";
 import { PageHeader } from "@/components/PageHeader";
@@ -20,30 +20,92 @@ function canonAppl(v: unknown): string {
   return digits ? digits.padStart(6, "0") : "";
 }
 
+// captured_at is ingest-capture time (naive UTC from the alerts store), so a
+// missing offset is treated as UTC -- the same convention Sidebar / White Paper
+// timestamps use -- and timeZone is pinned so the rendered date is stable across
+// machines/CI rather than shifting with the runner's locale.
+function fmtDetected(iso: string): string {
+  if (!iso) return "";
+  const norm = /(?:Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`;
+  const t = Date.parse(norm);
+  if (Number.isNaN(t)) return "";
+  return new Date(t).toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+// Confidence is a 0..1 match score; show a whole percent, not the raw float that
+// leaked before (0.9047619047619048). 0/NaN/undefined render nothing -- the
+// matcher never emits a 0 score, so an absent one is a non-result, not "0%".
+function pctMatch(v: number): string {
+  if (!Number.isFinite(v) || v <= 0) return "";
+  return `${Math.round(v * 100)}% match`;
+}
+
+// New vs Revised is derived in-component from the change summary: a first version
+// carries the "Initial version ingested" marker (change_detector.summarize_change);
+// anything else is a revision. Match the ASCII prefix only (the marker's trailing
+// excerpt is non-ASCII); a null/empty summary reads as Revised.
+function alertKind(diffSummary: string | null): "New" | "Revised" {
+  return (diffSummary ?? "").trim().startsWith("Initial version ingested") ? "New" : "Revised";
+}
+
 export default function WatchPage() {
   const [alerts, setAlerts] = useState<AlertRecord[] | null>(null);
   const [products, setProducts] = useState<ProductRecord[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [productError, setProductError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  // Serializes loads: the mount effect, Refresh, and the focus refetch can all
+  // fire; while one load is outstanding the others are no-ops (see load()).
+  const loadingRef = useRef(false);
 
   const load = useCallback(() => {
+    // In-flight guard: collapse overlapping loads so a burst of tab-focus events
+    // cannot hammer the API, a tab-return's focus+visibilitychange pair fires one
+    // load not two, and only one request set is ever outstanding -- so an older
+    // response can never overwrite a newer feed (no last-write-wins race).
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+    setBusy(true);
     setError(null);
-    watchLatest()
+    setProductError(null);
+    const alertsDone = watchLatest()
       .then((d) => setAlerts(d.alerts))
       // Leave `alerts` untouched on failure — an error must not masquerade as a
       // loaded-but-empty feed (the empty state below is gated on !error).
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-    setProductError(null);
-    listProducts()
+    const productsDone = listProducts()
       .then((d) => setProducts(d.products))
       .catch((e) => setProductError(e instanceof Error ? e.message : String(e)));
+    void Promise.allSettled([alertsDone, productsDone]).then(() => {
+      loadingRef.current = false;
+      setBusy(false);
+    });
   }, []);
 
   useEffect(() => {
-    // load() clears error state and fetches on mount; the synchronous
-    // setError(null)/setProductError(null) reset inside load() is intentional.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // Fetch the feed on mount. load() guards against re-entry, so a StrictMode
+    // double-invoke or an overlapping focus refetch collapses to a single request.
     load();
+  }, [load]);
+
+  useEffect(() => {
+    // Auto-refetch when the tab regains focus, so a long-open bulletin does not
+    // sit silently stale. load() is a stable useCallback (deps []), so this
+    // listener attaches once; the refetch runs from the event, not on render.
+    const refetchOnVisible = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    window.addEventListener("focus", refetchOnVisible);
+    document.addEventListener("visibilitychange", refetchOnVisible);
+    return () => {
+      window.removeEventListener("focus", refetchOnVisible);
+      document.removeEventListener("visibilitychange", refetchOnVisible);
+    };
   }, [load]);
 
   return (
@@ -67,12 +129,21 @@ export default function WatchPage() {
         </div>
       )}
 
-      <section className="rise d3">
+      <section className="rise d3" aria-busy={busy}>
         <div className="flex items-baseline gap-3">
           <h2 className="kicker" style={{ color: "var(--ink)" }}>
             Bulletin
           </h2>
           <hr className="hair grow" />
+          <button
+            className="btn btn--ghost"
+            type="button"
+            onClick={load}
+            disabled={busy}
+            style={{ padding: "0.32rem 0.7rem", fontSize: "0.62rem", opacity: busy ? 0.6 : 1 }}
+          >
+            {busy ? "Refreshing" : "Refresh"}
+          </button>
           <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
             {error ? "—" : alerts ? `${alerts.length} entries` : "…"}
           </span>
@@ -96,6 +167,20 @@ export default function WatchPage() {
                 </span>
                 <span className="chip code">PSG {str(r.listing_appl_no) || "—"}</span>
                 {str(r.listing_psg_type) && <span className="chip code">{str(r.listing_psg_type)}</span>}
+                <span
+                  className="chip code"
+                  style={
+                    alertKind(r.diff_summary) === "New"
+                      ? {
+                          color: "var(--gold-ink)",
+                          background: "var(--gold-wash)",
+                          borderColor: "var(--gold-deep)",
+                        }
+                      : undefined
+                  }
+                >
+                  {alertKind(r.diff_summary)}
+                </span>
               </div>
               {str(r.diff_summary) && (
                 <p style={{ margin: "0.6rem 0 0", color: "var(--ink-2)", lineHeight: 1.55 }}>{str(r.diff_summary)}</p>
@@ -106,9 +191,14 @@ export default function WatchPage() {
                     View source ↗
                   </a>
                 )}
-                {str(r.confidence) && (
+                {fmtDetected(str(r.captured_at)) && (
                   <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
-                    confidence {str(r.confidence)}
+                    detected <time dateTime={str(r.captured_at)}>{fmtDetected(str(r.captured_at))}</time>
+                  </span>
+                )}
+                {pctMatch(r.confidence) && (
+                  <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
+                    {pctMatch(r.confidence)}
                   </span>
                 )}
               </div>
