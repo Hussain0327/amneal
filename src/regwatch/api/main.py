@@ -1200,9 +1200,15 @@ def _record_captured_at(record: dict[str, Any]) -> datetime | None:
 
 @protected.get("/watch/latest")
 def watch_latest(since: datetime | None = None) -> dict[str, Any]:
-    records = latest_digest_records(limit=200)
-    if since:
-        since_utc = _as_utc(since)
+    since_utc = _as_utc(since) if since else None
+    # Push `since` into SQL (applied BEFORE the row cap) so a genuinely-recent
+    # alert is never dropped by limit=200; the prior code capped by created_at
+    # then filtered captured_at in Python, which could hide recent rows.
+    records = latest_digest_records(limit=200, since=since_utc)
+    if since_utc is not None:
+        # Backstop: the lexical SQL compare trusts the UTC-ISO captured_at format,
+        # so re-filter in Python to additionally drop any row whose captured_at
+        # fails to parse (excluded, never a 500).
         records = [
             r
             for r in records

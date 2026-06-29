@@ -96,44 +96,61 @@ def _fetch_version_for_listing(appl_no: str) -> tuple[int, int, str | None, str]
         return doc.id, v.id, v.diff_summary, v.captured_at.isoformat()
 
 
-def appl_nos_without_alert(appl_nos: list[str]) -> set[str]:
-    """Of these appl_nos, the ones whose LATEST psg_version has NO alert row.
+def pairs_without_alert(pairs: list[tuple[str, int]]) -> set[tuple[str, int]]:
+    """Of these (appl_no, product_id) pairs, the ones whose LATEST psg_version
+    has NO alert row FOR THAT PRODUCT.
 
-    INV-4 crash recovery: ``ingest_listing`` commits the psg_version row and
-    THEN writes chunks/BE in separate (non-atomic) stores. If that second step
-    crashes, the version is durably committed but no alert was ever built, and
-    every later run reads the matching content_hash as ``unchanged`` and so
-    never re-enters the alert path -- a permanent silent miss. We re-derive the
-    gap directly from the durable tables (LEFT JOIN alert ON psg_version_id):
-    a committed-latest-version with no alert row is exactly that missed case.
+    INV-4 crash recovery, made PER-PRODUCT. ``ingest_listing`` commits the
+    psg_version row and THEN writes chunks/BE in separate (non-atomic) stores.
+    If that second step crashes, the version is durably committed but no alert
+    was ever built, and every later run reads the matching content_hash as
+    ``unchanged`` and so never re-enters the alert path -- a permanent silent
+    miss.
 
-    Returns only appl_nos that HAVE a latest version (a doc that was never
-    fetched has nothing to alert on) AND that version has no alert row. The
+    The check is per (psg_version_id, listing_appl_no, product_id) -- the SAME
+    granularity as the durable ``uq_alert_version_listing_product`` key -- NOT
+    per version. A version already alerted for ONE product must still alert for
+    a SECOND product added to the watchlist later (combos, multi-form holdings,
+    or simply a growing watchlist); a per-version check silently drops that
+    newly-watched product forever, since its steady state is ``unchanged``. The
     caller feeds these back through ``build_alerts`` (which re-verifies the
-    version) so the missed alert is finally produced; ``_persist_alerts`` is
-    idempotent, so re-surfacing an already-alerted version is a no-op.
+    version); ``_persist_alerts`` is idempotent, so re-surfacing an
+    already-alerted (version, appl, product) is a no-op.
     """
-    if not appl_nos:
+    if not pairs:
         return set()
-    missed: set[str] = set()
+    missed: set[tuple[str, int]] = set()
     with session_scope() as s:
-        for appl_no in appl_nos:
-            doc = s.scalars(select(PsgDocument).where(PsgDocument.appl_no == appl_no)).first()
-            if doc is None or doc.id is None:
-                continue
-            ver = s.scalars(
-                select(PsgVersion)
-                .where(PsgVersion.psg_document_id == doc.id)
-                .order_by(desc(PsgVersion.captured_at), desc(PsgVersion.id))  # type: ignore[arg-type]
-                .limit(1)
-            ).first()
-            if ver is None or ver.id is None:
+        # Cache the latest-version lookup per appl_no: several products can share
+        # one listing and only the per-product alert check differs between them.
+        # (A single LEFT JOIN would collapse the remaining per-pair queries -- a
+        # deferred cron-only micro-optimization, not a correctness concern.)
+        latest_version: dict[str, int | None] = {}
+        for appl_no, product_id in pairs:
+            if appl_no not in latest_version:
+                doc = s.scalars(select(PsgDocument).where(PsgDocument.appl_no == appl_no)).first()
+                if doc is None or doc.id is None:
+                    latest_version[appl_no] = None
+                else:
+                    ver = s.scalars(
+                        select(PsgVersion)
+                        .where(PsgVersion.psg_document_id == doc.id)
+                        .order_by(desc(PsgVersion.captured_at), desc(PsgVersion.id))  # type: ignore[arg-type]
+                        .limit(1)
+                    ).first()
+                    latest_version[appl_no] = ver.id if ver is not None else None
+            version_id = latest_version[appl_no]
+            if version_id is None:
                 continue
             has_alert = s.scalars(
-                select(AlertRow.id).where(AlertRow.psg_version_id == ver.id).limit(1)
+                select(AlertRow.id)
+                .where(AlertRow.psg_version_id == version_id)
+                .where(AlertRow.listing_appl_no == appl_no)
+                .where(AlertRow.product_id == product_id)
+                .limit(1)
             ).first()
             if has_alert is None:
-                missed.add(appl_no)
+                missed.add((appl_no, product_id))
     return missed
 
 
@@ -229,21 +246,30 @@ def write_digest(alerts: list[Alert], *, when: date | None = None) -> Path:
     return path
 
 
-def latest_digest_records(limit: int = 100) -> list[dict[str, Any]]:
+def latest_digest_records(
+    limit: int = 100, *, since: datetime | None = None
+) -> list[dict[str, Any]]:
     """Return the most recent durable alerts (UI feed), newest first.
 
     Reads from the `alert` table — durable across redeploys. The returned dict
     keys match the Alert dataclass / former JSONL shape exactly, so the
     /watch/latest wire contract and lib/api.ts AlertRecord are unaffected.
+
+    ``since`` (tz-aware UTC) keeps only alerts whose ``captured_at`` is at/after
+    it, applied IN SQL BEFORE the limit so a genuinely-recent alert can never be
+    dropped by the row cap (the prior code limited by ``created_at`` then filtered
+    by ``captured_at`` in Python, which could hide recent rows). ``captured_at``
+    is a string column, but every value is a tz-aware UTC ``datetime.isoformat()``
+    (fixed-width through seconds, ``+00:00`` suffix), so a lexicographic ``>=`` is
+    chronological. Callers MUST pass a UTC-aware datetime — a naive value would
+    serialize without the offset and mis-compare (the API normalizes via _as_utc).
     """
     with session_scope() as s:
-        rows = list(
-            s.scalars(
-                select(AlertRow)
-                .order_by(desc(AlertRow.created_at), desc(AlertRow.id))  # type: ignore[arg-type]
-                .limit(limit)
-            )
-        )
+        stmt = select(AlertRow)
+        if since is not None:
+            stmt = stmt.where(AlertRow.captured_at >= since.isoformat())
+        ordered = stmt.order_by(desc(AlertRow.created_at), desc(AlertRow.id)).limit(limit)  # type: ignore[arg-type]
+        rows = list(s.scalars(ordered))
         # Materialize INSIDE the session: expire_on_commit detaches these rows
         # on scope exit, so reading attributes afterward would lazy-load against
         # a closed session. The returned dicts are plain values, ORM-free.

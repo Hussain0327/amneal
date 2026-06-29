@@ -24,9 +24,9 @@ from regwatch.ingest.pipeline import IngestStats, ingest_listing
 from regwatch.ingest.psg_crawler import PsgListing, fetch_all_listings
 from regwatch.watch.alerts import (
     Alert,
-    appl_nos_without_alert,
     build_alerts,
     digest_path,
+    pairs_without_alert,
     write_digest,
 )
 from regwatch.watch.matcher import WatchMatch, match_listings
@@ -35,6 +35,12 @@ from regwatch.watch.watchlist import list_watchlist
 log = get_logger(__name__)
 
 _CHANGED_OUTCOMES = {"added", "revised"}
+
+
+def _product_id(m: WatchMatch) -> int | None:
+    """The match's watchlist product id, or None when it carries no int id."""
+    pid = m.product.get("id")
+    return pid if isinstance(pid, int) else None
 
 
 @dataclass
@@ -88,25 +94,29 @@ def run_watch(*, extract: bool = True) -> WatchRunResult:
 
     stats, outcomes = _ingest_matched(matched, extract=extract)
     changed = [m for m in matches if outcomes.get(m.listing.appl_no) in _CHANGED_OUTCOMES]
-    # INV-4 crash recovery: a prior run can commit a psg_version row and then
-    # crash before its chunks/BE land (separate non-atomic stores), so this run
-    # reads the unchanged content_hash and classifies it "unchanged" -- never
-    # re-entering the alert path. Re-surface any matched version that is durably
-    # committed but has no alert row (LEFT JOIN alert on psg_version_id) so the
-    # missed alert is finally produced. build_alerts re-verifies each version and
-    # _persist_alerts is idempotent, so already-alerted versions stay no-ops and
-    # this never double-emits.
-    changed_appl_nos = {m.listing.appl_no for m in changed}
-    # `matched` is list[PsgListing] (de-duped by appl_no); `changed`/`matches` are
-    # list[WatchMatch]. Only check listings this run did NOT already alert on.
-    missed_appl_nos = appl_nos_without_alert(
-        [li.appl_no for li in matched if li.appl_no not in changed_appl_nos]
-    )
-    to_alert = changed + [
-        m
+    # INV-4 crash recovery, PER-PRODUCT: a prior run can commit a psg_version row
+    # and then crash before its chunks/BE land (separate non-atomic stores), so
+    # this run reads the unchanged content_hash and classifies it "unchanged" --
+    # never re-entering the alert path. The same gap appears whenever a NEW
+    # product is added to the watchlist after a version was already alerted for a
+    # different product (the version stays "unchanged" forever). Re-surface any
+    # matched (appl_no, product_id) pair whose committed latest version has no
+    # alert row FOR THAT PRODUCT. `changed` already fans per product for listings
+    # that changed this run, so only check the rest. build_alerts re-verifies each
+    # version and _persist_alerts is idempotent, so already-alerted pairs stay
+    # no-ops and this never double-emits.
+    changed_keys = {(m.listing.appl_no, _product_id(m)) for m in changed}
+    candidate_pairs = [
+        (m.listing.appl_no, pid)
         for m in matches
-        if m.listing.appl_no in missed_appl_nos and m.listing.appl_no not in changed_appl_nos
+        if (pid := _product_id(m)) is not None and (m.listing.appl_no, pid) not in changed_keys
     ]
+    missed_pairs = pairs_without_alert(candidate_pairs)
+    to_alert = list(changed)
+    for m in matches:
+        pid = _product_id(m)
+        if pid is not None and (m.listing.appl_no, pid) in missed_pairs:
+            to_alert.append(m)
     alerts = build_alerts(to_alert)
 
     # A clean run writes its digest (even when empty: that empty file is the

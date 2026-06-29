@@ -213,6 +213,40 @@ def test_watch_latest_rejects_invalid_since(auth_client: TestClient) -> None:
     assert r.status_code == 422
 
 
+def test_watch_latest_since_filters_by_captured_at(auth_client: TestClient) -> None:
+    """`since` keeps only alerts captured at/after it. The filter is pushed into
+    SQL before the row cap, so a recent alert is never dropped by limit=200."""
+    from regwatch.store.db import session_scope
+    from regwatch.store.models import Alert
+
+    def _alert(appl_no: str, captured_at: str, n: int) -> Alert:
+        return Alert(
+            product_id=n,
+            active_ingredient="Albuterol Sulfate",
+            listing_appl_no=appl_no,
+            listing_psg_type="final",
+            psg_document_id=1,
+            psg_version_id=n,  # distinct -> no unique-key conflict
+            captured_at=captured_at,
+            confidence=1.0,
+            rationale="canonical",
+            source_url=f"http://example/{appl_no}.pdf",
+        )
+
+    with session_scope() as s:
+        s.add(_alert("100001", "2026-06-01T00:00:00+00:00", 1))
+        s.add(_alert("100002", "2026-06-20T00:00:00+00:00", 2))
+
+    both = auth_client.get("/watch/latest").json()
+    assert {a["listing_appl_no"] for a in both["alerts"]} >= {"100001", "100002"}
+
+    r = auth_client.get("/watch/latest", params={"since": "2026-06-10T00:00:00+00:00"})
+    assert r.status_code == 200
+    appl_nos = {a["listing_appl_no"] for a in r.json()["alerts"]}
+    assert "100002" in appl_nos  # captured after `since`
+    assert "100001" not in appl_nos  # captured before `since`, excluded
+
+
 def test_assemble_refuses_when_no_matching_psg(auth_client: TestClient) -> None:
     r = auth_client.post(
         "/assemble",

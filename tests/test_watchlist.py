@@ -132,3 +132,31 @@ def test_upsert_does_not_downgrade_anda_letter_to_drugsfda() -> None:
     items = list_watchlist()
     assert len(items) == 1
     assert items[0]["source"] == "anda_letter"
+
+
+def test_status_from_marketing_status_is_deterministic() -> None:
+    """openFDA marketing_status may be a scalar string OR a list; precedence must
+    be explicit (approved > discontinued > tentative), not scan-order."""
+    from regwatch.watch.watchlist import _status_from_marketing_status
+
+    # Scalar coercion (openFDA returns a STRING, iterating it would walk chars).
+    assert _status_from_marketing_status({"marketing_status": "Prescription"}) == "approved"
+    assert _status_from_marketing_status({"marketing_status": "Discontinued"}) == "discontinued"
+    # approved short-circuits over any other status.
+    assert (
+        _status_from_marketing_status({"marketing_status": ["Discontinued", "Prescription"]})
+        == "approved"
+    )
+    # Deterministic regardless of order: discontinued outranks tentative both ways.
+    assert (
+        _status_from_marketing_status({"marketing_status": ["tentative", "discontinued"]})
+        == "discontinued"
+    )
+    assert (
+        _status_from_marketing_status({"marketing_status": ["discontinued", "tentative"]})
+        == "discontinued"
+    )
+    # Empty / unknown -> None.
+    assert _status_from_marketing_status({"marketing_status": None}) is None
+    assert _status_from_marketing_status({"marketing_status": ""}) is None
+    assert _status_from_marketing_status({"marketing_status": "Whatever"}) is None

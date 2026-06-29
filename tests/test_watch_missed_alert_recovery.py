@@ -23,7 +23,7 @@ from regwatch.ingest.psg_crawler import PsgListing
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import Alert as AlertRow
 from regwatch.store.models import PsgDocument, PsgVersion
-from regwatch.watch.alerts import appl_nos_without_alert, latest_digest_records
+from regwatch.watch.alerts import latest_digest_records, pairs_without_alert
 from regwatch.watch.matcher import WatchMatch
 
 APPL_NO = "020503"
@@ -45,10 +45,10 @@ def _listing(appl_no: str = APPL_NO, name: str = "Albuterol Sulfate") -> PsgList
     )
 
 
-def _match(appl_no: str = APPL_NO) -> WatchMatch:
+def _match(appl_no: str = APPL_NO, product_id: int = 7) -> WatchMatch:
     return WatchMatch(
         listing=_listing(appl_no),
-        product={"id": 7, "active_ingredient": "Albuterol Sulfate"},
+        product={"id": product_id, "active_ingredient": "Albuterol Sulfate"},
         confidence=1.0,
         rationale="canonical",
     )
@@ -87,24 +87,39 @@ def _commit_version_but_no_alert(appl_no: str = APPL_NO) -> int:
         return v.id
 
 
-def test_appl_nos_without_alert_flags_committed_unalerted_version() -> None:
+def test_pairs_without_alert_flags_committed_unalerted_version() -> None:
     version_id = _commit_version_but_no_alert()
-    assert appl_nos_without_alert([APPL_NO]) == {APPL_NO}
+    assert pairs_without_alert([(APPL_NO, 7)]) == {(APPL_NO, 7)}
     # And it really has no alert row yet (the precondition we recover from).
     with session_scope() as s:
         rows = list(s.scalars(select(AlertRow)))
     assert all(r.psg_version_id != version_id for r in rows)
 
 
-def test_appl_nos_without_alert_ignores_already_alerted_and_unknown() -> None:
-    """No miss for an already-alerted version; unknown appl_no is never flagged."""
+def test_pairs_without_alert_ignores_already_alerted_and_unknown() -> None:
+    """No miss for an already-alerted (version, product); unknown appl_no never flagged."""
     from regwatch.watch.alerts import build_alerts, write_digest
 
     _commit_version_but_no_alert()
-    write_digest(build_alerts([_match()]))  # durable alert now exists
-    assert appl_nos_without_alert([APPL_NO]) == set()
+    write_digest(build_alerts([_match()]))  # durable alert now exists for product 7
+    assert pairs_without_alert([(APPL_NO, 7)]) == set()
     # An appl_no with no psg_document/version has nothing to alert on.
-    assert appl_nos_without_alert(["999999"]) == set()
+    assert pairs_without_alert([("999999", 7)]) == set()
+
+
+def test_pairs_without_alert_is_per_product_not_per_version() -> None:
+    """A version alerted for product 7 must STILL flag product 8 as missed.
+
+    This is the silent-miss regression: a per-VERSION check (any alert row on
+    the version) would treat a newly-watched second product as satisfied and
+    never page its analyst, even though no alert exists for THAT product.
+    """
+    from regwatch.watch.alerts import build_alerts, write_digest
+
+    _commit_version_but_no_alert()
+    write_digest(build_alerts([_match(product_id=7)]))  # alerted for product 7 only
+    assert pairs_without_alert([(APPL_NO, 7)]) == set()  # 7 satisfied
+    assert pairs_without_alert([(APPL_NO, 8)]) == {(APPL_NO, 8)}  # 8 still missed
 
 
 def test_run_watch_resurfaces_missed_alert(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -157,3 +172,32 @@ def test_run_watch_no_missed_alert_when_clean(monkeypatch: pytest.MonkeyPatch) -
     assert result.alerts == []  # no re-emit; idempotent
     # The durable feed still has exactly the one original alert.
     assert len(latest_digest_records()) == 1
+
+
+def test_run_watch_alerts_newly_watched_second_product(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A product added to the watchlist AFTER a version was alerted for another
+    product gets its own alert on the next run, even though the listing is
+    'unchanged' (the per-product silent-miss fix), without re-emitting for the
+    already-alerted product."""
+    from regwatch.watch.alerts import build_alerts, write_digest
+
+    _commit_version_but_no_alert()
+    write_digest(build_alerts([_match(product_id=7)]))  # product 7 already alerted
+
+    listing = _listing()
+    match7 = _match(product_id=7)
+    match8 = _match(product_id=8)  # same listing, newly-watched second product
+    monkeypatch.setattr(run_mod, "fetch_all_listings", lambda: [listing])
+    monkeypatch.setattr(run_mod, "list_watchlist", lambda: [match7.product, match8.product])
+    monkeypatch.setattr(run_mod, "match_listings", lambda listings, products: [match7, match8])
+    monkeypatch.setattr(run_mod, "ingest_listing", lambda _l, *, extract: "unchanged")
+
+    result = run_mod.run_watch(extract=False)
+
+    # Exactly one NEW alert this run -- for product 8 only; product 7 is a no-op.
+    assert len(result.alerts) == 1
+    assert result.alerts[0].product_id == 8
+    # Durable feed now carries both per-product alerts for the one version.
+    records = latest_digest_records()
+    assert {r["product_id"] for r in records} == {7, 8}
+    assert len({r["psg_version_id"] for r in records}) == 1  # same version, two products

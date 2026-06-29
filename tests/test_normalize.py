@@ -46,6 +46,20 @@ def test_stripped_name_drops_salts() -> None:
     assert stripped_name("Levothyroxine Sodium") == "levothyroxine"
 
 
+def test_stripped_name_collapses_pure_electrolytes_to_empty() -> None:
+    """Mono-salt electrolytes are all salt tokens, so they strip to '' -- the
+    empty-key guard then refuses to cross-match distinct ones as the same drug
+    (e.g. potassium vs sodium vs calcium chloride)."""
+    assert stripped_name("Potassium Chloride") == ""
+    assert stripped_name("Sodium Chloride") == ""
+    assert stripped_name("Calcium Chloride") == ""
+    assert stripped_name("Sodium Acetate") == ""
+    assert stripped_name("Calcium Carbonate") == ""
+    # A real active with a salt counter-ion still keeps its base name.
+    assert stripped_name("Potassium Citrate") == ""  # both tokens -> empty
+    assert stripped_name("Diltiazem Hydrochloride") == "diltiazem"
+
+
 def test_stripped_name_combo_sorted() -> None:
     s = stripped_name("Hydrocodone Bitartrate; Acetaminophen")
     assert s == "acetaminophen; hydrocodone"
