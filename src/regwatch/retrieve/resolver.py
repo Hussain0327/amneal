@@ -126,8 +126,21 @@ def _primary_token(ingredient: str) -> str:
 
 
 def _product_tokens(normalized_name: str) -> frozenset[str]:
-    """The set of primary ingredient tokens for one product."""
-    return frozenset(_primary_token(i) for i in split_ingredients(normalized_name) if i.strip())
+    """The set of primary ingredient tokens for one product.
+
+    Empty primary tokens are dropped. A product whose ingredients are ENTIRELY
+    salt / mineral words ("sodium chloride", "potassium chloride", "magnesium
+    sulfate; potassium chloride; sodium sulfate") strips to "" (stripped_name
+    removes every word), and an empty token whole-word-matches EVERY question
+    (``re.search(r"\\b\\b", q)`` always succeeds). Left in, such a product is a
+    phantom match for every query, forcing spurious ``ambiguous`` clarifies on
+    ordinary drug questions ("atorvastatin" -> clarify among sodium chloride...).
+    Mirrors the non-empty-stripped-key guard already in
+    ``text_normalize.names_match`` so the two matchers cannot drift.
+    """
+    return frozenset(
+        t for t in (_primary_token(i) for i in split_ingredients(normalized_name) if i.strip()) if t
+    )
 
 
 def _full_ingredient_words(normalized_name: str) -> frozenset[str]:
