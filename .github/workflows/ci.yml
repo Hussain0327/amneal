@@ -154,7 +154,10 @@ jobs:
           load: true
           tags: regwatch:ci
           cache-from: type=gha,scope=api
-          cache-to: type=gha,mode=max,scope=api
+          # ignore-error: a GHA cache export failure (e.g. "failed to reserve
+          # cache" under quota pressure) must NOT fail the build -- the cache is
+          # an optimization, not a gate.
+          cache-to: type=gha,mode=max,scope=api,ignore-error=true
 
       - name: compose config
         run: docker compose config --quiet
@@ -166,7 +169,7 @@ jobs:
           load: true
           tags: regwatch-web:ci
           cache-from: type=gha,scope=web
-          cache-to: type=gha,mode=max,scope=web
+          cache-to: type=gha,mode=max,scope=web,ignore-error=true
 
       # Persist Trivy's vuln DB (~100MB) across ephemeral runners (the scans
       # below mount ~/.cache/trivy). The rolling key writes a fresh copy each run
