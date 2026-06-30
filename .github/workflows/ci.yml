@@ -8,6 +8,15 @@ on:
 permissions:
   contents: read
 
+# Cancel a superseded in-flight run when a newer commit lands on the same ref,
+# so iterative pushes don't burn Actions minutes finishing runs whose result is
+# already moot (the dominant waste). Grouped per-ref, so each branch/PR cancels
+# only its own prior run; the deploy workflow still fires only on the latest
+# successful main run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint-type-test:
     runs-on: ubuntu-latest
@@ -32,7 +41,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        # Prod runs only on 3.12 (Dockerfile python:3.12-slim), so gate on 3.12
+        # alone -- the 3.11 leg doubled this (the heaviest) job's minutes. Re-add
+        # "3.11" here if this ever needs to stay verified as a 3.11 library.
+        python-version: ["3.12"]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
