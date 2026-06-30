@@ -70,6 +70,18 @@ jobs:
       - name: docker build (API image)
         run: docker build -t regwatch:deploy .
 
+      # Persist Trivy's vuln DB (~100MB) across runs so the re-scan reuses it
+      # instead of re-downloading on every deploy. The rolling key restores the
+      # most recent DB (shares the `trivy-db-` lineage with ci.yml on the same
+      # ref); Trivy still refreshes it when its metadata says it is past TTL.
+      - name: cache trivy DB
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-
+
       # Re-scan before shipping, honoring ./.trivyignore. Semantics mirror
       # ci.yml's docker-build Trivy step EXACTLY: fail on FIXABLE CRITICAL/HIGH
       # vulns (--ignore-unfixed) plus any embedded secret (--scanners vuln,secret,
@@ -85,6 +97,16 @@ jobs:
             --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
             --ignorefile /root/.trivyignore \
             --scanners vuln,secret regwatch:deploy
+
+      # Trivy writes ~/.cache/trivy as root (0700); hand it back to the runner so
+      # the actions/cache POST-save can read it (otherwise the save silently
+      # no-ops and the DB never persists). always() so a failed scan still caches.
+      - name: hand trivy cache to the runner (for actions/cache save)
+        if: always()
+        run: |
+          if [ -d "$HOME/.cache/trivy" ]; then
+            sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache/trivy"
+          fi
 
       - name: setup flyctl
         uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1  # v1
