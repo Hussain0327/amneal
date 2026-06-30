@@ -32,6 +32,11 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Backstop: bound a pathological retry (scripts/fly-deploy.sh runs at most 3
+    # full deploys, each phase self-capped by flyctl's 5m wait/release-command
+    # timeouts) so a wedged flyctl can never hold the no-cancel `deploy-fly`
+    # concurrency slot and block a queued newer deploy. Mirrors watch-daily.yml.
+    timeout-minutes: 45
     # Gate (every clause is load-bearing; this is a privileged path that ships to
     # live prod with FLY_API_TOKEN, so it must reject anything not authored in
     # this repo's own main):
@@ -87,7 +92,16 @@ jobs:
       # flyctl builds remotely and runs fly.toml [deploy] release_command
       # (alembic upgrade head) before the rolling machine replace. The token is
       # passed via env (never inlined) per the workflow-injection-safe pattern.
+      #
+      # Wrapped in scripts/fly-deploy.sh, which retries ONLY transient Fly
+      # platform errors (e.g. "deadline_exceeded: machine still starting" when
+      # Fly fails to boot the release machine within its ~60s start deadline --
+      # the 2026-06-29 incident) and fails fast on everything else. No flyctl
+      # flag extends that start deadline, so a bounded retry is the only lever.
       - name: flyctl deploy
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: flyctl deploy --remote-only
+        # `bash scripts/...` (not `./scripts/...`) so the deploy never depends on
+        # the committed exec bit surviving every checkout/patch path, and matches
+        # exactly how the test drives the script.
+        run: bash scripts/fly-deploy.sh
