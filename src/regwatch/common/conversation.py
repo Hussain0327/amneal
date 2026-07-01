@@ -7,9 +7,13 @@ filters such as the selected product.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
+
+from sqlalchemy import desc
+from sqlmodel import col, select
 
 from regwatch.store.db import session_scope
 from regwatch.store.models import ChatMessage, ChatSession
@@ -66,6 +70,86 @@ def get_session_filters(session_id: str | None) -> dict[str, Any]:
         if row is None:
             return {}
         return _safe_filters(dict(row.active_filters_json or {}))
+
+
+@dataclass
+class PriorTurn:
+    """One completed prior turn, for conversational context only (never evidence)."""
+
+    question: str
+    answer: str
+    status: str | None
+
+
+def get_recent_turns(
+    session_id: str | None,
+    *,
+    limit: int = 3,
+    exclude_turn_id: str | None = None,
+) -> list[PriorTurn]:
+    """Up to ``limit`` most recent COMPLETED answer/summary turns, oldest-first.
+
+    A turn is the (user, assistant) ``ChatMessage`` pair sharing a ``turn_id``.
+    Only turns whose assistant reply is a real answer/summary are returned: a
+    refused/clarify/meta turn carries no fact worth threading, and threading a
+    refusal would re-inject the refusal sentence as "context". This is for
+    conversational reference ONLY (pronoun/ellipsis resolution) — never FDA
+    evidence; the caller strips citations and the synthesizer prompt forbids
+    treating it as a source.
+
+    Best-effort: no session, a non-positive limit, or any DB error returns ``[]``
+    so a memory hiccup can never break or wrongly refuse an answerable query.
+    """
+    if not session_id or limit <= 0:
+        return []
+    try:
+        with session_scope() as s:
+            rows = s.scalars(
+                select(ChatMessage)
+                .where(ChatMessage.session_id == session_id)
+                .order_by(desc(col(ChatMessage.created_at)))
+                # Scan a bounded window (enough to find `limit` answer turns past
+                # interleaved refusals/clarifies) without loading a whole long
+                # conversation.
+                .limit(limit * 8)
+            ).all()
+            # Extract plain fields WHILE the session is open — the ORM rows detach
+            # and their attributes expire once the scope commits/closes, so all
+            # column access must happen here, not in the folding loop below.
+            raw = [(m.turn_id, m.role, m.content or "", m.status) for m in rows]
+    except Exception:
+        # Conversational memory is an ergonomic aid, never required for
+        # correctness — degrade to no memory rather than fail the turn.
+        return []
+
+    # `raw` is newest-first; fold into turns keyed by turn_id, preserving order.
+    by_turn: dict[str, dict[str, tuple[str, str | None]]] = {}
+    order: list[str] = []
+    for turn_id, role, content, status in raw:
+        if exclude_turn_id and turn_id == exclude_turn_id:
+            continue
+        if turn_id not in by_turn:
+            by_turn[turn_id] = {}
+            order.append(turn_id)
+        by_turn[turn_id].setdefault(role, (content, status))  # keep newest per role
+
+    turns: list[PriorTurn] = []
+    for tid in order:  # newest-first
+        slot = by_turn[tid]
+        user = slot.get("user")
+        assistant = slot.get("assistant")
+        if user is None or assistant is None:
+            continue
+        answer, a_status = assistant
+        # An answer/summary is the only kind of prior turn with a fact to thread;
+        # None-status (older/legacy rows) is treated as an answer, not dropped.
+        if (a_status or "answer") not in ("answer", "summary"):
+            continue
+        turns.append(PriorTurn(question=user[0].strip(), answer=answer.strip(), status=a_status))
+        if len(turns) >= limit:
+            break
+    turns.reverse()  # oldest-first for the prompt
+    return turns
 
 
 def update_session_filters(session_id: str | None, filters: dict[str, Any] | None) -> None:

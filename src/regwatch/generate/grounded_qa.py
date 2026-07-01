@@ -31,8 +31,10 @@ from regwatch.common.citations import (
     strip_all_citations,
 )
 from regwatch.common.conversation import (
+    PriorTurn,
     SessionOwnershipError,
     ensure_session,
+    get_recent_turns,
     get_session_filters,
     new_turn_id,
     record_message,
@@ -43,6 +45,7 @@ from regwatch.common.observability import capture_exception
 from regwatch.common.text_normalize import canonical_name
 from regwatch.generate.llm import (
     LLMMessage,
+    LLMResponse,
     LLMUsage,
     current_model_name,
     estimate_cost_usd,
@@ -512,6 +515,71 @@ def _format_passages(passages: list[RetrievedPassage]) -> str:
     return "\n---\n".join(blocks)
 
 
+def _format_recent(turns: list[PriorTurn]) -> str:
+    """Render prior turns as a compact, citation-free conversation context block.
+
+    Citations are stripped so the model cannot see — and therefore cannot parrot
+    — a stale ``[PSG, p.N]`` whose page may not be in THIS turn's passages, and
+    each side is capped so the current passages stay dominant in the window.
+    Reference-only, never evidence (INV-1): the system prompt forbids treating it
+    as a source, and _validate_citations accepts only markers grounded in this
+    turn's passages regardless.
+    """
+    lines: list[str] = []
+    for t in turns:
+        # Strip markers from BOTH sides: a citation-shaped token in a prior
+        # question is context too, never a source the model may reuse this turn.
+        q = strip_all_citations(t.question).strip()[:400]
+        a = strip_all_citations(t.answer).strip()[:600]
+        if not q and not a:
+            continue
+        lines.append(f"User: {q}\nAssistant: {a}")
+    return "\n\n".join(lines)
+
+
+def _stream_synthesis(
+    provider: Any,
+    messages: list[LLMMessage],
+    *,
+    on_emit: Callable[[str], None],
+    refusal_text: str,
+) -> LLMResponse:
+    """Drive ``provider.stream()``, releasing provisional answer tokens to
+    ``on_emit`` UNLESS the output is (the start of) the refusal sentinel — a
+    refusal must never be painted as a streaming answer (it would read grounded
+    for a beat, then vanish). Tokens are cosmetic; the returned LLMResponse is the
+    fully-assembled text, on which the caller runs the UNCHANGED INV-1 pipeline.
+    """
+    buffer = ""  # the FULL accumulated answer text (drives the guard + the fallback)
+    released = False
+    response: LLMResponse | None = None
+    for chunk in provider.stream(messages, temperature=0.0, max_tokens=900):
+        if chunk.done:
+            response = chunk.response
+            break
+        if not chunk.delta:
+            continue
+        buffer += chunk.delta
+        if released:
+            on_emit(chunk.delta)
+            continue
+        if refusal_text.startswith(buffer):
+            continue  # still a prefix of the refusal sentinel — hold, stay silent
+        if buffer.startswith(refusal_text):
+            continue  # it IS the refusal (+ any trailing) — never emit as tokens
+        # Diverged from the sentinel: a real answer. Flush the held prefix (the
+        # whole buffer so far), then stream each later delta live.
+        on_emit(buffer)
+        released = True
+    if response is None:
+        # Defensive: a stream that ended without a terminal chunk (or with a null
+        # response) still yields the FULL accumulated text so the pipeline runs —
+        # empty text hits the empty-completion refusal; a held refusal validates as
+        # a refusal; a real answer validates normally.
+        response = LLMResponse(text=buffer, model=current_model_name(role="synthesizer"))
+    return response
+
+
 def _validate_citations(
     answer_text: str, passages: list[RetrievedPassage]
 ) -> tuple[list[Citation], list[tuple[str, int]]]:
@@ -881,6 +949,7 @@ def ask(
     turn_id: str | None = None,
     bind_session: bool = True,
     on_progress: Callable[[str], None] | None = None,
+    on_token: Callable[[str], None] | None = None,
 ) -> QAResult:
     """Grounded Q&A entry point — answer with citations, clarify, or refuse.
 
@@ -893,6 +962,12 @@ def ask(
     pipeline advances, for a live status ticker (POST /query/stream). It carries
     NO answer text or citations — INV-1 lives entirely in the post-validation
     answer path below — and a failing sink can never break or slow the query.
+
+    ``on_token`` (optional) receives provisional answer text deltas for a live
+    "typing" effect. It is cosmetic ONLY: the recorded and returned answer is the
+    post-validation text below, and the refusal sentinel is never streamed as an
+    answer. A missing sink or a non-streaming provider degrades to a single
+    buffered completion with no behavior change.
     """
     s = get_settings()
 
@@ -903,6 +978,14 @@ def ask(
             on_progress(textline)
         except Exception:  # broad: progress is best-effort, never fatal
             log.debug("on_progress_failed", exc_info=True)
+
+    def _emit_token(delta: str) -> None:
+        if on_token is None:
+            return
+        try:
+            on_token(delta)
+        except Exception:  # broad: the token sink is best-effort, never fatal
+            log.debug("on_token_failed", exc_info=True)
 
     model_name = current_model_name(role="synthesizer")
     # Session bookkeeping is best-effort: a DB hiccup here must never stop the query
@@ -1345,7 +1428,24 @@ def ask(
         )
 
     _emit(f"Reading {len(passages)} matching guidance passage(s)…")
+    # Conversational memory: thread the last few ANSWERED turns so a follow-up
+    # ("what about the fed study?") resolves naturally. Context ONLY — citations
+    # are stripped (_format_recent) and the system prompt forbids treating it as a
+    # source; INV-1 still holds because _validate_citations accepts only THIS
+    # turn's passages, so a fact that lived only in a prior turn cannot acquire a
+    # valid citation here and is dropped/refused. The current turn's just-written
+    # user row is excluded by turn_id. With no usable history the block is "" so
+    # the prompt is byte-identical to the single-turn form (protects the eval).
+    recent_block = _format_recent(get_recent_turns(session_id, limit=3, exclude_turn_id=turn_id))
+    recent_context = (
+        "Recent conversation (context ONLY — use it to resolve pronouns and "
+        "ellipsis in the question; it is NOT a source and MUST NOT be cited or "
+        f"treated as fact):\n{recent_block}\n\n"
+        if recent_block
+        else ""
+    )
     user_prompt = GROUNDED_QA_USER.format(
+        recent_context=recent_context,
         question=question,
         passages=_format_passages(passages),
     )
@@ -1353,15 +1453,22 @@ def ask(
 
     _emit("Composing a cited answer…")
     provider = get_llm_provider(role="synthesizer")
+    synth_messages = [
+        LLMMessage(role="system", content=system_prompt),
+        LLMMessage(role="user", content=user_prompt),
+    ]
     try:
-        response = provider.complete(
-            [
-                LLMMessage(role="system", content=system_prompt),
-                LLMMessage(role="user", content=user_prompt),
-            ],
-            temperature=0.0,
-            max_tokens=900,
-        )
+        if on_token is not None and hasattr(provider, "stream"):
+            # Stream provisional tokens for a live "typing" answer. INV-1 is
+            # untouched: tokens are cosmetic, the returned LLMResponse is the
+            # fully-assembled text, and the SAME post-validation below decides the
+            # recorded answer. The refusal sentinel is never streamed (guard in
+            # _stream_synthesis).
+            response = _stream_synthesis(
+                provider, synth_messages, on_emit=_emit_token, refusal_text=s.refusal_text
+            )
+        else:
+            response = provider.complete(synth_messages, temperature=0.0, max_tokens=900)
     except Exception as exc:  # provider transport error (timeout / 429 / 5xx)
         # B2: a synthesizer failure must NOT return a naked 500 with no audit
         # row — that would break INV-6 exactly when the system misbehaves. We

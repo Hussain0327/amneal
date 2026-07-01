@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { StatusTicker } from "@/components/StatusTicker";
-import { AssistantTurn, UserTurn } from "@/components/Turns";
+import { AssistantTurn, ProvisionalDraft, UserTurn } from "@/components/Turns";
 import type { Citation } from "@/lib/api";
 import type { Turn } from "@/lib/turns";
 
@@ -186,8 +186,55 @@ export default function FixturesPage() {
           </p>
         </header>
 
+        <Section no="F0" title="Opening — the empty state (an invitation to act)">
+          <div className="chat__empty">
+            <p className="kicker chat__empty-kicker">Ask the corpus</p>
+            <h2 className="chat__empty-lead">What does the FDA guidance say?</h2>
+            <p className="chat__empty-note">
+              Plain-language answers over FDA product-specific guidance &mdash; every claim cited to
+              its source. Ask in your own words; if a question is ambiguous it asks rather than
+              guesses.
+            </p>
+            <div className="chat__starters">
+              {[
+                {
+                  kind: "Study design",
+                  items: [
+                    "BE study for albuterol sulfate inhalation aerosol",
+                    "Beclomethasone dipropionate aerosol study type",
+                  ],
+                },
+                { kind: "Dissolution & specs", items: ["Dissolution method for metformin hydrochloride"] },
+                { kind: "Just a product name", items: ["propranolol"] },
+              ].map((g) => (
+                <div className="starter" key={g.kind}>
+                  <p className="starter__kind">{g.kind}</p>
+                  <div className="chat__examples">
+                    {g.items.map((label) => (
+                      <button key={label} className="pill" type="button">
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </Section>
+
         <Section no="F1" title="Status ticker — SSE docket log (cycles)">
           <TickerDemo />
+        </Section>
+
+        <Section no="F1b" title="Streaming draft — provisional, before citation validation">
+          <div className="chat-row">
+            <span className="avatar" aria-hidden>
+              RW
+            </span>
+            <div className="msg">
+              <ProvisionalDraft text="For albuterol sulfate inhalation aerosol, the PSG recommends two routes to demonstrating bioequivalence [PSG_021457, p.2]. The in vitro option covers single actuation content and aerodynamic particle size distribution" />
+            </div>
+          </div>
         </Section>
 
         <Section no="F2" title="Answer · cited finding">

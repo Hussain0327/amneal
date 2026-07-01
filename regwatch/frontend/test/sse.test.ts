@@ -108,7 +108,7 @@ describe("consumeSse (via askQueryStream)", () => {
     );
     failOnFallback();
 
-    const res = await askQueryStream("q", null, null, onStatus);
+    const res = await askQueryStream("q", null, null, { onStatus });
     expect(res.answer).toBe("after-status");
     // Status callbacks fired in order, strictly before the resolved result.
     expect(onStatus.mock.calls.map((c) => c[0])).toEqual(["searching", "ranking"]);
@@ -146,5 +146,61 @@ describe("consumeSse (via askQueryStream)", () => {
     // Two fetches: the stream, then the fallback.
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[1][0]).toContain("/query");
+  });
+
+  it("delivers token deltas in order, then resolves with the result", async () => {
+    const onToken = vi.fn();
+    const payload = JSON.stringify(resultFrameData("final"));
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([
+        `event: token\ndata: ${JSON.stringify({ delta: "A fasting " })}\n\n`,
+        `event: token\ndata: ${JSON.stringify({ delta: "study [PSG_1, p.3]." })}\n\n`,
+        `event: result\ndata: ${payload}\n\n`,
+      ]),
+    );
+    failOnFallback();
+
+    const res = await askQueryStream("q", null, null, { onToken });
+    expect(res.answer).toBe("final");
+    // Provisional deltas arrived in order, strictly before the resolved result.
+    expect(onToken.mock.calls.map((c) => c[0])).toEqual(["A fasting ", "study [PSG_1, p.3]."]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a malformed token frame and still resolves (draft is cosmetic)", async () => {
+    const onToken = vi.fn();
+    const payload = JSON.stringify(resultFrameData("ok"));
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([
+        "event: token\ndata: {not valid json}\n\n",
+        `event: token\ndata: ${JSON.stringify({ delta: "real" })}\n\n`,
+        `event: result\ndata: ${payload}\n\n`,
+      ]),
+    );
+    failOnFallback();
+
+    const res = await askQueryStream("q", null, null, { onToken });
+    expect(res.answer).toBe("ok");
+    // The malformed token was skipped; the valid one still fired.
+    expect(onToken.mock.calls.map((c) => c[0])).toEqual(["real"]);
+  });
+
+  it("delivers status and token callbacks together", async () => {
+    const onStatus = vi.fn();
+    const onToken = vi.fn();
+    const payload = JSON.stringify(resultFrameData("both"));
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([
+        `event: status\ndata: ${JSON.stringify({ text: "searching" })}\n\n`,
+        `event: token\ndata: ${JSON.stringify({ delta: "chunk" })}\n\n`,
+        `event: result\ndata: ${payload}\n\n`,
+      ]),
+    );
+    failOnFallback();
+
+    const res = await askQueryStream("q", null, null, { onStatus, onToken });
+    expect(res.answer).toBe("both");
+    expect(onStatus).toHaveBeenCalledWith("searching");
+    expect(onToken).toHaveBeenCalledWith("chunk");
   });
 });

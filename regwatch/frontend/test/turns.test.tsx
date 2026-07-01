@@ -1,7 +1,7 @@
 import { render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { UserTurn } from "@/components/Turns";
+import { ProvisionalDraft, UserTurn } from "@/components/Turns";
 import type { ChatMessage } from "@/lib/api";
 import { reasonCopy, turnFromMessage, userTurn } from "@/lib/turns";
 
@@ -46,5 +46,20 @@ describe("reasonCopy — plain-language decline/clarify reasons", () => {
 
   it("returns null when there is no reason", () => {
     expect(reasonCopy(null)).toBeNull();
+  });
+});
+
+describe("ProvisionalDraft — the streaming draft (INV-1/INV-2)", () => {
+  it("shows the raw streamed text with no grounding affordances", () => {
+    const { container } = render(<ProvisionalDraft text="A fasting study [PSG_020503, p.3]." />);
+    // Raw text; the marker stays literal (never a clickable stamp).
+    expect(container.querySelector(".msg__body--draft")?.textContent).toBe(
+      "A fasting study [PSG_020503, p.3].",
+    );
+    // No citation chip, stamp, or confidence band appears before validation.
+    expect(container.querySelector(".cite")).toBeNull();
+    expect(container.querySelector(".cite-stamp")).toBeNull();
+    expect(container.querySelector(".confidence")).toBeNull();
+    expect(container.textContent).toContain("verifying citations");
   });
 });

@@ -750,27 +750,32 @@ def query(req: QueryRequest, user: User = Depends(require_user)) -> QueryRespons
 
 
 def _sse_event(name: str, data: dict[str, Any]) -> str:
-    """One Server-Sent Events frame. The Ask client (askQueryStream) parses only
-    two event names: ``status`` (``{"text": ...}`` progress) and ``result`` (the
-    full QueryResponse). Any other name is ignored, so we emit only these."""
+    """One Server-Sent Events frame. The Ask client (askQueryStream) parses three
+    event names: ``status`` (``{"text": ...}`` progress), ``token`` (``{"delta":
+    ...}`` provisional answer text), and ``result`` (the full validated
+    QueryResponse). Any other name is ignored, so we emit only these."""
     return f"event: {name}\ndata: {json.dumps(data)}\n\n"
 
 
 async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[str]:
     """SSE body for POST /query/stream.
 
-    Streams real pipeline progress as ``status`` frames, then the validated
-    answer as exactly ONE terminal ``result`` frame — never any answer text
-    before it (INV-1: the answer only exists post citation-validation, inside
-    ask()). ask() runs in a worker thread so its progress callback can push
-    status lines onto the event loop while it works, and writes exactly one audit
-    row internally (INV-6, never duplicated). Once ask() has been dispatched onto
-    its thread it runs to completion even if the client then disconnects (the
-    threadpool is non-abandoning), so that turn is still audited; a disconnect in
-    the narrow window BEFORE dispatch cancels the work before it starts and writes
-    no row — correct, since nothing ran to audit. On any unexpected failure the
-    stream closes with no ``result`` frame, which makes the client fall back to
-    blocking POST /query exactly once.
+    Streams real pipeline progress as ``status`` frames and provisional answer
+    text as ``token`` frames, then the validated answer as exactly ONE terminal
+    ``result`` frame. The ``token`` deltas are COSMETIC: the authoritative answer
+    is only the ``result`` frame, built from ask()'s post-citation-validation text
+    (INV-1), and the refusal sentinel is never streamed as tokens (guarded inside
+    ask()). The client renders tokens as a clearly-provisional "draft" with no
+    citation surface, then replaces it with the validated ``result`` (INV-2).
+    ask() runs in a worker thread so its progress/token callbacks push onto the
+    event loop while it works, and writes exactly one audit row internally (INV-6,
+    never duplicated). Once ask() has been dispatched onto its thread it runs to
+    completion even if the client then disconnects (the threadpool is
+    non-abandoning), so that turn is still audited; a disconnect in the narrow
+    window BEFORE dispatch cancels the work before it starts and writes no row —
+    correct, since nothing ran to audit. On any unexpected failure the stream
+    closes with no ``result`` frame, which makes the client fall back to blocking
+    POST /query exactly once (any provisional tokens are discarded).
     """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
@@ -778,6 +783,11 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
     def on_progress(textline: str) -> None:
         # Runs on the ask() worker thread — hand the line to the loop thread.
         loop.call_soon_threadsafe(queue.put_nowait, ("status", textline))
+
+    def on_token(delta: str) -> None:
+        # Provisional answer delta from the worker thread — cosmetic only; the
+        # authoritative answer is still the terminal validated ``result`` frame.
+        loop.call_soon_threadsafe(queue.put_nowait, ("token", delta))
 
     async def _run() -> None:
         try:
@@ -789,6 +799,7 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
                 session_id=req.session_id,
                 user_id=user_id,
                 on_progress=on_progress,
+                on_token=on_token,
             )
             queue.put_nowait(("result", result))
         except SessionOwnershipError:
@@ -806,6 +817,9 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
             kind, payload = await queue.get()
             if kind == "status":
                 yield _sse_event("status", {"text": payload})
+                continue
+            if kind == "token":
+                yield _sse_event("token", {"delta": payload})
                 continue
             if kind == "result":
                 try:
