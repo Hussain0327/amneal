@@ -367,14 +367,23 @@ function isAbortError(e: unknown): boolean {
   return typeof e === "object" && e !== null && (e as { name?: unknown }).name === "AbortError";
 }
 
+// Callbacks for the streamed ask: cosmetic status lines and provisional answer
+// deltas. Both are best-effort; neither is the authoritative answer — that is the
+// single terminal `result` frame (post citation-validation).
+export interface StreamCallbacks {
+  onStatus?: (text: string) => void;
+  onToken?: (delta: string) => void;
+}
+
 // Minimal text/event-stream reader for /query/stream. Frames per the pinned
-// contract: zero or more `event: status` / `data: {"text": …}` then exactly
-// one `event: result` whose data is the full QueryResponse, then close.
-// Returns null if the stream closes without a result frame (caller falls
-// back to plain /query).
+// contract: zero or more `event: status` / `data: {"text": …}` and `event: token`
+// / `data: {"delta": …}` (provisional answer text), then exactly one
+// `event: result` whose data is the full validated QueryResponse, then close.
+// Returns null if the stream closes without a result frame (caller falls back to
+// plain /query).
 async function consumeSse(
   body: ReadableStream<Uint8Array>,
-  onStatus?: (text: string) => void,
+  callbacks?: StreamCallbacks,
 ): Promise<QueryResponse | null> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -391,9 +400,18 @@ async function consumeSse(
     if (name === "status") {
       try {
         const d = JSON.parse(payload) as { text?: unknown };
-        if (typeof d.text === "string") onStatus?.(d.text);
+        if (typeof d.text === "string") callbacks?.onStatus?.(d.text);
       } catch {
         // a malformed status frame is cosmetic — keep reading
+      }
+      return null;
+    }
+    if (name === "token") {
+      try {
+        const d = JSON.parse(payload) as { delta?: unknown };
+        if (typeof d.delta === "string") callbacks?.onToken?.(d.delta);
+      } catch {
+        // a malformed token frame is cosmetic (provisional draft) — keep reading
       }
       return null;
     }
@@ -458,7 +476,7 @@ export async function askQueryStream(
   question: string,
   filters: Record<string, string> | null = null,
   session_id: string | null = null,
-  onStatus?: (text: string) => void,
+  callbacks?: StreamCallbacks,
   signal?: AbortSignal,
 ): Promise<QueryResponse> {
   const path = "/query/stream";
@@ -521,7 +539,7 @@ export async function askQueryStream(
       return askQuery(question, filters, session_id, signal);
     }
     try {
-      const result = await consumeSse(res.body, onStatus);
+      const result = await consumeSse(res.body, callbacks);
       if (result) return normalizeQuery(result);
     } catch (e) {
       if (isAbortError(e)) throw e;

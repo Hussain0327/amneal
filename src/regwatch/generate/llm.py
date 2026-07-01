@@ -7,6 +7,7 @@ and uses the protocol below.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -38,6 +39,21 @@ class LLMResponse:
     # race on, and only the call sites that care (the synthesizer audit path)
     # read it.
     usage: LLMUsage = field(default_factory=LLMUsage)
+
+
+@dataclass
+class LLMStreamChunk:
+    """One step of a streaming completion.
+
+    Text arrives as ``delta`` chunks with ``done=False``; the FINAL chunk carries
+    ``done=True`` and the fully-assembled ``response`` (the same LLMResponse that
+    ``complete()`` would have returned). Callers stream the deltas cosmetically
+    but run all validation on the final ``response`` — never on partial deltas.
+    """
+
+    delta: str = ""
+    done: bool = False
+    response: LLMResponse | None = None
 
 
 def _usage_from(resp: Any, input_attr: str, output_attr: str) -> LLMUsage:
@@ -77,6 +93,19 @@ class LLMProvider(Protocol):
         response_format: str | None = None,  # "json" to request JSON-only
     ) -> LLMResponse: ...
 
+    def stream(
+        self,
+        messages: list[LLMMessage],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> Iterator[LLMStreamChunk]:
+        """Yield answer text deltas, then a terminal chunk (``done=True``) whose
+        ``response`` is the fully-assembled LLMResponse. Only the synthesizer uses
+        this; other callers keep using ``complete()`` and feature-detect via
+        ``hasattr(provider, "stream")``."""
+        ...
+
 
 # ---------- echo provider ----------
 class EchoLLMProvider:
@@ -104,6 +133,22 @@ class EchoLLMProvider:
                 usage=usage,
             )
         return LLMResponse(text=f"ECHO: {last_user}", model="echo", usage=usage)
+
+    def stream(
+        self,
+        messages: list[LLMMessage],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> Iterator[LLMStreamChunk]:
+        # Deterministic two-chunk stream of the same text complete() returns, so
+        # tests exercise real delta accumulation + the terminal validated chunk.
+        resp = self.complete(messages, temperature=temperature, max_tokens=max_tokens)
+        mid = len(resp.text) // 2
+        for part in (resp.text[:mid], resp.text[mid:]):
+            if part:
+                yield LLMStreamChunk(delta=part)
+        yield LLMStreamChunk(done=True, response=resp)
 
 
 # ---------- openai provider ----------
@@ -141,6 +186,19 @@ class OpenAIProvider:
             )
         return self._client
 
+    @staticmethod
+    def _split_messages(
+        messages: list[LLMMessage],
+    ) -> tuple[str, list[dict[str, str]]]:
+        """Responses API shape: system messages -> ``instructions``, the rest ->
+        ``input`` items. Shared by complete() and stream() so the two prompt
+        assemblies can never drift."""
+        instructions = "\n\n".join(m.content for m in messages if m.role == "system")
+        input_items = [
+            {"role": m.role, "content": m.content} for m in messages if m.role != "system"
+        ]
+        return instructions, input_items
+
     def complete(
         self,
         messages: list[LLMMessage],
@@ -174,10 +232,7 @@ class OpenAIProvider:
         import openai
 
         client = self._client_or_create()
-        instructions = "\n\n".join(m.content for m in messages if m.role == "system")
-        input_items = [
-            {"role": m.role, "content": m.content} for m in messages if m.role != "system"
-        ]
+        instructions, input_items = self._split_messages(messages)
         kwargs: dict[str, Any] = {
             "model": self.model,
             "input": input_items,
@@ -232,6 +287,63 @@ class OpenAIProvider:
             usage=_usage_from(resp, "prompt_tokens", "completion_tokens"),
         )
 
+    def stream(
+        self,
+        messages: list[LLMMessage],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> Iterator[LLMStreamChunk]:
+        # Real token streaming is the Responses path (the prod synthesizer). In
+        # chat mode we degrade to one buffered chunk so the caller still works.
+        if self.mode == "chat":
+            resp = self.complete(messages, temperature=temperature, max_tokens=max_tokens)
+            if resp.text:
+                yield LLMStreamChunk(delta=resp.text)
+            yield LLMStreamChunk(done=True, response=resp)
+            return
+
+        import openai
+
+        client = self._client_or_create()
+        instructions, input_items = self._split_messages(messages)
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "input": input_items,
+            "max_output_tokens": max_tokens,
+        }
+        if instructions:
+            kwargs["instructions"] = instructions
+        try:
+            events = client.responses.create(temperature=temperature, stream=True, **kwargs)
+        except openai.BadRequestError as exc:
+            # Reasoning models (e.g. gpt-5-nano) reject `temperature`; retry without it.
+            if getattr(exc, "param", None) == "temperature":
+                events = client.responses.create(stream=True, **kwargs)
+            else:
+                raise
+        parts: list[str] = []
+        final: Any = None
+        for event in events:
+            etype = getattr(event, "type", "")
+            if etype == "response.output_text.delta":
+                delta = getattr(event, "delta", "") or ""
+                if delta:
+                    parts.append(delta)
+                    yield LLMStreamChunk(delta=delta)
+            elif etype == "response.completed":
+                final = getattr(event, "response", None)
+        text = "".join(parts).strip()
+        model = getattr(final, "model", self.model) if final is not None else self.model
+        usage = (
+            _usage_from(final, "input_tokens", "output_tokens") if final is not None else LLMUsage()
+        )
+        raw = final.model_dump() if (final is not None and hasattr(final, "model_dump")) else {}
+        yield LLMStreamChunk(
+            done=True,
+            response=LLMResponse(text=text, model=model, raw=raw, usage=usage),
+        )
+
 
 # ---------- anthropic provider ----------
 class AnthropicProvider:
@@ -284,6 +396,21 @@ class AnthropicProvider:
             raw=resp.model_dump(),
             usage=_usage_from(resp, "input_tokens", "output_tokens"),
         )
+
+    def stream(
+        self,
+        messages: list[LLMMessage],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> Iterator[LLMStreamChunk]:
+        # Anthropic is the fallback provider; serve streaming as one buffered
+        # chunk (prod uses OpenAI for real token-by-token). Keeps the Protocol
+        # total so callers can feature-detect uniformly.
+        resp = self.complete(messages, temperature=temperature, max_tokens=max_tokens)
+        if resp.text:
+            yield LLMStreamChunk(delta=resp.text)
+        yield LLMStreamChunk(done=True, response=resp)
 
 
 def _model_for_role(s: Any, role: str) -> str:

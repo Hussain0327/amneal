@@ -5,17 +5,33 @@ import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 
 import { EvidenceDrawer } from "@/components/EvidenceDrawer";
 import { StatusTicker } from "@/components/StatusTicker";
-import { AssistantTurn, UserTurn } from "@/components/Turns";
+import { AssistantTurn, ProvisionalDraft, UserTurn } from "@/components/Turns";
 import { useSessions } from "@/components/SessionsProvider";
 import { askQueryStream, getSession, type Citation, type Suggestion } from "@/lib/api";
 import { assistantTurn, turnFromMessage, userTurn, type Turn } from "@/lib/turns";
 import { syncTextareaHeight } from "@/lib/composer";
 
-const EXAMPLES = [
-  { label: "albuterol BE study", q: "What BE study design is recommended for albuterol sulfate inhalation aerosol?" },
-  { label: "beclomethasone aerosol", q: "What type of study does the beclomethasone dipropionate inhalation aerosol PSG recommend?" },
-  { label: "propranolol", q: "propranolol" },
-  { label: "metformin dissolution", q: "What dissolution method is recommended for metformin hydrochloride?" },
+// Example inquiries grouped by the KIND of question the corpus answers — the
+// grouping teaches the tool's range (a study-design question, a spec question, or
+// just a product name it will scope for you), not decoration.
+const EXAMPLE_GROUPS = [
+  {
+    kind: "Study design",
+    items: [
+      { label: "BE study for albuterol sulfate inhalation aerosol", q: "What BE study design is recommended for albuterol sulfate inhalation aerosol?" },
+      { label: "Beclomethasone dipropionate aerosol study type", q: "What type of study does the beclomethasone dipropionate inhalation aerosol PSG recommend?" },
+    ],
+  },
+  {
+    kind: "Dissolution & specs",
+    items: [
+      { label: "Dissolution method for metformin hydrochloride", q: "What dissolution method is recommended for metformin hydrochloride?" },
+    ],
+  },
+  {
+    kind: "Just a product name",
+    items: [{ label: "propranolol", q: "propranolol" }],
+  },
 ];
 
 function isAbortError(e: unknown): boolean {
@@ -63,6 +79,10 @@ function AskView() {
   const [error, setError] = useState<string | null>(null);
   // SSE status frames for the in-flight query; cleared when the answer lands.
   const [statusFrames, setStatusFrames] = useState<string[]>([]);
+  // Provisional answer text streamed token-by-token BEFORE citation validation.
+  // Rendered as a clearly-provisional "draft" (no citations/drawer/feedback); the
+  // validated turn replaces it on the result frame. Reset alongside statusFrames.
+  const [draft, setDraft] = useState<string | null>(null);
   // Polite, screen-reader-only announcement of a settled answer — the visible
   // ticker unmounts on completion, so this is the only "answer ready" cue AT
   // gets (WCAG 4.1.3). A short lead keeps it from re-reading the transcript.
@@ -172,6 +192,7 @@ function AskView() {
     setLoading(true);
     setError(null);
     setStatusFrames([]);
+    setDraft(null);
     // Clear the SR live region so an identical consecutive answer/label still
     // changes the DOM text and re-announces (polite regions skip unchanged text).
     setAnnouncement("");
@@ -185,8 +206,13 @@ function AskView() {
         q,
         filters,
         sessionIdRef.current,
-        (text) => {
-          if (runSeqRef.current === seq) setStatusFrames((prev) => [...prev, text]);
+        {
+          onStatus: (text) => {
+            if (runSeqRef.current === seq) setStatusFrames((prev) => [...prev, text]);
+          },
+          onToken: (delta) => {
+            if (runSeqRef.current === seq) setDraft((prev) => (prev ?? "") + delta);
+          },
         },
         controller.signal,
       );
@@ -196,6 +222,8 @@ function AskView() {
       if (runSeqRef.current !== seq || controller.signal.aborted) return;
       sessionIdRef.current = next.session_id;
       setSessionId(next.session_id);
+      // Swap the provisional draft for the validated turn in one render batch.
+      setDraft(null);
       setTurns((prev) => [...prev, assistantTurn(next)]);
       setActiveSessionId(next.session_id);
       refocusRef.current = true;
@@ -232,6 +260,7 @@ function AskView() {
       if (runSeqRef.current === seq) {
         setLoading(false);
         setStatusFrames([]);
+        setDraft(null);
         controllerRef.current = null;
       }
     }
@@ -243,6 +272,7 @@ function AskView() {
   function stop() {
     if (!loading) return;
     controllerRef.current?.abort();
+    setDraft(null);
     setTurns((prev) => (prev.length && prev[prev.length - 1].role === "user" ? prev.slice(0, -1) : prev));
     // Hand the in-flight question back — but never clobber text the user has
     // started typing into the composer mid-query.
@@ -353,7 +383,9 @@ function AskView() {
                 ? "Pick an option above, or reply in your own words…"
                 : clarifyPending
                   ? "Reply in your own words…"
-                  : "Ask about an FDA guidance, product, or change…"
+                  : turns.length > 0
+                    ? "Ask a follow-up, or start a new question…"
+                    : "Ask about an FDA guidance, product, or change…"
             }
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
@@ -395,20 +427,33 @@ function AskView() {
       <div className="chat__thread">
         {!hasThread && (
           <div className="chat__empty rise d2">
-            <p className="chat__empty-lead">Ask about an FDA guidance, product, or change.</p>
-            <div className="chat__examples">
-              {EXAMPLES.map((ex) => (
-                <button
-                  key={ex.q}
-                  className="pill"
-                  onClick={() => {
-                    setIngredient("");
-                    setDosage("");
-                    void run(ex.q, null);
-                  }}
-                >
-                  {ex.label}
-                </button>
+            <p className="kicker chat__empty-kicker">Ask the corpus</p>
+            <h2 className="chat__empty-lead">What does the FDA guidance say?</h2>
+            <p className="chat__empty-note">
+              Plain-language answers over FDA product-specific guidance &mdash; every claim cited to
+              its source. Ask in your own words; if a question is ambiguous it asks rather than
+              guesses.
+            </p>
+            <div className="chat__starters">
+              {EXAMPLE_GROUPS.map((g) => (
+                <div className="starter" key={g.kind}>
+                  <p className="starter__kind">{g.kind}</p>
+                  <div className="chat__examples">
+                    {g.items.map((ex) => (
+                      <button
+                        key={ex.q}
+                        className="pill"
+                        onClick={() => {
+                          setIngredient("");
+                          setDosage("");
+                          void run(ex.q, null);
+                        }}
+                      >
+                        {ex.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               ))}
             </div>
           </div>
@@ -428,15 +473,17 @@ function AskView() {
           );
         })}
 
-        {/* While the (currently blocking) /query runs, the assistant slot shows
-            the docket ticker — honest motion, no faked token stream. */}
+        {/* In-flight assistant slot: the docket ticker until the first token,
+            then the answer streams in as a provisional draft. The draft is
+            aria-hidden — the settled answer is announced via the SR live region
+            below — and both are cleared when the validated turn lands. */}
         {loading && (
           <div className="chat-row rise">
             <span className="avatar" aria-hidden>
               RW
             </span>
-            <div className="msg">
-              <StatusTicker frames={statusFrames} />
+            <div className="msg" aria-hidden={draft != null ? true : undefined}>
+              {draft != null ? <ProvisionalDraft text={draft} /> : <StatusTicker frames={statusFrames} />}
             </div>
           </div>
         )}

@@ -73,7 +73,8 @@ export function turnFromMessage(m: ChatMessage): Turn {
 // unknown code falls back to the raw string so a new backend reason still shows
 // something rather than vanishing.
 const REASON_COPY: Record<string, string> = {
-  low_top_score: "No passage scored high enough to answer confidently.",
+  low_top_score:
+    "No passage scored high enough to answer this confidently — try naming the product or adding a specific detail.",
   no_product: "No product in the corpus matched this query.",
   no_matching_psg: "No product-specific guidance matched this query.",
   did_you_mean: "The product name is close to a known one — pick the intended match.",
@@ -86,7 +87,8 @@ const REASON_COPY: Record<string, string> = {
   spine_unresolved: "Could not resolve the product to a known FDA application.",
   provider_error: "The model provider failed to respond.",
   empty_completion: "The model returned no answer.",
-  model_refusal: "The model declined to answer from the retrieved passages.",
+  model_refusal:
+    "The retrieved passages didn't support a confident answer — try rephrasing or naming the product.",
   no_valid_citations: "The draft answer had no citation backed by a real passage.",
 };
 

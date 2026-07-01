@@ -35,6 +35,24 @@ export function UserTurn({ content, live }: { content: string; live: boolean }) 
   );
 }
 
+// The provisional streaming draft — the assistant's answer as it types, BEFORE
+// citation validation. Deliberately plain: rendered as raw text (not Markdown, so
+// a literal [PSG, p.N] never becomes a clickable stamp), with NO citation chips,
+// evidence drawer, confidence band, feedback, or audit line. Those grounding
+// affordances appear ONLY on a validated turn (INV-1/INV-2). The real
+// AssistantTurn replaces this the instant the result frame lands.
+export function ProvisionalDraft({ text }: { text: string }) {
+  return (
+    <>
+      <div className="msg__body msg__body--draft">{text}</div>
+      <p className="msg__drafting code">
+        <span className="msg__drafting-dot" aria-hidden />
+        Drafting — verifying citations…
+      </p>
+    </>
+  );
+}
+
 function AuditLine({ turn }: { turn: Turn }) {
   if (!turn.meta) return null;
   // model_name is absent on rehydrated history turns — drop the trailing

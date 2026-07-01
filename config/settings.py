@@ -322,9 +322,13 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.cors_allow_origins_csv.split(",") if o.strip()]
 
     # ---------- Refusal ----------
+    # The refusal sentinel: the model is told to emit it verbatim, and grounded_qa
+    # matches it by prefix, so keep it SHORT and stable (a long paraphrase-prone
+    # string would miss the fast match and skip the named-drug->clarify guide).
+    # Directional warmth lives in the UI (reason copy + "Related" pointers).
     refusal_text: str = (
-        "I can't find this in the current FDA guidance corpus. "
-        "I won't guess on a regulatory question."
+        "I couldn't find this in the current FDA guidance corpus, "
+        "and I won't guess on a regulatory question."
     )
 
     def ensure_dirs(self) -> None:

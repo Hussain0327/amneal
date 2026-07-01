@@ -34,7 +34,11 @@ def test_settings_load() -> None:
     s = get_settings()
     assert s.embedding_provider == "echo"
     assert s.llm_provider == "echo"
-    assert s.refusal_text.startswith("I can't find this")
+    # Assert the refusal contract (declines + won't guess), not exact phrasing,
+    # so warming the copy doesn't break this smoke test.
+    assert s.refusal_text
+    assert "find this" in s.refusal_text.lower()
+    assert "won't guess" in s.refusal_text.lower()
 
 
 def test_database_url_defaults_to_none_sqlite_mode() -> None:

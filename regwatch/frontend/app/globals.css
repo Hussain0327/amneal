@@ -253,13 +253,44 @@ main:focus {
   color: var(--ink-faint);
 }
 .chat__empty {
-  margin-top: 0.5rem;
+  margin-top: 0.75rem;
 }
+.chat__empty-kicker {
+  margin: 0 0 0.55rem;
+}
+/* The opening question, set large in the display serif — the page's thesis, in
+   the subject's own voice, not a neutral "Ask a question" label. */
 .chat__empty-lead {
-  font-family: var(--font-display), serif;
-  font-size: 1.25rem;
-  color: var(--ink-2);
-  margin: 0 0 0.9rem;
+  font-family: var(--font-display), Georgia, serif;
+  font-weight: 500;
+  font-size: clamp(1.55rem, 3.4vw, 2.05rem);
+  line-height: 1.08;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+  margin: 0 0 0.7rem;
+}
+.chat__empty-note {
+  max-width: 34rem;
+  margin: 0 0 1.7rem;
+  font-size: 0.94rem;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+/* Starter inquiries, grouped by kind — the group label encodes what the corpus
+   can answer (structure as information), so the empty state teaches the range. */
+.chat__starters {
+  display: flex;
+  flex-direction: column;
+  gap: 1.05rem;
+}
+.starter__kind {
+  margin: 0 0 0.5rem;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.62rem;
+  font-weight: 500;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
 }
 .chat__examples {
   display: flex;
@@ -316,6 +347,31 @@ main:focus {
 }
 .msg__body .prose {
   font-size: 1rem;
+}
+/* Provisional streaming draft: the answer as it types, BEFORE citation
+   validation. Muted + labelled so it never reads as a settled, sourced answer;
+   it carries no citation stamps / drawer / confidence (INV-1/INV-2) and is
+   replaced by the validated turn when the result frame lands. */
+.msg__body--draft {
+  white-space: pre-wrap;
+  color: var(--ink-soft);
+}
+.msg__drafting {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  margin: 0.55rem 0 0;
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.msg__drafting-dot {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 999px;
+  background: var(--gold-deep);
+  animation: ticker-pulse 1.6s ease-in-out infinite;
 }
 /* A refusal / out-of-scope reply stays visibly a refusal — oxblood seam, a
    tag, never the cream of a normal cited answer (INV-2). */
@@ -1503,7 +1559,8 @@ button.chip:disabled {
     display: none;
   }
   .ticker__line--live .ticker__rule,
-  .ticker__dot {
+  .ticker__dot,
+  .msg__drafting-dot {
     animation: none;
   }
 }
