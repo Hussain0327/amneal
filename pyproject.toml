@@ -13,18 +13,18 @@ dependencies = [
     "pdfplumber>=0.11.10",
     "pypdf>=6.14.2",  # 6.13.3 fixes GHSA-jm82-fx9c-mx94 (unbounded stream-length DoS)
     "chromadb>=0.5.20",
-    "sqlmodel>=0.0.22",
+    "sqlmodel>=0.0.39",
     "sqlalchemy>=2.0.51",
-    "alembic>=1.14",
+    "alembic>=1.18.5",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
-    "fastapi>=0.138.0",
+    "fastapi>=0.138.2",
     "uvicorn[standard]>=0.32",
     "structlog>=26.1.0",
     "rapidfuzz>=3.10",
     "python-dotenv>=1.0",
     "rich>=13.9",
-    "typer>=0.15",
+    "typer>=0.26.8",
     "tiktoken>=0.8",
     "bcrypt>=5.0.0",
     "python-docx>=1.2.0",
@@ -40,11 +40,11 @@ local-embeddings = [
     "transformers<5",
 ]
 llm = [
-    "openai>=2.43.0",
-    "anthropic>=0.111.0",
+    "openai>=2.44.0",
+    "anthropic>=0.115.0",
 ]
 orchestration = [
-    "dagster>=1.13.10,<1.14",
+    "dagster>=1.13.11,<1.14",
     "dagster-webserver>=1.13,<1.14",
     "dagster-postgres>=0.29,<0.30",
 ]
@@ -53,7 +53,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",
     "pytest-timeout>=2.3",
-    "ruff>=0.15.19",
+    "ruff>=0.15.20",
     "black>=24.10",
     "mypy>=1.13",
     "types-requests",
