@@ -62,7 +62,7 @@ jobs:
       # git SHA from GitHub context (not attacker-controllable free text), so it
       # is safe in `ref:`; this guarantees deploy == the artifact that passed CI
       # even if main advanced in between.
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
