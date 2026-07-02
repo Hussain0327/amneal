@@ -1,7 +1,8 @@
 // One rendered turn of an Ask conversation, shared by the live page and the
-// design fixtures. Live assistant turns carry clarify options and provenance;
-// turns rehydrated from GET /sessions/{id} carry only content / status /
-// citations and degrade cleanly (no chips, no feedback affordance).
+// design fixtures. Tier-2 history persists clarify / related / reason /
+// interpretation / audit_id, so turns rehydrated from GET /sessions/{id} keep
+// their analyst affordances; only model_name (and the .rise reveal) is
+// live-only. Pre-Tier-2 legacy rows degrade cleanly (empty arrays, no meta).
 
 import type {
   ChatMessage,
@@ -19,8 +20,8 @@ export interface Turn {
   citations: Citation[];
   clarify: ClarifyOption[];
   // "Related, not an answer" re-runnable queries surfaced beside a refusal.
-  // Live refusal turns carry them; rehydrated history leaves this [] (the wire
-  // shape from GET /sessions/{id} doesn't persist them).
+  // Persisted and returned by GET /sessions/{id}, so rehydrated refusals keep
+  // them; [] occurs only on pre-Tier-2 legacy rows.
   related: ClarifyOption[];
   interpretation: string | null;
   // Backend reason code for a refusal / clarify (e.g. low_top_score, no_product,
@@ -53,7 +54,11 @@ export function turnFromMessage(m: ChatMessage): Turn {
     role: m.role,
     content: m.content,
     status,
-    refused: status === "refused",
+    // The wire shape has no refused flag. The backend persists provider-failure
+    // turns as status="error" with refused=True live, so mirror that here —
+    // otherwise a rehydrated error turn falls out of the declined register and
+    // renders dressed as an answer (INV-2 drift between live and reload).
+    refused: status === "refused" || status === "error",
     citations: m.citations ?? [],
     clarify: m.clarify ?? [],
     related: m.related ?? [],

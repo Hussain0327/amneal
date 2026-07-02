@@ -15,8 +15,11 @@ from uuid import uuid4
 from sqlalchemy import desc
 from sqlmodel import col, select
 
+from regwatch.common.logging import get_logger
 from regwatch.store.db import session_scope
 from regwatch.store.models import ChatMessage, ChatSession
+
+log = get_logger(__name__)
 
 SESSION_FILTER_KEYS = frozenset({"normalized_name", "dosage_form", "route", "psg_type", "doc_id"})
 
@@ -63,13 +66,23 @@ def ensure_session(session_id: str | None = None, *, user_id: str | None = None)
 
 
 def get_session_filters(session_id: str | None) -> dict[str, Any]:
+    """Deterministic carry-over filters for a session (or ``{}`` when unknown).
+
+    Best-effort, mirroring ``get_recent_turns``: session context is an
+    ergonomic aid, never required for correctness -- any DB error degrades to
+    ``{}`` (logged) rather than failing an otherwise-answerable turn.
+    """
     if not session_id:
         return {}
-    with session_scope() as s:
-        row = s.get(ChatSession, session_id)
-        if row is None:
-            return {}
-        return _safe_filters(dict(row.active_filters_json or {}))
+    try:
+        with session_scope() as s:
+            row = s.get(ChatSession, session_id)
+            if row is None:
+                return {}
+            return _safe_filters(dict(row.active_filters_json or {}))
+    except Exception:
+        log.warning("get_session_filters_failed", exc_info=True)
+        return {}
 
 
 @dataclass

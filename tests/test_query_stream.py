@@ -3,16 +3,25 @@
 These assert the INV-1 emit boundary holds over the wire: no answer text or
 citation appears before the single validated ``result`` frame; refusals stream
 no prose and never leak a fabricated citation; exactly one audit row is written
-(INV-6); the streamed result matches blocking /query (parity); only the two
-event names the frontend parses (``status``/``result``) are emitted; and auth /
-rate-limit / ownership are enforced BEFORE the stream opens.
+(INV-6); the streamed result matches blocking /query (parity); only the three
+event names the frontend parses (``status``/``token``/``result``) are emitted
+(``token`` needs a streaming provider — covered in test_streaming_synthesis.py)
+plus anonymous ``: keep-alive`` comment frames the parser skips; auth /
+rate-limit / ownership are enforced BEFORE the stream opens; a mid-stream
+failure closes the stream with NO result frame (the client's fallback
+trigger); request filters are whitelisted at the boundary; and ask() dispatch
+rides a dedicated bounded worker pool with defined behavior at saturation.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+import time
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 from config.settings import get_settings
@@ -20,6 +29,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func
 from sqlmodel import select
 
+from regwatch.api import main as api_main
 from regwatch.generate import grounded_qa as qa_mod
 from regwatch.store.db import session_scope
 from regwatch.store.models import QueryLog
@@ -80,7 +90,9 @@ def test_query_stream_streams_progress_then_one_result_frame(
         assert "text/event-stream" in res.headers["content-type"]
         frames = _parse_sse(res.text)
         events = [e for e, _ in frames]
-        # The contract: only `status` and `result`, exactly one result, last.
+        # The contract: exactly one result, last. `token` is absent HERE only
+        # because the shared _stub_llm is complete()-only (no .stream method);
+        # token-frame coverage lives in test_streaming_synthesis.py.
         assert set(events) <= {"status", "result"}
         assert events.count("result") == 1
         assert events[-1] == "result"
@@ -180,3 +192,248 @@ def test_query_stream_requires_auth() -> None:
         assert "text/event-stream" not in res.headers.get("content-type", "")
     finally:
         client.__exit__(None, None, None)
+
+
+def test_query_stream_foreign_session_is_404_before_stream() -> None:
+    """Chat-session ownership is enforced BEFORE the stream opens: another
+    user's session_id gets a real 404 (never confirming the session exists),
+    not an opened stream that binds the turn into the victim's history."""
+    create_user("a@example.com", "password-for-a")
+    create_user("b@example.com", "password-for-b")
+    a = login_client("a@example.com", "password-for-a")
+    b = login_client("b@example.com", "password-for-b")
+    try:
+        sid = a.post("/query", json={"question": "Does this exist?"}).json()["session_id"]
+        res = b.post(
+            "/query/stream",
+            json={"question": "And dissolution?", "session_id": sid},
+            headers=_ACCEPT,
+        )
+        assert res.status_code == 404
+        assert res.json() == {"detail": "session not found"}  # 404, never 403
+        assert "text/event-stream" not in res.headers.get("content-type", "")
+    finally:
+        a.__exit__(None, None, None)
+        b.__exit__(None, None, None)
+
+
+def test_query_stream_rate_limited_before_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The per-user rate limit is a real pre-stream 429 — never an opened
+    stream (mirrors the buffered /query rate-limit test in test_auth.py)."""
+    import config.settings as cs
+
+    create_user()
+    client = login_client()
+    try:
+        monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "1")
+        cs.get_settings.cache_clear()
+        assert _stream(client, "First one?").status_code == 200
+        res = _stream(client, "Over the limit?")
+        assert res.status_code == 429
+        assert res.json() == {"detail": "rate limit exceeded"}
+        assert "text/event-stream" not in res.headers.get("content-type", "")
+    finally:
+        client.__exit__(None, None, None)
+
+
+def _fake_result() -> qa_mod.QAResult:
+    """A minimal terminal QAResult for tests that stub ask() itself (plumbing
+    tests where the pipeline's internals are not under test)."""
+    return qa_mod.QAResult(
+        answer=get_settings().refusal_text,
+        citations=[],
+        refused=True,
+        model_name="stub",
+        audit_id=1,
+        retrieved=[],
+        status="refused",
+        session_id="session-1",
+        turn_id="turn-1",
+    )
+
+
+def test_query_stream_failure_closes_without_result_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The load-bearing failure contract: when ask() raises mid-stream, the
+    stream closes with NO result frame and no token frames — that absence is
+    the client's single-fallback trigger — and no exception text leaks."""
+
+    def exploding_ask(**kwargs: Any) -> qa_mod.QAResult:
+        kwargs["on_progress"]("Reading the guidance…")
+        raise RuntimeError("internal-detail-must-not-leak")
+
+    monkeypatch.setattr(api_main, "ask", exploding_ask)
+    create_user()
+    client = login_client()
+    try:
+        res = _stream(client, "Will this fail mid-stream?")
+        assert res.status_code == 200
+        assert "text/event-stream" in res.headers["content-type"]
+        frames = _parse_sse(res.text)
+        events = [e for e, _ in frames]
+        assert "status" in events  # the stream really opened
+        assert "result" not in events
+        assert "token" not in events
+        # No partial JSON or exception detail on the wire.
+        assert "RuntimeError" not in res.text
+        assert "internal-detail-must-not-leak" not in res.text
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_query_stream_emits_keepalive_comment_during_quiet_gaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A quiet gap longer than the keep-alive interval (e.g. silent LLM
+    retries) produces SSE comment frames so intermediary idle timers never cut
+    a stream that is still working; comments carry no event name, so the
+    parsed event contract is unchanged."""
+    monkeypatch.setattr(api_main, "_SSE_KEEPALIVE_INTERVAL_S", 0.05)
+
+    def quiet_ask(**kwargs: Any) -> qa_mod.QAResult:
+        time.sleep(0.3)  # longer than the patched keep-alive interval
+        return _fake_result()
+
+    monkeypatch.setattr(api_main, "ask", quiet_ask)
+    create_user()
+    client = login_client()
+    try:
+        res = _stream(client, "Anything at all?")
+        assert res.status_code == 200
+        assert ": keep-alive" in res.text
+        frames = _parse_sse(res.text)
+        events = [e for e, _ in frames]
+        # Comment frames are invisible to the parser; the terminal result stands.
+        assert set(events) <= {"status", "result"}
+        assert events[-1] == "result"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_query_stream_builds_result_response_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_build_query_response does DB I/O (citation recency); the streaming
+    path must run it in a worker thread, never on the event loop, or a DB
+    stall freezes every concurrent stream on the machine."""
+    on_loop: list[bool] = []
+    real = api_main._build_query_response
+
+    def probe(result: qa_mod.QAResult) -> Any:
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return real(result)
+
+    monkeypatch.setattr(api_main, "_build_query_response", probe)
+    monkeypatch.setattr(api_main, "ask", lambda **kwargs: _fake_result())
+    create_user()
+    client = login_client()
+    try:
+        frames = _parse_sse(_stream(client, "Where does this build?").text)
+        assert [e for e, _ in frames][-1] == "result"
+        assert on_loop == [False]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_ask_pool_saturation_sheds_with_defined_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ask() dispatch rides a dedicated bounded pool. At saturation: buffered
+    /query sheds a real 503 (not an unbounded queue), the stream closes with
+    NO result frame (the client's fallback trigger), and /health — platform
+    liveness — never waits behind ask() work."""
+    monkeypatch.setattr(api_main, "_ASK_LIMITER", anyio.CapacityLimiter(1))
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_ask(**kwargs: Any) -> qa_mod.QAResult:
+        entered.set()
+        assert release.wait(timeout=30), "test never released the worker"
+        return _fake_result()
+
+    monkeypatch.setattr(api_main, "ask", slow_ask)
+    create_user()
+    client = login_client()
+    first: list[int] = []
+    worker = threading.Thread(
+        target=lambda: first.append(
+            client.post("/query", json={"question": "Slow one?"}).status_code
+        )
+    )
+    try:
+        worker.start()
+        assert entered.wait(timeout=10), "first query never reached ask()"
+        shed = client.post("/query", json={"question": "Busy now?"})
+        assert shed.status_code == 503
+        frames = _parse_sse(_stream(client, "Busy stream?").text)
+        assert "result" not in [e for e, _ in frames]
+        assert client.get("/health").status_code == 200
+    finally:
+        release.set()
+        worker.join(timeout=30)
+        client.__exit__(None, None, None)
+    assert first == [200]
+
+
+# ---------- boundary filter whitelist (shared QueryRequest model) ----------
+
+
+def test_query_filters_are_whitelisted_at_the_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """version_id (would disable current-version scoping), unknown keys (would
+    500 the pgvector store with no audit row), legacy clarify echoes
+    (source_url), and non-scalar values are all dropped BEFORE ask() sees the
+    filters; known scope keys pass through untouched. Dropped, not 422'd, so
+    clarify options persisted by older sessions keep working."""
+    seen: dict[str, Any] = {}
+
+    def capture_ask(**kwargs: Any) -> qa_mod.QAResult:
+        seen.update(kwargs)
+        return _fake_result()
+
+    monkeypatch.setattr(api_main, "ask", capture_ask)
+    create_user()
+    client = login_client()
+    try:
+        res = client.post(
+            "/query",
+            json={
+                "question": "What dissolution method is recommended?",
+                "filters": {
+                    "normalized_name": "albuterol sulfate",
+                    "version_id": 17,  # internal-only: never honored from callers
+                    "source_url": "http://example/psg.pdf",  # legacy clarify echo
+                    "page": 3,  # unknown-to-session junk
+                    "dosage_form": ["Gel", "Cream"],  # non-scalar cannot bind
+                },
+            },
+        )
+        assert res.status_code == 200
+        assert seen["filters"] == {"normalized_name": "albuterol sulfate"}
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_query_request_filters_validator_unit() -> None:
+    """The whitelist lives on the shared QueryRequest model, so /query and
+    /query/stream cannot drift: unknown keys and non-scalar values drop
+    silently (no 422), known scalar keys survive, and None stays None."""
+    req = api_main.QueryRequest(
+        question="q?",
+        k=None,
+        filters={
+            "normalized_name": "albuterol sulfate",
+            "doc_id": 4,
+            "version_id": 17,
+            "source_url": "http://example/psg.pdf",
+            "route": ["Inhalation"],
+        },
+    )
+    assert req.filters == {"normalized_name": "albuterol sulfate", "doc_id": 4}
+    assert api_main.QueryRequest(question="q?", k=None).filters is None

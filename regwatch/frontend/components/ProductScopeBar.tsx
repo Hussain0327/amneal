@@ -67,7 +67,17 @@ export function ProductScopeBar() {
   }
 
   return (
-    <div className="scopebar" role="status" aria-live="polite">
+    // The polite live region covers ONLY the read-only summary states (pinned
+    // name / empty). While the picker form is open the region is disabled —
+    // otherwise every mutation inside it (the Pin→"Resolving…" label swap,
+    // error text, the autofocused inputs) queues screen-reader announcements
+    // over the user's own typing echo. The resolve error announces via its
+    // own role="alert" below instead.
+    <div
+      className="scopebar"
+      role={open ? undefined : "status"}
+      aria-live={open ? undefined : "polite"}
+    >
       <span className="scopebar__eye">Under review</span>
       {open ? (
         <form
@@ -98,7 +108,11 @@ export function ProductScopeBar() {
           <button type="button" className="scopebar__clear" onClick={cancel} disabled={pinning}>
             cancel
           </button>
-          {error && <span className="scopebar__error code">{error}</span>}
+          {error && (
+            <span className="scopebar__error code" role="alert">
+              {error}
+            </span>
+          )}
         </form>
       ) : hasProduct ? (
         <>

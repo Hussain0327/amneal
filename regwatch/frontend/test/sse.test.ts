@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { askQueryStream } from "@/lib/api";
+import { askQueryStream, STREAM_FALLBACK_STATUS } from "@/lib/api";
 import type { QueryResponse } from "@/lib/api";
 
 // consumeSse is module-private; its only public driver is askQueryStream, which
@@ -141,11 +141,75 @@ describe("consumeSse (via askQueryStream)", () => {
       }),
     );
 
-    const res = await askQueryStream("q");
+    const onStatus = vi.fn();
+    const res = await askQueryStream("q", null, null, { onStatus });
     expect(res.answer).toBe("from-fallback");
     // Two fetches: the stream, then the fallback.
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[1][0]).toContain("/query");
+    // The page is told the stream died BEFORE the re-run, so it can discard
+    // the stale provisional draft and show progress for the fallback.
+    expect(onStatus).toHaveBeenLastCalledWith(STREAM_FALLBACK_STATUS);
+  });
+
+  it("falls back exactly once when the body errors mid-stream", async () => {
+    // A status frame arrives, then the ReadableStream errors (network drop
+    // mid-body). consumeSse throws a non-abort error and askQueryStream must
+    // issue exactly one fallback POST /query.
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(`event: status\ndata: ${JSON.stringify({ text: "working" })}\n\n`));
+        controller.error(new Error("network"));
+      },
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } }),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(resultFrameData("from-fallback")), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const onStatus = vi.fn();
+    const res = await askQueryStream("q", null, null, { onStatus });
+    expect(res.answer).toBe("from-fallback");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][0]).toContain("/query");
+    expect(onStatus).toHaveBeenLastCalledWith(STREAM_FALLBACK_STATUS);
+  });
+
+  it("rethrows a caller abort mid-stream without falling back (never double-send)", async () => {
+    // Real fetch errors the body stream when the request signal aborts; the
+    // mock mirrors that so the mid-body AbortError path is exercised for real.
+    const onStatus = vi.fn();
+    fetchMock.mockImplementationOnce((_input: RequestInfo | URL, init?: RequestInit) => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(enc.encode(`event: status\ndata: ${JSON.stringify({ text: "working" })}\n\n`));
+          init?.signal?.addEventListener(
+            "abort",
+            () => controller.error(new DOMException("aborted", "AbortError")),
+            { once: true },
+          );
+        },
+      });
+      return Promise.resolve(
+        new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } }),
+      );
+    });
+    failOnFallback();
+
+    const controller = new AbortController();
+    const promise = askQueryStream("q", null, null, { onStatus }, controller.signal);
+    // Abort only after the stream is provably mid-body (first frame delivered).
+    await vi.waitFor(() => expect(onStatus).toHaveBeenCalledWith("working"));
+    controller.abort();
+    await expect(promise).rejects.toMatchObject({ name: "AbortError" });
+    // The client-side single-send guarantee: no fallback fetch, no retry status.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(onStatus).not.toHaveBeenCalledWith(STREAM_FALLBACK_STATUS);
   });
 
   it("delivers token deltas in order, then resolves with the result", async () => {
@@ -202,5 +266,89 @@ describe("consumeSse (via askQueryStream)", () => {
     expect(res.answer).toBe("both");
     expect(onStatus).toHaveBeenCalledWith("searching");
     expect(onToken).toHaveBeenCalledWith("chunk");
+  });
+});
+
+// Half-open connection guard: once headers arrive the TTFB timer is disarmed,
+// so a socket that goes silent without FIN/RST would otherwise pend
+// reader.read() forever (composer locked, fallback unreachable). The watchdog
+// cancels the reader after 75s of total silence; the server's ~15s keep-alive
+// comments keep any healthy stream well inside the window.
+describe("SSE inactivity watchdog", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function openStreamResponse(): {
+    response: Response;
+    controller: ReadableStreamDefaultController<Uint8Array>;
+  } {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        controller = c;
+      },
+    });
+    const response = new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+    return { response, controller };
+  }
+
+  it("cancels a silent stream after the idle window and falls back to /query", async () => {
+    const { response, controller } = openStreamResponse();
+    fetchMock.mockResolvedValueOnce(response);
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(resultFrameData("from-fallback")), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const onStatus = vi.fn();
+    const promise = askQueryStream("q", null, null, { onStatus });
+    await vi.advanceTimersByTimeAsync(0);
+    controller.enqueue(enc.encode(`event: status\ndata: ${JSON.stringify({ text: "working" })}\n\n`));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onStatus).toHaveBeenCalledWith("working");
+    // The stream then goes silent past the 75s window: the watchdog cancels
+    // the reader and the transparent /query fallback takes over.
+    await vi.advanceTimersByTimeAsync(76_000);
+    const res = await promise;
+    expect(res.answer).toBe("from-fallback");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][0]).toContain("/query");
+    expect(onStatus).toHaveBeenLastCalledWith(STREAM_FALLBACK_STATUS);
+    // No timer survives: watchdog, TTFB, and fallback bounds all released.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps a slow stream alive while keep-alive comments arrive inside the window", async () => {
+    const { response, controller } = openStreamResponse();
+    fetchMock.mockResolvedValueOnce(response);
+    failOnFallback();
+
+    const payload = JSON.stringify(resultFrameData("slow-but-alive"));
+    const promise = askQueryStream("q");
+    await vi.advanceTimersByTimeAsync(0);
+    // Traffic every 60s (< 75s window) for 120s total (> 75s): comment frames
+    // must re-arm the watchdog, so the stream survives to its result.
+    controller.enqueue(enc.encode(": keep-alive\n"));
+    await vi.advanceTimersByTimeAsync(0); // let the read re-arm before time moves
+    await vi.advanceTimersByTimeAsync(60_000);
+    controller.enqueue(enc.encode(": keep-alive\n"));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    controller.enqueue(enc.encode(`event: result\ndata: ${payload}\n\n`));
+    controller.close();
+    const res = await promise;
+    expect(res.answer).toBe("slow-but-alive");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

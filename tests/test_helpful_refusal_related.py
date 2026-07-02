@@ -95,7 +95,7 @@ def test_low_top_score_refuses_with_related_and_no_llm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Below-threshold retrieval => refused, no citations, related from the
-    in-hand passages (distinct NAME + source_url), and the LLM is NOT called."""
+    in-hand passages (distinct NAME only), and the LLM is NOT called."""
     init_db()
     threshold = get_settings().refusal_score_threshold
     # Two passages well below threshold; two distinct products + a dup of the
@@ -122,13 +122,15 @@ def test_low_top_score_refuses_with_related_and_no_llm(
     assert result.citations == []
     # The LLM was never invoked on the weak-retrieval path.
     assert counter["n"] == 0
-    # related is populated, deduped by product name, with NAME + source link.
+    # related is populated, deduped by product name, NAME only.
     assert result.related, "expected related pointers on a low_top_score refusal"
     names = [o.label for o in result.related]
     assert names == ["Metformin Hydrochloride", "Propranolol Hydrochloride"]  # dedup + order
     for o in result.related:
         assert o.query  # a re-runnable query (the product name)
-        assert o.filters and o.filters.get("source_url")  # carries a source link
+        # Filters carry retrieval constraints only -- no display values
+        # (source_url) in the constraint channel.
+        assert o.filters == {"normalized_name": o.query}
         # The sub-threshold passage TEXT never leaks into any related field.
         assert "SECRET" not in o.label
         assert "SECRET" not in o.query

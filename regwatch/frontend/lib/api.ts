@@ -286,7 +286,13 @@ async function handle<T>(res: Response, method: string, path: string, gate: bool
 // same-origin /api proxy would include it by default, but the direct-call dev
 // mode (NEXT_PUBLIC_API_BASE on localhost) is cross-origin and would silently
 // drop the cookie without this; the backend's CORS allows credentials.
-async function postJSON<T>(path: string, body: unknown, gate = true, signal?: AbortSignal): Promise<T> {
+async function postJSON<T>(
+  path: string,
+  body: unknown,
+  gate = true,
+  signal?: AbortSignal,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<T> {
   const res = await fetchWithTimeout(
     `${apiBase()}${path}`,
     {
@@ -295,7 +301,7 @@ async function postJSON<T>(path: string, body: unknown, gate = true, signal?: Ab
       body: JSON.stringify(body),
       credentials: "include",
     },
-    DEFAULT_TIMEOUT_MS,
+    timeoutMs,
     signal,
   );
   return handle<T>(res, "POST", path, gate);
@@ -355,8 +361,15 @@ export async function askQuery(
   filters: Record<string, string> | null = null,
   session_id: string | null = null,
   signal?: AbortSignal,
+  // POST /query runs the full synthesis pipeline (server budget: llm_timeout_s
+  // x retries can exceed 30s), so the stream-failure fallback passes the same
+  // LONG bound the stream attempt got — otherwise the client aborts while the
+  // server completes and persists the turn invisibly.
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
 ): Promise<QueryResponse> {
-  return normalizeQuery(await postJSON<QueryResponse>("/query", { question, filters, session_id }, true, signal));
+  return normalizeQuery(
+    await postJSON<QueryResponse>("/query", { question, filters, session_id }, true, signal, timeoutMs),
+  );
 }
 
 function isAbortError(e: unknown): boolean {
@@ -375,12 +388,26 @@ export interface StreamCallbacks {
   onToken?: (delta: string) => void;
 }
 
+// Status line emitted immediately before every stream-failure fallback to plain
+// POST /query. The page keys off this exact string to discard the provisional
+// draft accumulated from the dead stream (its tokens are contractually
+// discarded on fallback) and show progress for the re-run instead.
+export const STREAM_FALLBACK_STATUS = "Retrying without streaming...";
+
 // Minimal text/event-stream reader for /query/stream. Frames per the pinned
 // contract: zero or more `event: status` / `data: {"text": …}` and `event: token`
 // / `data: {"delta": …}` (provisional answer text), then exactly one
 // `event: result` whose data is the full validated QueryResponse, then close.
 // Returns null if the stream closes without a result frame (caller falls back to
 // plain /query).
+// Inactivity watchdog for the SSE body read. The TTFB timer is disarmed once
+// headers arrive, so without this a half-open connection (AP roam, proxy or
+// machine death without RST) would leave reader.read() pending forever with no
+// error and no fallback. The server emits a keep-alive comment every ~15s, so a
+// healthy stream always has traffic well inside this window; 75s of total
+// silence means the connection is dead.
+const SSE_IDLE_TIMEOUT_MS = 75_000;
+
 async function consumeSse(
   body: ReadableStream<Uint8Array>,
   callbacks?: StreamCallbacks,
@@ -390,6 +417,15 @@ async function consumeSse(
   let buf = "";
   let eventName = "";
   let data = "";
+
+  // On expiry cancel the reader: the pending read resolves done, the loop ends
+  // without a result, and the caller's /query fallback takes over. Re-armed on
+  // EVERY chunk, keep-alive comments included.
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  const armIdle = () => {
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => void reader.cancel().catch(() => {}), SSE_IDLE_TIMEOUT_MS);
+  };
 
   const dispatch = (): QueryResponse | null => {
     const name = eventName;
@@ -420,9 +456,11 @@ async function consumeSse(
   };
 
   try {
+    armIdle();
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      armIdle();
       buf += decoder.decode(value, { stream: true });
       let nl: number;
       while ((nl = buf.indexOf("\n")) !== -1) {
@@ -461,6 +499,9 @@ async function consumeSse(
     // A trailing record without its blank-line terminator still dispatches.
     return dispatch();
   } finally {
+    // Release the watchdog on every exit path (result, clean close, throw,
+    // idle-cancel) so no timer can fire after the stream is done.
+    if (idleTimer !== null) clearTimeout(idleTimer);
     void reader.cancel().catch(() => {});
   }
 }
@@ -518,7 +559,8 @@ export async function askQueryStream(
         throw new ApiError(TIMEOUT_STATUS, "The request timed out — please try again.");
       }
       if (isAbortError(e)) throw e;
-      return askQuery(question, filters, session_id, signal);
+      callbacks?.onStatus?.(STREAM_FALLBACK_STATUS);
+      return askQuery(question, filters, session_id, signal, LONG_TIMEOUT_MS);
     } finally {
       // Headers are in (or the fetch failed): disarm the TTFB timer. The
       // caller-abort forwarding stays wired so the body read can still cancel.
@@ -536,7 +578,8 @@ export async function askQueryStream(
       // 404/405 (endpoint not deployed yet) or a non-streaming response. Cancel
       // the body so a stray non-SSE stream can't run alongside the fallback.
       void res.body?.cancel().catch(() => {});
-      return askQuery(question, filters, session_id, signal);
+      callbacks?.onStatus?.(STREAM_FALLBACK_STATUS);
+      return askQuery(question, filters, session_id, signal, LONG_TIMEOUT_MS);
     }
     try {
       const result = await consumeSse(res.body, callbacks);
@@ -546,7 +589,8 @@ export async function askQueryStream(
       // fall through to the plain call
     }
     if (signal?.aborted) throw new DOMException("aborted", "AbortError");
-    return askQuery(question, filters, session_id, signal);
+    callbacks?.onStatus?.(STREAM_FALLBACK_STATUS);
+    return askQuery(question, filters, session_id, signal, LONG_TIMEOUT_MS);
   } finally {
     // Always release the timer (if the fetch path above didn't reach its own
     // finally) and the caller-abort listener — no leak on any path.

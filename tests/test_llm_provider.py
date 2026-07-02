@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 
 import httpx
 import openai
@@ -116,6 +117,77 @@ def test_chat_mode_uses_chat_completions() -> None:
     except AssertionError as e:
         assert "Chat Completions" in str(e)
     assert fake.responses.calls == []
+
+
+# ---------- terminal failure / truncation must raise, never a fake completion ----------
+
+
+def _event(type_: str, **attrs: Any) -> SimpleNamespace:
+    return SimpleNamespace(type=type_, **attrs)
+
+
+def _stream_provider(events: list[SimpleNamespace]) -> OpenAIProvider:
+    client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kw: iter(events)))
+    return OpenAIProvider(model="gpt-5.4-nano", api_key="x", mode="responses", client=client)
+
+
+def test_stream_failed_event_raises_after_deltas() -> None:
+    """response.failed raises (the caller degrades to an audited refusal) instead
+    of a done chunk quietly built from the partial deltas already yielded."""
+    events = [
+        _event("response.output_text.delta", delta="A fasting "),
+        _event("response.failed", response=SimpleNamespace(error="server_error: boom")),
+    ]
+    it = _stream_provider(events).stream([LLMMessage("user", "q")])
+    assert next(it).delta == "A fasting "
+    with pytest.raises(RuntimeError, match=r"response\.failed"):
+        next(it)
+
+
+def test_stream_incomplete_event_raises() -> None:
+    """max_output_tokens truncation is a provider failure, not a completion: a
+    silently truncated answer would be validated and cited as if complete."""
+    events = [
+        _event("response.output_text.delta", delta="Dissolution uses app"),
+        _event(
+            "response.incomplete",
+            response=SimpleNamespace(
+                incomplete_details=SimpleNamespace(reason="max_output_tokens")
+            ),
+        ),
+    ]
+    it = _stream_provider(events).stream([LLMMessage("user", "q")])
+    assert next(it).delta == "Dissolution uses app"
+    with pytest.raises(RuntimeError, match=r"response\.incomplete"):
+        next(it)
+
+
+def test_stream_completed_event_still_yields_terminal_chunk() -> None:
+    """The failure check must not swallow a normal stream: deltas then a
+    response.completed event still produce the validated done chunk."""
+    events = [
+        _event("response.output_text.delta", delta="pong"),
+        _event("response.completed", response=_Resp(text="pong")),
+    ]
+    chunks = list(_stream_provider(events).stream([LLMMessage("user", "q")]))
+    assert [c.delta for c in chunks if not c.done] == ["pong"]
+    assert chunks[-1].done and chunks[-1].response is not None
+    assert chunks[-1].response.text == "pong"
+
+
+def test_complete_incomplete_status_raises() -> None:
+    """Buffered path parity: a resp.status == 'incomplete' (truncation) raises
+    instead of returning the partial output_text as a normal LLMResponse."""
+    resp = SimpleNamespace(
+        output_text="Dissolution uses app",
+        model="gpt-5.4-nano",
+        status="incomplete",
+        incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+    )
+    client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kw: resp))
+    p = OpenAIProvider(model="gpt-5.4-nano", api_key="x", mode="responses", client=client)
+    with pytest.raises(RuntimeError, match="incomplete"):
+        p.complete([LLMMessage("user", "q")])
 
 
 def _set_openai(monkeypatch: pytest.MonkeyPatch) -> None:

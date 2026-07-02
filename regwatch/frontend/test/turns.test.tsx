@@ -1,7 +1,7 @@
 import { render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { ProvisionalDraft, UserTurn } from "@/components/Turns";
+import { AssistantTurn, ProvisionalDraft, UserTurn } from "@/components/Turns";
 import type { ChatMessage } from "@/lib/api";
 import { reasonCopy, turnFromMessage, userTurn } from "@/lib/turns";
 
@@ -46,6 +46,43 @@ describe("reasonCopy — plain-language decline/clarify reasons", () => {
 
   it("returns null when there is no reason", () => {
     expect(reasonCopy(null)).toBeNull();
+  });
+});
+
+describe("rehydrated error turns — the declined register survives a reload (INV-2)", () => {
+  // The wire shape from GET /sessions/{id} carries NO refused flag; the backend
+  // persists provider-failure refusals as status="error" with audit_id set.
+  const errorMessage = {
+    id: "m2",
+    turn_id: "t2",
+    role: "assistant",
+    content: "The model provider failed to respond, so this question was not answered.",
+    status: "error",
+    citations: [],
+    audit_id: 7,
+    reason: "provider_error",
+    created_at: "2026-01-01T00:00:00Z",
+  } as unknown as ChatMessage;
+
+  it("maps status=error back to refused, matching the live wire's refused=true", () => {
+    expect(turnFromMessage(errorMessage).refused).toBe(true);
+  });
+
+  it("renders in the declined register — never dressed as a cited answer", () => {
+    const { container } = render(
+      <AssistantTurn
+        turn={turnFromMessage(errorMessage)}
+        sessionId={null}
+        onPick={() => {}}
+        onCite={() => {}}
+        busy={false}
+      />,
+    );
+    expect(container.querySelector(".msg__declined")).not.toBeNull();
+    // The answer-register furniture must not appear: no "No citations" caption
+    // (the defensive cited-branch fallback) and no citation chips.
+    expect(container.textContent).not.toContain("No citations");
+    expect(container.querySelector(".cite")).toBeNull();
   });
 });
 

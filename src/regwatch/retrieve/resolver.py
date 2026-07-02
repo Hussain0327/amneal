@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from rapidfuzz import fuzz
 
@@ -161,6 +162,20 @@ def _mentions(token: str, question: str) -> bool:
     return re.search(rf"\b{re.escape(token)}\b", question) is not None
 
 
+@lru_cache(maxsize=8)
+def _catalog_tokens(known: frozenset[str]) -> tuple[tuple[str, frozenset[str]], ...]:
+    """Per-product primary tokens, computed once per distinct catalog content.
+
+    resolve_product runs on every unpinned question (and more than once per
+    request via the scope-warning and meta branches); retokenizing the full
+    ~1.8k-product catalog each call is pure repeated CPU. The catalog only
+    changes when ingest adds chunks, so keying on the frozen contents of the
+    (already TTL-cached) distinct_metadata_values set stays correct across
+    catalog updates while the tiny maxsize bounds memory.
+    """
+    return tuple((name, _product_tokens(name)) for name in known)
+
+
 # Explicit comparison/contrast markers. A question that compares products names
 # more than one ON PURPOSE; since we answer about a single product at a time
 # (the cross-drug guard), an explicit comparison must clarify which — never
@@ -197,11 +212,11 @@ def resolve_product(
         return Resolution(status="none")
 
     q = question.lower()
-    matched: list[tuple[str, frozenset[str]]] = []
-    for name in known:
-        tokens = _product_tokens(name)
-        if tokens and all(_mentions(tok, q) for tok in tokens):
-            matched.append((name, tokens))
+    matched: list[tuple[str, frozenset[str]]] = [
+        (name, tokens)
+        for name, tokens in _catalog_tokens(frozenset(known))
+        if tokens and all(_mentions(tok, q) for tok in tokens)
+    ]
 
     # AND/conjunction validation: an EXPLICIT comparison naming 2+ in-corpus
     # products must clarify — even when one product's ingredient set is a strict

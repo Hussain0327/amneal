@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from config.settings import get_settings
 from sqlalchemy import func
@@ -45,6 +45,7 @@ from regwatch.common.observability import capture_exception
 from regwatch.common.text_normalize import canonical_name
 from regwatch.generate.llm import (
     LLMMessage,
+    LLMProvider,
     LLMResponse,
     LLMUsage,
     current_model_name,
@@ -57,12 +58,20 @@ from regwatch.retrieve.resolver import resolve_brand, resolve_product, suggest_p
 from regwatch.retrieve.retriever import RetrievedPassage, retrieve
 from regwatch.store.db import session_scope
 from regwatch.store.models import PsgDocument
-from regwatch.store.queries import current_dosage_form_routes
+from regwatch.store.queries import count_documents, current_dosage_form_routes
 from regwatch.store.vector_store import distinct_metadata_values
 from regwatch.watch.alerts import latest_digest_records
 from regwatch.watch.watchlist import list_watchlist
 
 log = get_logger(__name__)
+
+# The FULL status vocabulary ask() can emit. Defined here (the domain layer)
+# and imported by api.main for the wire model, so the OpenAPI enum -- and the
+# TS union generated from it (lib/api-types.ts) -- can never drift from what
+# the domain actually returns (dependencies point inward).
+QueryStatusLiteral = Literal[
+    "answer", "summary", "clarify", "scope_warning", "meta", "refused", "error"
+]
 
 
 @dataclass
@@ -102,7 +111,7 @@ class QAResult:
     retrieved: list[dict[str, Any]]
     # status supersedes the answer/refuse binary: "clarify" means we know the
     # product but need direction (offer `clarify` options) rather than guess.
-    status: str = "answer"  # "answer" | "clarify" | "refused"
+    status: QueryStatusLiteral = "answer"
     # The route reason behind the status (e.g. "multi_form", "no_product",
     # "retrieval") — surfaced so callers/eval can tell WHY we clarified or
     # refused, not just that we did. Mirrors route_json["reason"].
@@ -228,6 +237,13 @@ _META_PHRASES = (
     "what's new",
     "whats new",
 )
+
+# Synthesis decoding parameters, shared by the buffered and streaming twin
+# paths (provider.complete in ask() / provider.stream in _stream_synthesis).
+# One source so a tuning bump can never make answer length or determinism
+# depend on whether the client streamed.
+_SYNTH_TEMPERATURE = 0.0
+_SYNTH_MAX_TOKENS = 900
 
 
 def _looks_like_follow_up(question: str) -> bool:
@@ -395,11 +411,13 @@ def build_options(normalized_name: str) -> list[ClarifyOption]:
 def _related_from_passages(passages: list[RetrievedPassage]) -> list[ClarifyOption]:
     """ "Related, not an answer" pointers from the sub-threshold passages in hand.
 
-    Surfaces DISTINCT product NAMES + their source link ONLY — never the passage
-    text or score (chunk text would read as quasi-evidence on a refusal). Deduped
-    by product name, first occurrence wins (retrieval order = best match first).
-    Each option re-runs as a name-scoped query, so it renders as an inert,
+    Surfaces DISTINCT product NAMES ONLY — never the passage text or score
+    (chunk text would read as quasi-evidence on a refusal). Deduped by product
+    name, first occurrence wins (retrieval order = best match first). Each
+    option re-runs as a name-scoped query, so it renders as an inert,
     re-runnable pill — never a citation chip. Refused/citations are untouched.
+    Filters carry retrieval constraints only, so no display values (source_url)
+    belong here; the API boundary would strip them from an echo anyway.
     """
     options: list[ClarifyOption] = []
     seen: set[str] = set()
@@ -408,22 +426,18 @@ def _related_from_passages(passages: list[RetrievedPassage]) -> list[ClarifyOpti
         if not name or name in seen:
             continue
         seen.add(name)
-        options.append(
-            ClarifyOption(
-                name.title(),
-                name,
-                {"normalized_name": name, "source_url": p.source_url},
-            )
-        )
+        options.append(ClarifyOption(name.title(), name, {"normalized_name": name}))
     return options
 
 
-def _related_from_names(names: list[str]) -> list[ClarifyOption]:
-    """ "Related, not an answer" pointers from resolver candidate product names.
+def _options_from_names(names: list[str]) -> list[ClarifyOption]:
+    """Re-runnable product pills from a list of product names.
 
-    Used at the no-product family of declines (did-you-mean / brand lookup): the
-    resolver already computed these names, so we surface them as inert pills with
-    no DB hit. An empty list (genuinely-absent drug) yields ``[]`` — never raises.
+    THE one rule for how a bare product name becomes a clickable option --
+    clarify choices (ambiguous / did-you-mean / brand / mixed-products) and the
+    decline family's inert "related, not an answer" pointers all share it, so
+    the two pill kinds can never render or behave differently for the same
+    name. No DB hit; an empty list yields ``[]`` -- never raises.
     """
     return [ClarifyOption(name.title(), name, {"normalized_name": name}) for name in names]
 
@@ -484,26 +498,40 @@ def _combo_from_question(question: str, combos: list[tuple[str, str]]) -> tuple[
         "tablet" pins (Tablet) over its (Tablet, Extended Release) sibling instead of
         a pointless clarify, while "extended release tablet" still pins the ER variant
         and a token like "tablet" that fits ER and ODT equally still clarifies.
+      * The completeness tie-break only applies when the question matched at least
+        one DOSAGE-FORM token. A match-count tie carried by shared ROUTE tokens
+        alone ("albuterol sulfate inhalation" against the aerosol AND the solution
+        combo) names no form, so breaking it by token count would silently pin an
+        arbitrary form -- clarify instead. A route mention that is unique to one
+        combo still pins (no tie to break).
     """
     q_tokens = {t for t in re.split(r"[^a-z0-9]+", question.lower()) if t and t not in _FILLER}
 
-    def _score(form: str, route: str) -> tuple[int, int]:
-        combo_tokens = _form_match_tokens(form) | _form_match_tokens(route)
+    def _score(form: str, route: str) -> tuple[tuple[int, int], int]:
+        form_tokens = _form_match_tokens(form)
+        combo_tokens = form_tokens | _form_match_tokens(route)
         matched = len(combo_tokens & q_tokens)
         # primary: more matched tokens; secondary: fewer of the combo's own tokens
-        # left uncovered (negated so "more complete" sorts first).
-        return (matched, -(len(combo_tokens) - matched))
+        # left uncovered (negated so "more complete" sorts first). The form-token
+        # match count rides ALONGSIDE the sort key (never inside it -- an existing
+        # full-tuple tie must stay a tie) for the route-only guard below.
+        return (matched, -(len(combo_tokens) - matched)), len(form_tokens & q_tokens)
 
     scored = sorted(
-        ((_score(form, route), (form, route)) for form, route in combos),
+        ((*_score(form, route), (form, route)) for form, route in combos),
         key=lambda x: x[0],
         reverse=True,
     )
-    best_score, best_combo = scored[0]
+    best_score, best_form_matched, best_combo = scored[0]
     if best_score[0] == 0:
         return None  # the question named no form at all — clarify
     if len(scored) > 1 and scored[1][0] == best_score:
         return None  # two combos fit equally well (match AND completeness) — clarify
+    if best_form_matched == 0 and len(scored) > 1 and scored[1][0][0] == best_score[0]:
+        # The win came ONLY from the completeness tie-break over shared route
+        # tokens -- the question named no dosage form, so a pin here would be the
+        # silent wrong-form pin this function exists to prevent. Clarify.
+        return None
     return best_combo
 
 
@@ -530,7 +558,13 @@ def _format_recent(turns: list[PriorTurn]) -> str:
         # Strip markers from BOTH sides: a citation-shaped token in a prior
         # question is context too, never a source the model may reuse this turn.
         q = strip_all_citations(t.question).strip()[:400]
-        a = strip_all_citations(t.answer).strip()[:600]
+        # The stored answer ends with the prompt-mandated "Sources:" trailer,
+        # whose "<short_name>, p.<n>" pairs are UNbracketed and so survive the
+        # bracket-only strip -- drop the whole trailer first (same split as
+        # eval/metrics.faithfulness) so no stale re-citable pointer reaches the
+        # memory block.
+        answer_prose = re.split(r"\n\s*Sources:\s*\n", t.answer, maxsplit=1)[0]
+        a = strip_all_citations(answer_prose).strip()[:600]
         if not q and not a:
             continue
         lines.append(f"User: {q}\nAssistant: {a}")
@@ -538,7 +572,7 @@ def _format_recent(turns: list[PriorTurn]) -> str:
 
 
 def _stream_synthesis(
-    provider: Any,
+    provider: LLMProvider,
     messages: list[LLMMessage],
     *,
     on_emit: Callable[[str], None],
@@ -553,7 +587,9 @@ def _stream_synthesis(
     buffer = ""  # the FULL accumulated answer text (drives the guard + the fallback)
     released = False
     response: LLMResponse | None = None
-    for chunk in provider.stream(messages, temperature=0.0, max_tokens=900):
+    for chunk in provider.stream(
+        messages, temperature=_SYNTH_TEMPERATURE, max_tokens=_SYNTH_MAX_TOKENS
+    ):
         if chunk.done:
             response = chunk.response
             break
@@ -563,9 +599,14 @@ def _stream_synthesis(
         if released:
             on_emit(chunk.delta)
             continue
-        if refusal_text.startswith(buffer):
+        # Compare with leading whitespace dropped, mirroring the .strip() the
+        # authoritative path applies (llm.py joins-then-strips, ask() strips
+        # again before its sentinel check): a "\n"-prefixed sentinel must HOLD
+        # here too, or the whole refusal would paint as a provisional answer.
+        held = buffer.lstrip()
+        if refusal_text.startswith(held):
             continue  # still a prefix of the refusal sentinel — hold, stay silent
-        if buffer.startswith(refusal_text):
+        if held.startswith(refusal_text):
             continue  # it IS the refusal (+ any trailing) — never emit as tokens
         # Diverged from the sentinel: a real answer. Flush the held prefix (the
         # whole buffer so far), then stream each later delta live.
@@ -590,7 +631,11 @@ def _validate_citations(
     # and could flip a genuinely-grounded answer to a false refusal.
     allowed: dict[tuple[str, int], RetrievedPassage] = {}
     for p in passages:
-        allowed[(p.short_name.upper(), p.page)] = p
+        # Passages arrive best-first; a page often spans several chunks, so
+        # setdefault keeps the TOP-ranked chunk per (doc, page) -- the one the
+        # model most plausibly used -- as the citation's chunk_id/snippet/score
+        # (a plain assignment would bind the evidence to the weakest chunk).
+        allowed.setdefault((p.short_name.upper(), p.page), p)
 
     seen: set[tuple[str, int]] = set()
     validated: list[Citation] = []
@@ -639,6 +684,32 @@ def _usage_fields(model_name: str, usage: LLMUsage | None) -> dict[str, Any]:
     }
 
 
+# Fixed, non-LLM copy for the status="error" refusal family (provider transport
+# failure, catalog read failure, audit write failure). One literal so every
+# degrade path stays in sync with the tests that assert on it.
+_SERVICE_UNAVAILABLE_TEXT = (
+    "The answer service is temporarily unavailable. Your question was "
+    "not answered — please try again in a moment."
+)
+
+
+def _log_query_or_skip(**kwargs: Any) -> int:
+    """``log_query`` with a DEFINED failure: -1 when the audit write fails.
+
+    Used only by the no-LLM-content terminal paths (``_refuse``/``_clarify``):
+    their payload is fixed copy with zero citations, so returning it without an
+    audit row beats a naked, unaudited 500 that the stream-fallback client would
+    re-run into the same down DB. The skip is logged and Sentry-captured; -1
+    never collides with a real QueryLog id.
+    """
+    try:
+        return log_query(**kwargs)
+    except Exception as exc:
+        log.warning("qa_audit_write_failed", error=str(exc), error_type=type(exc).__name__)
+        capture_exception(exc)
+        return -1
+
+
 def _refuse(
     *,
     question: str,
@@ -649,7 +720,7 @@ def _refuse(
     turn_id: str,
     user_id: str | None,
     route_json: dict[str, Any],
-    status: str = "refused",
+    status: QueryStatusLiteral = "refused",
     answer_text: str | None = None,
     usage: LLMUsage | None = None,
     related: list[ClarifyOption] | None = None,
@@ -657,7 +728,7 @@ def _refuse(
     s = get_settings()
     answer = answer_text or s.refusal_text
     audited = _audit_retrieved(passages)
-    audit_id = log_query(
+    audit_id = _log_query_or_skip(
         mode="qa",
         query_text=question,
         retrieved=audited,
@@ -701,14 +772,21 @@ def _clarify(
     route_json: dict[str, Any],
     usage: LLMUsage | None = None,
     related: list[ClarifyOption] | None = None,
+    passages: list[RetrievedPassage] | None = None,
 ) -> QAResult:
     """Guide instead of guess: we know the product (or a near-match) but need
     direction. Carries ZERO citations (never fabricates) and logs one audit row
-    (INV-6), exactly like ``_refuse``."""
-    audit_id = log_query(
+    (INV-6), exactly like ``_refuse``.
+
+    ``passages`` is set only by the POST-retrieval defense-in-depth clarifies
+    (mixed_products / multi_form backstop) so the audit row keeps the retrieved
+    evidence that tripped the guard -- exactly the turns where forensics matter.
+    Pre-retrieval clarifies leave it None (nothing was retrieved)."""
+    audited = _audit_retrieved(passages or [])
+    audit_id = _log_query_or_skip(
         mode="qa",
         query_text=question,
-        retrieved=[],
+        retrieved=audited,
         answer_text=interpretation,
         citations=[],
         refused=False,
@@ -727,7 +805,7 @@ def _clarify(
         refused=False,
         model_name=model_name,
         audit_id=audit_id,
-        retrieved=[],
+        retrieved=audited,
         status="clarify",
         reason=reason,
         interpretation=interpretation,
@@ -741,6 +819,7 @@ def _clarify(
 def _scope_warning(
     *,
     question: str,
+    reason: str,
     model_name: str,
     session_id: str,
     turn_id: str,
@@ -783,7 +862,7 @@ def _scope_warning(
         return _refuse(
             question=question,
             passages=[],
-            reason="scope_warning",
+            reason=reason,
             model_name=model_name,
             session_id=session_id,
             turn_id=turn_id,
@@ -797,7 +876,7 @@ def _scope_warning(
     return _refuse(
         question=question,
         passages=[],
-        reason="scope_warning",
+        reason=reason,
         model_name=model_name,
         session_id=session_id,
         turn_id=turn_id,
@@ -829,9 +908,11 @@ def _meta_answer_text(question: str) -> str:
         included only when the question is a "what changed / what's new" phrase.
     Carries no passage text and no citations; it cannot emit a regulatory claim.
     """
-    # Corpus: distinct products you can ASK about.
+    # Corpus: distinct products you can ASK about. ONE aggregate COUNT -- the
+    # per-product _doc_count loop was an N+1 (~1.4k sequential round trips per
+    # meta question on the full catalog).
     corpus_names = sorted(n for n in distinct_metadata_values("normalized_name") if n)
-    corpus_doc_count = sum(_doc_count(n) for n in corpus_names)
+    corpus_doc_count = count_documents(corpus_names)
     products = "product" if len(corpus_names) == 1 else "products"
     docs = "document" if corpus_doc_count == 1 else "documents"
     sample = ", ".join(n.title() for n in corpus_names[:5])
@@ -895,6 +976,7 @@ def _meta_answer_text(question: str) -> str:
 def _meta(
     *,
     question: str,
+    reason: str,
     model_name: str,
     session_id: str,
     turn_id: str,
@@ -933,7 +1015,7 @@ def _meta(
         audit_id=audit_id,
         retrieved=[],
         status="meta",
-        reason="meta",
+        reason=reason,
         session_id=session_id,
         turn_id=turn_id,
     )
@@ -1019,37 +1101,67 @@ def ask(
     # silently miss and turn a real product into a wrong refusal.
     if active_filters.get("normalized_name"):
         active_filters["normalized_name"] = canonical_name(str(active_filters["normalized_name"]))
+
+    # Up to two carry-over sites below read the session filters (product in the
+    # resolver's none-branch, then dosage_form/route after resolution). Nothing
+    # mutates them mid-turn (update_session_filters runs in _finish_turn), so
+    # fetch lazily ONCE and reuse instead of two identical row reads per
+    # follow-up. Lazy so turns that never carry over still skip the read.
+    session_filters_memo: dict[str, Any] | None = None
+
+    def _session_filters() -> dict[str, Any]:
+        nonlocal session_filters_memo
+        if session_filters_memo is None:
+            session_filters_memo = get_session_filters(session_id)
+        return session_filters_memo
+
     resolved_by_name = False
     context_applied = False
-    response_mode = "summary" if _is_summary_request(question) else "answer"
+    response_mode: QueryStatusLiteral = "summary" if _is_summary_request(question) else "answer"
 
-    route_json = _route_json(
-        filters=active_filters,
-        reason="start",
-        context_applied=context_applied,
-        response_mode=response_mode,
-    )
-    if _is_scope_warning_request(question):
-        route_json = _route_json(
+    def _decline(
+        maker: Callable[..., QAResult],
+        *,
+        reason: str,
+        response_mode: str,
+        **kw: Any,
+    ) -> QAResult:
+        """One ceremony for every terminal decline (_refuse/_clarify/_scope_warning/
+        _meta) branch: build the audit route_json and the result TOGETHER so the
+        reason/response_mode pairing is single-source -- a branch can no longer
+        record an audit route that silently disagrees with the turn it describes.
+        Reads active_filters/context_applied at CALL time (they mutate as the
+        pipeline advances); post-synthesis branches override model_name
+        (response.model) and pass usage via **kw."""
+        rj = _route_json(
             filters=active_filters,
-            reason="scope_warning",
+            reason=reason,
             context_applied=context_applied,
-            response_mode="scope_warning",
+            response_mode=response_mode,
         )
+        kw.setdefault("model_name", model_name)
         return _finish_turn(
-            _scope_warning(
+            maker(
                 question=question,
-                model_name=model_name,
+                reason=reason,
                 session_id=session_id,
                 turn_id=turn_id,
                 user_id=user_id,
-                route_json=route_json,
-                # A caller-pinned product (API/dossier filter, already
-                # canonicalized above) short-circuits resolution.
-                filters=active_filters,
+                route_json=rj,
+                **kw,
             ),
             filters=active_filters,
-            route_json=route_json,
+            route_json=rj,
+        )
+
+    if _is_scope_warning_request(question):
+        return _decline(
+            _scope_warning,
+            reason="scope_warning",
+            response_mode="scope_warning",
+            # A caller-pinned product (API/dossier filter, already
+            # canonicalized above) short-circuits resolution.
+            filters=active_filters,
         )
 
     # Meta gate — "what does this system do" → answer from system state, no LLM,
@@ -1066,24 +1178,7 @@ def ask(
         and not active_filters.get("normalized_name")
         and resolve_product(question).status != "resolved"
     ):
-        route_json = _route_json(
-            filters=active_filters,
-            reason="meta",
-            context_applied=context_applied,
-            response_mode="meta",
-        )
-        return _finish_turn(
-            _meta(
-                question=question,
-                model_name=model_name,
-                session_id=session_id,
-                turn_id=turn_id,
-                user_id=user_id,
-                route_json=route_json,
-            ),
-            filters=active_filters,
-            route_json=route_json,
-        )
+        return _decline(_meta, reason="meta", response_mode="meta")
 
     # Entity resolution FIRST: pin the product before semantic retrieval so FDA
     # template boilerplate shared across drugs cannot leak a wrong-drug citation.
@@ -1095,32 +1190,15 @@ def ask(
             resolved_by_name = resolution.by_name
         elif resolution.status == "ambiguous":
             # Several products match → ASK which, don't guess (cross-drug guard).
-            route_json = _route_json(
-                filters=active_filters,
+            return _decline(
+                _clarify,
                 reason="ambiguous_product",
-                context_applied=context_applied,
                 response_mode="clarify",
-            )
-            return _finish_turn(
-                _clarify(
-                    question=question,
-                    reason="ambiguous_product",
-                    model_name=model_name,
-                    interpretation="More than one product matches that. Which did you mean?",
-                    options=[
-                        ClarifyOption(name.title(), name, {"normalized_name": name})
-                        for name in resolution.candidates
-                    ],
-                    session_id=session_id,
-                    turn_id=turn_id,
-                    user_id=user_id,
-                    route_json=route_json,
-                ),
-                filters=active_filters,
-                route_json=route_json,
+                interpretation="More than one product matches that. Which did you mean?",
+                options=_options_from_names(resolution.candidates),
             )
         else:
-            session_filters = get_session_filters(session_id)
+            session_filters = _session_filters()
             if session_filters.get("normalized_name") and _looks_like_follow_up(question):
                 # Carry the product across turns (the chosen dosage_form/route are
                 # carried just below, after resolved_name is set, so the same logic
@@ -1136,83 +1214,35 @@ def ask(
                 # refuse (e.g. romidepsin — absent, a deliberate must-refuse).
                 suggestions = suggest_products(question)
                 if suggestions:
-                    route_json = _route_json(
-                        filters=active_filters,
+                    return _decline(
+                        _clarify,
                         reason="did_you_mean",
-                        context_applied=context_applied,
                         response_mode="clarify",
-                    )
-                    return _finish_turn(
-                        _clarify(
-                            question=question,
-                            reason="did_you_mean",
-                            model_name=model_name,
-                            interpretation="I couldn't find that exact drug. Did you mean:",
-                            options=[
-                                ClarifyOption(name.title(), name, {"normalized_name": name})
-                                for name in suggestions
-                            ],
-                            session_id=session_id,
-                            turn_id=turn_id,
-                            user_id=user_id,
-                            route_json=route_json,
-                            related=_related_from_names(suggestions),
-                        ),
-                        filters=active_filters,
-                        route_json=route_json,
+                        interpretation="I couldn't find that exact drug. Did you mean:",
+                        options=_options_from_names(suggestions),
+                        related=_options_from_names(suggestions),
                     )
                 brand_matches = resolve_brand(question)
                 if brand_matches:
-                    route_json = _route_json(
-                        filters=active_filters,
+                    return _decline(
+                        _clarify,
                         reason="brand_lookup",
-                        context_applied=context_applied,
                         response_mode="clarify",
-                    )
-                    return _finish_turn(
-                        _clarify(
-                            question=question,
-                            reason="brand_lookup",
-                            model_name=model_name,
-                            interpretation=(
-                                "That looks like a brand name. Did you mean its generic ingredient?"
-                            ),
-                            options=[
-                                ClarifyOption(name.title(), name, {"normalized_name": name})
-                                for name in brand_matches
-                            ],
-                            session_id=session_id,
-                            turn_id=turn_id,
-                            user_id=user_id,
-                            route_json=route_json,
-                            related=_related_from_names(brand_matches),
+                        interpretation=(
+                            "That looks like a brand name. Did you mean its generic ingredient?"
                         ),
-                        filters=active_filters,
-                        route_json=route_json,
+                        options=_options_from_names(brand_matches),
+                        related=_options_from_names(brand_matches),
                     )
-                route_json = _route_json(
-                    filters=active_filters,
+                return _decline(
+                    _refuse,
                     reason="no_product",
-                    context_applied=context_applied,
                     response_mode="refused",
-                )
-                return _finish_turn(
-                    _refuse(
-                        question=question,
-                        passages=[],
-                        reason="no_product",
-                        model_name=model_name,
-                        session_id=session_id,
-                        turn_id=turn_id,
-                        user_id=user_id,
-                        route_json=route_json,
-                        # Resolver candidates already computed above. Both are []
-                        # on this branch (a genuinely-absent drug, e.g. romidepsin)
-                        # — so `related` is [] and the path never crashes.
-                        related=_related_from_names(suggestions + brand_matches),
-                    ),
-                    filters=active_filters,
-                    route_json=route_json,
+                    passages=[],
+                    # Resolver candidates already computed above. Both are []
+                    # on this branch (a genuinely-absent drug, e.g. romidepsin)
+                    # -- so `related` is [] and the path never crashes.
+                    related=_options_from_names(suggestions + brand_matches),
                 )
 
     resolved_name = active_filters.get("normalized_name")
@@ -1229,7 +1259,7 @@ def ask(
         and not active_filters.get("route")
         and _looks_like_follow_up(question)
     ):
-        session_filters = get_session_filters(session_id)
+        session_filters = _session_filters()
         if session_filters.get("normalized_name") == resolved_name:
             for key in ("dosage_form", "route"):
                 if session_filters.get(key):
@@ -1243,26 +1273,12 @@ def ask(
     # and comes back as a cited greeting. Deterministic, pre-LLM (the
     # unit-testable hero path).
     if resolved_name and _looks_vague(question, resolved_name):
-        route_json = _route_json(
-            filters=active_filters,
+        return _decline(
+            _clarify,
             reason="vague_input",
-            context_applied=context_applied,
             response_mode="clarify",
-        )
-        return _finish_turn(
-            _clarify(
-                question=question,
-                reason="vague_input",
-                model_name=model_name,
-                interpretation=_interpretation_for(resolved_name),
-                options=build_options(resolved_name),
-                session_id=session_id,
-                turn_id=turn_id,
-                user_id=user_id,
-                route_json=route_json,
-            ),
-            filters=active_filters,
-            route_json=route_json,
+            interpretation=_interpretation_for(resolved_name),
+            options=build_options(resolved_name),
         )
 
     # Multi-form guard (pre-retrieval): the resolver pins only normalized_name, but
@@ -1274,11 +1290,29 @@ def ask(
     # distinct (dosage_form, route) combos, honoring any form/route already pinned;
     # if more than one remains, CLARIFY which form before retrieving. One audit row.
     if resolved_name:
-        combos = current_dosage_form_routes(
-            resolved_name,
-            dosage_form=active_filters.get("dosage_form"),
-            route=active_filters.get("route"),
-        )
+        try:
+            combos = current_dosage_form_routes(
+                resolved_name,
+                dosage_form=active_filters.get("dosage_form"),
+                route=active_filters.get("route"),
+            )
+        except Exception as exc:
+            # This enumeration is a CORRECTNESS guard (it prevents the wrong-form
+            # citation blend), so unlike the best-effort session/memory reads it
+            # must NOT degrade to "no combos" -- and letting the DB error escape
+            # would be an unaudited 500 the stream-fallback client re-runs into
+            # the same down DB. Mirror the provider-error path instead: audited,
+            # fixed-copy status="error" refusal.
+            log.warning("qa_form_catalog_error", error=str(exc), error_type=type(exc).__name__)
+            capture_exception(exc)
+            return _decline(
+                _refuse,
+                reason="catalog_error",
+                response_mode="refused",
+                passages=[],
+                status="error",
+                answer_text=_SERVICE_UNAVAILABLE_TEXT,
+            )
         if len(combos) > 1:
             # Before clarifying, honor a form the QUESTION already names: if exactly
             # one combo's dosage_form/route tokens uniquely match the question text,
@@ -1289,29 +1323,15 @@ def ask(
             if pinned is not None:
                 active_filters["dosage_form"], active_filters["route"] = pinned
             else:
-                route_json = _route_json(
-                    filters=active_filters,
+                return _decline(
+                    _clarify,
                     reason="multi_form",
-                    context_applied=context_applied,
                     response_mode="clarify",
-                )
-                return _finish_turn(
-                    _clarify(
-                        question=question,
-                        reason="multi_form",
-                        model_name=model_name,
-                        interpretation=(
-                            f"{resolved_name.title()} has FDA guidance for more than one "
-                            "dosage form. Which form did you mean?"
-                        ),
-                        options=build_form_options(resolved_name, combos, question),
-                        session_id=session_id,
-                        turn_id=turn_id,
-                        user_id=user_id,
-                        route_json=route_json,
+                    interpretation=(
+                        f"{resolved_name.title()} has FDA guidance for more than one "
+                        "dosage form. Which form did you mean?"
                     ),
-                    filters=active_filters,
-                    route_json=route_json,
+                    options=build_form_options(resolved_name, combos, question),
                 )
 
     # Stage 1: wide-net vector search (up to VECTOR_TOP_K), constrained to the product.
@@ -1333,29 +1353,15 @@ def ask(
     # demoted-but-still-present passage's cosine value — the 0.30 threshold is
     # calibrated against the cosine scale, so compare the true best cosine.
     if not passages or max(p.score for p in passages) < s.refusal_score_threshold:
-        route_json = _route_json(
-            filters=active_filters,
+        return _decline(
+            _refuse,
             reason="low_top_score",
-            context_applied=context_applied,
             response_mode="refused",
-        )
-        return _finish_turn(
-            _refuse(
-                question=question,
-                passages=passages,
-                reason="low_top_score",
-                model_name=model_name,
-                session_id=session_id,
-                turn_id=turn_id,
-                user_id=user_id,
-                route_json=route_json,
-                # Surface the sub-threshold matches as inert "related" pointers
-                # (distinct product NAMES + source link only). refused/citations
-                # stay untouched — this never dresses the refusal as an answer.
-                related=_related_from_passages(passages),
-            ),
-            filters=active_filters,
-            route_json=route_json,
+            passages=passages,
+            # Surface the sub-threshold matches as inert "related" pointers
+            # (distinct product NAMES + source link only). refused/citations
+            # stay untouched — this never dresses the refusal as an answer.
+            related=_related_from_passages(passages),
         )
 
     # Post-retrieval guard (defense in depth): every passage must be the same
@@ -1365,29 +1371,15 @@ def ask(
     # so ask. Zero citations either way (never fabricates).
     distinct_products = sorted({p.normalized_name for p in passages if p.normalized_name})
     if len(distinct_products) > 1:
-        route_json = _route_json(
-            filters=active_filters,
+        return _decline(
+            _clarify,
             reason="mixed_products",
-            context_applied=context_applied,
             response_mode="clarify",
-        )
-        return _finish_turn(
-            _clarify(
-                question=question,
-                reason="mixed_products",
-                model_name=model_name,
-                interpretation="These passages span more than one product. Which did you mean?",
-                options=[
-                    ClarifyOption(name.title(), name, {"normalized_name": name})
-                    for name in distinct_products
-                ],
-                session_id=session_id,
-                turn_id=turn_id,
-                user_id=user_id,
-                route_json=route_json,
-            ),
-            filters=active_filters,
-            route_json=route_json,
+            interpretation="These passages span more than one product. Which did you mean?",
+            options=_options_from_names(distinct_products),
+            # Post-retrieval tripwire: audit WHAT was retrieved (the
+            # cross-product evidence is the whole point of the row).
+            passages=passages,
         )
 
     # Same defense in depth for dosage form: even within one product, passages must
@@ -1403,28 +1395,17 @@ def ask(
     }
     one_product = distinct_products[0] if distinct_products else resolved_name
     if one_product and len(passage_combos) > 1:
-        route_json = _route_json(
-            filters=active_filters,
+        return _decline(
+            _clarify,
             reason="multi_form",
-            context_applied=context_applied,
             response_mode="clarify",
-        )
-        return _finish_turn(
-            _clarify(
-                question=question,
-                reason="multi_form",
-                model_name=model_name,
-                interpretation=(
-                    "These passages span more than one dosage form. Which form did you mean?"
-                ),
-                options=build_form_options(one_product, sorted(passage_combos), question),
-                session_id=session_id,
-                turn_id=turn_id,
-                user_id=user_id,
-                route_json=route_json,
+            interpretation=(
+                "These passages span more than one dosage form. Which form did you mean?"
             ),
-            filters=active_filters,
-            route_json=route_json,
+            options=build_form_options(one_product, sorted(passage_combos), question),
+            # Post-retrieval tripwire: audit WHAT was retrieved (the
+            # cross-form evidence is the whole point of the row).
+            passages=passages,
         )
 
     _emit(f"Reading {len(passages)} matching guidance passage(s)…")
@@ -1468,7 +1449,9 @@ def ask(
                 provider, synth_messages, on_emit=_emit_token, refusal_text=s.refusal_text
             )
         else:
-            response = provider.complete(synth_messages, temperature=0.0, max_tokens=900)
+            response = provider.complete(
+                synth_messages, temperature=_SYNTH_TEMPERATURE, max_tokens=_SYNTH_MAX_TOKENS
+            )
     except Exception as exc:  # provider transport error (timeout / 429 / 5xx)
         # B2: a synthesizer failure must NOT return a naked 500 with no audit
         # row — that would break INV-6 exactly when the system misbehaves. We
@@ -1476,30 +1459,13 @@ def ask(
         # the cause to Sentry. The error never reaches the user verbatim.
         log.warning("qa_provider_error", error=str(exc), error_type=type(exc).__name__)
         capture_exception(exc)
-        route_json = _route_json(
-            filters=active_filters,
+        return _decline(
+            _refuse,
             reason="provider_error",
-            context_applied=context_applied,
             response_mode="refused",
-        )
-        return _finish_turn(
-            _refuse(
-                question=question,
-                passages=passages,
-                reason="provider_error",
-                model_name=model_name,
-                session_id=session_id,
-                turn_id=turn_id,
-                user_id=user_id,
-                route_json=route_json,
-                status="error",
-                answer_text=(
-                    "The answer service is temporarily unavailable. Your question was "
-                    "not answered — please try again in a moment."
-                ),
-            ),
-            filters=active_filters,
-            route_json=route_json,
+            passages=passages,
+            status="error",
+            answer_text=_SERVICE_UNAVAILABLE_TEXT,
         )
     answer = response.text.strip()
 
@@ -1508,26 +1474,13 @@ def ask(
     # rather than fall through and emit a non-refused, zero-citation empty
     # "answer" (the sentinel check below would not catch an empty string).
     if not answer:
-        route_json = _route_json(
-            filters=active_filters,
+        return _decline(
+            _refuse,
             reason="empty_completion",
-            context_applied=context_applied,
             response_mode="refused",
-        )
-        return _finish_turn(
-            _refuse(
-                question=question,
-                passages=passages,
-                reason="empty_completion",
-                model_name=response.model,
-                session_id=session_id,
-                turn_id=turn_id,
-                user_id=user_id,
-                route_json=route_json,
-                usage=response.usage,
-            ),
-            filters=active_filters,
-            route_json=route_json,
+            passages=passages,
+            model_name=response.model,
+            usage=response.usage,
         )
 
     # LLM-side refusal: it returned the exact refusal sentinel.
@@ -1541,48 +1494,22 @@ def ask(
         # When the product came from the single-product fallback (no drug named),
         # a model refusal is a genuine "not covered" → stay refused (INV-2).
         if resolved_by_name and resolved_name:
-            route_json = _route_json(
-                filters=active_filters,
+            return _decline(
+                _clarify,
                 reason="model_refusal",
-                context_applied=context_applied,
                 response_mode="clarify",
-            )
-            return _finish_turn(
-                _clarify(
-                    question=question,
-                    reason="model_refusal",
-                    model_name=response.model,
-                    interpretation=_interpretation_for(resolved_name),
-                    options=build_options(resolved_name),
-                    session_id=session_id,
-                    turn_id=turn_id,
-                    user_id=user_id,
-                    route_json=route_json,
-                    usage=response.usage,
-                ),
-                filters=active_filters,
-                route_json=route_json,
-            )
-        route_json = _route_json(
-            filters=active_filters,
-            reason="model_refusal",
-            context_applied=context_applied,
-            response_mode="refused",
-        )
-        return _finish_turn(
-            _refuse(
-                question=question,
-                passages=passages,
-                reason="model_refusal",
                 model_name=response.model,
-                session_id=session_id,
-                turn_id=turn_id,
-                user_id=user_id,
-                route_json=route_json,
+                interpretation=_interpretation_for(resolved_name),
+                options=build_options(resolved_name),
                 usage=response.usage,
-            ),
-            filters=active_filters,
-            route_json=route_json,
+            )
+        return _decline(
+            _refuse,
+            reason="model_refusal",
+            response_mode="refused",
+            passages=passages,
+            model_name=response.model,
+            usage=response.usage,
         )
 
     citations, bad = _validate_citations(answer, passages)
@@ -1594,54 +1521,70 @@ def ask(
     # citations-only / empty completion (no body) — never emit either.
     answer_body = strip_all_citations(answer).strip()
     if not answer_body or not citations:
-        route_json = _route_json(
-            filters=active_filters,
+        return _decline(
+            _refuse,
             reason="no_valid_citations",
-            context_applied=context_applied,
             response_mode="refused",
-        )
-        return _finish_turn(
-            _refuse(
-                question=question,
-                passages=passages,
-                reason="no_valid_citations",
-                model_name=response.model,
-                session_id=session_id,
-                turn_id=turn_id,
-                user_id=user_id,
-                route_json=route_json,
-                usage=response.usage,
-            ),
-            filters=active_filters,
-            route_json=route_json,
+            passages=passages,
+            model_name=response.model,
+            usage=response.usage,
         )
 
     # INV-1: strip any fabricated citation markers from the prose so the
     # rendered answer never shows an unverifiable citation. Valid markers are
     # kept intact; only those whose (short_name, page) is not in the validated
     # set are removed (compound brackets keep just their valid pairs).
-    valid_keys = {(c.short_name, c.page) for c in citations}
+    # filter_citations compares keys EXACTLY while _validate_citations dedupes
+    # case-insensitively (keeping one casing), so collect every AS-EMITTED
+    # casing whose fold validated -- otherwise a later mixed-case duplicate of a
+    # valid marker would be stripped, leaving its sentence uncited.
+    folded_valid = {(c.short_name.upper(), c.page) for c in citations}
+    valid_keys = {
+        (short_name, page)
+        for short_name, page in iter_psg_citations(answer)
+        if (short_name.upper(), page) in folded_valid
+    }
     cleaned_answer = filter_citations(answer, valid_keys)
     # Tidy whitespace left behind by removed markers.
     cleaned_answer = re.sub(r"\s+([.,;:])", r"\1", cleaned_answer)
     cleaned_answer = re.sub(r"[ \t]{2,}", " ", cleaned_answer).strip()
 
     audited = _audit_retrieved(passages)
-    audit_id = log_query(
-        mode="qa",
-        query_text=question,
-        retrieved=audited,
-        answer_text=cleaned_answer,
-        citations=[asdict(c) for c in citations],
-        refused=False,
-        model_name=response.model,
-        session_id=session_id,
-        turn_id=turn_id,
-        user_id=user_id,
-        status=response_mode,
-        route_json=route_json,
-        **_usage_fields(response.model, response.usage),
-    )
+    try:
+        audit_id = log_query(
+            mode="qa",
+            query_text=question,
+            retrieved=audited,
+            answer_text=cleaned_answer,
+            citations=[asdict(c) for c in citations],
+            refused=False,
+            model_name=response.model,
+            session_id=session_id,
+            turn_id=turn_id,
+            user_id=user_id,
+            status=response_mode,
+            route_json=route_json,
+            **_usage_fields(response.model, response.usage),
+        )
+    except Exception as exc:
+        # No-audit-no-answer (INV-6): a validated answer with no audit row is
+        # never returned -- but the failure must be DEFINED, not a naked 500
+        # that the stream-fallback client re-runs (a second paid synthesis)
+        # into the same down DB. Degrade to the fixed-copy status="error"
+        # refusal; _refuse re-attempts the audit and skips it (flagged) if the
+        # DB is still down.
+        log.warning("qa_answer_audit_write_failed", error=str(exc), error_type=type(exc).__name__)
+        capture_exception(exc)
+        return _decline(
+            _refuse,
+            reason="audit_error",
+            response_mode="refused",
+            passages=passages,
+            model_name=response.model,
+            status="error",
+            answer_text=_SERVICE_UNAVAILABLE_TEXT,
+            usage=response.usage,
+        )
     return _finish_turn(
         QAResult(
             answer=cleaned_answer,

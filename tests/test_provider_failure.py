@@ -9,11 +9,13 @@ query_log, mirroring the deterministic refusal paths.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
 
 from regwatch.generate import grounded_qa as qa_mod
+from regwatch.generate.llm import LLMStreamChunk
 from regwatch.process.embedder import get_embedding_provider
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import QueryLog
@@ -68,6 +70,51 @@ def test_provider_error_degrades_to_audited_refusal(monkeypatch: pytest.MonkeyPa
     assert "temporarily unavailable" in result.answer
 
     # INV-6: the turn is still audited even though the LLM call failed.
+    assert result.audit_id is not None
+    with session_scope() as s:
+        row = s.get(QueryLog, result.audit_id)
+        assert row is not None
+        assert row.status == "error"
+        assert row.refused is True
+
+
+class _MidStreamBoomProvider:
+    """stream() drops mid-answer AFTER emitting real tokens — the realistic prod
+    failure (OpenAI SSE stream cut off). complete() must not be reached: with
+    on_token set, ask() takes the stream branch."""
+
+    name = "boom-stream"
+
+    def complete(self, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("ask() must use stream() when on_token is provided")
+
+    def stream(self, *args: Any, **kwargs: Any) -> Iterator[LLMStreamChunk]:
+        yield LLMStreamChunk(delta="A fasting ")
+        raise RuntimeError("simulated stream dropped mid-answer")
+
+
+def test_streaming_provider_error_mid_stream_degrades_to_audited_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stream that raises after tokens were already painted must land in the
+    same B2 audited status='error' refusal as a buffered failure — the try in
+    ask() has to cover _stream_synthesis, not just provider.complete."""
+    _seed_corpus()
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _MidStreamBoomProvider())
+
+    tokens: list[str] = []
+    result = qa_mod.ask("What study design is recommended?", on_token=tokens.append)
+
+    # The provisional draft did stream before the drop (diverges from the
+    # refusal sentinel, so the guard released it)...
+    assert tokens == ["A fasting "]
+    # ...but the recorded result is the refusal frame, never the partial answer.
+    assert result.refused is True
+    assert result.status == "error"
+    assert result.citations == []
+    assert "temporarily unavailable" in result.answer
+
+    # INV-6: the failed turn is still audited.
     assert result.audit_id is not None
     with session_scope() as s:
         row = s.get(QueryLog, result.audit_id)

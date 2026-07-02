@@ -411,3 +411,170 @@ def test_combo_ambiguous_short_form_token_still_clarifies() -> None:
     combos = [("Tablet, Extended Release", "Oral"), ("Tablet, Orally Disintegrating", "Oral")]
     q = "BE study for the tablet"
     assert qa_mod._combo_from_question(q, combos) is None
+
+
+def test_combo_route_only_mention_shared_by_combos_still_clarifies() -> None:
+    # Both combos share the route "Inhalation" and the question names ONLY that
+    # route word -- no dosage form. The completeness tie-break must not silently
+    # pin the shorter (Solution) combo; the multi-form clarify has to fire.
+    combos = [("Aerosol, Metered", "Inhalation"), ("Solution", "Inhalation")]
+    q = "What BE study does FDA recommend for albuterol sulfate inhalation?"
+    assert qa_mod._combo_from_question(q, combos) is None
+
+
+def test_combo_discriminating_route_still_pins() -> None:
+    # A route word unique to ONE combo is a real disambiguator (no tie to
+    # break), so it still pins -- the route-only guard must not overreach.
+    combos = [("Gel", "Transdermal"), ("Tablet", "Vaginal")]
+    q = "What BE study design does FDA recommend for transdermal estradiol?"
+    assert qa_mod._combo_from_question(q, combos) == ("Gel", "Transdermal")
+
+
+# ---------- 7. failure paths and audit fidelity ----------
+
+
+def test_form_catalog_db_error_degrades_to_audited_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DB error on the combo-enumeration CORRECTNESS guard must become the
+    audited, fixed-copy status='error' refusal (like a provider failure) --
+    never an unaudited 500 the stream fallback re-runs into the same down DB."""
+    init_db()
+
+    def _boom(*a: object, **k: object) -> list[tuple[str, str]]:
+        raise RuntimeError("simulated catalog db outage")
+
+    monkeypatch.setattr(qa_mod, "current_dosage_form_routes", _boom)
+    before = _query_log_count()
+
+    r = qa_mod.ask(
+        "What BE study design is recommended?",
+        filters={"normalized_name": "estradiol"},
+    )
+
+    assert r.refused is True
+    assert r.status == "error"
+    assert r.citations == []
+    assert "temporarily unavailable" in r.answer
+    assert _query_log_count() == before + 1  # INV-6: audited despite the DB error
+
+
+def _bypass_passage(appl: str, name: str, form: str, route: str) -> RetrievedPassage:
+    return RetrievedPassage(
+        chunk_id=f"{appl}-1",
+        text="BE study guidance text.",
+        score=0.9,
+        doc_id=1,
+        version_id=10,
+        page=1,
+        section_path=None,
+        normalized_name=name,
+        source_url=f"http://example/PSG_{appl}.pdf",
+        short_name=f"PSG_{appl}",
+        metadata={"dosage_form": form, "route": route},
+    )
+
+
+def test_post_retrieval_multiform_clarify_audits_retrieved_passages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The multi_form backstop fires AFTER retrieval, so its audit row (and the
+    returned QAResult) must record the passages that tripped it -- retrieved=[]
+    would drop the forensic evidence exactly when the tripwire caught a bypass."""
+    init_db()
+    mixed = [
+        _bypass_passage("020001", "estradiol", "Gel", "Transdermal"),
+        _bypass_passage("020002", "estradiol", "Tablet", "Vaginal"),
+    ]
+    monkeypatch.setattr(qa_mod, "retrieve", lambda *a, **k: mixed)
+    monkeypatch.setattr(qa_mod, "current_dosage_form_routes", lambda *a, **k: [])
+
+    r = qa_mod.ask(
+        "What study design does the PSG recommend?",
+        filters={"normalized_name": "estradiol"},
+    )
+
+    assert r.status == "clarify"
+    assert r.reason == "multi_form"
+    assert {p["chunk_id"] for p in r.retrieved} == {"020001-1", "020002-1"}
+    with session_scope() as s:
+        row = s.get(QueryLog, r.audit_id)
+        assert row is not None
+        assert {p["chunk_id"] for p in row.retrieved_json} == {"020001-1", "020002-1"}
+
+
+def test_post_retrieval_mixed_products_clarify_audits_retrieved_passages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same audit-fidelity property for the mixed_products tripwire."""
+    init_db()
+    mixed = [
+        _bypass_passage("020001", "estradiol", "Gel", "Transdermal"),
+        _bypass_passage("020911", "beclomethasone dipropionate", "Aerosol, Metered", "Inhalation"),
+    ]
+    monkeypatch.setattr(qa_mod, "retrieve", lambda *a, **k: mixed)
+    monkeypatch.setattr(qa_mod, "current_dosage_form_routes", lambda *a, **k: [])
+
+    r = qa_mod.ask(
+        "What study design does the PSG recommend?",
+        filters={"normalized_name": "estradiol"},
+    )
+
+    assert r.status == "clarify"
+    assert r.reason == "mixed_products"
+    assert {p["chunk_id"] for p in r.retrieved} == {"020001-1", "020911-1"}
+    with session_scope() as s:
+        row = s.get(QueryLog, r.audit_id)
+        assert row is not None
+        assert {p["chunk_id"] for p in row.retrieved_json} == {"020001-1", "020911-1"}
+
+
+def test_pre_retrieval_clarify_still_audits_empty_retrieved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-retrieval clarifies genuinely retrieved nothing -- their audit row
+    must keep recording retrieved=[] (the passages parameter defaults off)."""
+    _stub(monkeypatch)
+    _seed(_MULTIFORM)
+
+    r = qa_mod.ask("What bioequivalence study design does FDA recommend for estradiol?")
+
+    assert r.status == "clarify"
+    assert r.retrieved == []
+    with session_scope() as s:
+        row = s.get(QueryLog, r.audit_id)
+        assert row is not None
+        assert list(row.retrieved_json or []) == []
+
+
+def test_followup_fetches_session_filters_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A carried-over follow-up needs the session filters at two sites (product,
+    then form/route); the turn must fetch the ChatSession row exactly ONCE."""
+    _stub(monkeypatch)
+    # Two products, so the follow-up does NOT hit the single-product-corpus
+    # fallback -- the resolver returns none and BOTH carry-over sites run.
+    _seed(_MULTIFORM + _SINGLE_FORM)
+
+    first = qa_mod.ask("What bioequivalence study design does FDA recommend for estradiol?")
+    assert first.status == "clarify"
+    second = qa_mod.ask(
+        "What bioequivalence study design does FDA recommend for estradiol?",
+        filters={"normalized_name": "estradiol", "dosage_form": "Gel", "route": "Transdermal"},
+        session_id=first.session_id,
+    )
+    assert second.status == "answer"
+
+    calls = {"n": 0}
+    from regwatch.common.conversation import get_session_filters as real_get_session_filters
+
+    def _counting(session_id: str | None) -> dict[str, Any]:
+        calls["n"] += 1
+        return real_get_session_filters(session_id)
+
+    monkeypatch.setattr(qa_mod, "get_session_filters", _counting)
+
+    third = qa_mod.ask("What about dissolution?", session_id=first.session_id)
+
+    assert third.status == "answer"
+    assert {p["short_name"] for p in third.retrieved} == {"PSG_020001"}
+    assert calls["n"] == 1  # one row read per turn, not one per carry-over site

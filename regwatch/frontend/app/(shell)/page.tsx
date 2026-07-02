@@ -7,7 +7,7 @@ import { EvidenceDrawer } from "@/components/EvidenceDrawer";
 import { StatusTicker } from "@/components/StatusTicker";
 import { AssistantTurn, ProvisionalDraft, UserTurn } from "@/components/Turns";
 import { useSessions } from "@/components/SessionsProvider";
-import { askQueryStream, getSession, type Citation, type Suggestion } from "@/lib/api";
+import { askQueryStream, getSession, STREAM_FALLBACK_STATUS, type Citation, type Suggestion } from "@/lib/api";
 import { assistantTurn, turnFromMessage, userTurn, type Turn } from "@/lib/turns";
 import { syncTextareaHeight } from "@/lib/composer";
 
@@ -129,6 +129,14 @@ function AskView() {
       setError(null);
       setHistoryLoading(false);
       setActiveSessionId(null);
+      // A new chat opens unscoped: filters left behind by the previous
+      // conversation's clarify pick (or typed by hand) must not silently scope
+      // its first question — the starter pills already clear these; this covers
+      // the typed-question path. The evidence drawer closes for the same
+      // reason: its citation belongs to the conversation being left.
+      setIngredient("");
+      setDosage("");
+      setActiveCitation(null);
       return;
     }
     if (urlSession === sessionIdRef.current) {
@@ -136,6 +144,10 @@ function AskView() {
       return;
     }
     controllerRef.current?.abort();
+    // Close the drawer before swapping threads: browser back/forward changes
+    // ?session without a click (the scrim only blocks in-page clicks), and the
+    // previous conversation's evidence must not float over the next one.
+    setActiveCitation(null);
     let cancelled = false;
     setHistoryLoading(true);
     setError(null);
@@ -150,6 +162,14 @@ function AskView() {
       })
       .catch((e) => {
         if (cancelled) return;
+        // The switch failed: leaving identity at the PREVIOUS session would
+        // silently append the next question (threading that session's memory)
+        // into a conversation the user is no longer looking at — and then
+        // teleport the URL back to it. Reset so a send after the error starts
+        // a fresh session instead.
+        sessionIdRef.current = null;
+        setSessionId(null);
+        setActiveSessionId(null);
         setTurns([]);
         setError(e instanceof Error ? e.message : String(e));
       })
@@ -165,12 +185,15 @@ function AskView() {
   // Abort any in-flight stream on unmount.
   useEffect(() => () => controllerRef.current?.abort(), []);
 
+  // `draft` is a dependency so the view keeps following the answer while it
+  // streams token-by-token — status frames stop once the first token arrives,
+  // and turns don't change until the validated result lands.
   useEffect(() => {
     if (!scrollArmedRef.current) return;
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     threadEndRef.current?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "end" });
     if (!loading) scrollArmedRef.current = false;
-  }, [turns, loading, statusFrames]);
+  }, [turns, loading, statusFrames, draft]);
 
   // Restore focus to the (relocated) composer once a send settles.
   useEffect(() => {
@@ -184,87 +207,101 @@ function AskView() {
   // this, so a turn can never be sent into a session being swapped away from.
   const busy = loading || historyLoading;
 
-  async function run(q: string, filters: Record<string, string> | null) {
-    if (busy) return; // race guard: one query or history fetch at a time
-    const seq = ++runSeqRef.current;
-    const controller = new AbortController();
-    controllerRef.current = controller;
-    setLoading(true);
-    setError(null);
-    setStatusFrames([]);
-    setDraft(null);
-    // Clear the SR live region so an identical consecutive answer/label still
-    // changes the DOM text and re-announces (polite regions skip unchanged text).
-    setAnnouncement("");
-    scrollArmedRef.current = true;
-    lastQuestionRef.current = q;
-    // The inquiry joins the thread immediately; the ticker answers it in place.
-    setTurns((prev) => [...prev, userTurn(q)]);
-    setQuestion("");
-    try {
-      const next = await askQueryStream(
-        q,
-        filters,
-        sessionIdRef.current,
-        {
-          onStatus: (text) => {
-            if (runSeqRef.current === seq) setStatusFrames((prev) => [...prev, text]);
-          },
-          onToken: (delta) => {
-            if (runSeqRef.current === seq) setDraft((prev) => (prev ?? "") + delta);
-          },
-        },
-        controller.signal,
-      );
-      // Superseded by a newer run, or aborted by a new-chat / session switch
-      // (the fallback /query fetch is bound to the same signal, so an abort
-      // throws above — this guards the rare in-between resolve).
-      if (runSeqRef.current !== seq || controller.signal.aborted) return;
-      sessionIdRef.current = next.session_id;
-      setSessionId(next.session_id);
-      // Swap the provisional draft for the validated turn in one render batch.
+  // useCallback (with onPick below) keeps handler identity stable across the
+  // per-token re-renders of a streaming answer, so the React.memo on the turn
+  // components actually bails out — settled turns must not re-parse their
+  // markdown once per SSE chunk.
+  const run = useCallback(
+    async (q: string, filters: Record<string, string> | null) => {
+      if (busy) return; // race guard: one query or history fetch at a time
+      const seq = ++runSeqRef.current;
+      const controller = new AbortController();
+      controllerRef.current = controller;
+      setLoading(true);
+      setError(null);
+      setStatusFrames([]);
       setDraft(null);
-      setTurns((prev) => [...prev, assistantTurn(next)]);
-      setActiveSessionId(next.session_id);
-      refocusRef.current = true;
-      const label =
-        next.status === "clarify"
-          ? "Clarification requested"
-          : next.refused || next.status === "scope_warning"
-            ? "Request declined — see the reply"
-            : next.status === "meta"
-              ? "Information ready"
-              : "Answer ready";
-      const lead = (next.answer || next.interpretation || "").replace(/\s+/g, " ").trim().slice(0, 140);
-      setAnnouncement(lead ? `${label}: ${lead}` : `${label}.`);
-      if (urlSession !== next.session_id) {
-        // Preserve any scoped-product params (rp/appl) when stamping the new
-        // session into the URL — only `session` changes here. Read the LIVE URL
-        // (not the render-time searchParams snapshot) so a product pinned DURING
-        // this in-flight query isn't wiped by a stale snapshot.
-        const params = new URLSearchParams(window.location.search);
-        params.set("session", next.session_id);
-        router.replace(`/?${params.toString()}`, { scroll: false });
-      }
-      void refreshSessions();
-    } catch (e) {
-      // An abort means new chat / session switch already took over the view.
-      if (isAbortError(e) || runSeqRef.current !== seq || controller.signal.aborted) return;
-      // The send failed: restore the typed question and drop the optimistic
-      // inquiry turn so the composer is usable to retry (parity with main).
-      setError(e instanceof Error ? e.message : String(e));
-      setQuestion(q);
-      setTurns((prev) => (prev.length && prev[prev.length - 1].role === "user" ? prev.slice(0, -1) : prev));
-      refocusRef.current = true;
-    } finally {
-      if (runSeqRef.current === seq) {
-        setLoading(false);
-        setStatusFrames([]);
+      // Clear the SR live region so an identical consecutive answer/label still
+      // changes the DOM text and re-announces (polite regions skip unchanged text).
+      setAnnouncement("");
+      scrollArmedRef.current = true;
+      lastQuestionRef.current = q;
+      // The inquiry joins the thread immediately; the ticker answers it in place.
+      setTurns((prev) => [...prev, userTurn(q)]);
+      setQuestion("");
+      try {
+        const next = await askQueryStream(
+          q,
+          filters,
+          sessionIdRef.current,
+          {
+            onStatus: (text) => {
+              if (runSeqRef.current !== seq) return;
+              // The api layer emits this exact status immediately before every
+              // stream-failure fallback to plain /query: the dead stream's
+              // provisional tokens are contractually discarded, so drop the
+              // draft and let the ticker (showing this retry line) take the
+              // in-flight slot back for the re-run.
+              if (text === STREAM_FALLBACK_STATUS) setDraft(null);
+              setStatusFrames((prev) => [...prev, text]);
+            },
+            onToken: (delta) => {
+              if (runSeqRef.current === seq) setDraft((prev) => (prev ?? "") + delta);
+            },
+          },
+          controller.signal,
+        );
+        // Superseded by a newer run, or aborted by a new-chat / session switch
+        // (the fallback /query fetch is bound to the same signal, so an abort
+        // throws above — this guards the rare in-between resolve).
+        if (runSeqRef.current !== seq || controller.signal.aborted) return;
+        sessionIdRef.current = next.session_id;
+        setSessionId(next.session_id);
+        // Swap the provisional draft for the validated turn in one render batch.
         setDraft(null);
-        controllerRef.current = null;
+        setTurns((prev) => [...prev, assistantTurn(next)]);
+        setActiveSessionId(next.session_id);
+        refocusRef.current = true;
+        const label =
+          next.status === "clarify"
+            ? "Clarification requested"
+            : next.refused || next.status === "scope_warning"
+              ? "Request declined — see the reply"
+              : next.status === "meta"
+                ? "Information ready"
+                : "Answer ready";
+        const lead = (next.answer || next.interpretation || "").replace(/\s+/g, " ").trim().slice(0, 140);
+        setAnnouncement(lead ? `${label}: ${lead}` : `${label}.`);
+        if (urlSession !== next.session_id) {
+          // Preserve any scoped-product params (rp/appl) when stamping the new
+          // session into the URL — only `session` changes here. Read the LIVE URL
+          // (not the render-time searchParams snapshot) so a product pinned DURING
+          // this in-flight query isn't wiped by a stale snapshot.
+          const params = new URLSearchParams(window.location.search);
+          params.set("session", next.session_id);
+          router.replace(`/?${params.toString()}`, { scroll: false });
+        }
+        void refreshSessions();
+      } catch (e) {
+        // An abort means new chat / session switch already took over the view.
+        if (isAbortError(e) || runSeqRef.current !== seq || controller.signal.aborted) return;
+        // The send failed: restore the typed question and drop the optimistic
+        // inquiry turn so the composer is usable to retry (parity with main).
+        setError(e instanceof Error ? e.message : String(e));
+        setQuestion(q);
+        setTurns((prev) => (prev.length && prev[prev.length - 1].role === "user" ? prev.slice(0, -1) : prev));
+        refocusRef.current = true;
+      } finally {
+        if (runSeqRef.current === seq) {
+          setLoading(false);
+          setStatusFrames([]);
+          setDraft(null);
+          controllerRef.current = null;
+        }
       }
-    }
-  }
+    },
+    [busy, urlSession, router, refreshSessions, setActiveSessionId],
+  );
 
   // Cancel an in-flight query. Aborting makes run()'s catch return early and
   // its finally clear loading/status; here we undo the optimistic inquiry turn
@@ -320,16 +357,21 @@ function AskView() {
   // Clarify options and grounded suggestions share a shape: the exact query +
   // filters to resend — click, no retyping. Sync BOTH visible filter fields so
   // a stale dosage form can't leak into the next free-text follow-up.
-  function onPick(opt: Suggestion) {
-    if (busy) return;
-    // Clarify filters are typed Record<string, unknown> (the backend models
-    // them as dict[str, Any]); they are deterministic string maps in practice,
-    // so narrow them for the outbound request + the visible filter fields.
-    const filters = (opt.filters ?? null) as Record<string, string> | null;
-    setIngredient(filters?.normalized_name ?? "");
-    setDosage(filters?.dosage_form ?? "");
-    void run(opt.query, filters);
-  }
+  // Stable (useCallback) because it is a prop of the memoized AssistantTurn:
+  // an unstable identity would bust the memo on every streamed token.
+  const onPick = useCallback(
+    (opt: Suggestion) => {
+      if (busy) return;
+      // Clarify filters are typed Record<string, unknown> (the backend models
+      // them as dict[str, Any]); they are deterministic string maps in practice,
+      // so narrow them for the outbound request + the visible filter fields.
+      const filters = (opt.filters ?? null) as Record<string, string> | null;
+      setIngredient(filters?.normalized_name ?? "");
+      setDosage(filters?.dosage_form ?? "");
+      void run(opt.query, filters);
+    },
+    [busy, run],
+  );
 
   const hasThread = turns.length > 0 || loading || historyLoading;
   // Free-text clarify: when the last assistant turn asked for clarification,
@@ -337,9 +379,10 @@ function AskView() {
   // the pending options, so picking a card and typing are both first-class.
   const lastAssistant = [...turns].reverse().find((t) => t.role === "assistant");
   const clarifyPending = !loading && lastAssistant?.status === "clarify";
-  // Restored history clarify turns carry no options (clarify: []), so the
-  // "pick an option above" hint would point at nothing — only show it when
-  // options are actually on screen.
+  // Clarify options ARE persisted (Tier-2), so restored history keeps them;
+  // pre-Tier-2 legacy rows rehydrate with clarify: [], where the "pick an
+  // option above" hint would point at nothing — keep it gated on options
+  // actually being on screen.
   const clarifyHasOptions = clarifyPending && (lastAssistant?.clarify.length ?? 0) > 0;
 
   const filtersActive = [ingredient.trim(), dosage.trim()].filter(Boolean).length;
