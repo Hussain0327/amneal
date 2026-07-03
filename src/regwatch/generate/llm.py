@@ -252,6 +252,15 @@ class OpenAIProvider:
                 resp = client.responses.create(**kwargs)
             else:
                 raise
+        # A failed or incomplete (max_output_tokens truncation) response must
+        # raise so the caller degrades to an audited refusal: a silently
+        # truncated answer would pass citation validation and ship as if
+        # complete, which is worse than a refusal. stream() applies the same
+        # rule via its terminal-event check, so the two paths agree.
+        status = getattr(resp, "status", None)
+        if status in ("failed", "incomplete"):
+            detail = getattr(resp, "error", None) or getattr(resp, "incomplete_details", None)
+            raise RuntimeError(f"openai response status {status}: {detail}")
         text = (getattr(resp, "output_text", "") or "").strip()
         raw = resp.model_dump() if hasattr(resp, "model_dump") else {}
         return LLMResponse(
@@ -333,6 +342,19 @@ class OpenAIProvider:
                     yield LLMStreamChunk(delta=delta)
             elif etype == "response.completed":
                 final = getattr(event, "response", None)
+            elif etype in ("response.failed", "response.incomplete", "error"):
+                # A failed or truncated (max_output_tokens) stream must raise --
+                # matching the buffered path, whose caller degrades to an
+                # audited refusal -- never launder the partial deltas into a
+                # normal-looking terminal chunk that would be validated and
+                # cited as if generation finished.
+                ev_resp = getattr(event, "response", None)
+                detail = (
+                    getattr(ev_resp, "error", None)
+                    or getattr(ev_resp, "incomplete_details", None)
+                    or getattr(event, "message", None)
+                )
+                raise RuntimeError(f"openai stream terminal event {etype}: {detail}")
         text = "".join(parts).strip()
         model = getattr(final, "model", self.model) if final is not None else self.model
         usage = (

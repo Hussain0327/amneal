@@ -111,6 +111,26 @@ def test_salt_only_products_never_phantom_match() -> None:
     assert r.status == "none"
 
 
+def test_catalog_tokenization_cached_per_catalog_content() -> None:
+    # Tokenizing the full catalog (plus one regex per product) is per-query CPU;
+    # it must run once per distinct catalog content, not once per resolve call.
+    from regwatch.retrieve import resolver
+
+    resolver._catalog_tokens.cache_clear()
+    resolve_product("levalbuterol tartrate study design?", products=CORPUS)
+    resolve_product("beclomethasone dipropionate study design?", products=CORPUS)
+    info = resolver._catalog_tokens.cache_info()
+    assert info.misses == 1
+    assert info.hits >= 1
+
+    # A changed catalog (e.g. new ingest) is a new cache entry -- never stale
+    # tokens: the newly added product resolves immediately.
+    r = resolve_product("romidepsin study design?", products=CORPUS | {"romidepsin"})
+    assert r.status == "resolved"
+    assert r.normalized_name == "romidepsin"
+    assert resolver._catalog_tokens.cache_info().misses == 2
+
+
 def test_distinct_metadata_cache_invalidates_on_add_chunks() -> None:
     embedder = get_embedding_provider()
     add_chunks(

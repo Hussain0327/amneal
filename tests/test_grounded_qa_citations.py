@@ -85,3 +85,103 @@ def test_inv1_fabricated_citation_stripped_from_answer(
     assert {(c.short_name, c.page) for c in result.citations} == {("PSG_020503", 3)}
     assert "[PSG_999999, p.9]" not in result.answer
     assert "[PSG_020503, p.3]" in result.answer
+
+
+def test_mixed_case_duplicate_of_valid_citation_is_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The validator dedupes case-insensitively, but a LATER occurrence of the
+    same valid citation in different casing must survive the prose filter --
+    stripping it (as if fabricated) would leave its sentence uncited."""
+    _seed_corpus(
+        [
+            ("Fasting bioequivalence study with 36 subjects.", _meta(1, 3, "PSG_020503")),
+        ]
+    )
+    answer_text = (
+        "The BE study is a two-way crossover [PSG_020503, p.3]. "
+        "The waiver criteria also apply [psg_020503, p.3]."
+    )
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(answer_text))
+
+    result = qa_mod.ask("What study design is recommended?")
+
+    assert not result.refused
+    # BOTH occurrences keep their marker, each in its as-emitted casing...
+    assert "[PSG_020503, p.3]" in result.answer
+    assert "[psg_020503, p.3]" in result.answer
+    # ...while the citations list stays deduped to one validated entry.
+    assert {(c.short_name.upper(), c.page) for c in result.citations} == {("PSG_020503", 3)}
+    assert len(result.citations) == 1
+
+
+# ---------- citation binds to the best-ranked same-page chunk ----------
+
+
+def test_validate_citations_binds_best_ranked_same_page_chunk() -> None:
+    """When several retrieved chunks share a (doc, page), the validated citation
+    must carry the TOP-ranked chunk's id/snippet/score (passages arrive
+    best-first) -- not the weakest one that happened to be listed last."""
+    from regwatch.retrieve.retriever import RetrievedPassage
+
+    def _passage(chunk_id: str, score: float, text: str) -> RetrievedPassage:
+        return RetrievedPassage(
+            chunk_id=chunk_id,
+            text=text,
+            score=score,
+            doc_id=1,
+            version_id=10,
+            page=3,
+            section_path=None,
+            normalized_name="albuterol sulfate",
+            source_url="http://example/PSG_020503.pdf",
+            short_name="PSG_020503",
+            metadata={},
+        )
+
+    best = _passage("chunk-best", 0.71, "Dissolution: USP paddle method at 50 rpm.")
+    worse = _passage("chunk-worse", 0.34, "Table 2 footnote.")
+    validated, bad = qa_mod._validate_citations(
+        "The dissolution method is the USP paddle [PSG_020503, p.3].", [best, worse]
+    )
+
+    assert bad == []
+    assert [c.chunk_id for c in validated] == ["chunk-best"]
+    assert validated[0].score == 0.71
+    assert "USP paddle" in validated[0].snippet
+
+
+# ---------- audit-write failure has a DEFINED shape (never a naked 500) ----------
+
+
+def test_audit_write_failure_degrades_to_error_refusal_not_500(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the QueryLog write fails after a successful synthesis, ask() must
+    return the fixed-copy status='error' refusal (audit skipped, flagged) --
+    the validated answer is withheld (no-audit-no-answer) but the client gets
+    a defined refusal instead of a 500 that re-runs the pipeline."""
+    _seed_corpus(
+        [
+            ("Fasting bioequivalence study with 36 subjects.", _meta(1, 3, "PSG_020503")),
+        ]
+    )
+    answer_text = "A fasting study is recommended [PSG_020503, p.3]."
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(answer_text))
+
+    def _boom(**kwargs: object) -> int:
+        raise RuntimeError("simulated audit db outage")
+
+    monkeypatch.setattr(qa_mod, "log_query", _boom)
+
+    result = qa_mod.ask("What study design is recommended?")
+
+    assert result.refused is True
+    assert result.status == "error"
+    assert result.citations == []
+    assert "temporarily unavailable" in result.answer
+    # The paid, validated answer never leaks on the unaudited path (INV-6).
+    assert "PSG_020503" not in result.answer
+    assert "fasting study" not in result.answer
+    # The refusal's own audit write also failed -> skipped, sentinel id.
+    assert result.audit_id == -1

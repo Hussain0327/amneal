@@ -35,6 +35,24 @@ describe("Markdown citation stamps", () => {
     expect(onCite).toHaveBeenCalledWith(c);
   });
 
+  it("stamps a tag the model echoed in lowercase (backend validates case-insensitively)", async () => {
+    // The backend's citation validator is IGNORECASE, so a lowercase-echoed
+    // bracket is a real, backend-blessed input. The stamp must resolve via the
+    // 1-based data-n index (same array the remark index was built from), not a
+    // case-sensitive name match that would silently drop the anchor.
+    const onCite = vi.fn();
+    const c = cite("PSG_020503", 3);
+    render(
+      <Markdown citations={[c]} onCite={onCite}>
+        {"A BE study is recommended [psg_020503, p.3]."}
+      </Markdown>,
+    );
+    const stamp = screen.getByRole("button", { name: /Source 1: PSG_020503, page 3/i });
+    expect(stamp).toHaveTextContent("[1]");
+    await userEvent.click(stamp);
+    expect(onCite).toHaveBeenCalledWith(c);
+  });
+
   it("renders an unmatched tag as literal prose, never a stamp (INV-1)", () => {
     const onCite = vi.fn();
     const { container } = render(

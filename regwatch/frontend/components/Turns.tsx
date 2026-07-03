@@ -1,5 +1,7 @@
 "use client";
 
+import { memo } from "react";
+
 import { AnswerFeedback } from "@/components/AnswerFeedback";
 import { Markdown } from "@/components/Markdown";
 import { RecencyBadge } from "@/components/RecencyBadge";
@@ -27,13 +29,19 @@ function FileGlyph() {
 // `live` gates the .rise reveal: turns that arrived this session animate in;
 // turns rehydrated from history render static so a reopened conversation opens
 // like a document (matches the no-auto-scroll-on-rehydrate intent in page.tsx).
-export function UserTurn({ content, live }: { content: string; live: boolean }) {
+//
+// Memoized (with AssistantTurn below): token streaming re-renders the page once
+// per SSE chunk, and without memo every settled turn re-renders — including a
+// full react-markdown re-parse per turn per chunk. Turn objects are append-only
+// (identity-stable) and the page keeps its handlers useCallback-stable, so the
+// bail-out actually holds while a draft streams.
+export const UserTurn = memo(function UserTurn({ content, live }: { content: string; live: boolean }) {
   return (
     <div className={`chat-row chat-row--user${live ? " rise" : ""}`}>
       <div className="bubble bubble--user">{content}</div>
     </div>
   );
-}
+});
 
 // The provisional streaming draft — the assistant's answer as it types, BEFORE
 // citation validation. Deliberately plain: rendered as raw text (not Markdown, so
@@ -92,7 +100,9 @@ function AssistantShell({ children, live }: { children: React.ReactNode; live: b
   );
 }
 
-export function AssistantTurn({
+// Memoized — see the note on UserTurn: per-token draft updates must not
+// re-parse every settled turn's markdown.
+export const AssistantTurn = memo(function AssistantTurn({
   turn,
   sessionId,
   onPick,
@@ -113,7 +123,8 @@ export function AssistantTurn({
         {/* Why we asked instead of answered — plain-language, persisted across
             history. Text only, so INV-2 holds (no citation surface). */}
         {why && <p className="msg__reason code">{why}</p>}
-        {/* Options exist only on live turns; rehydrated history shows the prompt alone. */}
+        {/* Options are persisted (Tier-2), so rehydrated clarify turns keep them;
+            only pre-Tier-2 legacy rows rehydrate with clarify []. */}
         {turn.clarify.length > 0 && (
           <div className="pills">
             {turn.clarify.map((opt, i) => (
@@ -151,10 +162,11 @@ export function AssistantTurn({
   // shouldn't whisper its way out).
   //
   // INV-2 hinges on this: a declined turn renders no citation chips, so the
-  // evidence drawer is unreachable from it. A status="error" turn isn't matched
-  // here, but the backend's _refuse() empties its citations, so it falls through
-  // to the cited branch below and hits the no-citations path — still no chip,
-  // still no drawer. The chip (and drawer trigger) exists ONLY where citations do.
+  // evidence drawer is unreachable from it. A status="error" turn lands here
+  // too — refused=true on the live wire, and turnFromMessage maps status
+  // "error" back to refused on rehydration — and the backend's _refuse()
+  // empties its citations, so still no chip, still no drawer. The chip (and
+  // drawer trigger) exists ONLY where citations do.
   if (turn.status === "scope_warning" || turn.refused) {
     const tag = turn.status === "scope_warning" ? "Out of scope" : "Declined · not in corpus";
     // Scope warnings always carry reason="scope_warning", which the "Out of
@@ -175,7 +187,8 @@ export function AssistantTurn({
             links), NOT evidence. These are inert '.pill' buttons wired to the
             same onPick as clarify — they are NEVER '.cite' chips and CANNOT open
             the evidence drawer, so INV-2 holds (a refusal surfaces no grounding).
-            Live refusals only; rehydrated history leaves related []. */}
+            Persisted (Tier-2), so rehydrated refusals keep them; only pre-Tier-2
+            legacy rows leave related []. */}
         {turn.related.length > 0 && (
           <>
             <p className="kicker">Related, not an answer</p>
@@ -270,7 +283,7 @@ export function AssistantTurn({
       )}
     </AssistantShell>
   );
-}
+});
 
 function Reference({ n, c }: { n: number; c: Citation }) {
   return (

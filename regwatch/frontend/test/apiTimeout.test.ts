@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, askQuery, me } from "@/lib/api";
+import { ApiError, askQuery, askQueryStream, me } from "@/lib/api";
 
 // Finding frontend-ui-2: every frontend fetch must carry a timeout so a hung
 // backend can't leave the page spinning forever. These tests pin that the
@@ -67,6 +67,36 @@ describe("fetch wrapper timeout (finding frontend-ui-2)", () => {
     await assertion;
     // It must NOT have been mapped to the timeout ApiError.
     await expect(promise).rejects.not.toBeInstanceOf(ApiError);
+  });
+
+  it("gives the stream-failure /query fallback the long bound, not the 30s default", async () => {
+    // POST /query re-runs the full synthesis pipeline (server budget can
+    // exceed 30s), and the fallback fires exactly when the backend is slow or
+    // flaky — a 30s client bound would abort while the server completes and
+    // persists the turn invisibly. The fallback must share the stream's long
+    // budget while STILL being bounded.
+    const hanging = hangingFetch();
+    const mock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      // First call: the stream fetch dies with a plain network error, forcing
+      // the fallback. Second call: the fallback /query hangs until aborted.
+      if (mock.mock.calls.length === 1) return Promise.reject(new TypeError("network down"));
+      return hanging(input, init);
+    });
+    vi.stubGlobal("fetch", mock);
+
+    const promise = askQueryStream("q");
+    let settled = false;
+    const assertion = expect(promise).rejects.toMatchObject({ name: "ApiError", status: 504 });
+    void promise.catch(() => {
+      settled = true;
+    });
+    // Past the 30s default: the fallback must still be pending.
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(settled).toBe(false);
+    // Crossing the long bound finally fires the fallback's own timer.
+    await vi.advanceTimersByTimeAsync(90_000);
+    await assertion;
+    expect(mock).toHaveBeenCalledTimes(2);
   });
 
   it("does not fire the timeout for a caller-aborted call even after the bound elapses", async () => {

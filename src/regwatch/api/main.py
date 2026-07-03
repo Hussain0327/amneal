@@ -37,8 +37,10 @@ import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
-from typing import Any, Literal, cast
+from functools import partial
+from typing import Any
 
+import anyio.to_thread
 from config.settings import Settings, get_settings
 from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
@@ -55,7 +57,7 @@ from regwatch.assemble.dossier import build_dossier
 from regwatch.auth.deps import SESSION_COOKIE, require_user
 from regwatch.auth.sessions import authenticate, create_session, revoke_token
 from regwatch.common.audit import log_query
-from regwatch.common.conversation import SessionOwnershipError
+from regwatch.common.conversation import SESSION_FILTER_KEYS, SessionOwnershipError
 from regwatch.common.logging import configure_logging, get_logger
 from regwatch.common.observability import capture_exception, init_sentry
 from regwatch.common.ratelimit import (
@@ -64,7 +66,7 @@ from regwatch.common.ratelimit import (
     login_limiter,
     query_limiter,
 )
-from regwatch.generate.grounded_qa import QAResult, ask
+from regwatch.generate.grounded_qa import QAResult, QueryStatusLiteral, ask
 from regwatch.process.embedder import assert_embedding_runtime_available
 from regwatch.sources.router import search_sources
 from regwatch.sources.types import SourceKind, SourceQuery
@@ -558,6 +560,32 @@ class QueryRequest(BaseModel):
     k: int | None = Field(None, ge=1, le=50)
     session_id: str | None = None
 
+    @field_validator("filters")
+    @classmethod
+    def _whitelist_filter_keys(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Keep only the session-scope filter keys; drop everything else.
+
+        A caller-supplied ``version_id`` would switch off the retriever's
+        current-version scoping (superseded PSG chunks could then be cited as
+        current), and any key outside the store's filterable columns raises an
+        uncaught 500 in pgvector mode with no audit row. Unknown keys are
+        DROPPED rather than 422'd because clarify options persisted by older
+        sessions echo legacy keys (e.g. ``source_url``) and must keep working.
+        Non-scalar values are dropped too: they cannot bind to the scalar
+        filter columns.
+        """
+        if v is None:
+            return None
+        kept = {
+            key: val
+            for key, val in v.items()
+            if key in SESSION_FILTER_KEYS and isinstance(val, str | int | float | bool)
+        }
+        dropped = sorted(set(v) - set(kept))
+        if dropped:
+            log.debug("query_filters_dropped", keys=dropped)
+        return kept
+
 
 class QueryCitation(BaseModel):
     short_name: str
@@ -583,16 +611,6 @@ class ClarifyOptionOut(BaseModel):
     label: str
     query: str
     filters: dict[str, Any] | None = None
-
-
-# The status values grounded_qa emits — carried as an enum in the OpenAPI
-# schema so the generated TS union (lib/api-types.ts) is exact: response_mode
-# in {answer, summary, clarify, scope_warning, meta, refused} plus the
-# provider-outage status="error" (grounded_qa._refuse). "meta" is the
-# deterministic, uncited "what does this system do" answer (grounded_qa._meta).
-QueryStatusLiteral = Literal[
-    "answer", "summary", "clarify", "scope_warning", "meta", "refused", "error"
-]
 
 
 class QueryResponse(BaseModel):
@@ -712,9 +730,10 @@ def _build_query_response(result: QAResult) -> QueryResponse:
         audit_id=result.audit_id,
         session_id=result.session_id,
         turn_id=result.turn_id,
-        # grounded_qa types status as a plain str; Pydantic still validates the
-        # enum at runtime, so genuine drift surfaces rather than being masked.
-        status=cast(QueryStatusLiteral, result.status),
+        # QAResult.status IS QueryStatusLiteral (imported from grounded_qa, the
+        # domain layer), so the OpenAPI enum -- and the generated TS union --
+        # can never drift from what the domain emits.
+        status=result.status,
         reason=result.reason,
         interpretation=result.interpretation,
         clarify=[
@@ -728,15 +747,42 @@ def _build_query_response(result: QAResult) -> QueryResponse:
     )
 
 
+# ask() holds its worker thread for the whole pipeline including LLM synthesis
+# (llm_timeout_s x retries — minutes under a slow provider), and a disconnected
+# stream's thread is non-abandoning, so it keeps its token to completion. On
+# the default anyio pool (40 tokens, shared with every sync-def endpoint
+# including /health) a provider slowdown would starve platform liveness checks.
+# A dedicated bounded limiter isolates ask() dispatch; at saturation we shed
+# with a defined failure (503 buffered / stream close -> client fallback)
+# instead of queueing every caller behind minutes-long holds.
+_ASK_LIMITER = anyio.CapacityLimiter(16)
+
+
+async def _dispatch_ask(**kwargs: Any) -> QAResult:
+    """Run ask() on its dedicated bounded worker pool; 503 when saturated.
+
+    The saturation check is read-then-acquire: a request racing past it queues
+    briefly instead of shedding, which only softens the bound — steady-state
+    saturation still returns the defined 503. Like run_in_threadpool, the
+    dispatched thread is non-abandoning on cancellation.
+    """
+    limiter = _ASK_LIMITER
+    if limiter.statistics().borrowed_tokens >= limiter.total_tokens:
+        raise HTTPException(status_code=503, detail="server is busy, retry shortly")
+    return await anyio.to_thread.run_sync(partial(ask, **kwargs), limiter=limiter)
+
+
 @protected.post("/query", response_model=QueryResponse)
-def query(req: QueryRequest, user: User = Depends(require_user)) -> QueryResponse:
+async def query(req: QueryRequest, user: User = Depends(require_user)) -> QueryResponse:
     _enforce_query_rate_limit(user)
     user_id = str(user.id)
     if req.session_id:
-        _authorize_session_access(req.session_id, user_id)
+        # DB I/O — keep it off the event loop (async def gives up the implicit
+        # threadpool that sync-def endpoints get).
+        await run_in_threadpool(_authorize_session_access, req.session_id, user_id)
     try:
-        result = ask(
-            req.question,
+        result = await _dispatch_ask(
+            question=req.question,
             filters=req.filters,
             k=req.k,
             session_id=req.session_id,
@@ -746,7 +792,8 @@ def query(req: QueryRequest, user: User = Depends(require_user)) -> QueryRespons
         # An ownership race lost after the pre-check above — same 404 as any
         # other foreign session, never confirming the session exists.
         raise HTTPException(status_code=404, detail="session not found") from exc
-    return _build_query_response(result)
+    # _build_query_response queries citation recency — also off-loop.
+    return await run_in_threadpool(_build_query_response, result)
 
 
 def _sse_event(name: str, data: dict[str, Any]) -> str:
@@ -755,6 +802,11 @@ def _sse_event(name: str, data: dict[str, Any]) -> str:
     ...}`` provisional answer text), and ``result`` (the full validated
     QueryResponse). Any other name is ignored, so we emit only these."""
     return f"event: {name}\ndata: {json.dumps(data)}\n\n"
+
+
+# How long the SSE body may go quiet before we emit a comment keep-alive frame.
+# Well under the ~60s idle timeout of typical proxies/load balancers.
+_SSE_KEEPALIVE_INTERVAL_S = 15.0
 
 
 async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[str]:
@@ -791,9 +843,8 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
 
     async def _run() -> None:
         try:
-            result = await run_in_threadpool(
-                ask,
-                req.question,
+            result = await _dispatch_ask(
+                question=req.question,
                 filters=req.filters,
                 k=req.k,
                 session_id=req.session_id,
@@ -802,6 +853,10 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
                 on_token=on_token,
             )
             queue.put_nowait(("result", result))
+        except HTTPException:
+            # ask() pool saturated — close with no result frame; the client
+            # falls back to blocking /query, which returns the real 503.
+            queue.put_nowait(("error", None))
         except SessionOwnershipError:
             # Ownership lost after the pre-flight check — close, let /query 404.
             queue.put_nowait(("error", None))
@@ -814,7 +869,18 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
     try:
         yield _sse_event("status", {"text": "Consulting the corpus…"})
         while True:
-            kind, payload = await queue.get()
+            try:
+                kind, payload = await asyncio.wait_for(
+                    queue.get(), timeout=_SSE_KEEPALIVE_INTERVAL_S
+                )
+            except TimeoutError:
+                # The synthesis quiet gap can span llm_timeout_s x retries with
+                # zero bytes on the wire; intermediaries with ~60s idle timers
+                # would cut a stream that was going to succeed and trigger the
+                # client's double-cost /query fallback. SSE comment frames are
+                # skipped by the client parser, so they are pure keep-alive.
+                yield ": keep-alive\n\n"
+                continue
             if kind == "status":
                 yield _sse_event("status", {"text": payload})
                 continue
@@ -823,7 +889,9 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
                 continue
             if kind == "result":
                 try:
-                    response = _build_query_response(payload)
+                    # Recency enrichment does DB I/O — build the response off
+                    # the event loop so a DB stall never freezes every stream.
+                    response = await run_in_threadpool(_build_query_response, payload)
                 except HTTPException:
                     log.warning("query_stream_missing_session_metadata")
                     return  # close without a result frame -> client falls back

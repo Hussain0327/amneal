@@ -17,7 +17,7 @@ from config.settings import get_settings
 
 from regwatch.common import conversation as conv
 from regwatch.common.citations import has_citation
-from regwatch.common.conversation import get_recent_turns
+from regwatch.common.conversation import PriorTurn, get_recent_turns
 from regwatch.generate import grounded_qa as qa_mod
 from regwatch.generate.llm import LLMResponse
 from regwatch.store.db import init_db, session_scope
@@ -109,6 +109,19 @@ def test_get_recent_turns_empty_and_bad_inputs() -> None:
     assert get_recent_turns("sess-empty", limit=0) == []
 
 
+def test_get_session_filters_degrades_to_empty_on_db_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session filters are best-effort context, like get_recent_turns: a DB
+    hiccup degrades to {} instead of raising a 500 into an answerable turn."""
+
+    def _boom() -> object:
+        raise RuntimeError("simulated db outage")
+
+    monkeypatch.setattr(conv, "session_scope", _boom)
+    assert conv.get_session_filters("sess-any") == {}
+
+
 # ---------- prompt shaping ----------
 
 
@@ -150,6 +163,28 @@ def test_followup_prompt_threads_prior_turn_without_citations(
     assert "fed study is also recommended" in recent_part  # answer prose threaded
     assert "recommend for the BE study" in recent_part  # question prose threaded
     assert not has_citation(recent_part)  # markers stripped from BOTH sides
+
+
+def test_format_recent_drops_unbracketed_sources_trailer() -> None:
+    """The stored answer's prompt-mandated 'Sources:' trailer carries UNbracketed
+    '<short_name>, p.<n>' pairs that the bracket-only citation strip misses --
+    the memory block must drop the whole trailer so the model never sees a stale
+    re-citable (short_name, page) pointer from a prior turn."""
+    turns = [
+        PriorTurn(
+            question="What dissolution method for albuterol?",
+            answer=(
+                "The USP paddle method is recommended.\n\n"
+                "Sources:\n- PSG_020503, p.4: dissolution method"
+            ),
+            status="answer",
+        )
+    ]
+    block = qa_mod._format_recent(turns)
+    assert "USP paddle method is recommended." in block  # prose still threads
+    assert "PSG_020503" not in block
+    assert "p.4" not in block
+    assert "Sources" not in block
 
 
 # ---------- the load-bearing INV-1 property under multi-turn ----------

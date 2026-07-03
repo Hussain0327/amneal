@@ -7,9 +7,10 @@ without re-implementing the same SQLModel selects.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
-from sqlalchemy import inspect
+from sqlalchemy import func, inspect
 from sqlmodel import col, select
 
 from regwatch.common.logging import get_logger
@@ -107,6 +108,28 @@ def fetch_citation_recency(version_ids: list[int], doc_ids: list[int]) -> Recenc
     return RecencyIndex(by_version=by_version, doc_dates=doc_dates)
 
 
+def count_documents(normalized_names: Iterable[str]) -> int:
+    """Total ``psg_document`` rows across ``normalized_names`` -- ONE round trip.
+
+    Aggregate sibling of the generator's per-product doc count: the meta answer
+    needs the corpus-wide total, and a per-product COUNT loop is an N+1 (~1.4k
+    sequential round trips against remote Postgres on the full catalog). An
+    empty name set returns 0 without touching the DB.
+    """
+    names = {n for n in normalized_names if n}
+    if not names:
+        return 0
+    with session_scope() as s:
+        return int(
+            s.scalar(
+                select(func.count())
+                .select_from(PsgDocument)
+                .where(col(PsgDocument.normalized_name).in_(names))
+            )
+            or 0
+        )
+
+
 def current_dosage_form_routes(
     normalized_name: str,
     *,
@@ -140,10 +163,14 @@ def current_dosage_form_routes(
                 select(PsgVersion.psg_document_id).distinct()
             ),
         )
+        # Case-insensitive on both sides (works on SQLite and Postgres): the
+        # catalog stores FDA listing casing ("Aerosol, Metered") while a
+        # hand-typed UI filter arrives in whatever casing the user chose -- a
+        # case-sensitive pin would silently enumerate zero combos.
         if dosage_form:
-            stmt = stmt.where(PsgDocument.dosage_form == dosage_form)
+            stmt = stmt.where(func.lower(PsgDocument.dosage_form) == dosage_form.lower())
         if route:
-            stmt = stmt.where(PsgDocument.route == route)
+            stmt = stmt.where(func.lower(PsgDocument.route) == route.lower())
         rows = s.execute(stmt).all()
 
     combos = {

@@ -1,10 +1,10 @@
 """Retrieval — embed the query, return top-k chunks with metadata + scores.
 
 Filters supported via the `filters` arg (passed through to the vector store):
-  - normalized_name (exact match)
-  - dosage_form    (exact match)
-  - route          (exact match)
-  - psg_type       ("draft" | "final")
+  - normalized_name (exact match; callers canonicalize to lowercase)
+  - dosage_form    (exact, case-insensitive match)
+  - route          (exact, case-insensitive match)
+  - psg_type       ("draft" | "final", case-insensitive)
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from sqlmodel import col, select
 from regwatch.process.embedder import get_embedding_provider
 from regwatch.store.db import get_engine, session_scope
 from regwatch.store.models import PsgDocument, PsgVersion
-from regwatch.store.vector_store import Hit, similarity_search
+from regwatch.store.vector_store import Hit, distinct_metadata_values, similarity_search
 
 
 @dataclass
@@ -46,6 +46,36 @@ def _short_name(meta: dict[str, Any]) -> str:
         return f"PSG_{appl}"
     name = (meta.get("normalized_name") or "PSG").strip()
     return name.replace(" ", "_") or "PSG"
+
+
+# Catalog fields stored verbatim from the FDA listing ("Aerosol, Metered",
+# "Inhalation") or lowercased at ingest ("draft"). Hand-typed UI filters arrive
+# in whatever casing the user chose, and the vector-store `where` is exact-match,
+# so these values are folded to the stored casing before filtering.
+_CASE_FOLDED_FILTER_KEYS = ("dosage_form", "route", "psg_type")
+
+
+def _fold_filter_casing(filters: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Map case-variant filter values to the corpus's stored casing.
+
+    Uses the TTL-cached distinct metadata values, so the common no-filter path
+    pays nothing. A value with no case-insensitive stored match (or an ambiguous
+    one) passes through verbatim -- it matches nothing, exactly as before, and
+    the caller's no-passages handling applies.
+    """
+    if not filters or not any(
+        isinstance(filters.get(key), str) and filters.get(key) for key in _CASE_FOLDED_FILTER_KEYS
+    ):
+        return filters
+    folded = dict(filters)
+    for key in _CASE_FOLDED_FILTER_KEYS:
+        value = folded.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        stored = {v for v in distinct_metadata_values(key) if v.lower() == value.lower()}
+        if len(stored) == 1:
+            folded[key] = next(iter(stored))
+    return folded
 
 
 def _build_where(filters: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -110,12 +140,20 @@ def _current_version_ids_for_filters(filters: dict[str, Any] | None) -> list[int
             doc_stmt = doc_stmt.where(
                 PsgDocument.normalized_name == str(filters["normalized_name"])
             )
+        # Case-insensitive on both sides (works on SQLite and Postgres): the
+        # catalog stores FDA listing casing while UI filters are hand-typed.
         if filters.get("dosage_form"):
-            doc_stmt = doc_stmt.where(PsgDocument.dosage_form == str(filters["dosage_form"]))
+            doc_stmt = doc_stmt.where(
+                func.lower(PsgDocument.dosage_form) == str(filters["dosage_form"]).lower()
+            )
         if filters.get("route"):
-            doc_stmt = doc_stmt.where(PsgDocument.route == str(filters["route"]))
+            doc_stmt = doc_stmt.where(
+                func.lower(PsgDocument.route) == str(filters["route"]).lower()
+            )
         if filters.get("psg_type"):
-            doc_stmt = doc_stmt.where(PsgDocument.psg_type == str(filters["psg_type"]))
+            doc_stmt = doc_stmt.where(
+                func.lower(PsgDocument.psg_type) == str(filters["psg_type"]).lower()
+            )
 
         doc_ids = [int(doc_id) for doc_id in s.scalars(doc_stmt) if doc_id is not None]
         if not doc_ids:
@@ -144,7 +182,6 @@ def retrieve(
     *,
     k: int | None = None,
     filters: dict[str, Any] | None = None,
-    current_only: bool = True,
 ) -> list[RetrievedPassage]:
     """Stage-1 vector search.
 
@@ -158,8 +195,12 @@ def retrieve(
         return []
     embedder = get_embedding_provider()
     qv = embedder.embed([query])[0]
+    filters = _fold_filter_casing(filters)
     where = _build_where(filters)
-    if current_only and not (filters or {}).get("version_id"):
+    # An explicit version_id filter (internal callers only -- the API whitelists
+    # it out of external input) targets one specific version, so the current-
+    # version scoping below would be contradictory; everything else is scoped.
+    if not (filters or {}).get("version_id"):
         current_version_ids = _current_version_ids_for_filters(filters)
         if current_version_ids is not None:
             if not current_version_ids:

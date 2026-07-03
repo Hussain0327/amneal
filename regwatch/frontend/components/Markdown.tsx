@@ -131,9 +131,14 @@ export function Markdown({
       const n = Number(props["data-n"]);
       const short = String(props["data-short"]);
       const page = Number(props["data-page"]);
-      const citation = citations!.find((c) => c.short_name === short && c.page === page);
-      // Defensive: the index guaranteed a match, but never render a stamp
-      // without its backing citation (INV-1).
+      // Resolve by n: the 1-based position in the SAME citations array the
+      // index was built from. data-short carries the MODEL-ECHOED casing
+      // (backend validation is case-insensitive), so a strict name match can
+      // miss a valid stamp; the name+page find is only a fallback for an
+      // out-of-range n.
+      const citation =
+        citations![n - 1] ?? citations!.find((c) => c.short_name === short && c.page === page);
+      // Defensive: never render a stamp without its backing citation (INV-1).
       if (!citation) return null;
       return <CitationStamp n={n} citation={citation} onCite={onCite!} />;
     },
