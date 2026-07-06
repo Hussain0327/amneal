@@ -225,8 +225,11 @@ def _persist_alerts(alerts: list[Alert]) -> int:
                     index_elements=["psg_version_id", "listing_appl_no", "product_id"]
                 )
             )
-        result = s.execute(stmt)
-        return int(getattr(result, "rowcount", 0) or 0)
+        # Count via RETURNING, not cursor rowcount: psycopg v3 reports -1 for
+        # this multi-VALUES insert form, and ON CONFLICT DO NOTHING emits only
+        # the rows that actually landed - driver-independent on both dialects.
+        result = s.execute(stmt.returning(AlertRow.__table__.c.id))  # type: ignore[attr-defined]
+        return len(result.scalars().all())
 
 
 def write_digest(alerts: list[Alert], *, when: date | None = None) -> Path:
