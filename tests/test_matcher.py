@@ -155,6 +155,87 @@ def test_same_ingredient_two_products_both_alert_when_compatible() -> None:
     assert {x.product["id"] for x in m} == {1, 2}
 
 
+def test_form_filtered_canonical_hit_falls_through_to_stripped() -> None:
+    # A same-name product that fails the form gate must not veto (via the
+    # branch short-circuit) a form-compatible base-name product reachable
+    # through the stripped key.
+    listing = _listing_form("Albuterol Sulfate", route="Inhalation", form="Aerosol")
+    products = [
+        _product_form("Albuterol Sulfate", route="Oral", form="Tablet", prod_id=1),
+        _product_form("Albuterol", route="Inhalation", form="Aerosol", prod_id=2),
+    ]
+    m = match_listings([listing], products)
+    assert {(x.product["id"], x.rationale) for x in m} == {(2, "stripped")}
+
+
+def test_form_filtered_canonical_hit_falls_through_to_combo_component() -> None:
+    # Combo listing: the same-name combo product fails the form gate; the
+    # form-compatible component product must still alert (previously the
+    # unconditional `continue` dropped the listing entirely).
+    listing = _listing_form(
+        "Albuterol Sulfate; Budesonide", route="Inhalation", form="Aerosol, Metered"
+    )
+    products = [
+        _product_form(
+            "Albuterol Sulfate; Budesonide", route="Inhalation", form="Powder", prod_id=1
+        ),
+        _product_form("Budesonide", route="Inhalation", form="Aerosol", prod_id=2),
+    ]
+    m = match_listings([listing], products)
+    assert {(x.product["id"], x.rationale) for x in m} == {(2, "combo_component")}
+
+
+def test_form_filtered_combo_component_hit_falls_through_to_fuzzy() -> None:
+    # Component NAME hit whose only product is form-filtered must not swallow
+    # the listing before the fuzzy branch can find a compatible product.
+    listing = _listing_form(
+        "Beclometasone Dipropionate; Albuterol", route="Inhalation", form="Aerosol"
+    )
+    products = [
+        _product_form("Albuterol", route="Oral", form="Tablet", prod_id=1),
+        _product_form(
+            # 'h' typo vs the listing -- only fuzzy can reach it.
+            "Beclomethasone Dipropionate; Albuterol",
+            route="Inhalation",
+            form="Aerosol",
+            prod_id=2,
+        ),
+    ]
+    m = match_listings([listing], products)
+    assert {(x.product["id"], x.rationale) for x in m} == {(2, "fuzzy")}
+
+
+def test_salt_only_combo_component_matches_via_canonical_key() -> None:
+    # 'Potassium Chloride' strips to '' (all salt tokens), so the component
+    # lookup must fall back to its canonical key to reach the exact product.
+    m = match_listings(
+        [_listing("Dextrose; Potassium Chloride")],
+        [_product("Potassium Chloride", prod_id=3)],
+    )
+    assert {(x.product["id"], x.rationale) for x in m} == {(3, "combo_component")}
+
+
+def test_salt_only_combo_component_does_not_cross_match_electrolytes() -> None:
+    # The canonical-key fallback is salt-preserving: a KCl component must not
+    # reintroduce the cross-electrolyte collapse the empty-strip guard blocks.
+    m = match_listings(
+        [_listing("Dextrose; Potassium Chloride")],
+        [_product("Sodium Chloride")],
+    )
+    assert m == []
+
+
+def test_salt_differs_provenance_is_stripped_both_directions() -> None:
+    # Base-name listing vs salted product: the hit lands on the PRODUCT's
+    # stripped key, so provenance must be stripped/0.92, not canonical/1.0
+    # (the durable alert row stores both fields).
+    m = match_listings([_listing("Albuterol")], [_product("Albuterol Sulfate")])
+    assert [(x.rationale, x.confidence) for x in m] == [("stripped", 0.92)]
+    # Mirror direction was already labeled stripped; pin it against drift.
+    m2 = match_listings([_listing("Albuterol Sulfate")], [_product("Albuterol")])
+    assert [(x.rationale, x.confidence) for x in m2] == [("stripped", 0.92)]
+
+
 def test_unrelated_ingredient_does_not_match() -> None:
     m = match_listings(
         [_listing("Romidepsin")],

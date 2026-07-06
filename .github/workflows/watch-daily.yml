@@ -20,7 +20,10 @@ name: watch-daily
 #   WATCH_DATABASE_URL  postgresql://...pooler.supabase.com:5432/postgres?sslmode=require
 #                       (the prod Supabase URL WITH ?sslmode=require — see stream 2)
 #   WATCH_OPENAI_API_KEY  ingest embeds every chunk (EMBEDDING_PROVIDER=openai), so
-#                       this is REQUIRED (no key => the run hard-fails). Watch-scoped
+#                       this is REQUIRED. The key is only exercised when a PSG
+#                       actually CHANGES (embed/extract), so a lost key would stay
+#                       green through every no-change day; the preflight step below
+#                       fails the run fast when the secret is empty. Watch-scoped
 #                       (NOT the repo-wide OPENAI_API_KEY) so ci.yml's live-eval gate
 #                       stays skipped — see the env block below.
 #   OPENFDA_API_KEY     OPTIONAL — only raises the openFDA rate limit; the run
@@ -30,8 +33,11 @@ name: watch-daily
 # Optional alerting secrets (this cron is the SOLE prod driver of the pipeline,
 # so a silent failure leaves analysts on stale FDA guidance with nobody paged):
 #   SLACK_WEBHOOK_URL     OPTIONAL — Slack incoming-webhook URL. When set, a
-#                         failed run posts repo/workflow/run-URL to Slack. Unset
-#                         => the notify step is a graceful no-op (forks are fine).
+#                         failed OR timed-out (cancelled) run posts
+#                         repo/workflow/run-URL to Slack, AND a successful run
+#                         delivers the day's alert digest (new/revised PSGs; a
+#                         quiet day posts nothing). Unset => both Slack steps
+#                         are graceful no-ops (forks are fine).
 #   WATCH_HEALTHCHECK_URL OPTIONAL — healthchecks.io-style ping URL (see
 #                         docs/DEPLOY.md §6.2). On success we ping it; on failure
 #                         we ping `$URL/fail`. This is the dead-man's-switch that
@@ -83,6 +89,19 @@ jobs:
           echo "WATCH_DATABASE_URL secret not set — skipping the daily watch run."
           echo "Set it to the prod Supabase URL with ?sslmode=require (stream 2)."
 
+      # Fail fast on a missing/empty OpenAI key. The key is only exercised at
+      # embed/extract time, i.e. on the day a PSG actually changes: without this
+      # check a revoked or mis-rotated key stays green through every no-change
+      # day and first errors on the one run that mattered. (The advisory sweep
+      # also uses the key, but it is continue-on-error and cannot surface the loss.)
+      - name: preflight WATCH_OPENAI_API_KEY
+        if: env.DATABASE_URL != ''
+        run: |
+          if [ -z "${OPENAI_API_KEY}" ]; then
+            echo "::error::WATCH_OPENAI_API_KEY secret is unset/empty. Ingest embeds via OpenAI on change days, so the run would first fail on the day a real FDA change lands. Restore the secret."
+            exit 1
+          fi
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         if: env.DATABASE_URL != ''
         with:
@@ -117,6 +136,44 @@ jobs:
       - name: regwatch watch
         if: env.DATABASE_URL != ''
         run: uv run regwatch watch
+
+      # ---- Success digest to Slack (delivery, NOT paging) ---------------------
+      # Durable alerts land in the DB, but until now an analyst only learned of
+      # new/revised PSGs by opening the Watch page. On a successful run this
+      # posts the day's digest to the same webhook. Two INV-4 properties: the
+      # JSONL digest is the truthful record of THIS run (write_digest emits it
+      # only after the pipeline committed), and a missing/empty file means
+      # "ran, no changes" -- a quiet day posts NOTHING, never a notification
+      # about changes that did not happen. The post itself is `|| true`-guarded:
+      # a flaky webhook must never fail a run whose pipeline succeeded, so the
+      # failure-notify step below stays the ONLY path that can page.
+      - name: slack digest on success
+        if: success() && env.DATABASE_URL != '' && env.SLACK_WEBHOOK_URL != ''
+        run: |
+          set -euo pipefail
+          # Same UTC day as alerts.digest_path (datetime.now(UTC).date()) -- a
+          # local-time `date` would read the wrong file around midnight. The
+          # 07:17 UTC cron + 45-minute cap cannot straddle a UTC date boundary.
+          DIGEST="data/processed/alerts/digest-$(date -u +%F).jsonl"
+          if [ ! -s "$DIGEST" ]; then
+            echo "no alerts today ($DIGEST missing or empty) -- nothing to post"
+            exit 0
+          fi
+          # jq (preinstalled on ubuntu-latest) builds the payload FROM the JSONL
+          # so crawled ingredient names are JSON-escaped by construction --
+          # never printf-interpolated into the body (same reason the failure
+          # step passes context via env). Cap at 5 lines + "+N more": Slack is
+          # a headline, the Watch page is the full feed.
+          PAYLOAD="$(jq -s '
+            length as $n
+            | (.[:5] | map("- \(.active_ingredient) (\(.listing_appl_no), \(.listing_psg_type))"))
+              + (if $n > 5 then ["+\($n - 5) more"] else [] end)
+            | {text: (":memo: *regwatch daily digest* -- \($n) PSG alert(s):\n" + join("\n"))}
+          ' "$DIGEST")"
+          curl -fsS --max-time 20 --retry 2 --retry-delay 10 \
+            -X POST -H 'Content-Type: application/json' \
+            --data "$PAYLOAD" \
+            "$SLACK_WEBHOOK_URL" || true
 
       # ---- Refusal-threshold revalidation (ADVISORY observability) -----------
       # NON-GATING. This re-runs the gold set through the REAL prod retrieval path
@@ -154,10 +211,13 @@ jobs:
       # job outcome AND secret-presence, so a contributor/fork without the
       # secrets sees no extra steps and no errors.
 
-      # Post to Slack on any failure. RUN_URL etc. are trusted GitHub context
+      # Post to Slack on any failure OR cancellation. cancelled() is load-bearing:
+      # the job-level timeout-minutes CANCELS a hung run (it does not fail it),
+      # and failure() is false on cancellation, so without cancelled() an overrun
+      # past 45 minutes would page nobody. RUN_URL etc. are trusted GitHub context
       # (no user input) but are passed via env and quoted per the safe pattern.
       - name: notify slack on failure
-        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        if: (failure() || cancelled()) && env.SLACK_WEBHOOK_URL != ''
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REPO: ${{ github.repository }}
@@ -178,7 +238,9 @@ jobs:
 
       # Signal the failure to healthchecks.io too, so it surfaces alongside the
       # missed-start case in one place. Best-effort: `|| true` so a flaky ping
-      # never masks the real failure that already failed the job.
+      # never masks the real failure that already failed the job. cancelled()
+      # for the same reason as the Slack step: a timeout cancellation must still
+      # flip the check to failing instead of waiting out the missed-ping grace.
       - name: healthcheck ping on failure
-        if: failure() && env.WATCH_HEALTHCHECK_URL != ''
+        if: (failure() || cancelled()) && env.WATCH_HEALTHCHECK_URL != ''
         run: curl -fsS --max-time 20 --retry 2 --retry-delay 10 "${WATCH_HEALTHCHECK_URL}/fail" || true

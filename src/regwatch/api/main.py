@@ -17,6 +17,7 @@ Endpoints (per spec §10.16):
     GET    /watch/latest   — recent alerts (auth)
     GET    /products       — list watchlist (auth)
     POST   /products       — add manual product (auth)
+    DELETE /products/{id}  - remove a product from the watchlist (soft) (auth)
     GET    /sessions       — the caller's chat sessions (auth)
     GET    /sessions/{id}  — one chat session with messages (auth)
     DELETE /sessions/{id}  — delete a chat session (auth)
@@ -42,7 +43,7 @@ from typing import Any
 
 import anyio.to_thread
 from config.settings import Settings, get_settings
-from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -74,8 +75,9 @@ from regwatch.store.db import engine_dialect, get_engine, init_db, session_scope
 from regwatch.store.models import AnswerFeedback, ChatMessage, ChatSession, QueryLog, User
 from regwatch.store.queries import fetch_citation_recency
 from regwatch.store.vector_store import collection_size
-from regwatch.watch.alerts import latest_digest_records
-from regwatch.watch.watchlist import ALLOWED_SOURCES, add_manual_product, list_watchlist
+from regwatch.watch.alerts import count_digest_records, latest_digest_records
+from regwatch.watch.runs import latest_watch_run
+from regwatch.watch.watchlist import add_manual_product, list_watchlist, set_on_watchlist
 from regwatch.whitepaper.docx_writer import docx_media_type, write_whitepaper_docx
 from regwatch.whitepaper.populator import (
     SpineResolutionError,
@@ -1281,36 +1283,86 @@ def _record_captured_at(record: dict[str, Any]) -> datetime | None:
 
 
 @protected.get("/watch/latest")
-def watch_latest(since: datetime | None = None) -> dict[str, Any]:
+def watch_latest(
+    since: datetime | None = None,
+    # Bounded page, not a hard window: without offset, alerts past the newest
+    # `limit` rows were permanently unreachable through the API (one big watch
+    # run can insert more than a page in a single batch).
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
     since_utc = _as_utc(since) if since else None
     # Push `since` into SQL (applied BEFORE the row cap) so a genuinely-recent
-    # alert is never dropped by limit=200; the prior code capped by created_at
+    # alert is never dropped by the limit; the prior code capped by created_at
     # then filtered captured_at in Python, which could hide recent rows.
-    records = latest_digest_records(limit=200, since=since_utc)
+    records = latest_digest_records(limit=limit, offset=offset, since=since_utc)
+    # Same-filter SQL COUNT: `total` is the full matching count, so clients can
+    # tell a truncated page from the whole feed (count == len(page) only).
+    total = count_digest_records(since=since_utc)
     if since_utc is not None:
-        # Backstop: the lexical SQL compare trusts the UTC-ISO captured_at format,
-        # so re-filter in Python to additionally drop any row whose captured_at
-        # fails to parse (excluded, never a 500).
+        # Backstop: the SQL compare is lexicographic over the stored NAIVE-UTC
+        # isoformat captured_at strings (alerts._since_key normalizes `since` to
+        # that shape), so re-filter in Python to additionally drop any row whose
+        # captured_at fails to parse (excluded, never a 500).
         records = [
             r
             for r in records
             if (captured_at := _record_captured_at(r)) is not None and captured_at >= since_utc
         ]
-    return {"count": len(records), "alerts": records}
+    return {
+        "count": len(records),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "alerts": records,
+        # Newest COMPLETED watch run from the durable ledger (null = never
+        # ran). The alert list alone cannot distinguish a quiet day from a
+        # cron that has been dead for a week -- this can (INV-4: it is only
+        # ever a run that actually happened, never inferred).
+        "last_run": latest_watch_run(),
+    }
 
 
 # ---------- /products ----------
+# INV-5 at the API boundary: POST /products is a HUMAN assertion, so it may
+# only claim provenance a human can actually stand behind. "drugsfda" (also in
+# watchlist.ALLOWED_SOURCES) means "machine-verified against the automated
+# Drugs@FDA import"; accepting it on a hand-typed row would fabricate that
+# verification. Kept as an explicit literal (not ALLOWED_SOURCES minus
+# drugsfda) so a future machine source fails CLOSED here by default.
+USER_ASSERTABLE_SOURCES = frozenset({"manual", "anda_letter"})
+
+
 class ProductCreate(BaseModel):
     # Persisted to the watchlist — cap free-text fields for the same reason the
     # rest of the surface does (consistency + bounded per-row storage).
-    active_ingredient: str = Field(..., max_length=200)
+    active_ingredient: str = Field(..., min_length=1, max_length=200)
     dosage_form: str | None = Field(None, max_length=200)
     route: str | None = Field(None, max_length=200)
     rld_name: str | None = Field(None, max_length=200)
     rld_application_number: str | None = Field(None, max_length=40)
     company_status: str | None = Field(None, max_length=200)
-    source: str = Field(..., max_length=200, description=f"one of {sorted(ALLOWED_SOURCES)}")
+    source: str = Field(
+        ...,
+        max_length=200,
+        description=(
+            f"one of {sorted(USER_ASSERTABLE_SOURCES)}; 'drugsfda' rows come only "
+            "from the automated Drugs@FDA import (INV-5)"
+        ),
+    )
     source_url: str | None = Field(None, max_length=2000)
+
+    @field_validator("active_ingredient")
+    @classmethod
+    def _require_non_blank_ingredient(cls, v: str) -> str:
+        # A whitespace-only name normalizes to "" -- permanently unmatchable
+        # junk (DELETE /products only soft-unwatches: the row itself is kept
+        # forever for alert-history integrity). Reject at the boundary; store
+        # the stripped form so the row matches what was meant.
+        v = v.strip()
+        if not v:
+            raise ValueError("active_ingredient must not be blank")
+        return v
 
 
 @protected.get("/products")
@@ -1321,11 +1373,18 @@ def list_products() -> dict[str, Any]:
 
 @protected.post("/products", status_code=201)
 def create_product(req: ProductCreate) -> dict[str, Any]:
-    if req.source not in ALLOWED_SOURCES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"source must be one of {sorted(ALLOWED_SOURCES)} (INV-5)",
-        )
+    if req.source not in USER_ASSERTABLE_SOURCES:
+        # "drugsfda" is a real source value, so the generic "must be one of"
+        # would read as a typo rather than the policy it is.
+        if req.source == "drugsfda":
+            detail = (
+                "source 'drugsfda' is machine-verified provenance: those rows "
+                "come only from the automated Drugs@FDA import, never manual "
+                f"entry (INV-5). Use one of {sorted(USER_ASSERTABLE_SOURCES)}."
+            )
+        else:
+            detail = f"source must be one of {sorted(USER_ASSERTABLE_SOURCES)} (INV-5)"
+        raise HTTPException(status_code=422, detail=detail)
     added = add_manual_product(
         active_ingredient=req.active_ingredient,
         dosage_form=req.dosage_form,
@@ -1337,6 +1396,23 @@ def create_product(req: ProductCreate) -> dict[str, Any]:
         source_url=req.source_url,
     )
     return {"added": added, "products": list_watchlist()}
+
+
+@protected.delete("/products/{product_id}")
+def delete_product(product_id: int) -> dict[str, Any]:
+    """Remove a product from the watchlist (SOFT: the row is kept).
+
+    ``on_watchlist`` flips to False instead of deleting the row -- durable
+    alert rows reference ``product_id``, so a hard delete would orphan the
+    alert history the feed still renders (INV-4), and the row's INV-5
+    provenance survives for audit. Idempotent: re-deleting an already-unwatched
+    row still returns ``removed: true`` because the caller's goal state holds;
+    404 is reserved for ids no Product row ever had, mirroring the "does it
+    exist" contract of the other 404s on this surface.
+    """
+    if not set_on_watchlist(product_id, False):
+        raise HTTPException(status_code=404, detail="product not found")
+    return {"removed": True, "products": list_watchlist()}
 
 
 # ---------- /sessions (per-user chat history) ----------

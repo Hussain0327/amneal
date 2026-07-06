@@ -350,6 +350,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/products/{product_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Product
+         * @description Remove a product from the watchlist (SOFT: the row is kept).
+         *
+         *     ``on_watchlist`` flips to False instead of deleting the row -- durable
+         *     alert rows reference ``product_id``, so a hard delete would orphan the
+         *     alert history the feed still renders (INV-4), and the row's INV-5
+         *     provenance survives for audit. Idempotent: re-deleting an already-unwatched
+         *     row still returns ``removed: true`` because the caller's goal state holds;
+         *     404 is reserved for ids no Product row ever had, mirroring the "does it
+         *     exist" contract of the other 404s on this surface.
+         */
+        delete: operations["delete_product_products__product_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions": {
         parameters: {
             query?: never;
@@ -497,7 +525,7 @@ export interface components {
             company_status?: string | null;
             /**
              * Source
-             * @description one of ['anda_letter', 'drugsfda', 'manual']
+             * @description one of ['anda_letter', 'manual']; 'drugsfda' rows come only from the automated Drugs@FDA import (INV-5)
              */
             source: string;
             /** Source Url */
@@ -1133,6 +1161,8 @@ export interface operations {
         parameters: {
             query?: {
                 since?: string | null;
+                limit?: number;
+                offset?: number;
             };
             header?: never;
             path?: never;
@@ -1214,6 +1244,41 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_product_products__product_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                product_id: number;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };

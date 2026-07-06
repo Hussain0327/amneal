@@ -17,6 +17,7 @@ since an all-clear file would misrepresent a failed run as a quiet day (INV-4).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from regwatch.common.logging import get_logger
@@ -30,6 +31,7 @@ from regwatch.watch.alerts import (
     write_digest,
 )
 from regwatch.watch.matcher import WatchMatch, match_listings
+from regwatch.watch.runs import record_watch_run
 from regwatch.watch.watchlist import list_watchlist
 
 log = get_logger(__name__)
@@ -87,7 +89,18 @@ def _ingest_matched(
 
 def run_watch(*, extract: bool = True) -> WatchRunResult:
     """Run one full Watch cycle and write the daily digest."""
+    # Captured BEFORE the crawl so the durable ledger row reflects the whole
+    # run (the crawl is the slow part), not just the post-match work.
+    started_at = datetime.now(UTC)
     listings = fetch_all_listings()
+    # A working crawl structurally cannot return zero listings: even letters
+    # with no drugs fall back to the ~70-row default slice, so an empty catalog
+    # means the crawl itself broke (200-status challenge page, redesign). Fail
+    # BEFORE any digest write -- an empty all-clear digest plus exit 0 would
+    # misreport a dead crawl as a quiet day from then on (INV-4) and keep
+    # pinging the cron's dead-man's-switch as success.
+    if not listings:
+        raise RuntimeError("watch crawl returned 0 PSG listings; aborting before digest write")
     products = list_watchlist()
     matches = match_listings(listings, products)
     matched = _matched_listings(matches)
@@ -127,9 +140,16 @@ def run_watch(*, extract: bool = True) -> WatchRunResult:
     # same-day digest. The non-zero exit code already signals the failure.
     if stats.errors and not alerts:
         out_path = digest_path()
+        # No digest was written on this branch, so the ledger must not name
+        # one (INV-4: never claim an artifact that does not exist).
+        digest_date = None
         log.info("watch_digest_skipped_on_error", errors=stats.errors, path=str(out_path))
     else:
         out_path = write_digest(alerts)
+        # The date embedded in the file actually written (digest-YYYY-MM-DD),
+        # parsed from the path rather than re-read from the clock so a run
+        # spanning midnight still records the digest it really wrote.
+        digest_date = out_path.stem.removeprefix("digest-")
 
     log.info(
         "watch_run_done",
@@ -142,6 +162,28 @@ def run_watch(*, extract: bool = True) -> WatchRunResult:
         alerts=len(alerts),
         digest=str(out_path),
     )
+    # Durable ledger row -- the truthful "a run completed" record (INV-4).
+    # Errored-but-completed runs (CLI exit 2) record too: they really ran, and
+    # their errors count is the honest state. Runs that RAISE (the zero-listings
+    # guard above, or a crash mid-pipeline) never reach this line, so an aborted
+    # run records nothing -- the cron's dead-man's-switch owns that class. The
+    # digest + alert rows are already durable here, so a DB hiccup while
+    # recording logs loudly instead of turning a completed run into a crash.
+    try:
+        record_watch_run(
+            started_at=started_at,
+            finished_at=datetime.now(UTC),
+            listings=len(listings),
+            matched=len(matched),
+            added=stats.added,
+            revised=stats.revised,
+            unchanged=stats.unchanged,
+            errors=stats.errors,
+            alerts=len(alerts),
+            digest_date=digest_date,
+        )
+    except Exception:
+        log.error("watch_run_record_failed", exc_info=True)
     return WatchRunResult(
         listings=len(listings),
         matched=len(matched),

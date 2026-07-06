@@ -2,8 +2,11 @@
 
 Given a `PsgListing`, the pipeline:
   1. Downloads the PDF (cached on disk).
-  2. Upserts the `psg_document` row keyed on the FDA application number
-     (`appl_no`) — the canonical PSG identity. Idempotent.
+  2. Resolves the `psg_document` row keyed on the FDA application number
+     (`appl_no`) — the canonical PSG identity. Idempotent. The row's
+     content-describing fields only ever commit together with a version row
+     (see `_commit_version_and_doc`), so the doc never claims content that
+     was not actually ingested.
   3. If the new content hash differs from the latest `psg_version`, creates a
      new version row, regenerates chunks (in Chroma), regenerates the
      `be_requirement` extraction. Idempotent on re-run.
@@ -20,7 +23,7 @@ from pathlib import Path
 
 from config.settings import get_settings
 from sqlalchemy import desc
-from sqlmodel import select
+from sqlmodel import Session, select
 
 from regwatch.common.logging import get_logger
 from regwatch.ingest.pdf_parser import ParsedPdf, parse_pdf
@@ -49,37 +52,79 @@ class IngestStats:
     errors: int = 0
 
 
-def _upsert_psg_document(listing: PsgListing, content_hash: str, pdf_path: str) -> tuple[int, bool]:
-    """Upsert psg_document keyed on the FDA application number. Returns (id, is_new)."""
-    rld_or_rs_key = ",".join(sorted(listing.rld_or_rs_numbers))
+def _apply_content_fields(
+    doc: PsgDocument, listing: PsgListing, content_hash: str, pdf_path: str
+) -> None:
+    """Set the doc-row fields that describe INGESTED CONTENT (which revision the
+    document is). Callers must only apply these when the matching version row
+    is (or is being) committed, so the doc never advertises a revision (e.g.
+    a draft->final flip) whose content was never ingested."""
+    doc.content_hash = content_hash
+    doc.psg_type = listing.psg_type
+    doc.recommended_date = listing.recommended_date
+    doc.source_url = listing.pdf_url
+    doc.pdf_path = pdf_path
+
+
+def _latest_hash_in_session(s: Session, psg_document_id: int) -> str | None:
+    """Most recent version content_hash for a doc, read inside the caller's session."""
+    rows = list(
+        s.scalars(
+            select(PsgVersion.content_hash)
+            .where(PsgVersion.psg_document_id == psg_document_id)
+            .order_by(desc(PsgVersion.captured_at))  # type: ignore[arg-type]
+            .limit(1)
+        )
+    )
+    return rows[0] if rows else None
+
+
+def _resolve_psg_document(
+    listing: PsgListing, content_hash: str, pdf_path: str
+) -> tuple[int | None, str | None]:
+    """Look up the doc row for a listing. Returns (doc_id or None, latest version hash).
+
+    Refreshes the listing-identity fields and last_seen_at on every sighting,
+    but content-describing fields are refreshed here ONLY when the latest
+    ingested version already matches this download (an unchanged sighting, so
+    the fields describe real content). For a new revision they must wait for
+    _commit_version_and_doc: parse/summarize can still fail after this point,
+    and a doc row updated without its version would serve the NEW revision's
+    metadata (psg_type/recommended_date/content_hash) next to the OLD
+    version's content on every read of sources/psg.py."""
     with session_scope() as s:
         stmt = select(PsgDocument).where(PsgDocument.appl_no == listing.appl_no)
         rows = list(s.scalars(stmt))
-        if rows:
-            doc = rows[0]
-            doc.last_seen_at = datetime.now(UTC)
-            doc.active_ingredient = listing.active_ingredient
-            doc.normalized_name = listing.normalized_name
-            doc.dosage_form = listing.dosage_form
-            doc.route = listing.route
-            doc.rld_or_rs_number = rld_or_rs_key
-            doc.content_hash = content_hash
-            doc.recommended_date = listing.recommended_date
-            doc.psg_type = listing.psg_type
-            doc.source_url = listing.pdf_url
-            doc.pdf_path = pdf_path
-            s.add(doc)
-            s.flush()
-            if doc.id is None:
-                raise RuntimeError("psg_document upsert did not produce an id")
-            return doc.id, False
+        if not rows:
+            return None, None
+        doc = rows[0]
+        if doc.id is None:
+            raise RuntimeError("psg_document row has no id")
+        latest_hash = _latest_hash_in_session(s, doc.id)
+        doc.last_seen_at = datetime.now(UTC)
+        doc.active_ingredient = listing.active_ingredient
+        doc.normalized_name = listing.normalized_name
+        doc.dosage_form = listing.dosage_form
+        doc.route = listing.route
+        doc.rld_or_rs_number = ",".join(sorted(listing.rld_or_rs_numbers))
+        if latest_hash == content_hash:
+            _apply_content_fields(doc, listing, content_hash, pdf_path)
+        s.add(doc)
+        return doc.id, latest_hash
+
+
+def _create_psg_document(listing: PsgListing, content_hash: str, pdf_path: str) -> int:
+    """Create a brand-new doc row. Content columns are NOT NULL so they are set
+    at insert; there is no prior version whose served content they could
+    misdescribe, and downstream steps key parsed text/chunks on the new id."""
+    with session_scope() as s:
         doc = PsgDocument(
             appl_no=listing.appl_no,
             active_ingredient=listing.active_ingredient,
             normalized_name=listing.normalized_name,
             dosage_form=listing.dosage_form,
             route=listing.route,
-            rld_or_rs_number=rld_or_rs_key,
+            rld_or_rs_number=",".join(sorted(listing.rld_or_rs_numbers)),
             psg_type=listing.psg_type,
             recommended_date=listing.recommended_date,
             source_url=listing.pdf_url,
@@ -90,21 +135,7 @@ def _upsert_psg_document(listing: PsgListing, content_hash: str, pdf_path: str) 
         s.flush()
         if doc.id is None:
             raise RuntimeError("psg_document insert did not produce an id")
-        return doc.id, True
-
-
-def _latest_version_hash(psg_document_id: int) -> str | None:
-    """Return only the most recent content_hash for a doc, to avoid detached instances."""
-    with session_scope() as s:
-        rows = list(
-            s.scalars(
-                select(PsgVersion.content_hash)
-                .where(PsgVersion.psg_document_id == psg_document_id)
-                .order_by(desc(PsgVersion.captured_at))  # type: ignore[arg-type]
-                .limit(1)
-            )
-        )
-        return rows[0] if rows else None
+        return doc.id
 
 
 def _latest_version_id(psg_document_id: int) -> int | None:
@@ -165,22 +196,51 @@ def _be_requirement_exists(version_id: int) -> bool:
         return bool(rows)
 
 
-def _insert_version(
+def _commit_version_and_doc(
+    *,
+    listing: PsgListing,
     psg_document_id: int,
     content_hash: str,
-    recommended_date: str | None,
+    pdf_path: str,
     parsed_text_path: str | None,
     diff_summary: str | None,
-) -> int:
+) -> int | None:
+    """Insert the new version AND the doc row's content fields in ONE transaction.
+
+    Returns the new version id, or None when the latest version already carries
+    this hash: an overlapping run (e.g. the watch-daily cron plus a manual
+    `ingest-all` against the same DB) landed the identical revision between the
+    caller's early hash check and this commit. Skipping the duplicate keeps a
+    single version row per revision, so pairs_without_alert cannot re-alert the
+    same FDA change on the next run (INV-4).
+
+    One transaction, two reasons:
+    - The doc row must never describe content that has no version row: a parse
+      or LLM failure aborts before this function, leaving the doc on its prior
+      state instead of advertising a revision that was never ingested.
+    - Re-checking the latest hash here shrinks the cross-process check-then-act
+      window from the whole parse+LLM stretch (seconds to tens of seconds) to
+      milliseconds. A residual window remains because psg_version has no unique
+      (psg_document_id, content_hash) constraint (needs a migration, deferred);
+      the watch-daily workflow concurrency group is the primary guard against
+      overlapping runs.
+    """
     with session_scope() as s:
+        if _latest_hash_in_session(s, psg_document_id) == content_hash:
+            return None
         v = PsgVersion(
             psg_document_id=psg_document_id,
             content_hash=content_hash,
-            recommended_date=recommended_date,
+            recommended_date=listing.recommended_date,
             parsed_text_path=parsed_text_path,
             diff_summary=diff_summary,
         )
         s.add(v)
+        doc = s.get(PsgDocument, psg_document_id)
+        if doc is None:
+            raise RuntimeError("psg_document row vanished during ingest")
+        _apply_content_fields(doc, listing, content_hash, pdf_path)
+        s.add(doc)
         s.flush()
         if v.id is None:
             raise RuntimeError("psg_version insert did not produce an id")
@@ -298,9 +358,10 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
     try:
         log.info("psg_download", appl_no=listing.appl_no, name=listing.normalized_name)
         path, pdf_bytes, content_hash = download_pdf(listing.pdf_url)
-        doc_id, is_new = _upsert_psg_document(listing, content_hash, str(path))
-        latest_hash = _latest_version_hash(doc_id)
-        if latest_hash == content_hash:
+        doc_id, latest_hash = _resolve_psg_document(listing, content_hash, str(path))
+        if doc_id is None:
+            doc_id = _create_psg_document(listing, content_hash, str(path))
+        elif latest_hash == content_hash:
             # Content is unchanged, but a prior run may have committed this
             # version row and then crashed before its chunks and/or BE row landed
             # (separate stores, not atomic). Because the hash matches forever,
@@ -339,20 +400,30 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
             current_text=parsed.text,
             current_page_count=len(parsed.pages),
         )
-        version_id = _insert_version(
+        version_id = _commit_version_and_doc(
+            listing=listing,
             psg_document_id=doc_id,
             content_hash=content_hash,
-            recommended_date=listing.recommended_date,
+            pdf_path=str(path),
             parsed_text_path=_write_parsed_text(doc_id, content_hash, parsed.text),
             diff_summary=diff_summary,
         )
+        if version_id is None:
+            # An overlapping run already committed this exact revision (and owns
+            # its chunks/BE backfill); reporting it changed again here would
+            # double-count one FDA change (INV-4).
+            return "unchanged"
 
         _regenerate_chunks(doc_id, version_id, parsed, listing)
 
         if extract:
             _extract_and_save_be(doc_id, version_id, parsed.pages, listing.appl_no)
 
-        return "added" if is_new else "revised"
+        # Classify by version history, not doc-row novelty: a doc row can
+        # persist from an earlier run whose parse failed AFTER the row was
+        # created, and that PSG has still never been ingested; its first
+        # successful version must be reported "added", not "revised".
+        return "added" if latest_hash is None else "revised"
     except Exception as exc:
         # error_type lets a watch run be triaged by which guard fired
         # (PdfTooLargeError / PdfInvalidError / PdfParseTimeoutError / ...).

@@ -59,9 +59,15 @@ def summarize_change(
     summary = resp.text.strip()
 
     # Validate any [p.N] tokens point to real pages in the CURRENT version.
-    bad = [m.group(1) for m in _CITE_RE.finditer(summary) if int(m.group(1)) > current_page_count]
+    # Pages are 1-indexed (see chunker), so [p.0] is as ungrounded as a page
+    # beyond the count; both ends must be rejected.
+    bad = [
+        m.group(1)
+        for m in _CITE_RE.finditer(summary)
+        if not 1 <= int(m.group(1)) <= current_page_count
+    ]
     if bad:
-        # INV-1: a [p.N] beyond the document's page count is an ungrounded
+        # INV-1: a [p.N] outside the document's page range is an ungrounded
         # provenance claim. Don't merely log it — drop the whole sentence that
         # carries it so the unsupported claim never reaches a user surface
         # (dossier "Latest change:", QueryCitation.diff_summary, watch digest).
@@ -72,7 +78,7 @@ def summarize_change(
 
 
 def _strip_bad_cite_sentences(summary: str, current_page_count: int) -> str:
-    """Drop sentences containing a [p.N] that exceeds current_page_count.
+    """Drop sentences containing a [p.N] outside 1..current_page_count.
 
     Splits on sentence terminators (. ! ?), removes any sentence carrying an
     out-of-range page citation, and rejoins. A sentence with only in-range
@@ -85,7 +91,9 @@ def _strip_bad_cite_sentences(summary: str, current_page_count: int) -> str:
         sentence = match.group(0).replace(_CITE_DOT, ".")
         if not sentence.strip():
             continue
-        has_bad = any(int(m.group(1)) > current_page_count for m in _CITE_RE.finditer(sentence))
+        has_bad = any(
+            not 1 <= int(m.group(1)) <= current_page_count for m in _CITE_RE.finditer(sentence)
+        )
         if not has_bad:
             kept.append(sentence.strip())
     return " ".join(kept)

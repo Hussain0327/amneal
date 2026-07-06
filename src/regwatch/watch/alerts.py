@@ -24,10 +24,10 @@ from pathlib import Path
 from typing import Any
 
 from config.settings import get_settings
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlmodel import select
+from sqlmodel import col, select
 
 from regwatch.common.logging import get_logger
 from regwatch.store.db import session_scope
@@ -39,7 +39,9 @@ log = get_logger(__name__)
 
 # The fields persisted/returned for one alert — the wire contract for
 # GET /watch/latest (lib/api.ts AlertRecord). `id`/`created_at` are storage
-# bookkeeping and never cross the wire.
+# bookkeeping and never cross the wire. The wire ALSO carries `change_kind`
+# ("new" | "revised"), which is NOT stored: latest_digest_records derives it
+# from psg_version history at read time, so it is deliberately absent here.
 _RECORD_FIELDS = (
     "product_id",
     "active_ingredient",
@@ -246,31 +248,93 @@ def write_digest(alerts: list[Alert], *, when: date | None = None) -> Path:
     return path
 
 
+def _since_key(since: datetime) -> str:
+    """Normalize ``since`` to the format actually stored in ``captured_at``.
+
+    Stored values are timezone-NAIVE isoformat strings: the writer is
+    ``PsgVersion.captured_at.isoformat()`` and that column is a naive DateTime
+    (no ``timezone=True``), so round-tripped values carry NO ``+00:00`` suffix.
+    A tz-aware ``since.isoformat()`` DOES end in ``+00:00``, which sorts AFTER
+    its exact stored equal (the stored string is a strict byte-prefix), so the
+    documented inclusive at/after boundary would silently drop the boundary
+    row. Comparing naive-to-naive keeps the lexicographic ``>=`` chronological
+    for the writer's format AND inclusive at exact equality.
+    """
+    if since.tzinfo is None:
+        # Treat naive input as already-UTC (mirrors the API's _as_utc):
+        # astimezone() on a naive value would assume LOCAL time and shift it.
+        return since.isoformat()
+    return since.astimezone(UTC).replace(tzinfo=None).isoformat()
+
+
+def count_digest_records(*, since: datetime | None = None) -> int:
+    """COUNT of durable alerts matching the same ``since`` filter as
+    ``latest_digest_records``.
+
+    Split out so GET /watch/latest can report the TRUE total next to a bounded
+    page -- ``len(page)`` alone reads as "that's everything" and rows past the
+    cap would otherwise be invisible through the API forever.
+    """
+    with session_scope() as s:
+        stmt = select(func.count()).select_from(AlertRow)
+        if since is not None:
+            stmt = stmt.where(AlertRow.captured_at >= _since_key(since))
+        return int(s.scalars(stmt).one())
+
+
 def latest_digest_records(
-    limit: int = 100, *, since: datetime | None = None
+    limit: int = 100, *, offset: int = 0, since: datetime | None = None
 ) -> list[dict[str, Any]]:
-    """Return the most recent durable alerts (UI feed), newest first.
+    """Return one page of durable alerts (UI feed), newest first.
 
-    Reads from the `alert` table — durable across redeploys. The returned dict
-    keys match the Alert dataclass / former JSONL shape exactly, so the
-    /watch/latest wire contract and lib/api.ts AlertRecord are unaffected.
+    Reads from the `alert` table -- durable across redeploys. The returned dict
+    keys match the Alert dataclass / former JSONL shape, plus a derived
+    ``change_kind`` ("new" | "revised") -- lib/api.ts AlertRecord mirrors both.
 
-    ``since`` (tz-aware UTC) keeps only alerts whose ``captured_at`` is at/after
-    it, applied IN SQL BEFORE the limit so a genuinely-recent alert can never be
-    dropped by the row cap (the prior code limited by ``created_at`` then filtered
-    by ``captured_at`` in Python, which could hide recent rows). ``captured_at``
-    is a string column, but every value is a tz-aware UTC ``datetime.isoformat()``
-    (fixed-width through seconds, ``+00:00`` suffix), so a lexicographic ``>=`` is
-    chronological. Callers MUST pass a UTC-aware datetime — a naive value would
-    serialize without the offset and mis-compare (the API normalizes via _as_utc).
+    ``since`` keeps only alerts whose ``captured_at`` is at/after it (INCLUSIVE
+    at the boundary), applied IN SQL BEFORE the limit so a genuinely-recent
+    alert can never be dropped by the row cap (the prior code limited by
+    ``created_at`` then filtered by ``captured_at`` in Python, which could hide
+    recent rows). ``captured_at`` is a string column of NAIVE-UTC isoformat
+    values (see ``_since_key``), so ``since`` is normalized to that same shape
+    before the lexicographic compare. ``offset`` pages the feed;
+    ``count_digest_records`` (same filter) reports the full matching total.
     """
     with session_scope() as s:
         stmt = select(AlertRow)
         if since is not None:
-            stmt = stmt.where(AlertRow.captured_at >= since.isoformat())
-        ordered = stmt.order_by(desc(AlertRow.created_at), desc(AlertRow.id)).limit(limit)  # type: ignore[arg-type]
+            stmt = stmt.where(AlertRow.captured_at >= _since_key(since))
+        ordered = (
+            stmt.order_by(desc(AlertRow.created_at), desc(AlertRow.id))  # type: ignore[arg-type]
+            .offset(offset)
+            .limit(limit)
+        )
         rows = list(s.scalars(ordered))
+        # `change_kind` is derived STRUCTURALLY: an alert is "new" iff no
+        # psg_version row for the same document precedes its version (smaller
+        # id). The prose diff_summary can degrade to the initial-version marker
+        # when a revision's prior parsed text is gone (the prod cron runner's
+        # disk is ephemeral), so kind must never be inferred from prose. Not
+        # persisted -- no migration; the DB answers it authoritatively at read
+        # time. One grouped query covers the whole page.
+        doc_ids = {r.psg_document_id for r in rows}
+        first_version_id: dict[int, int] = {}
+        if doc_ids:
+            grouped = s.execute(
+                select(PsgVersion.psg_document_id, func.min(PsgVersion.id))
+                .where(col(PsgVersion.psg_document_id).in_(doc_ids))
+                .group_by(col(PsgVersion.psg_document_id))
+            ).all()
+            first_version_id = {doc_id: min_id for doc_id, min_id in grouped}
         # Materialize INSIDE the session: expire_on_commit detaches these rows
         # on scope exit, so reading attributes afterward would lazy-load against
         # a closed session. The returned dicts are plain values, ORM-free.
-        return [{field: getattr(r, field) for field in _RECORD_FIELDS} for r in rows]
+        records: list[dict[str, Any]] = []
+        for r in rows:
+            rec: dict[str, Any] = {field: getattr(r, field) for field in _RECORD_FIELDS}
+            first_id = first_version_id.get(r.psg_document_id)
+            rec["change_kind"] = (
+                "new" if first_id is None or r.psg_version_id <= first_id else "revised"
+            )
+            records.append(rec)
+        return records
