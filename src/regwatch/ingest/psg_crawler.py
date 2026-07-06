@@ -145,12 +145,48 @@ def fetch_index_html(*, client: httpx.Client | None = None, url: str = PSG_INDEX
             client.close()
 
 
+class CrawlPageError(RuntimeError):
+    """A 200-status index page carried none of the expected PSG table markup.
+
+    Akamai serves challenge/maintenance pages WITH HTTP 200, and a full FDA
+    redesign would also parse to zero rows without any HTTP error -- so without
+    this check a dead crawl degrades to "0 listings" and masquerades as a quiet
+    day. Verified against the live letter routes (including empty letters like
+    J): a real page always renders <table class="drugTable" id="drugTable">,
+    even with an empty tbody, so a page carrying neither drugData rows nor that
+    table is a crawl failure, never an empty catalog.
+    """
+
+
+def ensure_psg_index_markup(html: str, *, url: str) -> None:
+    """Raise CrawlPageError when `html` is not recognizably a PSG index page.
+
+    Zero PARSED rows is legal (a letter's results table may be empty); zero
+    rows AND no results-table shell means the fetch got a challenge,
+    maintenance, or redesigned page and the crawl must fail loudly instead of
+    contributing an empty slice to the catalog union.
+    """
+    tree = HTMLParser(html)
+    if tree.css_first("tr.drugData") is not None:
+        return
+    # A legitimately-empty letter still renders the results-table shell
+    # (live letter-J page: "0 record(s) found", table present, tbody empty).
+    if tree.css_first("table.drugTable") is not None or tree.css_first("#drugTable") is not None:
+        return
+    raise CrawlPageError(f"no PSG table markup on 200-status page (challenge/redesign?): {url}")
+
+
 def fetch_all_listings(*, client: httpx.Client | None = None) -> list[PsgListing]:
     """Enumerate the COMPLETE PSG catalog by walking the A-Z letter routes.
 
     The landing page only renders a recent slice (~70 rows); iterating
     `event=Home.Letter&searchLetter=A..Z` and unioning by the parser's de-dupe
     key recovers the full database (~1,800 PSGs / ~1,200 distinct drugs).
+
+    Raises CrawlPageError when ANY letter page lacks the PSG table markup: a
+    partial union (e.g. maintenance kicking in after letter K) would silently
+    drop every watched product in the missing range, so the whole crawl fails
+    rather than merge a partial catalog.
     """
     s = get_settings()
     owned = False
@@ -164,7 +200,9 @@ def fetch_all_listings(*, client: httpx.Client | None = None) -> list[PsgListing
     try:
         merged: dict[tuple[str, str | None, str | None, str], PsgListing] = {}
         for letter in string.ascii_uppercase:
-            html = fetch_index_html(client=client, url=PSG_LETTER_URL.format(letter=letter))
+            url = PSG_LETTER_URL.format(letter=letter)
+            html = fetch_index_html(client=client, url=url)
+            ensure_psg_index_markup(html, url=url)
             for row in parse_listings(html):
                 key = (row.appl_no, row.route, row.dosage_form, row.psg_type)
                 merged.setdefault(key, row)

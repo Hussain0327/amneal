@@ -345,3 +345,40 @@ class Alert(SQLModel, table=True):
     rationale: str
     source_url: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
+
+
+class WatchRun(SQLModel, table=True):
+    """One COMPLETED Watch pipeline run -- the durable "the cron actually ran" ledger.
+
+    Before this table the only record of a run was the JSONL digest on the
+    GitHub cron runner's ephemeral disk, so the UI could not distinguish a
+    quiet day (recent run, zero alerts) from a cron that has been dead for a
+    week -- both looked like an empty feed. One row per run that COMPLETES,
+    including completed-with-errors runs (an errored-but-completed run is a
+    real run; INV-4 wants the truthful record). A run that RAISES (e.g. the
+    zero-listings crawl guard) writes nothing: the cron's dead-man's-switch
+    owns that failure class, and a row here would misreport an aborted run.
+
+    Timestamps mirror ``Alert.created_at`` exactly: plain DateTime columns (no
+    ``timezone=True``) written from ``datetime.now(UTC)``, so values round-trip
+    as naive-UTC like every other timestamp in this schema. ``digest_date`` is
+    the YYYY-MM-DD of the JSONL digest file actually written, or None when the
+    errored-run branch skipped that write (never claim an artifact that does
+    not exist).
+    """
+
+    __tablename__ = "watch_run"
+
+    id: int | None = Field(default=None, primary_key=True)
+    started_at: datetime
+    # latest_watch_run reads newest-by-finished_at; the index keeps that read a
+    # single index scan as the ledger grows one row per cron day forever.
+    finished_at: datetime = Field(index=True)
+    listings: int
+    matched: int
+    added: int
+    revised: int
+    unchanged: int
+    errors: int
+    alerts: int
+    digest_date: str | None = None

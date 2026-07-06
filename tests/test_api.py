@@ -7,11 +7,15 @@ behavior itself is locked down in tests/test_auth.py.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from config.settings import get_settings
 from fastapi.testclient import TestClient
 
 from regwatch.api.main import app
+from regwatch.store.db import session_scope
+from regwatch.store.models import Alert
 
 
 def _open() -> TestClient:
@@ -19,6 +23,36 @@ def _open() -> TestClient:
     c = TestClient(app)
     c.__enter__()
     return c
+
+
+def _seed_alert(
+    appl_no: str,
+    captured_at: str,
+    n: int,
+    *,
+    created_at: datetime | None = None,
+) -> Alert:
+    """A durable alert row for the /watch/latest tests.
+
+    ``captured_at`` values passed in should use the WRITER'S shape: naive-UTC
+    isoformat with no +00:00 suffix (PsgVersion.captured_at is a naive DateTime
+    column). ``created_at`` is overridable so tests can control feed order.
+    """
+    if created_at is None:
+        created_at = datetime.now(UTC)
+    return Alert(
+        product_id=n,
+        active_ingredient="Albuterol Sulfate",
+        listing_appl_no=appl_no,
+        listing_psg_type="final",
+        psg_document_id=1,
+        psg_version_id=n,  # distinct -> no unique-key conflict
+        captured_at=captured_at,
+        confidence=1.0,
+        rationale="canonical",
+        source_url=f"http://example/{appl_no}.pdf",
+        created_at=created_at,
+    )
 
 
 def test_health() -> None:
@@ -181,6 +215,42 @@ def test_create_product_rejects_bad_source(auth_client: TestClient) -> None:
     assert r.status_code == 422
 
 
+def test_create_product_rejects_drugsfda_source(auth_client: TestClient) -> None:
+    """INV-5 at the API boundary: 'drugsfda' means machine-verified provenance
+    from the automated Drugs@FDA import. A hand-typed row claiming it would
+    fabricate that verification, so the API refuses it outright."""
+    r = auth_client.post(
+        "/products",
+        json={"active_ingredient": "Foo", "source": "drugsfda"},
+    )
+    assert r.status_code == 422
+    assert "automated" in r.json()["detail"]
+    # Nothing was persisted under the fabricated provenance.
+    listing = auth_client.get("/products").json()
+    assert not any(p["source"] == "drugsfda" for p in listing["products"])
+
+
+def test_create_product_rejects_blank_active_ingredient(auth_client: TestClient) -> None:
+    """Empty/whitespace-only names normalize to "" -- permanently unmatchable
+    junk (DELETE /products only soft-unwatches; the row is kept forever).
+    422 at the boundary."""
+    for bad in ("", "   ", "\t\n"):
+        r = auth_client.post(
+            "/products",
+            json={"active_ingredient": bad, "source": "manual"},
+        )
+        assert r.status_code == 422, f"accepted blank active_ingredient {bad!r}"
+
+    # Padded-but-real names are stored stripped, not rejected.
+    r = auth_client.post(
+        "/products",
+        json={"active_ingredient": "  Padded Name  ", "source": "manual"},
+    )
+    assert r.status_code == 201
+    listing = auth_client.get("/products").json()
+    assert any(p["active_ingredient"] == "Padded Name" for p in listing["products"])
+
+
 def test_create_and_list_product(auth_client: TestClient) -> None:
     auth_client.post(
         "/products",
@@ -200,12 +270,74 @@ def test_create_and_list_product(auth_client: TestClient) -> None:
     assert any(p["active_ingredient"] == "Romidepsin" for p in listing["products"])
 
 
+def test_delete_product_unwatches_and_is_idempotent(auth_client: TestClient) -> None:
+    """DELETE soft-unwatches: 200 + removed=true + the updated watchlist. A
+    re-delete of the (kept, already-unwatched) row is idempotent -- the
+    caller's goal state holds, so it is removed=true again, never a 404."""
+    created = auth_client.post(
+        "/products",
+        json={"active_ingredient": "Romidepsin", "source": "manual"},
+    )
+    assert created.status_code == 201
+    product_id = created.json()["products"][0]["id"]
+
+    r = auth_client.delete(f"/products/{product_id}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["removed"] is True
+    assert all(p["id"] != product_id for p in body["products"])
+    assert auth_client.get("/products").json()["count"] == 0
+
+    again = auth_client.delete(f"/products/{product_id}")
+    assert again.status_code == 200
+    assert again.json()["removed"] is True
+
+
+def test_delete_product_404_when_row_never_existed(auth_client: TestClient) -> None:
+    r = auth_client.delete("/products/999999")
+    assert r.status_code == 404
+
+
 def test_watch_latest_returns_empty_when_no_alerts(auth_client: TestClient) -> None:
     r = auth_client.get("/watch/latest")
     assert r.status_code == 200
     body = r.json()
     assert body["count"] == 0
     assert body["alerts"] == []
+    # Truthful "never ran" (INV-4): an empty DB must report null, not a
+    # fabricated quiet-day run.
+    assert body["last_run"] is None
+
+
+def test_watch_latest_carries_last_run_from_ledger(auth_client: TestClient) -> None:
+    """`last_run` is the newest durable watch_run row in the agreed wire shape,
+    so the UI can distinguish "quiet day" from "cron dead for a week"."""
+    from regwatch.watch.runs import record_watch_run
+
+    record_watch_run(
+        started_at=datetime(2026, 7, 1, 7, 17, 0),
+        finished_at=datetime(2026, 7, 1, 7, 21, 0),
+        listings=1795,
+        matched=2,
+        added=1,
+        revised=0,
+        unchanged=1,
+        errors=0,
+        alerts=1,
+        digest_date="2026-07-01",
+    )
+    body = auth_client.get("/watch/latest").json()
+    assert body["last_run"] == {
+        "started_at": "2026-07-01T07:17:00",
+        "finished_at": "2026-07-01T07:21:00",
+        "listings": 1795,
+        "matched": 2,
+        "added": 1,
+        "revised": 0,
+        "unchanged": 1,
+        "errors": 0,
+        "alerts": 1,
+    }
 
 
 def test_watch_latest_rejects_invalid_since(auth_client: TestClient) -> None:
@@ -214,28 +346,12 @@ def test_watch_latest_rejects_invalid_since(auth_client: TestClient) -> None:
 
 
 def test_watch_latest_since_filters_by_captured_at(auth_client: TestClient) -> None:
-    """`since` keeps only alerts captured at/after it. The filter is pushed into
-    SQL before the row cap, so a recent alert is never dropped by limit=200."""
-    from regwatch.store.db import session_scope
-    from regwatch.store.models import Alert
-
-    def _alert(appl_no: str, captured_at: str, n: int) -> Alert:
-        return Alert(
-            product_id=n,
-            active_ingredient="Albuterol Sulfate",
-            listing_appl_no=appl_no,
-            listing_psg_type="final",
-            psg_document_id=1,
-            psg_version_id=n,  # distinct -> no unique-key conflict
-            captured_at=captured_at,
-            confidence=1.0,
-            rationale="canonical",
-            source_url=f"http://example/{appl_no}.pdf",
-        )
-
+    """`since` keeps only alerts captured at/after it, INCLUSIVE at the exact
+    boundary. Stored captured_at strings are the writer's naive-UTC isoformat
+    (no +00:00), so the SQL compare must normalize `since` to that shape."""
     with session_scope() as s:
-        s.add(_alert("100001", "2026-06-01T00:00:00+00:00", 1))
-        s.add(_alert("100002", "2026-06-20T00:00:00+00:00", 2))
+        s.add(_seed_alert("100001", "2026-06-01T00:00:00", 1))
+        s.add(_seed_alert("100002", "2026-06-20T00:00:00", 2))
 
     both = auth_client.get("/watch/latest").json()
     assert {a["listing_appl_no"] for a in both["alerts"]} >= {"100001", "100002"}
@@ -245,6 +361,88 @@ def test_watch_latest_since_filters_by_captured_at(auth_client: TestClient) -> N
     appl_nos = {a["listing_appl_no"] for a in r.json()["alerts"]}
     assert "100002" in appl_nos  # captured after `since`
     assert "100001" not in appl_nos  # captured before `since`, excluded
+
+    # Boundary: a tz-aware `since` equal to the stored instant keeps the row.
+    # Pre-fix, '2026-06-20T00:00:00' >= '2026-06-20T00:00:00+00:00' was False
+    # lexicographically and the cursor client silently lost the boundary alert.
+    boundary = auth_client.get(
+        "/watch/latest", params={"since": "2026-06-20T00:00:00+00:00"}
+    ).json()
+    assert {a["listing_appl_no"] for a in boundary["alerts"]} == {"100002"}
+    assert boundary["total"] == 1
+
+
+def test_watch_latest_since_is_applied_before_the_row_cap(auth_client: TestClient) -> None:
+    """Regression guard for the acknowledged prior bug shape: cap the newest N
+    by created_at THEN filter captured_at in Python. The ONLY since-matching
+    alert is seeded with the oldest created_at (outside every post-limit
+    window), so it survives only if the filter runs in SQL before the cap."""
+    base = datetime(2026, 6, 1, tzinfo=UTC)
+    with session_scope() as s:
+        # Recent capture, oldest insert: a post-limit filter evicts it first.
+        s.add(_seed_alert("200000", "2026-06-20T00:00:00", 10, created_at=base))
+        for i in range(1, 6):  # 5 old-captured alerts inserted AFTER it
+            s.add(
+                _seed_alert(
+                    f"20000{i}",
+                    "2026-05-01T00:00:00",
+                    10 + i,
+                    created_at=base + timedelta(minutes=i),
+                )
+            )
+
+    r = auth_client.get(
+        "/watch/latest",
+        params={"since": "2026-06-10T00:00:00+00:00", "limit": 3},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert [a["listing_appl_no"] for a in body["alerts"]] == ["200000"]
+    assert body["count"] == 1
+    assert body["total"] == 1
+
+
+def test_watch_latest_paginates_with_true_total(auth_client: TestClient) -> None:
+    """limit/offset page the durable feed and `total` is the FULL matching
+    count -- len(page) alone reads as "that's everything" and rows past the
+    cap were previously unreachable through the API forever."""
+    base = datetime(2026, 6, 1, tzinfo=UTC)
+    with session_scope() as s:
+        for i in range(5):
+            s.add(
+                _seed_alert(
+                    f"30000{i}",
+                    "2026-06-01T00:00:00",
+                    20 + i,
+                    created_at=base + timedelta(minutes=i),
+                )
+            )
+
+    seen: list[str] = []
+    for offset in (0, 2, 4):
+        body = auth_client.get("/watch/latest", params={"limit": 2, "offset": offset}).json()
+        assert body["total"] == 5
+        assert body["limit"] == 2
+        assert body["offset"] == offset
+        assert body["count"] == len(body["alerts"])
+        seen += [a["listing_appl_no"] for a in body["alerts"]]
+    # Newest-first across pages: no overlap, nothing lost.
+    assert seen == ["300004", "300003", "300002", "300001", "300000"]
+
+    assert auth_client.get("/watch/latest", params={"limit": 0}).status_code == 422
+    assert auth_client.get("/watch/latest", params={"limit": 501}).status_code == 422
+    assert auth_client.get("/watch/latest", params={"offset": -1}).status_code == 422
+
+
+def test_watch_latest_alerts_carry_change_kind(auth_client: TestClient) -> None:
+    """Backend half of the New/Revised chip: every alert on the wire carries a
+    STRUCTURAL change_kind (here "new": no psg_version history at all), so the
+    UI never infers kind from degraded diff prose. The "revised" derivation is
+    unit-tested against real version rows in tests/test_alerts.py."""
+    with session_scope() as s:
+        s.add(_seed_alert("400001", "2026-06-01T00:00:00", 40))
+    body = auth_client.get("/watch/latest").json()
+    assert body["alerts"][0]["change_kind"] == "new"
 
 
 def test_assemble_refuses_when_no_matching_psg(auth_client: TestClient) -> None:

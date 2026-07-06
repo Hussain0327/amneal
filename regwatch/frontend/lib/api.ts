@@ -109,10 +109,42 @@ export interface AlertRecord {
   confidence: number;
   rationale: string;
   source_url: string;
+  // Structural New-vs-Revised signal, derived server-side from version history
+  // (whether a prior psg_version exists for the doc). Optional because alerts
+  // serialized before the field shipped omit it; consumers fall back to the
+  // "Initial version ingested" prose marker, which prod revisions can carry
+  // when the prior parsed text was lost (ephemeral cron runner disk).
+  change_kind?: "new" | "revised";
+}
+// Telemetry from the most recent completed watch run, straight off the durable
+// run ledger. Rendered by the Watch page so "no alerts" can be read honestly:
+// an empty feed with a fresh run means "nothing changed", while a stale or
+// error-laden run means the feed itself may be wrong. Counters are the run's
+// own tallies (INV-4: they report only what that run actually did).
+export interface WatchRunSummary {
+  started_at: string;
+  finished_at: string;
+  listings: number;
+  matched: number;
+  added: number;
+  revised: number;
+  unchanged: number;
+  errors: number;
+  alerts: number;
 }
 export interface WatchLatest {
+  // The feed is a newest-first window: `alerts` carries at most `limit` rows
+  // from `offset`, `count` is the page size, and `total` is the full matching
+  // ledger count -- kept so the page can say "showing newest N of M" instead
+  // of passing one page off as the whole history.
   count: number;
+  total: number;
+  limit: number;
+  offset: number;
   alerts: AlertRecord[];
+  // null when no watch run has ever recorded (fresh install / wiped ledger) --
+  // the page must say so rather than imply a check happened.
+  last_run: WatchRunSummary | null;
 }
 
 export interface ProductRecord {

@@ -76,75 +76,121 @@ def _form_route_compatible(listing: PsgListing, product: dict[str, Any]) -> bool
     )
 
 
-def _index_watchlist(products: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Build a (key -> products) index for fast canonical/stripped lookup."""
-    index: dict[str, list[dict[str, Any]]] = {}
+def _index_watchlist(
+    products: list[dict[str, Any]],
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    """Build (canonical key -> products, stripped key -> products) indexes.
+
+    Two maps, not one merged dict: the emitted rationale/confidence must record
+    WHICH product-side key was hit. A merged index let a listing whose canonical
+    string equaled only a product's STRIPPED key claim 'canonical'/1.0 -- a
+    salt-preserving exact match that never happened -- in the durable alert row.
+    """
+    canonical_index: dict[str, list[dict[str, Any]]] = {}
+    stripped_index: dict[str, list[dict[str, Any]]] = {}
     for p in products:
         canon = canonical_name(p.get("active_ingredient", ""))
         strip = stripped_name(p.get("active_ingredient", ""))
-        for key in {canon, strip}:
-            if not key:
-                continue
-            index.setdefault(key, []).append(p)
-    return index
+        if canon:
+            canonical_index.setdefault(canon, []).append(p)
+        # An all-salt-token name ("Potassium Chloride") strips to "": never
+        # index the empty key, or distinct electrolytes would cross-match.
+        if strip:
+            stripped_index.setdefault(strip, []).append(p)
+    return canonical_index, stripped_index
 
 
 def match_listings(listings: list[PsgListing], products: list[dict[str, Any]]) -> list[WatchMatch]:
     """Return all matches between listings and products."""
     if not products:
         return []
-    index = _index_watchlist(products)
+    canonical_index, stripped_index = _index_watchlist(products)
 
     matches: list[WatchMatch] = []
     for li in listings:
         listing_canon = li.normalized_name
         listing_strip = li.stripped_name
 
-        # The name-match branches below short-circuit (`continue`) on a NAME hit
-        # regardless of form/route: once the listing's ingredient is recognized
-        # we have made our decision for it, and `_form_route_compatible` only
-        # filters WHICH of the same-named products alert (the fan-out gate).
+        # Each name-match branch below short-circuits (`continue`) only when it
+        # EMITTED at least one match. A name-key hit whose whole bucket was then
+        # rejected by the form/route gate must fall through: a differently-keyed
+        # but form-compatible product may still be reachable via a later branch,
+        # and silencing it by control flow would be a silent miss (INV-4 spirit
+        # -- the gate only filters WHICH same-named products alert; it must not
+        # veto the remaining strategies for the listing).
 
-        # 1. Canonical exact match
-        if listing_canon in index:
-            for prod in index[listing_canon]:
-                if _form_route_compatible(li, prod):
-                    matches.append(
-                        WatchMatch(listing=li, product=prod, confidence=1.0, rationale="canonical")
-                    )
+        # 1. Canonical exact match. Provenance follows the PRODUCT-side key that
+        # was hit: only canonical==canonical is 'canonical'/1.0; a hit on a
+        # product's stripped key dropped salt tokens, so it is 'stripped'/0.92
+        # even though the listing's canonical string found it.
+        emitted = False
+        seen: set[int] = set()  # id() of product dicts already handled for li
+        for prod in canonical_index.get(listing_canon, []):
+            seen.add(id(prod))
+            if _form_route_compatible(li, prod):
+                matches.append(
+                    WatchMatch(listing=li, product=prod, confidence=1.0, rationale="canonical")
+                )
+                emitted = True
+        for prod in stripped_index.get(listing_canon, []):
+            if id(prod) in seen:
+                continue
+            seen.add(id(prod))
+            if _form_route_compatible(li, prod):
+                matches.append(
+                    WatchMatch(listing=li, product=prod, confidence=0.92, rationale="stripped")
+                )
+                emitted = True
+        if emitted:
             continue
 
-        # 2. Stripped exact match
-        if listing_strip in index:
-            for prod in index[listing_strip]:
+        # 2. Stripped exact match: the listing side dropped salt tokens, so any
+        # hit here is 'stripped'/0.92 regardless of which product key matched.
+        emitted = False
+        seen = set()
+        for idx in (canonical_index, stripped_index):
+            for prod in idx.get(listing_strip, []):
+                if id(prod) in seen:
+                    continue
+                seen.add(id(prod))
                 if _form_route_compatible(li, prod):
                     matches.append(
                         WatchMatch(listing=li, product=prod, confidence=0.92, rationale="stripped")
                     )
+                    emitted = True
+        if emitted:
             continue
 
         # 3. Combo component match: if the listing is a combination and ANY of
         # its component names matches a watchlist product, flag it.
         if is_combo(li.active_ingredient):
-            comps = split_ingredients(li.active_ingredient)
-            hit = False
-            for comp in comps:
-                comp_strip = stripped_name(comp)
-                if comp_strip in index:
-                    # A component NAME hit decides this listing (sets hit), even
-                    # if form/route then filters the specific product out.
-                    hit = True
-                    for prod in index[comp_strip]:
-                        if _form_route_compatible(li, prod):
-                            matches.append(
-                                WatchMatch(
-                                    listing=li,
-                                    product=prod,
-                                    confidence=0.80,
-                                    rationale="combo_component",
+            emitted = False
+            seen = set()
+            for comp in split_ingredients(li.active_ingredient):
+                # Check BOTH component keys: an all-salt-token component
+                # ("Potassium Chloride") strips to "", so its canonical key is
+                # the only exact handle on the matching watchlist product. The
+                # canonical key is salt-preserving, so it cannot reintroduce the
+                # cross-electrolyte collapse the empty-strip guard prevents.
+                for comp_key in (canonical_name(comp), stripped_name(comp)):
+                    if not comp_key:
+                        continue
+                    for idx in (canonical_index, stripped_index):
+                        for prod in idx.get(comp_key, []):
+                            if id(prod) in seen:
+                                continue
+                            seen.add(id(prod))
+                            if _form_route_compatible(li, prod):
+                                matches.append(
+                                    WatchMatch(
+                                        listing=li,
+                                        product=prod,
+                                        confidence=0.80,
+                                        rationale="combo_component",
+                                    )
                                 )
-                            )
-            if hit:
+                                emitted = True
+            if emitted:
                 continue
 
         # 4. Fuzzy match (rapidfuzz token_sort_ratio) — conservative threshold.

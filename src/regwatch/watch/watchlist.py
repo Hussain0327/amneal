@@ -198,6 +198,19 @@ def _status_from_marketing_status(prod: dict[str, Any]) -> str | None:
     return None
 
 
+def _identity_attr(value: str | None) -> str | None:
+    """Casefold + collapse whitespace for the upsert identity key.
+
+    The matcher compares dosage_form/route case-insensitively (_norm_attr in
+    matcher.py), so upsert equality must agree or cross-source case differences
+    ("Tablet" vs FDA's "TABLET") create duplicate rows and duplicate alerts.
+    None stays None: an unknown form/route matches only another unknown.
+    """
+    if value is None:
+        return None
+    return " ".join(value.strip().casefold().split())
+
+
 def upsert_entries(entries: list[WatchlistEntry]) -> int:
     """Upsert WatchlistEntries into the `product` table. Returns rows added."""
     added = 0
@@ -205,23 +218,35 @@ def upsert_entries(entries: list[WatchlistEntry]) -> int:
         for e in entries:
             if e.source not in ALLOWED_SOURCES:
                 continue  # INV-5
+            # Select on the exact columns only; form/route are matched in
+            # Python below so 'Tablet' and 'TABLET' resolve to one row.
             stmt = (
                 select(Product)
                 .where(Product.normalized_name == e.normalized_name)
-                .where(Product.dosage_form == e.dosage_form)
-                .where(Product.route == e.route)
                 .where(Product.rld_application_number == e.rld_application_number)
             )
-            existing = list(s.scalars(stmt))
+            existing = [
+                r
+                for r in s.scalars(stmt)
+                if _identity_attr(r.dosage_form) == _identity_attr(e.dosage_form)
+                and _identity_attr(r.route) == _identity_attr(e.route)
+            ]
             if existing:
                 row = existing[0]
-                row.company_status = e.company_status or row.company_status
-                row.rld_name = e.rld_name or row.rld_name
-                # Keep the higher-trust source (INV-5 set is preserved).
-                # Equal rank takes the incoming value.
+                # INV-5 trust gate covers the DATA fields too, not just the
+                # source label: a lower-trust re-import overwriting a manual
+                # override would silently revert user data while the row kept
+                # its trusted label. Lower rank may only FILL empty fields.
                 if _SOURCE_RANK.get(e.source, 0) >= _SOURCE_RANK.get(row.source, 0):
+                    # Equal rank takes the incoming value.
+                    row.company_status = e.company_status or row.company_status
+                    row.rld_name = e.rld_name or row.rld_name
                     row.source = e.source
-                row.source_url = e.source_url or row.source_url
+                    row.source_url = e.source_url or row.source_url
+                else:
+                    row.company_status = row.company_status or e.company_status
+                    row.rld_name = row.rld_name or e.rld_name
+                    row.source_url = row.source_url or e.source_url
                 row.on_watchlist = True
                 s.add(row)
             else:
@@ -269,6 +294,28 @@ def add_manual_product(
         source_url=source_url,
     )
     return upsert_entries([entry])
+
+
+def set_on_watchlist(product_id: int, on: bool) -> bool:
+    """Flip a product's watchlist membership. Returns whether the row exists.
+
+    SOFT by design: the row is kept (``on_watchlist=False``) rather than
+    deleted, because durable alert rows reference ``product_id`` and a hard
+    delete would orphan that history (INV-4: the feed must keep resolving to
+    real products) -- and the row's INV-5 provenance survives for audit.
+    Idempotent: re-applying the current state still returns True, so a
+    double-unwatch is a no-op, not an error. NOTE: ``upsert_entries`` above
+    re-sets ``on_watchlist=True`` when a re-import matches the same identity
+    key, so unwatching a drugsfda row lasts until the next import refreshes it
+    -- the import-refresh trust model, unchanged here.
+    """
+    with session_scope() as s:
+        row = s.get(Product, product_id)
+        if row is None:
+            return False
+        row.on_watchlist = on
+        s.add(row)
+        return True
 
 
 def list_watchlist() -> list[dict[str, Any]]:

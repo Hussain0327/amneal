@@ -274,6 +274,128 @@ def test_failed_extraction_is_backfilled_on_next_run(monkeypatch: pytest.MonkeyP
     assert _row_count(BeRequirement) == 1
 
 
+def test_failed_parse_leaves_doc_row_on_prior_ingested_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revision whose parse fails must NOT update the doc row's content fields.
+
+    Otherwise sources/psg.py serves the NEW revision's psg_type/recommended_date/
+    content_hash next to the OLD version's diff summary and chunks until the PDF
+    becomes parseable (the doc row would describe content that was never ingested).
+    """
+    state: dict[str, Any] = {"hash": "old-hash", "pages": PAGES, "boom": False}
+    _patch_pipeline_state(monkeypatch, state)
+
+    def flaky_parse(pdf_bytes: bytes) -> ParsedPdf:
+        if state["boom"]:
+            raise RuntimeError("simulated parser guard failure")
+        pages = list(state["pages"])
+        return ParsedPdf(text="\n\f\n".join(pages), pages=pages, engine="stub")
+
+    monkeypatch.setattr(pipeline_mod, "parse_pdf", flaky_parse)
+    init_db()
+
+    assert pipeline_mod.ingest_listing(_listing()) == "added"
+
+    # FDA revises draft -> final with a new PDF that trips the parser guard.
+    revised = _listing()
+    revised.psg_type = "final"
+    revised.recommended_date = "2026-06-01"
+    state["hash"] = "new-hash"
+    state["boom"] = True
+    assert pipeline_mod.ingest_listing(revised) == "error"
+
+    with session_scope() as s:
+        doc = s.scalars(select(PsgDocument)).one()
+        # The doc row must still describe the version that was actually ingested.
+        assert doc.content_hash == "old-hash"
+        assert doc.psg_type == "draft"
+        assert doc.recommended_date == "2026-05-21"
+    assert _row_count(PsgVersion) == 1
+
+    # Once the PDF parses, the content fields land together with the version row.
+    state["boom"] = False
+    assert pipeline_mod.ingest_listing(revised) == "revised"
+    with session_scope() as s:
+        doc = s.scalars(select(PsgDocument)).one()
+        assert doc.content_hash == "new-hash"
+        assert doc.psg_type == "final"
+        assert doc.recommended_date == "2026-06-01"
+    assert _row_count(PsgVersion) == 2
+
+
+def test_first_success_after_failed_first_attempt_is_added(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """'added' vs 'revised' is judged by version history, not doc-row novelty.
+
+    Day 1: parse fails after the doc row is created -> outcome "error", row
+    persists with no version. Day 2: parse succeeds -> this is the first-ever
+    ingested version and must be reported "added" (not "revised").
+    """
+    state: dict[str, Any] = {"hash": "h1", "pages": PAGES, "boom": True}
+    _patch_pipeline_state(monkeypatch, state)
+
+    def flaky_parse(pdf_bytes: bytes) -> ParsedPdf:
+        if state["boom"]:
+            raise RuntimeError("simulated parser guard failure")
+        pages = list(state["pages"])
+        return ParsedPdf(text="\n\f\n".join(pages), pages=pages, engine="stub")
+
+    monkeypatch.setattr(pipeline_mod, "parse_pdf", flaky_parse)
+    init_db()
+
+    assert pipeline_mod.ingest_listing(_listing()) == "error"
+    assert _row_count(PsgDocument) == 1
+    assert _row_count(PsgVersion) == 0
+
+    state["boom"] = False
+    assert pipeline_mod.ingest_listing(_listing()) == "added"
+    assert _row_count(PsgVersion) == 1
+
+
+def test_concurrent_duplicate_revision_is_not_inserted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revision committed by an overlapping run during our parse+summarize
+    window must not be inserted a second time (a duplicate never-alerted
+    version row would re-alert the same FDA change the next day, INV-4)."""
+    state: dict[str, Any] = {"hash": "old-hash", "pages": PAGES}
+    _patch_pipeline_state(monkeypatch, state)
+    init_db()
+
+    assert pipeline_mod.ingest_listing(_listing()) == "added"
+    state["hash"] = "new-hash"
+
+    def racing_summarize(
+        previous_text: str | None, current_text: str, *, current_page_count: int
+    ) -> str:
+        # Simulate the overlapping run (e.g. watch-daily cron vs a manual
+        # ingest-all) landing the identical revision between the early hash
+        # check and the version insert.
+        with session_scope() as s:
+            doc = s.scalars(select(PsgDocument)).one()
+            assert doc.id is not None
+            s.add(
+                PsgVersion(
+                    psg_document_id=doc.id,
+                    content_hash="new-hash",
+                    diff_summary="committed by the overlapping run",
+                )
+            )
+        return "Initial version ingested."
+
+    monkeypatch.setattr(pipeline_mod, "summarize_change", racing_summarize)
+
+    outcome = pipeline_mod.ingest_listing(_listing())
+
+    # Exactly two versions total: v1 plus the overlapping run's v2 -- no third
+    # duplicate row for the same content, and the sighting is not re-reported
+    # as a change.
+    assert _row_count(PsgVersion) == 2
+    assert outcome == "unchanged"
+
+
 def test_revised_ingest_removes_stale_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
     old_pages = [
         PAGES[0],

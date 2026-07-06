@@ -70,6 +70,29 @@ def test_page_equal_to_count_is_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out == summary
 
 
+def test_page_zero_cite_sentence_is_stripped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Pages are 1-indexed, so [p.0] is as ungrounded as a page beyond the
+    # count; a one-sided (> page_count) check silently accepts it.
+    summary = "Dissolution acceptance criteria changed [p.0]. Waiver kept [p.2]."
+    monkeypatch.setattr(cd, "get_llm_provider", _stub_llm(summary))
+
+    out = cd.summarize_change("old", "new", current_page_count=3)
+
+    assert "[p.0]" not in out
+    assert "Dissolution acceptance criteria" not in out
+    # The in-range citation and its sentence survive verbatim.
+    assert "Waiver kept [p.2]." in out
+
+
+def test_only_page_zero_cite_yields_empty_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    summary = "Study design revised [p.0]."
+    monkeypatch.setattr(cd, "get_llm_provider", _stub_llm(summary))
+
+    out = cd.summarize_change("old", "new", current_page_count=5)
+
+    assert out == ""
+
+
 def test_initial_version_marker_skips_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     # No prior text -> no LLM call, no cite validation; marker returned as-is.
     def _boom(*_a: object, **_kw: object) -> object:

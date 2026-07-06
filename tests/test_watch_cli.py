@@ -22,8 +22,9 @@ from regwatch.ingest.pdf_parser import ParsedPdf
 from regwatch.ingest.psg_crawler import PsgListing
 from regwatch.store.db import init_db
 from regwatch.watch import run as run_mod
-from regwatch.watch.alerts import latest_digest_records
-from regwatch.watch.watchlist import add_manual_product
+from regwatch.watch.alerts import digest_path, latest_digest_records
+from regwatch.watch.runs import latest_watch_run
+from regwatch.watch.watchlist import add_manual_product, list_watchlist, set_on_watchlist
 
 runner = CliRunner()
 
@@ -99,6 +100,11 @@ def test_watch_first_run_alerts_on_new_matched_listing(monkeypatch: pytest.Monke
     assert records[0]["listing_appl_no"] == "020503"
     assert records[0]["psg_version_id"] > 0
     assert records[0]["rationale"] == "canonical"
+    # The completed run also lands in the durable watch_run ledger (the
+    # JSONL digest alone dies with the cron runner's disk).
+    run = latest_watch_run()
+    assert run is not None
+    assert (run["listings"], run["matched"], run["alerts"], run["errors"]) == (1, 1, 1, 0)
 
 
 def test_watch_second_identical_run_emits_no_new_alert(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -176,6 +182,11 @@ def test_watch_failed_ingest_never_alerts(monkeypatch: pytest.MonkeyPatch) -> No
     result = runner.invoke(app, ["watch", "--no-extract"])
     assert result.exit_code == 2
     assert latest_digest_records() == []
+    # Errored-but-COMPLETED: still a real run, so the ledger records it with
+    # the truthful errors count (INV-4) even though exit code is 2.
+    run = latest_watch_run()
+    assert run is not None
+    assert run["errors"] == 1 and run["alerts"] == 0
 
 
 def test_watch_errored_run_does_not_erase_prior_digest(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -185,10 +196,13 @@ def test_watch_errored_run_does_not_erase_prior_digest(monkeypatch: pytest.Monke
     _patch_crawl(monkeypatch, [_listing()])
     _patch_pdf(monkeypatch, {"hash": "hash-v1", "pages": PAGES})
 
-    # Morning run: a real alert is written to today's digest.
+    # Morning run: a real alert is written to today's digest -- durable table
+    # AND the on-disk JSONL file.
     assert runner.invoke(app, ["watch", "--no-extract"]).exit_code == 0
     morning = latest_digest_records()
     assert len(morning) == 1
+    morning_file = digest_path().read_text(encoding="utf-8")
+    assert '"listing_appl_no": "020503"' in morning_file
 
     # A later run the SAME day fails to ingest (download error) → exit 2, no alerts.
     def boom(url: str, *, client: object | None = None) -> tuple[Path, bytes, str]:
@@ -197,5 +211,60 @@ def test_watch_errored_run_does_not_erase_prior_digest(monkeypatch: pytest.Monke
     monkeypatch.setattr(pipeline_mod, "download_pdf", boom)
     assert runner.invoke(app, ["watch", "--no-extract"]).exit_code == 2
 
-    # The morning alert is preserved — not clobbered by an empty all-clear file.
+    # The FILE is what the skip-on-error branch protects (write_digest([]) never
+    # deletes table rows), so the file assertion is the one that catches a
+    # dropped guard; the durable-table check alone would stay green.
+    assert digest_path().read_text(encoding="utf-8") == morning_file
     assert latest_digest_records() == morning
+
+
+def test_watch_zero_listing_crawl_fails_loud_and_writes_no_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crawl that yields ZERO listings is a broken crawl, never a quiet day
+    (even empty letters fall back to the ~70-row default slice), so the run
+    must abort non-zero BEFORE stamping an empty all-clear digest (INV-4) --
+    otherwise the daily cron pings its dead-man's-switch as success and no FDA
+    change is ever detected again."""
+    _seed_watchlist()
+    _patch_crawl(monkeypatch, [])
+
+    result = runner.invoke(app, ["watch", "--no-extract"])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, RuntimeError)
+    assert "0 PSG listings" in str(result.exception)
+    assert not digest_path().exists()
+    assert latest_digest_records() == []
+    # A run that RAISED never completed: no ledger row either (INV-4) -- the
+    # cron's dead-man's-switch owns this failure class.
+    assert latest_watch_run() is None
+
+
+def test_watch_unwatched_product_stops_matching(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unwatching removes the product from the next run's match set: a PSG
+    revision landing AFTER the unwatch must not alert (the analyst opted out),
+    while the earlier alert history stays durable (soft delete keeps the
+    product row the old alerts reference)."""
+    _seed_watchlist()
+    _patch_crawl(monkeypatch, [_listing()])
+    state: dict[str, Any] = {"hash": "hash-v1", "pages": PAGES}
+    _patch_pdf(monkeypatch, state)
+
+    assert runner.invoke(app, ["watch", "--no-extract"]).exit_code == 0
+    assert len(latest_digest_records()) == 1
+
+    # Analyst unwatches the product, then FDA revises the PSG.
+    items = list_watchlist()
+    assert len(items) == 1
+    assert set_on_watchlist(items[0]["id"], False) is True
+    state["hash"] = "hash-v2"
+    state["pages"] = [PAGES[0], PAGES[1] + "\nRevised dissolution recommendation."]
+
+    assert runner.invoke(app, ["watch", "--no-extract"]).exit_code == 0
+    # No new alert: the original run's record persists, nothing was added.
+    assert len(latest_digest_records()) == 1
+    # And the second run truthfully recorded that it matched nothing.
+    run = latest_watch_run()
+    assert run is not None
+    assert run["matched"] == 0 and run["alerts"] == 0
