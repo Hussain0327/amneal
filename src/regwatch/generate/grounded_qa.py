@@ -29,6 +29,7 @@ from regwatch.common.citations import (
     filter_citations,
     iter_psg_citations,
     strip_all_citations,
+    strip_sources_trailer,
 )
 from regwatch.common.conversation import (
     PriorTurn,
@@ -560,10 +561,10 @@ def _format_recent(turns: list[PriorTurn]) -> str:
         q = strip_all_citations(t.question).strip()[:400]
         # The stored answer ends with the prompt-mandated "Sources:" trailer,
         # whose "<short_name>, p.<n>" pairs are UNbracketed and so survive the
-        # bracket-only strip -- drop the whole trailer first (same split as
-        # eval/metrics.faithfulness) so no stale re-citable pointer reaches the
-        # memory block.
-        answer_prose = re.split(r"\n\s*Sources:\s*\n", t.answer, maxsplit=1)[0]
+        # bracket-only strip -- drop the whole trailer first (shared with
+        # eval/metrics.faithfulness via strip_sources_trailer) so no stale
+        # re-citable pointer reaches the memory block.
+        answer_prose = strip_sources_trailer(t.answer)
         a = strip_all_citations(answer_prose).strip()[:600]
         if not q and not a:
             continue
@@ -696,10 +697,10 @@ _SERVICE_UNAVAILABLE_TEXT = (
 def _log_query_or_skip(**kwargs: Any) -> int:
     """``log_query`` with a DEFINED failure: -1 when the audit write fails.
 
-    Used only by the no-LLM-content terminal paths (``_refuse``/``_clarify``):
-    their payload is fixed copy with zero citations, so returning it without an
-    audit row beats a naked, unaudited 500 that the stream-fallback client would
-    re-run into the same down DB. The skip is logged and Sentry-captured; -1
+    Used only by the no-LLM-content terminal paths (``_refuse``/``_clarify``/
+    ``_meta``): their payload is fixed copy or system-state text with zero
+    citations, so returning it without an audit row beats a naked, unaudited
+    500 that the stream-fallback client would re-run into the same down DB. The skip is logged and Sentry-captured; -1
     never collides with a real QueryLog id.
     """
     try:
@@ -992,7 +993,7 @@ def _meta(
     fabrication-incapable; it can never carry a regulatory claim.
     """
     answer = _meta_answer_text(question)
-    audit_id = log_query(
+    audit_id = _log_query_or_skip(
         mode="qa",
         query_text=question,
         retrieved=[],

@@ -24,11 +24,9 @@ from config.settings import get_settings
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from regwatch.common.logging import get_logger
+from regwatch.sources.drugsfda import DRUGSFDA_ENDPOINT as DRUGSFDA_URL
 
 log = get_logger(__name__)
-
-
-DRUGSFDA_URL = "https://api.fda.gov/drug/drugsfda.json"
 
 
 @retry(

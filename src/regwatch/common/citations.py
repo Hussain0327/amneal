@@ -27,6 +27,23 @@ _PAIR = re.compile(r"((?:PSG_|OB_)?\d{3,})\s*,\s*p\.\s*(\d+)", re.IGNORECASE)
 # left untouched.
 _BRACKET = re.compile(r"\[([^\[\]]+)\]")
 
+# The prompt-mandated trailing "Sources:\n<short_name>, p.<n>..." list. Its
+# entries are unbracketed and so survive strip_all_citations -- callers that
+# need prose only must drop the whole trailer first.
+_SOURCES_TRAILER = re.compile(r"\n\s*Sources:\s*\n")
+
+
+def strip_sources_trailer(text: str) -> str:
+    """Drop the trailing "Sources:" list, keeping only the prose above it.
+
+    Shared by the generator's citation-stripped conversation memory (INV-1:
+    an unbracketed "<short_name>, p.<n>" trailer entry must not leak into a
+    later turn as a re-citable pointer) and the eval's faithfulness scorer
+    (which would otherwise miscount trailer lines as uncited sentences). One
+    definition keeps the two from drifting apart if the trailer format changes.
+    """
+    return _SOURCES_TRAILER.split(text, maxsplit=1)[0]
+
 
 def _pairs_in(body: str) -> list[tuple[str, int]]:
     """Every (short_name, page) pair inside one bracket body (compound-aware)."""

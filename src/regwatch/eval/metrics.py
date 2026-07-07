@@ -23,7 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from regwatch.common.citations import has_citation
+from regwatch.common.citations import has_citation, strip_sources_trailer
 
 _SENT_RE = re.compile(r"(?<=[.!?])\s+")
 
@@ -97,8 +97,9 @@ def faithfulness(answer_text: str) -> float:
     text = (answer_text or "").strip()
     if not text:
         return 1.0
-    # Strip a trailing "Sources" list so we don't penalize bullet citations.
-    text = re.split(r"\n\s*Sources:\s*\n", text, maxsplit=1)[0]
+    # Strip a trailing "Sources" list so we don't penalize bullet citations
+    # (shared with grounded_qa's memory-context strip via strip_sources_trailer).
+    text = strip_sources_trailer(text)
     sentences = [s.strip() for s in _SENT_RE.split(text) if s.strip()]
     if not sentences:
         return 1.0

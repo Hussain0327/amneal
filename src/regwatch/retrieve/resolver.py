@@ -28,8 +28,11 @@ from functools import lru_cache
 
 from rapidfuzz import fuzz
 
+from regwatch.common.logging import get_logger
 from regwatch.common.text_normalize import canonical_name, split_ingredients, stripped_name
 from regwatch.store.vector_store import distinct_metadata_values
+
+log = get_logger(__name__)
 
 
 @dataclass
@@ -316,13 +319,15 @@ def resolve_brand(question: str, *, products: set[str] | None = None, limit: int
         return []
     try:
         from regwatch.sources._utils import fetch_openfda_results
+        from regwatch.sources.drugsfda import DRUGSFDA_ENDPOINT
 
         rows = fetch_openfda_results(
-            "https://api.fda.gov/drug/drugsfda.json",
+            DRUGSFDA_ENDPOINT,
             [f'openfda.brand_name:"{tok}"' for tok in candidates],
             limit=5,
         )
     except Exception:  # offline / rate-limited / malformed — degrade to no match
+        log.debug("ingredient_resolution_failed", exc_info=True)
         return []
     generics: set[str] = set()
     for row in rows:

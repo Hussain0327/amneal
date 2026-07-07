@@ -9,6 +9,9 @@ must NEVER reach the uncited meta path (INV-1/INV-2). These tests pin that:
   T3 no-drug-fact-leak — the meta answer carries only system facts (corpus /
                        watchlist / digest), never BE/dissolution regulatory prose.
   T4 meta-audited    — exactly ONE QueryLog row, status='meta' (extends INV-6).
+  T5 meta-audit-write-failure — a transient audit DB error degrades (audit_id=-1,
+                       status stays 'meta') instead of a naked 500, mirroring the
+                       _refuse/_clarify degrade contract.
 """
 
 from __future__ import annotations
@@ -333,3 +336,31 @@ def test_t4_meta_writes_exactly_one_audit_row(monkeypatch: pytest.MonkeyPatch) -
         assert list(row.citations_json or []) == []
         assert list(row.retrieved_json or []) == []
         assert dict(row.route_json)["response_mode"] == "meta"
+
+
+# ---------- T5 meta-audit-write-failure degrades, never a naked 500 ----------
+
+
+def test_t5_meta_audit_write_failure_degrades_audit_id_not_500(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_meta reaches the QueryLog write through the same _decline ceremony as
+    _refuse/_clarify. Mirrors test_audit_write_failure_degrades_to_error_refusal_
+    not_500 (test_grounded_qa_citations.py): a transient DB error on the audit
+    write must degrade to audit_id=-1 (logged + Sentry-captured) rather than
+    propagate as an unhandled 500 -- the meta answer itself is safe, uncited
+    system-state text, so (unlike the LLM-grounded path) it is still returned."""
+    _seed(["atorvastatin calcium", "metformin hydrochloride"])
+    monkeypatch.setattr(qa_mod, "get_llm_provider", _counting_llm({"n": 0}))
+
+    def _boom(**kwargs: object) -> int:
+        raise RuntimeError("simulated audit db outage")
+
+    monkeypatch.setattr(qa_mod, "log_query", _boom)
+
+    result = qa_mod.ask("what can I ask about?")
+
+    assert result.status == "meta"
+    assert result.refused is False
+    assert result.citations == []
+    assert result.audit_id == -1
