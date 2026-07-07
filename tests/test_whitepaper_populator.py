@@ -25,7 +25,7 @@ from regwatch.whitepaper.populator import (
     _rems_record_matches_application,
     build_whitepaper,
 )
-from tests._whitepaper_stub import APPL_NO, RLD_NAME, install_fake_sources
+from tests._whitepaper_stub import APPL_NO, RLD_NAME, _qa_result, install_fake_sources
 
 
 def _cells(result: dict) -> dict[str, dict]:
@@ -978,6 +978,286 @@ def test_be_guidance_unverifiable_when_application_form_unknown(
     assert any("could not be form-verified" in w for w in result["spine"]["warnings"])
 
 
+# --------------------------- P1a: form-scoped Requirements ask ---------------------------
+def _capture_ask(monkeypatch: pytest.MonkeyPatch, qa: object) -> list[dict]:
+    """Replace populator.ask with a capture that records each call's filters."""
+    calls: list[dict] = []
+
+    def fake_ask(question: str, *, filters: dict | None = None, **kwargs: object) -> object:
+        calls.append(dict(filters or {}))
+        return qa
+
+    monkeypatch.setattr(populator, "ask", fake_ask)
+    return calls
+
+
+def _clarify_qa() -> object:
+    from regwatch.generate.grounded_qa import QAResult
+
+    return QAResult(
+        answer="",
+        citations=[],
+        refused=False,
+        model_name="stub",
+        audit_id=0,
+        retrieved=[],
+        status="clarify",
+    )
+
+
+def test_requirements_ask_form_scoped_with_exact_stored_strings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Single-form application + the store's real vocabulary (the seeded doc has
+    # a version, so current_dosage_form_routes enumerates it): the ask carries
+    # the EXACT stored strings, and the cell populates with citations.
+    install_fake_sources(monkeypatch)  # seeds "Aerosol, Metered" / "Inhalation"
+    calls = _capture_ask(monkeypatch, _qa_result())
+    cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["requirements"]
+    assert calls == [
+        {
+            "normalized_name": "albuterol sulfate",
+            "dosage_form": "Aerosol, Metered",
+            "route": "Inhalation",
+        }
+    ]
+    assert cell["status"] == "populated"
+    assert cell["evidence"][0]["page"] == 4
+
+
+def test_requirements_ask_unfiltered_when_vocab_has_no_matching_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No stored pair normalizes to the application's own OB pair: a value the
+    # store does not literally carry must NEVER be passed (a manufactured empty
+    # retrieval would turn a real product into a wrong refusal, INV-5) -- the
+    # ask stays unfiltered and the clarify path is preserved.
+    install_fake_sources(monkeypatch)
+    monkeypatch.setattr(
+        populator, "current_dosage_form_routes", lambda name: [("Solution", "Oral")]
+    )
+    calls = _capture_ask(monkeypatch, _clarify_qa())
+    cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["requirements"]
+    assert calls == [{"normalized_name": "albuterol sulfate"}]
+    assert cell["status"] == "analyst_input_required"
+    assert cell["value"] is None
+    assert "INV-1" in (cell["note"] or "")
+
+
+def test_requirements_ask_unfiltered_for_multi_form_application(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # OB rows spanning forms: the application itself is multi-form, so the
+    # vocabulary is never consulted and today's clarify behavior is unchanged.
+    install_fake_sources(monkeypatch)
+
+    def two_form_products(application_number: str, *, client: object = None) -> OrangeBookRows:
+        base = {
+            "appl_type": "N",
+            "appl_no": APPL_NO,
+            "ingredient": "ALBUTEROL SULFATE",
+            "trade_name": "PROVENTIL",
+            "rld": "Yes",
+            "rs": "Yes",
+        }
+        return OrangeBookRows(
+            rows=[
+                {
+                    **base,
+                    "product_no": "001",
+                    "dosage_form_route": "AEROSOL, METERED;INHALATION",
+                    "strength": "0.09MG/INH",
+                },
+                {
+                    **base,
+                    "product_no": "002",
+                    "dosage_form_route": "TABLET;ORAL",
+                    "strength": "2MG",
+                },
+            ],
+            fetched_at=datetime.now(UTC),
+        )
+
+    monkeypatch.setattr(orange_book, "product_rows", two_form_products)
+    vocab_calls: list[str] = []
+
+    def spy_vocab(name: str) -> list[tuple[str, str]]:
+        vocab_calls.append(name)
+        return []
+
+    monkeypatch.setattr(populator, "current_dosage_form_routes", spy_vocab)
+    calls = _capture_ask(monkeypatch, _clarify_qa())
+    cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["requirements"]
+    assert calls == [{"normalized_name": "albuterol sulfate"}]
+    assert vocab_calls == []
+    assert cell["status"] == "analyst_input_required"
+
+
+def test_requirements_ask_unfiltered_when_vocab_pair_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two stored pairs normalize to the same OB pair: picking one would be a
+    # guess (forms are never blended, INV-1) -- fall back to the unfiltered ask.
+    install_fake_sources(monkeypatch)
+    monkeypatch.setattr(
+        populator,
+        "current_dosage_form_routes",
+        lambda name: [("Aerosol, Metered", "Inhalation"), ("AEROSOL, METERED", "INHALATION")],
+    )
+    calls = _capture_ask(monkeypatch, _qa_result())
+    cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["requirements"]
+    assert calls == [{"normalized_name": "albuterol sulfate"}]
+    assert cell["status"] == "populated"  # the unfiltered ask still answered
+
+
+def test_requirements_ask_unfiltered_when_vocab_query_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A vocabulary lookup failure degrades to today's unfiltered ask -- it must
+    # never crash the cell or manufacture an empty retrieval.
+    install_fake_sources(monkeypatch)
+
+    def boom(name: str) -> list[tuple[str, str]]:
+        raise RuntimeError("vocab store down")
+
+    monkeypatch.setattr(populator, "current_dosage_form_routes", boom)
+    calls = _capture_ask(monkeypatch, _qa_result())
+    cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["requirements"]
+    assert calls == [{"normalized_name": "albuterol sulfate"}]
+    assert cell["status"] == "populated"
+
+
+# --------------------------- P1b: SPL candidates on the spine ---------------------------
+def test_spine_surfaces_spl_candidates_and_selection_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from regwatch.sources.dailymed import SplCandidate
+
+    install_fake_sources(monkeypatch)
+    sponsor_title = "PROVENTIL HFA (ALBUTEROL SULFATE) AEROSOL, METERED [MERCK SHARP & DOHME CORP.]"
+    repack_title = "ALBUTEROL SULFATE AEROSOL, METERED [PREFERRED PHARMACEUTICALS INC.]"
+    resolution = SetidResolution(
+        setid="sponsor-setid",
+        title=sponsor_title,
+        published="Oct 08, 2019",
+        source_url="https://dailymed.nlm.nih.gov/dailymed/drugInfo.cfm?setid=sponsor-setid",
+        fetched_at=datetime.now(UTC),
+        labeler="MERCK SHARP & DOHME CORP.",
+        candidate_labelers=("PREFERRED PHARMACEUTICALS INC.", "MERCK SHARP & DOHME CORP."),
+        candidates=(
+            SplCandidate(
+                setid="repackager-setid",
+                title=repack_title,
+                labeler="PREFERRED PHARMACEUTICALS INC.",
+                published="Jan 16, 2026",
+            ),
+            SplCandidate(
+                setid="sponsor-setid",
+                title=sponsor_title,
+                labeler="MERCK SHARP & DOHME CORP.",
+                published="Oct 08, 2019",
+            ),
+        ),
+    )
+
+    def fake_resolve(
+        application_number: str,
+        *,
+        prefer_titles: object = (),
+        prefer_labelers: object = (),
+        client: object = None,
+    ) -> SetidResolution:
+        return resolution
+
+    monkeypatch.setattr(dailymed, "resolve_setid", fake_resolve)
+    result = build_whitepaper(RLD_NAME, APPL_NO)
+    spine = result["spine"]
+    assert spine["setid"] == "sponsor-setid"
+    assert spine["spl_candidates"] == [
+        {
+            "setid": "repackager-setid",
+            "title": repack_title,
+            "labeler": "PREFERRED PHARMACEUTICALS INC.",
+            "published": "Jan 16, 2026",
+        },
+        {
+            "setid": "sponsor-setid",
+            "title": sponsor_title,
+            "labeler": "MERCK SHARP & DOHME CORP.",
+            "published": "Oct 08, 2019",
+        },
+    ]
+    # The multi-labeler selection warning is preserved (never a silent pick).
+    assert any("2 distinct labelers" in w for w in spine["warnings"])
+
+
+def test_spine_spl_candidates_empty_when_resolution_has_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Additive default: a resolution without a retained candidate list (the
+    # stub's) yields an empty list, never a missing key.
+    install_fake_sources(monkeypatch)
+    spine = build_whitepaper(RLD_NAME, APPL_NO)["spine"]
+    assert spine["spl_candidates"] == []
+
+
+# --------------------------- P1d: per-study evidence + guiding notes ---------------------------
+def test_be_requirement_note_states_extracted_field_and_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_sources(monkeypatch)
+    cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["in_vivo_be_studies"]
+    assert cell["status"] == "analyst_input_required"
+    assert "INV-3" in cell["note"]
+    assert "'study_type'" in cell["note"]
+    assert "page citation" in cell["note"]
+    # The extracted field rides as evidence WITH its page citation.
+    assert any(
+        ev["source"] == "PSG (BE requirement)"
+        and ev["page"] == 4
+        and "in vivo BE study" in (ev.get("snippet") or "")
+        for ev in cell["evidence"]
+    )
+
+
+def test_be_requirement_note_says_when_no_field_extracted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_sources(monkeypatch)
+    cells = _cells(build_whitepaper(RLD_NAME, APPL_NO))
+    # waiver_conditions is not extracted in the stub's BE row.
+    q1q2 = cells["q1_q2_assessment"]
+    assert "no 'waiver_conditions' text was extracted" in q1q2["note"]
+    assert "surfaced as evidence" in q1q2["note"]  # the PSG doc still rides along
+    # Study cells with no mapped extraction field say so instead of implying one.
+    unmapped = cells["tablet_scoring"]
+    assert "no machine-extracted PSG field maps" in unmapped["note"]
+    assert "INV-3" in unmapped["note"]
+
+
+def test_be_requirement_note_omits_page_claim_when_no_page_cited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """INV-5: the note may not assert a page citation the evidence lacks --
+    an extracted field whose citation carries no page keeps the text claim only."""
+    from sqlmodel import select
+
+    install_fake_sources(monkeypatch)
+    with session_scope() as s:
+        row = s.scalars(select(BeRequirement)).one()
+        # study_type keeps its extracted TEXT but loses its page citation.
+        row.citations_json = {"dissolution": {"page": 3}}
+        s.add(row)
+    cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["in_vivo_be_studies"]
+    assert "'study_type'" in cell["note"]
+    assert "text is surfaced as evidence" in cell["note"]
+    assert "page citation" not in cell["note"]
+    # The evidence itself carries the text with page=None -- unchanged honesty.
+    assert any(
+        ev["source"] == "PSG (BE requirement)" and ev["page"] is None for ev in cell["evidence"]
+    )
+
+
 # --------------------------- A5/C1: resolved number on post-resolution queries ----------
 def test_post_resolution_queries_use_resolved_prefixed_number(
     monkeypatch: pytest.MonkeyPatch,
@@ -1000,7 +1280,11 @@ def test_post_resolution_queries_use_resolved_prefixed_number(
         return [], 47
 
     def capture_resolve(
-        application_number: str, *, prefer_titles: object = (), client: object = None
+        application_number: str,
+        *,
+        prefer_titles: object = (),
+        prefer_labelers: object = (),
+        client: object = None,
     ) -> SetidResolution | None:
         seen["dailymed"] = application_number
         return None

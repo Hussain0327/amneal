@@ -20,6 +20,7 @@ from regwatch.sources.dailymed import (
     SPL_XML_URL_TEMPLATE,
     SPLS_ENDPOINT,
     DailyMedHandler,
+    SplCandidate,
     fetch_media,
     fetch_spl_sections,
     parse_spl_section_codes,
@@ -103,10 +104,160 @@ def test_resolve_setid_falls_back_to_most_recent_without_title_match() -> None:
     }
     with respx.mock(assert_all_called=True) as mock:
         mock.get(SPLS_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
-        resolution = resolve_setid("NDA020503", prefer_titles=["NO SUCH BRAND"])
+        resolution = resolve_setid(
+            "NDA020503",
+            prefer_titles=["NO SUCH BRAND"],
+            prefer_labelers=["NO SUCH COMPANY"],
+        )
 
     assert resolution is not None
     assert resolution.setid == SETID
+
+
+def test_resolve_setid_matches_punctuation_variant_brand_title() -> None:
+    """Live NDA 020503 regression: the Orange Book trade name is hyphenated
+    ("PROVENTIL-HFA") while DailyMed titles it "PROVENTIL HFA ..." -- the old
+    canonical containment kept the hyphen, silently missed the brand, and the
+    most-recent REPACKAGER relabel won the pick."""
+    payload = {
+        "data": [
+            _listing(
+                "repackager-setid",
+                "Jan 16, 2026",
+                "ALBUTEROL SULFATE AEROSOL, METERED [PREFERRED PHARMACEUTICALS INC.]",
+            ),
+            _listing(
+                SETID,
+                "Oct 08, 2019",
+                "PROVENTIL HFA (ALBUTEROL SULFATE) AEROSOL, METERED [MERCK SHARP & DOHME CORP.]",
+            ),
+        ]
+    }
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(SPLS_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
+        resolution = resolve_setid("NDA020503", prefer_titles=["PROVENTIL-HFA"])
+
+    assert resolution is not None
+    assert resolution.setid == SETID
+    assert resolution.labeler == "MERCK SHARP & DOHME CORP."
+
+
+def test_resolve_setid_labeler_tier_picks_sponsor_over_recent_repackager() -> None:
+    """With no brand/trade title match at all, the second tier matches the
+    bracketed LABELER against the Drugs@FDA sponsor / OB applicant names -- the
+    sponsor's own label beats a more recently published repackager relabel."""
+    payload = {
+        "data": [
+            _listing(
+                "repackager-setid",
+                "Jan 16, 2026",
+                "ALBUTEROL SULFATE AEROSOL, METERED [PREFERRED PHARMACEUTICALS INC.]",
+            ),
+            _listing(
+                SETID,
+                "Oct 08, 2019",
+                "ALBUTEROL SULFATE AEROSOL, METERED [KINDEVA DRUG DELIVERY L.P.]",
+            ),
+        ]
+    }
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(SPLS_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
+        resolution = resolve_setid(
+            "NDA020503",
+            prefer_titles=["NO SUCH BRAND"],
+            prefer_labelers=["Kindeva Drug Delivery L.P."],
+        )
+
+    assert resolution is not None
+    assert resolution.setid == SETID
+    assert resolution.labeler == "KINDEVA DRUG DELIVERY L.P."
+
+
+def test_resolve_setid_title_tier_outranks_labeler_tier() -> None:
+    """A title-matched listing wins even when a labeler-matched one is newer --
+    the brand/trade title is the stronger identity signal."""
+    payload = {
+        "data": [
+            _listing(
+                "labeler-setid",
+                "Jan 16, 2026",
+                "ALBUTEROL SULFATE AEROSOL, METERED [KINDEVA DRUG DELIVERY L.P.]",
+            ),
+            _listing(
+                SETID,
+                "Oct 08, 2019",
+                "PROVENTIL HFA (ALBUTEROL SULFATE) AEROSOL, METERED [MERCK SHARP & DOHME CORP.]",
+            ),
+        ]
+    }
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(SPLS_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
+        resolution = resolve_setid(
+            "NDA020503",
+            prefer_titles=["PROVENTIL-HFA"],
+            prefer_labelers=["Kindeva Drug Delivery L.P."],
+        )
+
+    assert resolution is not None
+    assert resolution.setid == SETID
+
+
+def test_resolve_setid_short_prefer_tokens_never_match() -> None:
+    """Sub-4-char normalized tokens ("HFA", "INC.") prove nothing -- without the
+    floor they would pin the OLDER listing here; with it the pick falls back to
+    the most recent overall."""
+    payload = {
+        "data": [
+            _listing(
+                SETID,
+                "Jan 16, 2026",
+                "ALBUTEROL SULFATE AEROSOL, METERED [KINDEVA DRUG DELIVERY L.P.]",
+            ),
+            _listing(
+                "older-setid",
+                "Oct 08, 2019",
+                "PROVENTIL HFA (ALBUTEROL SULFATE) AEROSOL, METERED [PREFERRED PHARMACEUTICALS INC.]",
+            ),
+        ]
+    }
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(SPLS_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
+        resolution = resolve_setid("NDA020503", prefer_titles=["HFA"], prefer_labelers=["INC."])
+
+    assert resolution is not None
+    assert resolution.setid == SETID
+
+
+def test_resolve_setid_retains_candidate_listings() -> None:
+    """The chosen resolution keeps the full candidate set (setid/title/labeler/
+    published) so the caller can surface the selection for analyst review."""
+    repack_title = "ALBUTEROL SULFATE AEROSOL, METERED [PREFERRED PHARMACEUTICALS INC.]"
+    sponsor_title = "PROVENTIL HFA (ALBUTEROL SULFATE) AEROSOL, METERED [MERCK SHARP & DOHME CORP.]"
+    payload = {
+        "data": [
+            _listing("repackager-setid", "Jan 16, 2026", repack_title),
+            _listing(SETID, "Oct 08, 2019", sponsor_title),
+        ]
+    }
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(SPLS_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
+        resolution = resolve_setid("NDA020503", prefer_titles=["PROVENTIL HFA"])
+
+    assert resolution is not None
+    assert resolution.candidates == (
+        SplCandidate(
+            setid="repackager-setid",
+            title=repack_title,
+            labeler="PREFERRED PHARMACEUTICALS INC.",
+            published="Jan 16, 2026",
+        ),
+        SplCandidate(
+            setid=SETID,
+            title=sponsor_title,
+            labeler="MERCK SHARP & DOHME CORP.",
+            published="Oct 08, 2019",
+        ),
+    )
 
 
 def test_resolve_setid_never_queries_bare_digits() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import zipfile
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -306,3 +307,190 @@ def test_provenance_appendix_lists_evidence(
     rows_text = "\n".join(c.text for t in prov for r in t.rows for c in r.cells)
     assert "OB_020503/001" in rows_text
     assert "Orange Book" in rows_text
+
+
+# ---------- analyst overlay (Phase 2: attributed inputs, INV-3 discipline) ----------
+UPDATED_AT = "2026-07-07T12:00:00"
+
+
+def _inputs(**values: str) -> dict[str, dict[str, str]]:
+    return {
+        cell_id: {"value": value, "author": "Second Analyst", "updated_at": UPDATED_AT}
+        for cell_id, value in values.items()
+    }
+
+
+def _all_text(data: bytes) -> str:
+    doc = Document(BytesIO(data))
+    paragraphs = "\n".join(p.text for p in doc.paragraphs)
+    cells = "\n".join(c.text for t in doc.tables for r in t.rows for c in r.cells)
+    return paragraphs + "\n" + cells
+
+
+def _document_xml(data: bytes) -> bytes:
+    """The document part only - zip metadata carries wall-clock timestamps."""
+    with zipfile.ZipFile(BytesIO(data)) as archive:
+        return archive.read("word/document.xml")
+
+
+def test_overlay_fills_analyst_cell_with_attribution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An analyst_input_required cell renders the overlay text, visibly attributed."""
+    template = tmp_path / "real-shaped.docx"
+    _real_shaped_template(template)
+    result = _build(monkeypatch)
+    data = write_whitepaper_docx(
+        result, template_path=template, inputs=_inputs(salable_unit="30-count blister pack")
+    )
+    doc = Document(BytesIO(data))
+    # First match in document order = the template row (the analyst-inputs
+    # appendix repeats the label later with different columns).
+    salable_row = next(
+        r.cells[-1].text
+        for t in doc.tables
+        for r in t.rows
+        if r.cells and r.cells[0].text.strip().startswith("Salable Unit")
+    )
+    assert "30-count blister pack [analyst: Second Analyst]" in salable_row
+    assert "Analyst input required" not in salable_row
+
+
+def test_overlay_on_populated_cell_appends_note_never_replaces(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A populated cell keeps its generated value verbatim; the human text rides
+    in as a distinct note paragraph (INV-3)."""
+    template = tmp_path / "template.docx"
+    _synthetic_template(template)
+    result = _build(monkeypatch)
+    data = write_whitepaper_docx(
+        result, template_path=template, inputs=_inputs(product_name="verify with brand team")
+    )
+    doc = Document(BytesIO(data))
+    name_cell = next(
+        r.cells[-1].text
+        for t in doc.tables
+        for r in t.rows
+        if r.cells and r.cells[0].text.strip() == "Product Name"
+    )
+    assert "ALBUTEROL SULFATE" in name_cell  # generated value untouched
+    assert "Analyst note (Second Analyst): verify with brand team" in name_cell
+    # The note never replaces the value: both live in the same cell, value first.
+    assert name_cell.index("ALBUTEROL SULFATE") < name_cell.index("Analyst note")
+
+
+def test_overlay_checkbox_cell_marker_format(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A checkbox-style analyst cell takes the overlay as its appended marker,
+    keeping the template's own Yes/No text."""
+    template = tmp_path / "template.docx"
+    _synthetic_template(template)
+    result = _build(monkeypatch)
+    data = write_whitepaper_docx(
+        result, template_path=template, inputs=_inputs(dea_classification="Not scheduled")
+    )
+    doc = Document(BytesIO(data))
+    dea_cell = next(
+        r.cells[-1].text
+        for t in doc.tables
+        for r in t.rows
+        if r.cells and r.cells[0].text.strip() == "DEA Classification"
+    )
+    assert "Yes\t\tNo" in dea_cell  # template checkbox text survives
+    assert "->  Not scheduled [analyst: Second Analyst]" in dea_cell
+    assert "Analyst input required" not in dea_cell
+
+
+def test_overlay_note_on_priority_block_member(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A verified_absent block member keeps its 'No' marker; the overlay is an
+    appended note inside the merged Priority Status cell."""
+    template = tmp_path / "real-shaped.docx"
+    _real_shaped_template(template)
+    result = _build(monkeypatch)
+    data = write_whitepaper_docx(
+        result, template_path=template, inputs=_inputs(drug_shortage="re-check next quarter")
+    )
+    doc = Document(BytesIO(data))
+    block_cell = next(
+        r.cells[-1].text
+        for t in doc.tables
+        for r in t.rows
+        if r.cells and r.cells[0].text.strip() == "Priority Status"
+    )
+    assert "Drug Shortages: On Shortage List? Y/N  ->  No" in block_cell
+    assert "Analyst note (Second Analyst): re-check next quarter" in block_cell
+
+
+def test_overlay_analyst_inputs_appendix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    result = _build(monkeypatch)
+    data = write_whitepaper_docx(
+        result,
+        template_path=tmp_path / "missing.docx",
+        inputs=_inputs(rd_center="Site A", product_name="verify with brand team"),
+    )
+    doc = Document(BytesIO(data))
+    assert "Analyst inputs" in {p.text for p in doc.paragraphs}
+    appendix = next(
+        t
+        for t in doc.tables
+        if t.rows and [c.text for c in t.rows[0].cells] == ["Cell", "Value", "Author", "Updated at"]
+    )
+    rows = [[c.text for c in r.cells] for r in appendix.rows[1:]]
+    assert ["R&D Center", "Site A", "Second Analyst", UPDATED_AT] in rows
+    assert ["Product Name", "verify with brand team", "Second Analyst", UPDATED_AT] in rows
+    assert len(rows) == 2
+
+
+def test_overlay_fallback_path_parity(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The from-scratch fallback applies the identical overlay treatment."""
+    result = _build(monkeypatch)
+    data = write_whitepaper_docx(
+        result,
+        template_path=tmp_path / "missing.docx",
+        inputs=_inputs(rd_center="Site A", product_name="verify with brand team"),
+    )
+    doc = Document(BytesIO(data))
+    assert FALLBACK_MARKER in {p.text for p in doc.paragraphs}  # still the loud fallback
+    section_rows = {
+        r.cells[0].text: r.cells[1].text
+        for t in doc.tables
+        if t.rows and [c.text for c in t.rows[0].cells][:3] == ["Cell", "Value", "Status"]
+        for r in t.rows[1:]
+    }
+    assert section_rows["R&D Center"] == "Site A [analyst: Second Analyst]"
+    value_cell = section_rows["Product Name"]
+    assert "ALBUTEROL SULFATE" in value_cell
+    assert "Analyst note (Second Analyst): verify with brand team" in value_cell
+
+
+def test_no_inputs_rendering_unchanged(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """inputs=None must render exactly as before the overlay existed: no analyst
+    strings anywhere, and byte-identical document XML to an empty overlay."""
+    template = tmp_path / "template.docx"
+    _synthetic_template(template)
+    result = _build(monkeypatch)
+    plain = write_whitepaper_docx(result, template_path=template)
+    for text in (_all_text(plain), _all_text(write_whitepaper_docx(result, template_path=None))):
+        assert "[analyst:" not in text
+        assert "Analyst note" not in text
+        assert "Analyst inputs" not in text
+    empty = write_whitepaper_docx(result, template_path=template, inputs={})
+    assert _document_xml(plain) == _document_xml(empty)
+
+
+def test_blank_overlay_value_never_renders_as_analyst_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A blank/whitespace overlay entry is ignored on every surface (INV-5)."""
+    result = _build(monkeypatch)
+    data = write_whitepaper_docx(
+        result, template_path=tmp_path / "missing.docx", inputs=_inputs(rd_center="   ")
+    )
+    text = _all_text(data)
+    assert "[analyst:" not in text
+    assert "Analyst note" not in text
+    assert "Analyst inputs" not in text

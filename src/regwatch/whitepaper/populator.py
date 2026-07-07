@@ -66,6 +66,7 @@ from regwatch.sources.shortages import SHORTAGES_DOC_URL, ShortagesHandler
 from regwatch.sources.types import SourceQuery, SourceRecord
 from regwatch.store.db import session_scope
 from regwatch.store.models import BeRequirement, PsgDocument
+from regwatch.store.queries import current_dosage_form_routes
 from regwatch.store.whitepaper_sources import (
     ObSnapshot,
     SplSnapshot,
@@ -566,10 +567,26 @@ def _fetch_dailymed(ctx: _Ctx) -> None:
             _drugsfda_sponsor(ctx.drugsfda_records),
         ]
     )
+    # Second preference tier (P1b): sponsor/applicant names rarely appear in a
+    # repackager's relabel TITLE, but DailyMed brackets the labeler
+    # organization into every listing title -- matching that labeler against
+    # the Drugs@FDA sponsor and Orange Book applicant names picks the RLD
+    # holder's own SPL when no brand/trade title matches.
+    prefer_labelers = _unique(
+        [
+            _drugsfda_sponsor(ctx.drugsfda_records),
+            *(row.get("applicant_full_name") for row in ctx.product_rows),
+            *(row.get("applicant") for row in ctx.product_rows),
+        ]
+    )
     try:
         # The RESOLVED, PREFIXED number — bare-digit input must not let the
         # candidate expansion resolve another type's label (contract C1).
-        resolution = dailymed.resolve_setid(_resolved_application_number(ctx), prefer_titles=prefer)
+        resolution = dailymed.resolve_setid(
+            _resolved_application_number(ctx),
+            prefer_titles=prefer,
+            prefer_labelers=prefer_labelers,
+        )
     except Exception as exc:
         ctx.warnings.append(f"DailyMed setid resolution failed ({type(exc).__name__}).")
         log.warning("whitepaper_setid_failed", error=str(exc))
@@ -1717,6 +1734,43 @@ def _guiding_note(qa: QAResult, base: str) -> str:
     return note
 
 
+def _psg_ask_form_filters(ctx: _Ctx) -> dict[str, str] | None:
+    """EXACT stored (dosage_form, route) strings scoping the Requirements ask.
+
+    A multi-form ingredient (albuterol spans four dosage forms in the PSG
+    corpus) collapses a name-only ask to a multi_form clarify even when THIS
+    application is single-form. The retriever's form/route filter matches the
+    STORED values, so the scope must be a pair the store literally carries: a
+    manufactured value would silently zero retrieval and turn a real product
+    into a wrong refusal (INV-5). Filters are returned only when BOTH hold:
+    the application's own Orange Book identity has exactly one distinct
+    normalized (form, route), and exactly one stored vocabulary pair
+    normalizes to it. Anything else -- multi-form application, no or ambiguous
+    stored pair, vocabulary lookup failure -- returns None and the ask stays
+    unfiltered (today's clarify/guiding-note behavior; forms are never
+    blended, INV-1).
+    """
+    ob_forms, ob_routes = _ob_forms_and_routes(ctx)
+    if len(ob_forms) != 1 or len(ob_routes) != 1:
+        return None
+    ob_form = next(iter(ob_forms))
+    ob_route = next(iter(ob_routes))
+    try:
+        combos = current_dosage_form_routes(ctx.normalized_name)
+    except Exception as exc:
+        log.warning("whitepaper_psg_form_vocab_failed", error=str(exc))
+        return None
+    matches = [
+        (form, route)
+        for form, route in combos
+        if _normalized_form(form) == ob_form and _normalized_form(route) == ob_route
+    ]
+    if len(matches) != 1:
+        return None
+    form, route = matches[0]
+    return {"dosage_form": form, "route": route}
+
+
 def _ext_psg_requirements(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     if not ctx.normalized_name:
         return _analyst(spec, [], "No normalized ingredient resolved; cannot scope the PSG ask.")
@@ -1724,17 +1778,14 @@ def _ext_psg_requirements(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
         f"What are the recommended bioequivalence study design and acceptance criteria for "
         f"{ctx.ingredient} generic products?"
     )
-    # 2a deliberately skipped: _Ctx exposes no clean scalar dosage_form/route
-    # (forms live per-product-row as a combined string and can be multi-form),
-    # and _ob_forms_and_routes returns NORMALIZED lower-case tokens that would
-    # NOT exact-match the retriever's stored mixed-case form/route filter
-    # (retriever.py uses == on dosage_form/route) — passing them would silently
-    # zero retrieval and turn a real product into a wrong refusal. Per the
-    # spec's "verify first; if absent, skip" rule we pass normalized_name alone.
+    filters: dict[str, Any] = {"normalized_name": ctx.normalized_name}
+    form_filters = _psg_ask_form_filters(ctx)
+    if form_filters is not None:
+        filters.update(form_filters)
     try:
         qa = ask(
             question,
-            filters={"normalized_name": ctx.normalized_name},
+            filters=filters,
             user_id=ctx.user_id,
             bind_session=False,
         )
@@ -2010,10 +2061,27 @@ def _ext_psg_strategy(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
 
 def _ext_be_requirement_field(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     ev = _be_requirement_evidence(ctx, spec.arg)
-    note = (
-        "Per-study requirement is analyst judgment (INV-3); the PSG field(s) and citation are "
-        "surfaced as evidence."
+    # The note states what evidence actually EXISTS for this study cell so the
+    # analyst is guided, not dead-ended -- the cell itself stays analyst input
+    # (INV-3) and nothing is asserted beyond what was extracted (INV-5).
+    base = "Per-study requirement is analyst judgment (INV-3)"
+    be_fields = (ctx.be_requirement or {}).get("fields") or {}
+    docs_tail = (
+        "the PSG document(s) are surfaced as evidence"
+        if ev
+        else "no PSG evidence is available for this product"
     )
+    if spec.arg and be_fields.get(spec.arg):
+        # Claim a page citation only when one was actually extracted (INV-5:
+        # the note may not assert evidence the cell does not carry).
+        cite = ((ctx.be_requirement or {}).get("citations") or {}).get(spec.arg)
+        has_page = isinstance(cite, dict) and isinstance(cite.get("page"), int)
+        cited = "text and its page citation are" if has_page else "text is"
+        note = f"{base}; the PSG's extracted {spec.arg!r} {cited} surfaced as evidence."
+    elif spec.arg:
+        note = f"{base}; no {spec.arg!r} text was extracted from this product's PSG - {docs_tail}."
+    else:
+        note = f"{base}; no machine-extracted PSG field maps to this study cell - {docs_tail}."
     return _analyst(spec, ev, note)
 
 
@@ -2184,6 +2252,18 @@ def _spine_from_ctx(ctx: _Ctx) -> dict[str, Any]:
             r.get("product_no") for r in ctx.product_rows if r.get("product_no")
         ),
         "setid": ctx.setid,
+        # Additive (P1b): the full DailyMed candidate set behind the setid
+        # pick, so the repackager-vs-sponsor selection is auditable and
+        # overridable by the analyst -- never a silent pick.
+        "spl_candidates": [
+            {
+                "setid": c.setid,
+                "title": c.title,
+                "labeler": c.labeler,
+                "published": c.published,
+            }
+            for c in (ctx.setid_resolution.candidates if ctx.setid_resolution else ())
+        ],
         "warnings": ctx.warnings,
     }
 

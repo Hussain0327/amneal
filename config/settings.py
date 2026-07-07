@@ -268,6 +268,13 @@ class Settings(BaseSettings):
     # gitignored but present on a real deployment; when absent (CI), the docx
     # writer generates a structurally-equivalent document from scratch.
     whitepaper_template_path: Path = Path("./CRA White Paper Template May 2026 - Raja.docx")
+    # Prod machines have no persistent volume, so the gitignored template never
+    # survives a deploy and every prod render fell back. When set (a long-lived
+    # signed URL to the private Supabase Storage object, delivered as a Fly
+    # secret), the render path lazily fetches and caches the template at
+    # whitepaper_template_path on first use; any fetch failure keeps today's
+    # loud FALLBACK_MARKER behavior. Rotation = re-sign + update the secret.
+    whitepaper_template_url: str | None = None
 
     # ---------- API ----------
     api_host: str = "127.0.0.1"

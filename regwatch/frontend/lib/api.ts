@@ -79,6 +79,15 @@ export interface WhitepaperSectionData {
   cells: WhitepaperCell[];
 }
 
+// The full DailyMed candidate set behind the setid pick, so the
+// repackager-vs-sponsor selection is auditable -- never a silent pick.
+export interface WhitepaperSplCandidate {
+  setid: string;
+  title: string;
+  labeler: string | null;
+  published: string | null;
+}
+
 export interface WhitepaperSpine {
   application_number: string;
   // The backend can also resolve BLA inputs (Drugs@FDA / Orange Book carry them).
@@ -87,6 +96,7 @@ export interface WhitepaperSpine {
   normalized_name: string;
   product_numbers: string[];
   setid: string | null;
+  spl_candidates: WhitepaperSplCandidate[];
   warnings: string[];
 }
 
@@ -95,7 +105,32 @@ export interface WhitepaperResponse {
   sections: WhitepaperSectionData[];
   warnings: string[];
   audit_id: number;
+  // The durable org-shared run this populate persisted as. null when the
+  // persist DEGRADED (populate is the expensive step, so the result still
+  // ships, with a warning appended) -- the page then renders it inline
+  // instead of navigating to ?run=.
+  run_id: number | null;
 }
+
+// --- White Paper runs (durable, org-shared) ---------------------------------
+// These routes carry typed response_models, so the shapes come from the
+// generated schema rather than hand-written mirrors.
+export type WhitepaperRunSummary = Schemas["WhitepaperRunSummary"];
+export type WhitepaperRunList = Schemas["WhitepaperRunListResponse"];
+export type WhitepaperInput = Schemas["WhitepaperInputOut"];
+export type WhitepaperCellSaved = Schemas["WhitepaperCellResponse"];
+export type WhitepaperRunStatus = Schemas["WhitepaperRunStatusResponse"];
+// spine/sections are deliberately passthrough on the wire (the stored payload
+// is VERBATIM what the audited populate produced, INV-3), so the schema types
+// them as plain objects; narrow them here to the same hand-written cell shapes
+// the populate response uses -- they are the identical payload.
+export type WhitepaperRunDetail = Omit<
+  Schemas["WhitepaperRunDetailResponse"],
+  "spine" | "sections"
+> & {
+  spine: WhitepaperSpine;
+  sections: WhitepaperSectionData[];
+};
 
 export interface AlertRecord {
   product_id: number;
@@ -682,24 +717,86 @@ function filenameFromDisposition(header: string | null): string | null {
   return plain ? plain[1].trim() : null;
 }
 
-// The body is {result: <the exact JSON object buildWhitepaper returned>}: the
-// server verifies result.audit_id is the caller's own white-paper run and
-// renders the .docx FROM that payload — no re-populate, so the document can
-// never silently differ from what the analyst reviewed. The 200 is the .docx
-// itself: read it as a blob and hand it to the browser as a download under
-// the server's Content-Disposition filename. Error bodies are JSON, so they
-// go through the shared handler — same 401 gate and detail parsing as every
-// other call.
-export async function downloadWhitepaperDocx(result: WhitepaperResponse): Promise<void> {
-  const path = "/whitepaper/docx";
+// Org-shared saved runs, newest activity first. Filters are passed through to
+// the server (an unparseable application_number filter 422s -- refuse, never
+// guess); pagination mirrors /watch/latest's count/total/limit/offset honesty.
+export function listWhitepaperRuns(
+  params: {
+    limit?: number;
+    offset?: number;
+    application_number?: string;
+    normalized_name?: string;
+    status?: string;
+  } = {},
+): Promise<WhitepaperRunList> {
+  const qs = new URLSearchParams();
+  if (params.limit !== undefined) qs.set("limit", String(params.limit));
+  if (params.offset !== undefined) qs.set("offset", String(params.offset));
+  if (params.application_number) qs.set("application_number", params.application_number);
+  if (params.normalized_name) qs.set("normalized_name", params.normalized_name);
+  if (params.status) qs.set("status", params.status);
+  const q = qs.toString();
+  return getJSON<WhitepaperRunList>(`/whitepaper/runs${q ? `?${q}` : ""}`);
+}
+
+export function getWhitepaperRun(runId: number): Promise<WhitepaperRunDetail> {
+  return getJSON<WhitepaperRunDetail>(`/whitepaper/runs/${runId}`);
+}
+
+// Set one attributed analyst overlay cell. The generated layer is never
+// touched (INV-3): the value lives in a separate overlay keyed by cell id, and
+// the response carries the stored view (author + updated_at) for attribution.
+export function saveWhitepaperInput(
+  runId: number,
+  cellId: string,
+  value: string,
+): Promise<WhitepaperCellSaved> {
+  return postJSON<WhitepaperCellSaved>(
+    `/whitepaper/runs/${runId}/cells/${encodeURIComponent(cellId)}`,
+    { value },
+  );
+}
+
+// Clearing deletes the overlay row (the wire contract: a null value clears);
+// the response comes back cleared=true with input=null.
+export function clearWhitepaperInput(runId: number, cellId: string): Promise<WhitepaperCellSaved> {
+  return postJSON<WhitepaperCellSaved>(
+    `/whitepaper/runs/${runId}/cells/${encodeURIComponent(cellId)}`,
+    { value: null },
+  );
+}
+
+export function finalizeWhitepaperRun(runId: number): Promise<WhitepaperRunStatus> {
+  return postJSON<WhitepaperRunStatus>(`/whitepaper/runs/${runId}/finalize`, {});
+}
+
+export function reopenWhitepaperRun(runId: number): Promise<WhitepaperRunStatus> {
+  return postJSON<WhitepaperRunStatus>(`/whitepaper/runs/${runId}/reopen`, {});
+}
+
+// Creator-only, drafts-only: the server owns the rules (403 foreign, 409
+// final); the page surfaces those as inline messages rather than hiding the
+// affordance (the client does not know the current user id).
+export function deleteWhitepaperRun(runId: number): Promise<void> {
+  return deleteJSON(`/whitepaper/runs/${runId}`);
+}
+
+// Renders the .docx server-side FROM the saved run (no client echo, no
+// re-populate): the server re-verifies the stored sections fingerprint before
+// rendering, so the document can never silently differ from what the analysts
+// reviewed. The 200 is the .docx itself: read it as a blob and hand it to the
+// browser as a download under the server's Content-Disposition filename.
+// Error bodies are JSON, so they go through the shared handler -- same 401
+// gate and detail parsing as every other call. applicationNumber only feeds
+// the filename fallback when the header is missing/unparseable.
+export async function downloadWhitepaperDocx(
+  runId: number,
+  applicationNumber: string,
+): Promise<void> {
+  const path = `/whitepaper/runs/${runId}/docx`;
   const res = await fetchWithTimeout(
     `${apiBase()}${path}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ result }),
-      credentials: "include",
-    },
+    { method: "POST", credentials: "include" },
     LONG_TIMEOUT_MS,
   );
   if (!res.ok) {
@@ -707,7 +804,7 @@ export async function downloadWhitepaperDocx(result: WhitepaperResponse): Promis
     return;
   }
   const blob = await res.blob();
-  const fallback = `whitepaper_${result.spine.application_number}.docx`;
+  const fallback = `whitepaper_${applicationNumber}.docx`;
   const filename = filenameFromDisposition(res.headers.get("content-disposition")) ?? fallback;
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -716,7 +813,7 @@ export async function downloadWhitepaperDocx(result: WhitepaperResponse): Promis
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
-  // Revoking in the same tick aborts the download in WebKit — defer until the
+  // Revoking in the same tick aborts the download in WebKit -- defer until the
   // browser has had a chance to start streaming the blob.
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
