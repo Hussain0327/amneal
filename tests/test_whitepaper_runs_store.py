@@ -333,11 +333,12 @@ def test_concurrent_duplicate_insert_raises_typed_conflict(
             WhitepaperInput(run_id=run_id, cell_id=ANALYST_CELL, value="first", author_user_id=uid)
         )
 
-    real_select = wr.select
-
     def stale_select(model: Any) -> Any:
         # The race window: the lookup misses the row another writer committed.
-        return real_select(model).where(col(WhitepaperInput.id) < 0)
+        # Wraps the module-level `select` import (the same object wr.select is
+        # bound to) rather than wr.select, which strict mypy rejects as a
+        # non-exported attribute.
+        return select(model).where(col(WhitepaperInput.id) < 0)
 
     monkeypatch.setattr(wr, "select", stale_select)
     with pytest.raises(wr.ConcurrentEditError):

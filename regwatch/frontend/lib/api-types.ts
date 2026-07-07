@@ -360,7 +360,8 @@ export interface paths {
          *     A ``null`` or empty-after-cleaning value clears the cell. No query rate
          *     limit: a pure bounded DB write, no FDA/LLM call. The store owns the domain
          *     rules; this boundary maps its typed errors -- 404 missing run, 409
-         *     final-frozen, 422 unknown cell / oversized value.
+         *     final-frozen or lost-the-concurrent-insert (retry), 422 unknown cell /
+         *     oversized value.
          */
         post: operations["whitepaper_run_set_cell_whitepaper_runs__run_id__cells__cell_id__post"];
         delete?: never;
