@@ -17,6 +17,12 @@
 ARG PYTHON_VERSION=3.12
 FROM python:3.12-slim@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e
 ARG INSTALL_LOCAL_EMBEDDINGS=false
+# Dagster ships only when asked for (compose sets true for its dagster-*
+# services). Prod structurally cannot run it (the CMD is uvicorn-only, Fly has
+# no dagster process, and the GitHub Actions cron is the sole scheduler), so
+# baking the orchestration closure into the default image was pure dead weight
+# (size, build time, and Trivy/pip-audit CVE surface for unreachable code).
+ARG INSTALL_ORCHESTRATION=false
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -57,11 +63,12 @@ RUN pip install --no-cache-dir uv
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
-RUN if [ "$INSTALL_LOCAL_EMBEDDINGS" = "true" ]; then \
-        uv sync --frozen --extra llm --extra orchestration --extra local-embeddings --no-dev --no-install-project; \
-    else \
-        uv sync --frozen --extra llm --extra orchestration --no-dev --no-install-project; \
-    fi
+# Word-splitting on $EXTRAS is intentional (POSIX sh flag accumulation); the
+# values are fixed literals, never user input.
+RUN EXTRAS="--extra llm" \
+    && if [ "$INSTALL_LOCAL_EMBEDDINGS" = "true" ]; then EXTRAS="$EXTRAS --extra local-embeddings"; fi \
+    && if [ "$INSTALL_ORCHESTRATION" = "true" ]; then EXTRAS="$EXTRAS --extra orchestration"; fi \
+    && uv sync --frozen $EXTRAS --no-dev --no-install-project
 
 COPY README.md alembic.ini ./
 COPY config ./config
@@ -72,11 +79,10 @@ COPY docker/dagster $DAGSTER_CONFIG_DIR
 COPY docker/entrypoint.sh /usr/local/bin/regwatch-entrypoint
 
 RUN chmod +x /usr/local/bin/regwatch-entrypoint \
-    && if [ "$INSTALL_LOCAL_EMBEDDINGS" = "true" ]; then \
-        uv sync --frozen --extra llm --extra orchestration --extra local-embeddings --no-dev; \
-    else \
-        uv sync --frozen --extra llm --extra orchestration --no-dev; \
-    fi
+    && EXTRAS="--extra llm" \
+    && if [ "$INSTALL_LOCAL_EMBEDDINGS" = "true" ]; then EXTRAS="$EXTRAS --extra local-embeddings"; fi \
+    && if [ "$INSTALL_ORCHESTRATION" = "true" ]; then EXTRAS="$EXTRAS --extra orchestration"; fi \
+    && uv sync --frozen $EXTRAS --no-dev
 
 # The CRA White Paper Word template is gitignored (internal artifact) and is
 # deliberately NOT baked into the image. WHITEPAPER_TEMPLATE_PATH (set above)

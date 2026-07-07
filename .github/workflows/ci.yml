@@ -104,16 +104,18 @@ jobs:
           version: "latest"
           enable-cache: true
 
-      # Audit the SHIPPED production closure: the slim image installs llm +
-      # orchestration (Dockerfile default INSTALL_LOCAL_EMBEDDINGS=false; Fly runs
-      # EMBEDDING_PROVIDER=openai), so torch/transformers from `local-embeddings`
-      # never reach prod and are intentionally out of scope here — gating prod CI
-      # on that heavyweight ML extra's noisy, slow-to-fix CVE cadence would add
-      # churn with no prod exposure. --frozen also asserts uv.lock matches pyproject.
+      # Audit the SHIPPED production closure: the slim image installs llm only
+      # (Dockerfile defaults INSTALL_LOCAL_EMBEDDINGS=false and
+      # INSTALL_ORCHESTRATION=false; Fly runs EMBEDDING_PROVIDER=openai), so
+      # torch/transformers from `local-embeddings` and the dagster closure from
+      # `orchestration` (compose-only dev tooling) never reach prod and are
+      # intentionally out of scope here: gating prod CI on their noisy,
+      # slow-to-fix CVE cadence would add churn with no prod exposure.
+      # --frozen also asserts uv.lock matches pyproject.
       - name: export runtime dependency set
         run: >-
           uv export --frozen --no-emit-project --no-dev
-          --extra llm --extra orchestration
+          --extra llm
           --format requirements-txt --output-file requirements-audit.txt
 
       # chromadb GHSA-f4j7-r4q5-qw2c (CVE-2026-45829, ChromaToast) is a pre-auth
@@ -234,8 +236,10 @@ jobs:
       - name: install python
         run: uv python install 3.12
 
+      # No `orchestration` extra: the schema dump only imports the FastAPI app,
+      # which never touches the dagster closure.
       - name: sync deps (api importable for the schema dump)
-        run: uv sync --extra dev --extra llm --extra orchestration
+        run: uv sync --extra dev --extra llm
 
       - name: setup node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0

@@ -45,6 +45,17 @@ class WatchMatch:
     rationale: str  # "canonical" | "stripped" | "fuzzy" | "combo_component"
 
 
+def product_id(m: WatchMatch) -> int | None:
+    """The match's watchlist product id, or None when it carries no int id.
+
+    Single home for the "non-int product id => not alertable/pairable" rule:
+    run.py's missed-pair recovery and alerts.py's build_alerts must apply the
+    SAME coercion or the INV-4 re-surfacing check drifts from alert emission.
+    """
+    pid = m.product.get("id")
+    return pid if isinstance(pid, int) else None
+
+
 def _norm_attr(v: Any) -> str:
     """Lowercased, whitespace-collapsed attribute for lenient route/form compare."""
     if not isinstance(v, str):

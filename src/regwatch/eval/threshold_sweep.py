@@ -216,14 +216,6 @@ def sweep(
     )
 
 
-def _retention_at(curve: Sequence[CurvePoint], t: float) -> float:
-    """answer_retention at the candidate closest to ``t`` (exact when on-grid)."""
-    if not curve:
-        return 1.0
-    nearest = min(curve, key=lambda p: abs(p.threshold - t))
-    return nearest.answer_retention
-
-
 @dataclass
 class Recommendation:
     recommended: float | None

@@ -26,6 +26,15 @@ class _Resp:
         return {"model": self.model, "output_text": self.output_text}
 
 
+class _Event:
+    """One streamed Responses-API event (duck-typed: type + optional attrs)."""
+
+    def __init__(self, type: str, **attrs: object) -> None:
+        self.type = type
+        for key, value in attrs.items():
+            setattr(self, key, value)
+
+
 class _Responses:
     def __init__(self, reject_temperature: bool = False, message_only: bool = False) -> None:
         self.calls: list[dict] = []
@@ -40,6 +49,14 @@ class _Responses:
                 "Unsupported parameter: 'temperature' is not supported with this model.",
                 response=httpx.Response(400, request=req),
                 body=None if self.message_only else {"param": "temperature"},
+            )
+        if kwargs.get("stream"):
+            return iter(
+                [
+                    _Event("response.output_text.delta", delta="po"),
+                    _Event("response.output_text.delta", delta="ng"),
+                    _Event("response.completed", response=_Resp()),
+                ]
             )
         return _Resp()
 
@@ -106,6 +123,28 @@ def test_temperature_retry_uses_structured_param_not_message() -> None:
     fake = _FakeClient(reject_temperature=True, message_only=True)
     with pytest.raises(openai.BadRequestError):
         _provider(fake).complete([LLMMessage("user", "hi")], temperature=0.0)
+    assert len(fake.responses.calls) == 1
+
+
+def test_stream_temperature_retry_on_reasoning_model() -> None:
+    fake = _FakeClient(reject_temperature=True)
+    chunks = list(_provider(fake).stream([LLMMessage("user", "hi")], temperature=0.0))
+    # First call carried temperature (rejected), second omitted it; both streamed.
+    assert len(fake.responses.calls) == 2
+    assert "temperature" in fake.responses.calls[0]
+    assert "temperature" not in fake.responses.calls[1]
+    assert all(call["stream"] is True for call in fake.responses.calls)
+    # The retried stream still delivers deltas then the terminal validated chunk.
+    assert "".join(c.delta for c in chunks if not c.done) == "pong"
+    assert chunks[-1].done is True
+    assert chunks[-1].response is not None
+    assert chunks[-1].response.text == "pong"
+
+
+def test_stream_temperature_retry_uses_structured_param_not_message() -> None:
+    fake = _FakeClient(reject_temperature=True, message_only=True)
+    with pytest.raises(openai.BadRequestError):
+        list(_provider(fake).stream([LLMMessage("user", "hi")], temperature=0.0))
     assert len(fake.responses.calls) == 1
 
 

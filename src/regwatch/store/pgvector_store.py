@@ -181,6 +181,7 @@ def get_engine() -> Engine:
                 pool_pre_ping=True,
                 pool_size=5,
                 max_overflow=5,
+                pool_recycle=s.db_pool_recycle_s,
                 connect_args=db_module._pg_connect_args(s),
             )
             _owns_engine = True
@@ -220,23 +221,38 @@ def ensure_schema(engine: Engine) -> None:
     # Creates the table plus the btree indexes declared on the model
     # (doc_id, version_id, normalized_name, appl_no).
     SQLModel.metadata.tables["chunk"].create(engine, checkfirst=True)
-    with engine.begin() as conn:
-        conn.execute(
-            sa_text(
-                "CREATE INDEX IF NOT EXISTS ix_chunk_embedding_hnsw "
-                "ON chunk USING hnsw (embedding vector_cosine_ops) "
-                "WITH (m = 16, ef_construction = 64)"
-            )
-        )
-        # Self-heal the model-declared btree indexes too: Table.create with
-        # checkfirst=True skips indexes entirely when the table already exists
-        # (e.g. created first by store/db.py's bootstrap DDL), and both
-        # bootstrap paths must converge on the same index set (K4) regardless
-        # of module-initialization order.
-        for column in ("normalized_name", "doc_id", "version_id", "appl_no"):
-            conn.execute(
-                sa_text(f"CREATE INDEX IF NOT EXISTS ix_chunk_{column} ON chunk ({column})")
-            )
+    # Self-heal the HNSW index plus the model-declared btree indexes:
+    # Table.create with checkfirst=True skips indexes entirely when the table
+    # already exists (e.g. created first by store/db.py's bootstrap DDL), and
+    # both bootstrap paths must converge on the same index set (K4) regardless
+    # of module-initialization order.
+    index_ddl = (
+        "CREATE INDEX IF NOT EXISTS ix_chunk_embedding_hnsw "
+        "ON chunk USING hnsw (embedding vector_cosine_ops) "
+        "WITH (m = 16, ef_construction = 64)",
+        *(
+            f"CREATE INDEX IF NOT EXISTS ix_chunk_{column} ON chunk ({column})"
+            for column in ("normalized_name", "doc_id", "version_id", "appl_no")
+        ),
+    )
+    # Lock-safe like _enable_chunk_rls below and db.py's _ensure_postgres_objects:
+    # CREATE INDEX IF NOT EXISTS takes a ShareLock on the hot `chunk` table even
+    # when the index already exists, which conflicts with the RowExclusiveLock a
+    # concurrent ingest writer holds (the 2026-06-18 lock-pileup class) -- and
+    # this path runs lazily on a booted process's FIRST query/ingest. So each
+    # statement gets its own transaction under a short lock_timeout; a contended
+    # run is logged and skipped rather than surfacing as an uncaught 500. All
+    # statements target the same table, so once one is contended the rest will
+    # be too: break instead of paying lock_timeout per index. Every statement is
+    # IF NOT EXISTS, so the next boot/first-use re-attempts the skipped ones.
+    for ddl in index_ddl:
+        try:
+            with engine.begin() as conn:
+                conn.execute(sa_text("SET LOCAL lock_timeout = '3s'"))
+                conn.execute(sa_text(ddl))
+        except OperationalError as exc:
+            log.warning("ensure_schema_index_skipped", error=str(getattr(exc, "orig", exc)))
+            break
     # Deny-all for Supabase's auto-exposed Data API roles; the app's `postgres`
     # role bypasses RLS. Mandatory per the K2 contract — but enabled OUT of the
     # DDL transaction above and only when not already on, so a first-query path

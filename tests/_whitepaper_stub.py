@@ -292,6 +292,7 @@ def install_fake_sources(
         application_number: str,
         *,
         prefer_titles: Any = (),
+        prefer_labelers: Any = (),
         client: Any = None,
     ) -> SetidResolution | None:
         if setid is None:

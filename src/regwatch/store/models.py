@@ -347,6 +347,80 @@ class Alert(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
 
 
+class WhitepaperRun(SQLModel, table=True):
+    """A persisted White-Paper populate result -- the durable run of record.
+
+    Two-layer compliance model (INV-3/INV-5): everything the populator produced
+    (``spine_json``/``sections_json``/``warnings_json``) is IMMUTABLE after
+    insert -- no code path updates it -- and ``sections_sha256`` is the
+    fingerprint that render/finalize re-verify, so a stored run can never be
+    silently altered. Attributed analyst text lives in ``whitepaper_input``,
+    a separate table, so a manual cell's generated ``value`` stays ``None``
+    forever and the human answer is visibly human.
+
+    Spine keys are denormalized as plain columns for listing/filtering; the
+    three status counts describe the immutable generated layer, so their
+    denormalization cannot drift. Timestamps mirror ``WatchRun``: plain
+    DateTime columns written from ``datetime.now(UTC)``, round-tripping as
+    naive-UTC like every other timestamp in this schema.
+    """
+
+    __tablename__ = "whitepaper_run"
+    # Declared in metadata so create_all (the fresh-Postgres bootstrap) and
+    # migration 0013 produce identical constraints on both paths.
+    __table_args__ = (
+        CheckConstraint("status IN ('draft', 'final')", name="ck_whitepaper_run_status"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_by_user_id: int = Field(foreign_key="user.id", index=True)
+    # Spine keys denormalized for listing/filtering and Phase-3 staleness joins.
+    rld_name_input: str
+    application_number: str = Field(index=True)  # six digits, normalized
+    application_type: str  # NDA | ANDA | BLA
+    ingredient: str
+    normalized_name: str = Field(index=True)
+    # The full generated payload, immutable after insert (INV-3).
+    spine_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
+    sections_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=_json_column())
+    warnings_json: list[str] = Field(default_factory=list, sa_column=_json_column())
+    sections_sha256: str
+    # Ties the run to its existing QueryLog audit row (mode="whitepaper").
+    source_audit_id: int = Field(index=True)
+    # Workflow: draft -> final. Finalize freezes the analyst layer too.
+    status: str = Field(default="draft", index=True)
+    finalized_at: datetime | None = None
+    finalized_by_user_id: int | None = Field(default=None, foreign_key="user.id")
+    # Status counts over the immutable generated layer, computed once at create.
+    populated_count: int
+    analyst_input_count: int
+    verified_absent_count: int
+
+
+class WhitepaperInput(SQLModel, table=True):
+    """Attributed analyst overlay -- one CURRENT value per (run, cell).
+
+    The overlay is the ONLY mutable layer of a run (INV-3): human text with an
+    author, never mixed into ``sections_json``. Clearing a cell deletes the
+    row -- an empty value never persists as a confident blank (INV-5). Updates
+    overwrite in place; edit history is deferred until someone asks for it.
+    """
+
+    __tablename__ = "whitepaper_input"
+    # Declared in metadata so create_all (the fresh-Postgres bootstrap) and
+    # migration 0013 produce identical constraints on both paths.
+    __table_args__ = (UniqueConstraint("run_id", "cell_id", name="uq_whitepaper_input_run_cell"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    run_id: int = Field(foreign_key="whitepaper_run.id", index=True)
+    cell_id: str  # validated in code against template.CELL_SPECS
+    value: str  # non-empty; clearing deletes the row
+    author_user_id: int = Field(foreign_key="user.id")
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class WatchRun(SQLModel, table=True):
     """One COMPLETED Watch pipeline run -- the durable "the cron actually ran" ledger.
 

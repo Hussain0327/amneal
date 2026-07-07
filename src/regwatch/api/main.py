@@ -13,7 +13,13 @@ Endpoints (per spec §10.16):
     POST   /sources/search — structured FDA source lookup (auth)
     POST   /assemble       — build a cited dossier for a target product (auth)
     POST   /whitepaper     — populate the CRA White Paper (RLD + appl no) (auth)
-    POST   /whitepaper/docx — render a returned /whitepaper result as .docx (auth)
+    GET    /whitepaper/runs - org-shared saved white-paper runs (auth)
+    GET    /whitepaper/runs/{id} - one saved run + analyst overlay (auth)
+    POST   /whitepaper/runs/{id}/cells/{cell_id} - set/clear one analyst cell (auth)
+    POST   /whitepaper/runs/{id}/finalize - freeze a run (draft -> final) (auth)
+    POST   /whitepaper/runs/{id}/reopen - reopen a finalized run (auth)
+    POST   /whitepaper/runs/{id}/docx - render a saved run as .docx (auth)
+    DELETE /whitepaper/runs/{id} - creator-only draft delete (auth)
     GET    /watch/latest   — recent alerts (auth)
     GET    /products       — list watchlist (auth)
     POST   /products       — add manual product (auth)
@@ -37,6 +43,7 @@ import os
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import UTC, date, datetime
 from functools import partial
 from typing import Any
@@ -71,13 +78,22 @@ from regwatch.generate.grounded_qa import QAResult, QueryStatusLiteral, ask
 from regwatch.process.embedder import assert_embedding_runtime_available
 from regwatch.sources.router import search_sources
 from regwatch.sources.types import SourceKind, SourceQuery
+from regwatch.store import whitepaper_runs as run_store
 from regwatch.store.db import engine_dialect, get_engine, init_db, session_scope
-from regwatch.store.models import AnswerFeedback, ChatMessage, ChatSession, QueryLog, User
+from regwatch.store.models import (
+    AnswerFeedback,
+    ChatMessage,
+    ChatSession,
+    QueryLog,
+    User,
+    WhitepaperRun,
+)
 from regwatch.store.queries import fetch_citation_recency
 from regwatch.store.vector_store import collection_size
 from regwatch.watch.alerts import count_digest_records, latest_digest_records
 from regwatch.watch.runs import latest_watch_run
 from regwatch.watch.watchlist import add_manual_product, list_watchlist, set_on_watchlist
+from regwatch.whitepaper import template_fetch
 from regwatch.whitepaper.docx_writer import docx_media_type, write_whitepaper_docx
 from regwatch.whitepaper.populator import (
     SpineResolutionError,
@@ -289,6 +305,12 @@ def health(response: Response) -> dict[str, Any]:
             "llm": {"provider": s.llm_provider, "key_present": _llm_key_present(s)},
             "embedding": {"provider": s.embedding_provider},
         },
+        # Pure path/config inspection (no I/O beyond a stat, never raises), so a
+        # prod stack silently rendering FALLBACK_MARKER documents is visible at
+        # a glance. Diagnostic only: it never flips the 503.
+        "whitepaper_template": template_fetch.template_status(
+            s.whitepaper_template_path, s.whitepaper_template_url
+        ),
         "warnings": warnings,
     }
     if s.allow_test_providers:
@@ -1090,18 +1112,61 @@ class WhitepaperRequest(BaseModel):
     application_number: str = Field(..., min_length=1, max_length=40)
 
 
+def _user_pk(user: User) -> int:
+    if user.id is None:  # pragma: no cover - require_user only returns persisted users
+        raise HTTPException(status_code=401, detail="authentication required")
+    return user.id
+
+
+def _persist_whitepaper_run(user_id: int, rld_name_input: str, result: dict[str, Any]) -> None:
+    """Persist the populate result as a durable run; sets ``result["run_id"]``.
+
+    DEGRADE, never fail: populate is the expensive step (live FDA fetches + an
+    LLM turn), so losing durability must not lose the result -- same philosophy
+    as the populator's ``_persist`` snapshot write-through. On failure the
+    response ships with ``run_id: null`` plus an explicit warning, and the
+    capture is sanitized the same way: a StatementError's str() embeds the
+    failed SQL + parameter preview (the run payload), so only the exception
+    CLASS is forwarded, with no cause/context chain.
+    """
+    try:
+        result["run_id"] = run_store.create_run(
+            user_id=user_id, rld_name_input=rld_name_input, result=result
+        )
+        return
+    except Exception as exc:
+        result["run_id"] = None
+        warnings = result.get("warnings")
+        if isinstance(warnings, list):
+            warnings.append(
+                "Saving this run failed - the populate result below is complete but "
+                "was not persisted, so it will not appear in the runs list. "
+                "Re-run POST /whitepaper to retry."
+            )
+        log.warning("whitepaper_run_persist_failed", error_type=type(exc).__name__)
+        sanitized = RuntimeError(f"whitepaper run persist failed: {type(exc).__name__}")
+        sanitized.__cause__ = None
+        sanitized.__suppress_context__ = True
+        capture_exception(sanitized)
+
+
 @protected.post("/whitepaper")
 def whitepaper(req: WhitepaperRequest, user: User = Depends(require_user)) -> dict[str, Any]:
     """Populate the CRA White Paper for an RLD name + NDA/ANDA number.
 
     Writes one whitepaper audit row (in build_whitepaper) on success AND on a
-    422 resolution failure. Rate-limited like /query and /assemble.
+    422 resolution failure. Rate-limited like /query and /assemble. A
+    successful populate is persisted as a durable org-shared run and the
+    response gains ``run_id`` (null when the persist degraded, see
+    ``_persist_whitepaper_run``).
     """
     _enforce_query_rate_limit(user)
     try:
-        return build_whitepaper(req.rld_name, req.application_number, user_id=str(user.id))
+        result = build_whitepaper(req.rld_name, req.application_number, user_id=str(user.id))
     except SpineResolutionError as exc:
         raise HTTPException(status_code=422, detail=exc.detail) from exc
+    _persist_whitepaper_run(_user_pk(user), req.rld_name, result)
+    return result
 
 
 # ---------- /resolve ----------
@@ -1128,124 +1193,332 @@ def resolve(req: ResolveRequest, user: User = Depends(require_user)) -> dict[str
         raise HTTPException(status_code=422, detail=exc.detail) from exc
 
 
-class WhitepaperDocxRequest(BaseModel):
-    """Body: the EXACT JSON object a previous POST /whitepaper returned."""
-
-    result: dict[str, Any]
-
-
-_DOCX_RESULT_DETAIL = (
-    "result must be the exact JSON object returned by POST /whitepaper "
-    "({spine, sections, warnings, audit_id})"
-)
-_DOCX_CELL_KEYS = ("id", "label", "status")
-
-# What /whitepaper actually returns: six digits, optionally NDA/ANDA/BLA-
-# prefixed. The value is interpolated into the Content-Disposition filename
-# (and the audit row), so anything looser — CR/LF, quotes, path characters —
-# is rejected rather than trusted into a response header.
+# ---------- /whitepaper/runs (durable runs + attributed analyst overlay) ----------
+# What /whitepaper produces (and create_run normalizes): six digits, optionally
+# NDA/ANDA/BLA-prefixed. The value is interpolated into the Content-Disposition
+# filename (and the audit row), so anything looser (CR/LF, quotes, path
+# characters) is refused rather than trusted into a response header.
 _DOCX_APPL_NO_RE = re.compile(r"^[A-Z]{0,4}[0-9]{6}$")
 
+_RUN_NOT_FOUND_DETAIL = "white-paper run not found"
 
-def _validated_docx_result(result: dict[str, Any]) -> tuple[int, str]:
-    """Minimal shape check before rendering: (audit_id, application_number).
 
-    The docx is rendered verbatim from this payload — no re-populate — so the
-    shape the writer dereferences must hold, and nothing else is trusted.
+class WhitepaperRunSummary(BaseModel):
+    """One org-shared run list row (no JSON payloads -- see the detail route)."""
+
+    id: int
+    rld_name_input: str
+    application_number: str
+    application_type: str
+    ingredient: str
+    normalized_name: str
+    status: str
+    populated_count: int
+    analyst_input_count: int
+    verified_absent_count: int
+    inputs_count: int
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class WhitepaperRunListResponse(BaseModel):
+    count: int
+    total: int
+    limit: int
+    offset: int
+    runs: list[WhitepaperRunSummary]
+
+
+class WhitepaperInputOut(BaseModel):
+    """One attributed analyst overlay value."""
+
+    value: str
+    author: str | None
+    updated_at: datetime
+
+
+class WhitepaperRunDetailResponse(BaseModel):
+    """The full stored run.
+
+    ``spine``/``sections``/``warnings`` are deliberately passthrough fields
+    (plain dict/list, no nested models): the response must be VERBATIM what the
+    audited populate stored -- serialization may never reshape or filter the
+    fingerprinted sections payload (INV-3).
     """
 
-    def reject(why: str) -> HTTPException:
-        return HTTPException(status_code=422, detail=f"{_DOCX_RESULT_DETAIL}: {why}")
-
-    audit_id = result.get("audit_id")
-    if not isinstance(audit_id, int) or isinstance(audit_id, bool):
-        raise reject("audit_id must be an integer")
-    spine = result.get("spine")
-    if not isinstance(spine, dict):
-        raise reject("spine must be an object")
-    appl_no = spine.get("application_number")
-    if not isinstance(appl_no, str) or not _DOCX_APPL_NO_RE.fullmatch(appl_no):
-        raise reject(
-            "spine.application_number must be an FDA application number "
-            "(six digits, optional NDA/ANDA/BLA prefix)"
-        )
-    sections = result.get("sections")
-    if not isinstance(sections, list) or not sections:
-        raise reject("sections must be a non-empty list")
-    for section in sections:
-        if not isinstance(section, dict) or not isinstance(section.get("cells"), list):
-            raise reject("every section must be an object with a cells list")
-        for cell in section["cells"]:
-            if not isinstance(cell, dict):
-                raise reject("every cell must be an object")
-            if any(not isinstance(cell.get(key), str) for key in _DOCX_CELL_KEYS):
-                raise reject("every cell must carry string id, label, and status")
-            if cell.get("value") is not None and not isinstance(cell["value"], str):
-                raise reject("cell value must be a string or null")
-            evidence = cell.get("evidence")
-            if not isinstance(evidence, list) or any(not isinstance(ev, dict) for ev in evidence):
-                raise reject("every cell must carry an evidence list of objects")
-    return audit_id, appl_no
+    id: int
+    rld_name_input: str
+    application_number: str
+    application_type: str
+    ingredient: str
+    normalized_name: str
+    spine: dict[str, Any]
+    sections: list[dict[str, Any]]
+    warnings: list[str]
+    status: str
+    populated_count: int
+    analyst_input_count: int
+    verified_absent_count: int
+    source_audit_id: int
+    created_by: str
+    created_by_user_id: int
+    created_at: datetime
+    updated_at: datetime
+    finalized_at: datetime | None
+    finalized_by: str | None
+    inputs: dict[str, WhitepaperInputOut]
 
 
-def _require_owned_whitepaper_audit(audit_id: int, user_id: str) -> str | None:
-    """The audit row must be the caller's own successful white-paper run.
+class WhitepaperCellRequest(BaseModel):
+    # null (or empty-after-cleaning) clears the cell. max_length sits a bit
+    # ABOVE the store's MAX_INPUT_CHARS: the store cap applies AFTER control
+    # characters are stripped, so this boundary bound (defense in depth against
+    # unbounded bodies) must not reject values that clean down under the cap.
+    value: str | None = Field(None, max_length=run_store.MAX_INPUT_CHARS + 1024)
 
-    One uniform 422 for fabricated, foreign, or non-whitepaper ids — the
-    response never confirms that someone else's audit row exists. Returns the
-    sections fingerprint stored on that run (None for a legacy row predating
-    the integrity check) so the caller can verify the echoed result body.
+
+class WhitepaperCellResponse(BaseModel):
+    run_id: int
+    cell_id: str
+    cleared: bool
+    input: WhitepaperInputOut | None
+
+
+class WhitepaperRunStatusResponse(BaseModel):
+    run_id: int
+    status: str
+
+
+def _input_out(view: run_store.InputView) -> WhitepaperInputOut:
+    return WhitepaperInputOut(value=view.value, author=view.author, updated_at=view.updated_at)
+
+
+def _stored_corruption_500(run_id: int, event: str) -> HTTPException:
+    """Stored-data corruption (INV-3/INV-4): 500 + sanitized Sentry capture.
+
+    Never a client 422 -- there is no client payload to fix -- and the detail
+    (like the capture) never carries the stored hashes or values.
     """
+    log.error(event, run_id=run_id)
+    sanitized = RuntimeError(f"{event}: run_id={run_id}")
+    sanitized.__cause__ = None
+    sanitized.__suppress_context__ = True
+    capture_exception(sanitized)
+    return HTTPException(
+        status_code=500, detail="stored white-paper run failed its integrity check"
+    )
+
+
+def _run_application_number(run_id: int) -> str:
+    """The run's stored application number for audit rows -- one light column
+    select, never the JSON payloads. Empty when the run vanished mid-request."""
     with session_scope() as s:
-        row = s.get(QueryLog, audit_id)
-        if (
-            row is None
-            or row.mode != "whitepaper"
-            or row.status != "populated"
-            or row.user_id != user_id
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"audit_id {audit_id} does not reference one of your white-paper runs — "
-                    "re-run POST /whitepaper and send its result verbatim"
-                ),
-            )
-        route = row.route_json if isinstance(row.route_json, dict) else {}
-        stored = route.get("sections_sha256")
-        return stored if isinstance(stored, str) else None
+        appl_no = s.execute(
+            sa_select(col(WhitepaperRun.application_number)).where(col(WhitepaperRun.id) == run_id)
+        ).scalar_one_or_none()
+    return appl_no or ""
 
 
-@protected.post("/whitepaper/docx")
-def whitepaper_docx(req: WhitepaperDocxRequest, user: User = Depends(require_user)) -> Response:
-    """Render the Word document FROM a previously returned /whitepaper result.
-
-    No re-populate: zero live fetches, zero LLM calls — the .docx is rendered
-    from the exact JSON the analyst reviewed, after verifying result.audit_id
-    is the caller's own white-paper audit row. Writes one lightweight audit row
-    (mode="whitepaper", docx_render) and keeps the /query rate limiter.
-    """
-    _enforce_query_rate_limit(user)
-    audit_id, appl_no = _validated_docx_result(req.result)
-    expected_hash = _require_owned_whitepaper_audit(audit_id, str(user.id))
-    # Integrity (INV-1/INV-4): audit_id ownership proves the caller ran THIS
-    # white paper, not that the echoed body is unmodified. Render only when the
-    # supplied sections match the audited run byte-for-byte, so a tampered cell
-    # value/status/evidence can never be rendered into an official document.
-    if expected_hash is None or result_fingerprint(req.result.get("sections")) != expected_hash:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "result sections do not match the audited white-paper run for that "
-                "audit_id — re-run POST /whitepaper and send its result verbatim"
-            ),
-        )
-    data = write_whitepaper_docx(req.result, template_path=get_settings().whitepaper_template_path)
+def _log_run_workflow(user: User, run_id: int, *, status: str) -> None:
+    """One QueryLog audit row per finalize/reopen -- the same generic audit
+    trail docx_rendered rides on. model_name is a non-LLM marker (no model ran),
+    consistent with "(docx-render)"."""
+    appl_no = _run_application_number(run_id)
     log_query(
         mode="whitepaper",
-        query_text=f"whitepaper docx application_number={appl_no!r}",
+        query_text=f"whitepaper run {status} run_id={run_id} application_number={appl_no!r}",
         retrieved=[],
-        answer_text=f"Rendered the white-paper .docx from audit #{audit_id} (no re-population).",
+        answer_text=f"White-paper run #{run_id} {status}.",
+        citations=[],
+        refused=False,
+        model_name="(workflow)",
+        user_id=str(user.id),
+        status=status,
+        route_json={
+            "route": "whitepaper",
+            "reason": status,
+            "run_id": run_id,
+            "application_number": appl_no,
+        },
+    )
+
+
+@protected.get("/whitepaper/runs", response_model=WhitepaperRunListResponse)
+def whitepaper_runs_list(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    application_number: str | None = Query(None, max_length=40),
+    normalized_name: str | None = Query(None, max_length=200),
+    status: str | None = Query(None, max_length=40),
+) -> WhitepaperRunListResponse:
+    """Org-shared saved runs, newest activity first.
+
+    Any authenticated analyst sees every run (a product decision, design doc
+    section 10); deletes stay creator-only. Shape follows /watch/latest:
+    count/total/limit/offset so pagination stays truthful.
+    """
+    try:
+        summaries, total = run_store.list_runs(
+            limit=limit,
+            offset=offset,
+            application_number=application_number,
+            normalized_name=normalized_name,
+            status=status,
+        )
+    except ValueError as exc:
+        # normalize_appl_no refused the filter -- a client error, never a 500.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    runs = [WhitepaperRunSummary(**asdict(row)) for row in summaries]
+    return WhitepaperRunListResponse(
+        count=len(runs), total=total, limit=limit, offset=offset, runs=runs
+    )
+
+
+@protected.get("/whitepaper/runs/{run_id}", response_model=WhitepaperRunDetailResponse)
+def whitepaper_run_detail(run_id: int) -> WhitepaperRunDetailResponse:
+    """One saved run: verbatim generated payload + the analyst overlay.
+
+    404 for a missing id -- runs are org-shared, so existence is not a secret
+    (the legacy uniform-422 pattern applied only to the per-user audit lookup).
+    """
+    detail = run_store.get_run(run_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=_RUN_NOT_FOUND_DETAIL)
+    return WhitepaperRunDetailResponse(
+        id=detail.id,
+        rld_name_input=detail.rld_name_input,
+        application_number=detail.application_number,
+        application_type=detail.application_type,
+        ingredient=detail.ingredient,
+        normalized_name=detail.normalized_name,
+        spine=detail.spine,
+        sections=detail.sections,
+        warnings=detail.warnings,
+        status=detail.status,
+        populated_count=detail.populated_count,
+        analyst_input_count=detail.analyst_input_count,
+        verified_absent_count=detail.verified_absent_count,
+        source_audit_id=detail.source_audit_id,
+        created_by=detail.created_by,
+        created_by_user_id=detail.created_by_user_id,
+        created_at=detail.created_at,
+        updated_at=detail.updated_at,
+        finalized_at=detail.finalized_at,
+        finalized_by=detail.finalized_by,
+        inputs={iv.cell_id: _input_out(iv) for iv in detail.inputs},
+    )
+
+
+@protected.post("/whitepaper/runs/{run_id}/cells/{cell_id}", response_model=WhitepaperCellResponse)
+def whitepaper_run_set_cell(
+    run_id: int, cell_id: str, req: WhitepaperCellRequest, user: User = Depends(require_user)
+) -> WhitepaperCellResponse:
+    """Set (or clear) one attributed analyst overlay cell (org-shared edit).
+
+    A ``null`` or empty-after-cleaning value clears the cell. No query rate
+    limit: a pure bounded DB write, no FDA/LLM call. The store owns the domain
+    rules; this boundary maps its typed errors -- 404 missing run, 409
+    final-frozen or lost-the-concurrent-insert (retry), 422 unknown cell /
+    oversized value.
+    """
+    try:
+        view = run_store.upsert_input(
+            run_id=run_id, cell_id=cell_id, value=req.value or "", user_id=_user_pk(user)
+        )
+    except run_store.RunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_RUN_NOT_FOUND_DETAIL) from exc
+    except (run_store.RunFinalizedError, run_store.ConcurrentEditError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (run_store.InvalidCellError, run_store.InputTooLongError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if view is None:
+        return WhitepaperCellResponse(run_id=run_id, cell_id=cell_id, cleared=True, input=None)
+    return WhitepaperCellResponse(
+        run_id=run_id, cell_id=cell_id, cleared=False, input=_input_out(view)
+    )
+
+
+@protected.post("/whitepaper/runs/{run_id}/finalize", response_model=WhitepaperRunStatusResponse)
+def whitepaper_run_finalize(
+    run_id: int, user: User = Depends(require_user)
+) -> WhitepaperRunStatusResponse:
+    """draft -> final: freezes the analyst layer; open to any analyst, audited.
+
+    The store re-verifies the stored sections fingerprint FIRST -- a mismatch
+    is stored-data corruption (500 + Sentry), never a client error.
+    """
+    try:
+        run_store.finalize_run(run_id=run_id, user_id=_user_pk(user))
+    except run_store.RunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_RUN_NOT_FOUND_DETAIL) from exc
+    except run_store.RunFinalizedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except run_store.IntegrityMismatchError as exc:
+        raise _stored_corruption_500(run_id, "whitepaper_run_integrity_mismatch") from exc
+    _log_run_workflow(user, run_id, status="finalized")
+    return WhitepaperRunStatusResponse(run_id=run_id, status="final")
+
+
+@protected.post("/whitepaper/runs/{run_id}/reopen", response_model=WhitepaperRunStatusResponse)
+def whitepaper_run_reopen(
+    run_id: int, user: User = Depends(require_user)
+) -> WhitepaperRunStatusResponse:
+    """final -> draft: clears the finalize stamp; open to any analyst, audited."""
+    try:
+        run_store.reopen_run(run_id=run_id, user_id=_user_pk(user))
+    except run_store.RunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_RUN_NOT_FOUND_DETAIL) from exc
+    except run_store.RunNotFinalError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _log_run_workflow(user, run_id, status="reopened")
+    return WhitepaperRunStatusResponse(run_id=run_id, status="draft")
+
+
+@protected.post("/whitepaper/runs/{run_id}/docx")
+def whitepaper_run_docx(run_id: int, user: User = Depends(require_user)) -> Response:
+    """Render the Word document FROM the saved run -- no client echo, no re-populate.
+
+    Zero live fetches, zero LLM calls: the .docx renders the STORED generated
+    layer after re-verifying ``result_fingerprint(sections) == sections_sha256``
+    (a mismatch is stored-data corruption: 500 + Sentry, no document), with the
+    attributed analyst overlay applied per the writer's INV-3 discipline. The
+    official template is lazily fetched on first use (ensure_template); any
+    fetch failure keeps the loud FALLBACK_MARKER path. Keeps the /query rate
+    limiter (docx assembly is CPU-bound) and writes one lightweight audit row
+    (mode="whitepaper", docx_rendered).
+    """
+    _enforce_query_rate_limit(user)
+    detail = run_store.get_run(run_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=_RUN_NOT_FOUND_DETAIL)
+    if result_fingerprint(detail.sections) != detail.sections_sha256:
+        raise _stored_corruption_500(run_id, "whitepaper_run_integrity_mismatch")
+    appl_no = detail.application_number
+    if not _DOCX_APPL_NO_RE.fullmatch(appl_no):
+        # create_run normalizes to six digits, so anything else is corrupted
+        # stored data (same 500 class as the fingerprint mismatch) -- CR/LF or
+        # quotes never reach the Content-Disposition header.
+        raise _stored_corruption_500(run_id, "whitepaper_run_unsafe_application_number")
+    inputs = {
+        iv.cell_id: {
+            "value": iv.value,
+            "author": iv.author or "unknown",
+            "updated_at": iv.updated_at.isoformat(),
+        }
+        for iv in detail.inputs
+    }
+    s = get_settings()
+    template_path = template_fetch.ensure_template(
+        s.whitepaper_template_path, s.whitepaper_template_url
+    )
+    result = {"spine": detail.spine, "sections": detail.sections, "warnings": detail.warnings}
+    data = write_whitepaper_docx(result, template_path=template_path, inputs=inputs)
+    log_query(
+        mode="whitepaper",
+        query_text=f"whitepaper docx run_id={run_id} application_number={appl_no!r}",
+        retrieved=[],
+        answer_text=f"Rendered the white-paper .docx from run #{run_id} (no re-population).",
         citations=[],
         refused=False,
         model_name="(docx-render)",
@@ -1254,7 +1527,8 @@ def whitepaper_docx(req: WhitepaperDocxRequest, user: User = Depends(require_use
         route_json={
             "route": "whitepaper",
             "reason": "docx_render",
-            "source_audit_id": audit_id,
+            "run_id": run_id,
+            "source_audit_id": detail.source_audit_id,
             "application_number": appl_no,
         },
     )
@@ -1263,6 +1537,20 @@ def whitepaper_docx(req: WhitepaperDocxRequest, user: User = Depends(require_use
         media_type=docx_media_type(),
         headers={"Content-Disposition": f'attachment; filename="whitepaper_{appl_no}.docx"'},
     )
+
+
+@protected.delete("/whitepaper/runs/{run_id}")
+def whitepaper_run_delete(run_id: int, user: User = Depends(require_user)) -> dict[str, Any]:
+    """Creator-only (403), drafts-only (409): a finalized paper is a record."""
+    try:
+        run_store.delete_run(run_id=run_id, user_id=_user_pk(user))
+    except run_store.RunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=_RUN_NOT_FOUND_DETAIL) from exc
+    except run_store.RunNotOwnedError as exc:
+        raise HTTPException(status_code=403, detail="only the run's creator may delete it") from exc
+    except run_store.RunFinalizedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"deleted": True, "run_id": run_id}
 
 
 # ---------- /watch/latest ----------

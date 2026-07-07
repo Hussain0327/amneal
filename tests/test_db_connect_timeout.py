@@ -73,19 +73,19 @@ def test_db_engine_is_built_with_connect_timeout(monkeypatch: Any) -> None:
         captured["kwargs"] = kwargs
         return object()  # never connected; we only inspect construction args
 
-    monkeypatch.setattr(db, "create_engine", fake_create_engine)
-    monkeypatch.setattr(
-        db,
-        "get_settings",
-        lambda: Settings(
-            database_url="postgresql+psycopg://u:p@aws-1-us-east-1.pooler.supabase.com:5432/postgres",
-            db_connect_timeout="10",
-        ),
+    settings = Settings(
+        database_url="postgresql+psycopg://u:p@aws-1-us-east-1.pooler.supabase.com:5432/postgres",
+        db_connect_timeout="10",
     )
+    monkeypatch.setattr(db, "create_engine", fake_create_engine)
+    monkeypatch.setattr(db, "get_settings", lambda: settings)
     db.reset_for_tests()
     try:
         db.get_engine()
         assert captured["kwargs"]["connect_args"]["connect_timeout"] == 10
+        # Parity anchor for the pgvector fallback test below: both Postgres
+        # engines must recycle pooled connections on the same schedule.
+        assert captured["kwargs"]["pool_recycle"] == settings.db_pool_recycle_s
     finally:
         # Leave no fake engine cached for other tests in this file/process.
         db._engine = None
@@ -117,9 +117,10 @@ def test_pgvector_fallback_engine_is_built_with_connect_timeout(monkeypatch: Any
 
     import regwatch.store.db as db
 
+    settings = Settings(db_connect_timeout="10")
     monkeypatch.setattr(pv, "create_engine", fake_create_engine)
     monkeypatch.setattr(db, "get_engine", lambda: _SqliteShared())
-    monkeypatch.setattr(pv, "get_settings", lambda: Settings(db_connect_timeout="10"))
+    monkeypatch.setattr(pv, "get_settings", lambda: settings)
     # _database_url() reads vector_store; force it to the remote URL.
     import regwatch.store.vector_store as vs
 
@@ -133,6 +134,10 @@ def test_pgvector_fallback_engine_is_built_with_connect_timeout(monkeypatch: Any
         # store-7: the fallback now forces TLS on the remote pooler too.
         assert dict(captured["url"].query)["sslmode"] == "require"
         assert captured["kwargs"]["pool_pre_ping"] is True
+        # The block's comment claims the SAME hardening as db.py's engine:
+        # pool_recycle is part of that parity (a fallback that never recycles
+        # pooled connections outlives the pooler's idle cutoff).
+        assert captured["kwargs"]["pool_recycle"] == settings.db_pool_recycle_s
     finally:
         pv._engine = None
         pv._owns_engine = False

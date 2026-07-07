@@ -24,7 +24,6 @@ from typing import Any
 import httpx
 from config.settings import get_settings
 
-from regwatch.common.text_normalize import canonical_name
 from regwatch.sources._utils import (
     APPLICATION_PREFIXES,
     clean_application_number,
@@ -45,6 +44,20 @@ _PUBLISHED_FORMAT = "%b %d, %Y"  # DailyMed's published_date shape, e.g. "Oct 08
 
 
 @dataclass(frozen=True)
+class SplCandidate:
+    """One SPL listing DailyMed returned for the application number.
+
+    Retained on the resolution so the caller can surface the full candidate
+    set (repackager relabels included) for analyst review of the selection.
+    """
+
+    setid: str
+    title: str
+    labeler: str | None
+    published: str | None
+
+
+@dataclass(frozen=True)
 class SetidResolution:
     """The current SPL for an application number, with fetch provenance.
 
@@ -52,6 +65,8 @@ class SetidResolution:
     ``candidate_labelers`` lists every distinct labeler DailyMed returned for
     the number — more than one means repackager relabels were in play and the
     selection is surfaced to the caller rather than silently resolved.
+    ``candidates`` retains every listing (API order) so the selection is
+    auditable and overridable, never a silent pick.
     """
 
     setid: str
@@ -61,6 +76,7 @@ class SetidResolution:
     fetched_at: datetime
     labeler: str | None = None
     candidate_labelers: tuple[str, ...] = ()
+    candidates: tuple[SplCandidate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -97,20 +113,25 @@ def resolve_setid(
     application_number: str,
     *,
     prefer_titles: Sequence[str] = (),
+    prefer_labelers: Sequence[str] = (),
     client: httpx.Client | None = None,
 ) -> SetidResolution | None:
     """Resolve an application number to its current SPL setid.
 
     DailyMed lists repackager relabels alongside the sponsor's own SPL, and a
-    repackager's relabel is frequently the most recently published — so when
-    ``prefer_titles`` (brand / trade / sponsor names) is given, listings whose
-    title matches one are preferred, most-recent-first; the most recent overall
-    is the fallback. Returns ``None`` only when DailyMed answered successfully
-    and listed no SPL for the number ("queried, genuinely absent"). HTTP
-    failures propagate so callers can collapse to ``analyst_input_required``.
+    repackager's relabel is frequently the most recently published -- so the
+    pick is tiered: (1) most recent listing whose TITLE matches a
+    ``prefer_titles`` name (brand / trade / sponsor), (2) most recent listing
+    whose bracketed LABELER matches a ``prefer_labelers`` name (Drugs@FDA
+    sponsor / Orange Book applicant), (3) most recent overall. Matching is
+    punctuation-normalized ("PROVENTIL-HFA" matches "PROVENTIL HFA ...") with
+    a minimum-length guard so short tokens cannot false-match. Returns
+    ``None`` only when DailyMed answered successfully and listed no SPL for
+    the number ("queried, genuinely absent"). HTTP failures propagate so
+    callers can collapse to ``analyst_input_required``.
     """
     listings = _spl_listings(application_number, client)
-    best = _select_listing(listings, prefer_titles)
+    best = _select_listing(listings, prefer_titles, prefer_labelers)
     if best is None:
         return None
     setid = clean_text(best.get("setid"))
@@ -125,6 +146,7 @@ def resolve_setid(
         fetched_at=datetime.now(UTC),
         labeler=_listing_labeler(title),
         candidate_labelers=_distinct_labelers(listings),
+        candidates=_candidates(listings),
     )
 
 
@@ -336,23 +358,59 @@ def _has_next_page(metadata: object, page: int) -> bool:
 def _select_listing(
     listings: list[dict[str, Any]],
     prefer_titles: Sequence[str],
+    prefer_labelers: Sequence[str] = (),
 ) -> dict[str, Any] | None:
-    """Most recent listing whose title matches a preferred name, else most recent."""
+    """Tiered pick: title-matched, else labeler-matched, else most recent overall."""
     preferred = [
         listing for listing in listings if _title_matches(listing.get("title"), prefer_titles)
     ]
+    if not preferred:
+        preferred = [
+            listing
+            for listing in listings
+            if _labeler_matches(_listing_labeler(listing.get("title")), prefer_labelers)
+        ]
     return _most_recent(preferred or listings)
 
 
-def _title_matches(title: object, prefer_titles: Sequence[str]) -> bool:
-    canon = canonical_name(clean_text(title))
-    if not canon:
+# Containment shorter than this proves nothing ("HFA"/"INC" would wave through
+# half the catalog) -- mirrors the populator's name-verification floor.
+_MIN_PREFER_CONTAINMENT_CHARS = 4
+_MATCH_NORM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _match_normalized(value: object) -> str:
+    """Lowercased, punctuation-to-space, whitespace-collapsed match key.
+
+    DailyMed titles/labelers and Drugs@FDA / Orange Book names disagree on
+    punctuation ("PROVENTIL-HFA" vs "PROVENTIL HFA ...", "MERCK SHARP & DOHME
+    CORP." vs "MERCK SHARP DOHME CORP") -- canonical_name preserves hyphens, so
+    a punctuation variant silently missed its own brand and the most-recent
+    repackager relabel won the pick.
+    """
+    return " ".join(_MATCH_NORM_RE.sub(" ", clean_text(value).lower()).split())
+
+
+def _normalized_contains(candidate: str, want: str) -> bool:
+    """Bidirectional normalized containment with the minimum-length floor."""
+    if not candidate or not want:
         return False
-    for want in prefer_titles:
-        want_canon = canonical_name(want)
-        if want_canon and want_canon in canon:
-            return True
-    return False
+    contained = want if want in candidate else candidate if candidate in want else None
+    return contained is not None and len(contained) >= _MIN_PREFER_CONTAINMENT_CHARS
+
+
+def _title_matches(title: object, prefer_titles: Sequence[str]) -> bool:
+    haystack = _match_normalized(title)
+    if not haystack:
+        return False
+    return any(_normalized_contains(haystack, _match_normalized(want)) for want in prefer_titles)
+
+
+def _labeler_matches(labeler: str | None, prefer_labelers: Sequence[str]) -> bool:
+    got = _match_normalized(labeler)
+    if not got:
+        return False
+    return any(_normalized_contains(got, _match_normalized(want)) for want in prefer_labelers)
 
 
 _LABELER_RE = re.compile(r"\[([^\[\]]+)\]\s*$")
@@ -370,6 +428,24 @@ def _distinct_labelers(listings: list[dict[str, Any]]) -> tuple[str, ...]:
         labeler = _listing_labeler(listing.get("title"))
         if labeler and labeler not in out:
             out.append(labeler)
+    return tuple(out)
+
+
+def _candidates(listings: list[dict[str, Any]]) -> tuple[SplCandidate, ...]:
+    out: list[SplCandidate] = []
+    for listing in listings:
+        setid = clean_text(listing.get("setid"))
+        if not setid:
+            continue
+        title = clean_text(listing.get("title"))
+        out.append(
+            SplCandidate(
+                setid=setid,
+                title=title,
+                labeler=_listing_labeler(title),
+                published=clean_text(listing.get("published_date")) or None,
+            )
+        )
     return tuple(out)
 
 

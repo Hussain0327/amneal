@@ -4,6 +4,9 @@ primary_region = "iad"
 [build]
   [build.args]
     INSTALL_LOCAL_EMBEDDINGS = "false"
+    # Prod never runs Dagster (uvicorn-only CMD; the GitHub Actions cron is the
+    # sole scheduler), so keep its closure out of the shipped image.
+    INSTALL_ORCHESTRATION = "false"
 
 # Run pending Alembic migrations in a one-off machine BEFORE the rolling deploy
 # of the app machines. This moves the live schema to the build's head so the

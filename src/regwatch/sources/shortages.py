@@ -60,7 +60,9 @@ def _searches(query: SourceQuery) -> list[str]:
 
 
 def _record(row: dict[str, Any]) -> SourceRecord:
-    application_number = _first_openfda_value(row, "application_number")
+    # first_str applies clean_text, keeping this identifier normalized like
+    # every other handler's (the old local helper skipped normalization).
+    application_number = first_str(row.get("openfda") or {}, "application_number")
     identifiers = {"application_number": application_number} if application_number else {}
     fields: dict[str, Any] = {
         "generic_name": first_str(row, "generic_name"),
@@ -81,13 +83,3 @@ def _record(row: dict[str, Any]) -> SourceRecord:
         fields=fields,
         raw=row,
     )
-
-
-def _first_openfda_value(row: dict[str, Any], key: str) -> str | None:
-    openfda = row.get("openfda")
-    if not isinstance(openfda, dict):
-        return None
-    value = openfda.get(key)
-    if isinstance(value, list):
-        value = next((v for v in value if v not in (None, "")), None)
-    return str(value) if value not in (None, "") else None

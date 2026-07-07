@@ -122,6 +122,31 @@ def test_get_session_filters_degrades_to_empty_on_db_error(
     assert conv.get_session_filters("sess-any") == {}
 
 
+def test_get_recent_turns_degrades_to_empty_on_db_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DB error degrades to no-memory rather than failing the turn -- and is
+    LOGGED: a silent swallow would hide a broken DB behind subtly context-less
+    answers (the recurring silent-failure incident class)."""
+
+    class _LogRecorder:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def warning(self, event: str, **kwargs: object) -> None:
+            self.events.append(event)
+
+    def boom() -> object:
+        raise RuntimeError("db down")
+
+    recorder = _LogRecorder()
+    monkeypatch.setattr(conv, "session_scope", boom)
+    monkeypatch.setattr(conv, "log", recorder)
+
+    assert get_recent_turns("sess-any", limit=3) == []
+    assert "get_recent_turns_failed" in recorder.events
+
+
 # ---------- prompt shaping ----------
 
 

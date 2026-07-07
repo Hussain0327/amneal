@@ -77,7 +77,7 @@ config/
   settings.py              runtime config from env
 
 scripts/
-  seed.py                  seed ingest helper
+  (ops helpers)            deploy/restore utilities; seeding is `uv run regwatch seed`
 
 docker/
   entrypoint.sh            container startup: create data dirs and init DB

@@ -29,12 +29,12 @@ from tenacity import (
 
 from regwatch.common.logging import get_logger
 from regwatch.common.text_normalize import canonical_name, stripped_name
+from regwatch.sources.drugsfda import DRUGSFDA_ENDPOINT as DRUGSFDA_URL
 from regwatch.store.db import session_scope
 from regwatch.store.models import Product
 
 log = get_logger(__name__)
 
-DRUGSFDA_URL = "https://api.fda.gov/drug/drugsfda.json"
 ALLOWED_SOURCES = {"drugsfda", "anda_letter", "manual"}
 # Trust hierarchy: the most trustworthy source wins on update.
 # manual (user override) > anda_letter (user-verified letter) > drugsfda (re-import).

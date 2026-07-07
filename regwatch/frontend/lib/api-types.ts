@@ -254,7 +254,10 @@ export interface paths {
          * @description Populate the CRA White Paper for an RLD name + NDA/ANDA number.
          *
          *     Writes one whitepaper audit row (in build_whitepaper) on success AND on a
-         *     422 resolution failure. Rate-limited like /query and /assemble.
+         *     422 resolution failure. Rate-limited like /query and /assemble. A
+         *     successful populate is persisted as a durable org-shared run and the
+         *     response gains ``run_id`` (null when the persist degraded, see
+         *     ``_persist_whitepaper_run``).
          */
         post: operations["whitepaper_whitepaper_post"];
         delete?: never;
@@ -290,7 +293,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/whitepaper/docx": {
+    "/whitepaper/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whitepaper Runs List
+         * @description Org-shared saved runs, newest activity first.
+         *
+         *     Any authenticated analyst sees every run (a product decision, design doc
+         *     section 10); deletes stay creator-only. Shape follows /watch/latest:
+         *     count/total/limit/offset so pagination stays truthful.
+         */
+        get: operations["whitepaper_runs_list_whitepaper_runs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/whitepaper/runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whitepaper Run Detail
+         * @description One saved run: verbatim generated payload + the analyst overlay.
+         *
+         *     404 for a missing id -- runs are org-shared, so existence is not a secret
+         *     (the legacy uniform-422 pattern applied only to the per-user audit lookup).
+         */
+        get: operations["whitepaper_run_detail_whitepaper_runs__run_id__get"];
+        put?: never;
+        post?: never;
+        /**
+         * Whitepaper Run Delete
+         * @description Creator-only (403), drafts-only (409): a finalized paper is a record.
+         */
+        delete: operations["whitepaper_run_delete_whitepaper_runs__run_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/whitepaper/runs/{run_id}/cells/{cell_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -300,15 +354,88 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Whitepaper Docx
-         * @description Render the Word document FROM a previously returned /whitepaper result.
+         * Whitepaper Run Set Cell
+         * @description Set (or clear) one attributed analyst overlay cell (org-shared edit).
          *
-         *     No re-populate: zero live fetches, zero LLM calls — the .docx is rendered
-         *     from the exact JSON the analyst reviewed, after verifying result.audit_id
-         *     is the caller's own white-paper audit row. Writes one lightweight audit row
-         *     (mode="whitepaper", docx_render) and keeps the /query rate limiter.
+         *     A ``null`` or empty-after-cleaning value clears the cell. No query rate
+         *     limit: a pure bounded DB write, no FDA/LLM call. The store owns the domain
+         *     rules; this boundary maps its typed errors -- 404 missing run, 409
+         *     final-frozen or lost-the-concurrent-insert (retry), 422 unknown cell /
+         *     oversized value.
          */
-        post: operations["whitepaper_docx_whitepaper_docx_post"];
+        post: operations["whitepaper_run_set_cell_whitepaper_runs__run_id__cells__cell_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/whitepaper/runs/{run_id}/finalize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Whitepaper Run Finalize
+         * @description draft -> final: freezes the analyst layer; open to any analyst, audited.
+         *
+         *     The store re-verifies the stored sections fingerprint FIRST -- a mismatch
+         *     is stored-data corruption (500 + Sentry), never a client error.
+         */
+        post: operations["whitepaper_run_finalize_whitepaper_runs__run_id__finalize_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/whitepaper/runs/{run_id}/reopen": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Whitepaper Run Reopen
+         * @description final -> draft: clears the finalize stamp; open to any analyst, audited.
+         */
+        post: operations["whitepaper_run_reopen_whitepaper_runs__run_id__reopen_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/whitepaper/runs/{run_id}/docx": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Whitepaper Run Docx
+         * @description Render the Word document FROM the saved run -- no client echo, no re-populate.
+         *
+         *     Zero live fetches, zero LLM calls: the .docx renders the STORED generated
+         *     layer after re-verifying ``result_fingerprint(sections) == sections_sha256``
+         *     (a mismatch is stored-data corruption: 500 + Sentry, no document), with the
+         *     attributed analyst overlay applied per the writer's INV-3 discipline. The
+         *     official template is lazily fetched on first use (ensure_template); any
+         *     fetch failure keeps the loud FALLBACK_MARKER path. Keeps the /query rate
+         *     limiter (docx assembly is CPU-bound) and writes one lightweight audit row
+         *     (mode="whitepaper", docx_rendered).
+         */
+        post: operations["whitepaper_run_docx_whitepaper_runs__run_id__docx_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -690,15 +817,35 @@ export interface components {
             /** Context */
             ctx?: Record<string, never>;
         };
+        /** WhitepaperCellRequest */
+        WhitepaperCellRequest: {
+            /** Value */
+            value?: string | null;
+        };
+        /** WhitepaperCellResponse */
+        WhitepaperCellResponse: {
+            /** Run Id */
+            run_id: number;
+            /** Cell Id */
+            cell_id: string;
+            /** Cleared */
+            cleared: boolean;
+            input: components["schemas"]["WhitepaperInputOut"] | null;
+        };
         /**
-         * WhitepaperDocxRequest
-         * @description Body: the EXACT JSON object a previous POST /whitepaper returned.
+         * WhitepaperInputOut
+         * @description One attributed analyst overlay value.
          */
-        WhitepaperDocxRequest: {
-            /** Result */
-            result: {
-                [key: string]: unknown;
-            };
+        WhitepaperInputOut: {
+            /** Value */
+            value: string;
+            /** Author */
+            author: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
         };
         /** WhitepaperRequest */
         WhitepaperRequest: {
@@ -706,6 +853,131 @@ export interface components {
             rld_name: string;
             /** Application Number */
             application_number: string;
+        };
+        /**
+         * WhitepaperRunDetailResponse
+         * @description The full stored run.
+         *
+         *     ``spine``/``sections``/``warnings`` are deliberately passthrough fields
+         *     (plain dict/list, no nested models): the response must be VERBATIM what the
+         *     audited populate stored -- serialization may never reshape or filter the
+         *     fingerprinted sections payload (INV-3).
+         */
+        WhitepaperRunDetailResponse: {
+            /** Id */
+            id: number;
+            /** Rld Name Input */
+            rld_name_input: string;
+            /** Application Number */
+            application_number: string;
+            /** Application Type */
+            application_type: string;
+            /** Ingredient */
+            ingredient: string;
+            /** Normalized Name */
+            normalized_name: string;
+            /** Spine */
+            spine: {
+                [key: string]: unknown;
+            };
+            /** Sections */
+            sections: {
+                [key: string]: unknown;
+            }[];
+            /** Warnings */
+            warnings: string[];
+            /** Status */
+            status: string;
+            /** Populated Count */
+            populated_count: number;
+            /** Analyst Input Count */
+            analyst_input_count: number;
+            /** Verified Absent Count */
+            verified_absent_count: number;
+            /** Source Audit Id */
+            source_audit_id: number;
+            /** Created By */
+            created_by: string;
+            /** Created By User Id */
+            created_by_user_id: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Finalized At */
+            finalized_at: string | null;
+            /** Finalized By */
+            finalized_by: string | null;
+            /** Inputs */
+            inputs: {
+                [key: string]: components["schemas"]["WhitepaperInputOut"];
+            };
+        };
+        /** WhitepaperRunListResponse */
+        WhitepaperRunListResponse: {
+            /** Count */
+            count: number;
+            /** Total */
+            total: number;
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Runs */
+            runs: components["schemas"]["WhitepaperRunSummary"][];
+        };
+        /** WhitepaperRunStatusResponse */
+        WhitepaperRunStatusResponse: {
+            /** Run Id */
+            run_id: number;
+            /** Status */
+            status: string;
+        };
+        /**
+         * WhitepaperRunSummary
+         * @description One org-shared run list row (no JSON payloads -- see the detail route).
+         */
+        WhitepaperRunSummary: {
+            /** Id */
+            id: number;
+            /** Rld Name Input */
+            rld_name_input: string;
+            /** Application Number */
+            application_number: string;
+            /** Application Type */
+            application_type: string;
+            /** Ingredient */
+            ingredient: string;
+            /** Normalized Name */
+            normalized_name: string;
+            /** Status */
+            status: string;
+            /** Populated Count */
+            populated_count: number;
+            /** Analyst Input Count */
+            analyst_input_count: number;
+            /** Verified Absent Count */
+            verified_absent_count: number;
+            /** Inputs Count */
+            inputs_count: number;
+            /** Created By */
+            created_by: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
         };
     };
     responses: never;
@@ -1122,20 +1394,227 @@ export interface operations {
             };
         };
     };
-    whitepaper_docx_whitepaper_docx_post: {
+    whitepaper_runs_list_whitepaper_runs_get: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: number;
+                offset?: number;
+                application_number?: string | null;
+                normalized_name?: string | null;
+                status?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: {
                 regwatch_session?: string | null;
             };
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["WhitepaperDocxRequest"];
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WhitepaperRunListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
+    };
+    whitepaper_run_detail_whitepaper_runs__run_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WhitepaperRunDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    whitepaper_run_delete_whitepaper_runs__run_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    whitepaper_run_set_cell_whitepaper_runs__run_id__cells__cell_id__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+                cell_id: string;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WhitepaperCellRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WhitepaperCellResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    whitepaper_run_finalize_whitepaper_runs__run_id__finalize_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WhitepaperRunStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    whitepaper_run_reopen_whitepaper_runs__run_id__reopen_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WhitepaperRunStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    whitepaper_run_docx_whitepaper_runs__run_id__docx_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

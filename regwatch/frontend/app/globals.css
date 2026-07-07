@@ -1378,6 +1378,50 @@ button.chip:disabled {
   color: var(--ink-2);
 }
 
+/* analyst overlay: attributed human text. Always visually distinct from the
+   cited generated value (gold-edged annotation vs plain ink) -- the UI mirror
+   of the docx writer's INV-3 discipline: a human note annotates a sourced
+   fact, it never replaces or restyles it. */
+.wp-analyst {
+  margin: 0.45rem 0 0 1.05rem;
+  border-left: 3px solid var(--gold-deep);
+  background: var(--gold-wash);
+  border-radius: 0 2px 2px 0;
+  padding: 0.5rem 0.75rem;
+}
+.wp-analyst__tag {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--gold-ink);
+}
+.wp-analyst p {
+  margin: 0.25rem 0 0;
+  font-size: 0.92rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+}
+.wp-analyst__meta {
+  display: block;
+  margin-top: 0.3rem;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.66rem;
+  color: var(--ink-faint);
+}
+
+/* the inline analyst editor under a cell (textarea + explicit Save / Clear) */
+.wp-editor {
+  margin: 0.45rem 0 0 1.05rem;
+}
+.wp-editor textarea {
+  resize: vertical;
+  min-height: 4.5rem;
+  font-size: 0.92rem;
+}
+
 /* ---------- Status ticker (the docket log while a query runs) ----------
    Each SSE status frame is one ruled docket line: gold rule draws in, the
    live line carries a pulsing seal-dot, superseded lines dim in place. With
