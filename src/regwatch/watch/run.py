@@ -30,19 +30,13 @@ from regwatch.watch.alerts import (
     pairs_without_alert,
     write_digest,
 )
-from regwatch.watch.matcher import WatchMatch, match_listings
+from regwatch.watch.matcher import WatchMatch, match_listings, product_id
 from regwatch.watch.runs import record_watch_run
 from regwatch.watch.watchlist import list_watchlist
 
 log = get_logger(__name__)
 
 _CHANGED_OUTCOMES = {"added", "revised"}
-
-
-def _product_id(m: WatchMatch) -> int | None:
-    """The match's watchlist product id, or None when it carries no int id."""
-    pid = m.product.get("id")
-    return pid if isinstance(pid, int) else None
 
 
 @dataclass
@@ -118,16 +112,16 @@ def run_watch(*, extract: bool = True) -> WatchRunResult:
     # that changed this run, so only check the rest. build_alerts re-verifies each
     # version and _persist_alerts is idempotent, so already-alerted pairs stay
     # no-ops and this never double-emits.
-    changed_keys = {(m.listing.appl_no, _product_id(m)) for m in changed}
+    changed_keys = {(m.listing.appl_no, product_id(m)) for m in changed}
     candidate_pairs = [
         (m.listing.appl_no, pid)
         for m in matches
-        if (pid := _product_id(m)) is not None and (m.listing.appl_no, pid) not in changed_keys
+        if (pid := product_id(m)) is not None and (m.listing.appl_no, pid) not in changed_keys
     ]
     missed_pairs = pairs_without_alert(candidate_pairs)
     to_alert = list(changed)
     for m in matches:
-        pid = _product_id(m)
+        pid = product_id(m)
         if pid is not None and (m.listing.appl_no, pid) in missed_pairs:
             to_alert.append(m)
     alerts = build_alerts(to_alert)

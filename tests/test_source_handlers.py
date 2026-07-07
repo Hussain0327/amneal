@@ -303,6 +303,24 @@ def test_shortages_handler_maps_openfda_shortage() -> None:
     assert records[0].fields["status"] == "Current"
 
 
+def test_shortages_application_number_is_whitespace_normalized() -> None:
+    # first_str applies clean_text; the old local helper skipped it, leaving
+    # shortages the only handler with an un-normalized identifier.
+    payload = {
+        "results": [
+            {
+                "generic_name": "ALBUTEROL SULFATE",
+                "openfda": {"application_number": ["NDA  020503\n"]},
+            }
+        ]
+    }
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(SHORTAGES_ENDPOINT).mock(return_value=httpx.Response(200, json=payload))
+        records = ShortagesHandler().search(SourceQuery(active_ingredient="albuterol sulfate"))
+
+    assert records[0].identifiers["application_number"] == "NDA 020503"
+
+
 def test_shortages_dosage_form_alone_does_not_query() -> None:
     assert ShortagesHandler().search(SourceQuery(dosage_form="tablet")) == []
 

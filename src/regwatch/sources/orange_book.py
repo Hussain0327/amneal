@@ -33,6 +33,7 @@ from regwatch.sources._utils import (
     bare_application_number,
     clean_application_number,
     clean_text,
+    get_openfda_client,
     get_with_retry,
     owned_client,
 )
@@ -288,10 +289,6 @@ def _split_application_number(value: str) -> tuple[str | None, str]:
     return None, cleaned
 
 
-def _cached_products_text(client: httpx.Client | None) -> str:
-    return _cached_zip(client).files[PRODUCTS_MEMBER]
-
-
 def _cached_parsed(
     member: str, columns: Mapping[str, str], client: httpx.Client | None
 ) -> list[dict[str, str]]:
@@ -334,11 +331,7 @@ def _cached_zip(client: httpx.Client | None) -> _ZipCache:
 
 
 def _fetch_zip_files(client: httpx.Client | None) -> tuple[dict[str, str], frozenset[str]]:
-    s = get_settings()
-    with owned_client(
-        client,
-        lambda: httpx.Client(timeout=s.http_timeout_s, headers={"User-Agent": s.user_agent}),
-    ) as active_client:
+    with owned_client(client, get_openfda_client) as active_client:
         resp = get_with_retry(active_client, ORANGE_BOOK_ZIP_URL)
         resp.raise_for_status()
         return _file_texts_from_zip(resp.content)

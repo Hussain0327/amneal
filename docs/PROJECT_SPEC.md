@@ -179,7 +179,7 @@ regwatch/
     common/   logging.py  audit.py  text_normalize.py
   tests/
   data/  raw/ (gitignored)  processed/
-  scripts/  seed.py
+  scripts/  ops helpers (seeding is the `uv run regwatch seed` CLI command)
 ```
 
 ## 9. Data model (SQLite via SQLModel)
@@ -342,7 +342,7 @@ Three pages: Ask (Q&A with inline sources), Assemble (pick a product to a brief)
 ## 12. Milestones and definition of done
 
 - **Phase 0 — Scaffold.** Repo, config, stores, provider interfaces, CI (ruff/black/mypy/pytest), `CLAUDE.md`, `.env.example`. DoD: `uv run pytest` green on a smoke test; app boots.
-- **Phase 1 — Ingest + extract (seed).** Crawl and parse PSGs for the three seed products; extract cited BE requirements. DoD: `scripts/seed.py` populates `psg_document`, `psg_version`, `be_requirement` for albuterol, beclomethasone, romidepsin, every field cited; idempotent re-run.
+- **Phase 1 — Ingest + extract (seed).** Crawl and parse PSGs for the three seed products; extract cited BE requirements. DoD: `uv run regwatch seed` populates `psg_document`, `psg_version`, `be_requirement` for albuterol, beclomethasone, romidepsin, every field cited; idempotent re-run.
 - **Phase 2 — Retrieval + cited Q&A.** Embed, retrieve, grounded generation with citations and refusal; audit logging. DoD: INV-1/2/6 tests pass incl. adversarial refusals.
 - **Phase 3 — Watch.** Build watchlist from Drugs@FDA; change detection; matcher; alerts. DoD: on the pasted batch, albuterol + beclomethasone are flagged with cited diffs; additions correctly ignored; INV-4/5 tests pass.
 - **Phase 4 — Assemble.** Dossier builder + the two non-Q&A UI pages. DoD: a seed product yields a fully cited brief, reproducible via `/assemble`.

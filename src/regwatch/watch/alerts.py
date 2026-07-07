@@ -33,7 +33,7 @@ from regwatch.common.logging import get_logger
 from regwatch.store.db import session_scope
 from regwatch.store.models import Alert as AlertRow
 from regwatch.store.models import PsgDocument, PsgVersion
-from regwatch.watch.matcher import WatchMatch
+from regwatch.watch.matcher import WatchMatch, product_id
 
 log = get_logger(__name__)
 
@@ -128,7 +128,9 @@ def pairs_without_alert(pairs: list[tuple[str, int]]) -> set[tuple[str, int]]:
         # (A single LEFT JOIN would collapse the remaining per-pair queries -- a
         # deferred cron-only micro-optimization, not a correctness concern.)
         latest_version: dict[str, int | None] = {}
-        for appl_no, product_id in pairs:
+        # `pid`, not `product_id`: that name is now the shared coercion helper
+        # imported from matcher and must not be shadowed here.
+        for appl_no, pid in pairs:
             if appl_no not in latest_version:
                 doc = s.scalars(select(PsgDocument).where(PsgDocument.appl_no == appl_no)).first()
                 if doc is None or doc.id is None:
@@ -148,11 +150,11 @@ def pairs_without_alert(pairs: list[tuple[str, int]]) -> set[tuple[str, int]]:
                 select(AlertRow.id)
                 .where(AlertRow.psg_version_id == version_id)
                 .where(AlertRow.listing_appl_no == appl_no)
-                .where(AlertRow.product_id == product_id)
+                .where(AlertRow.product_id == pid)
                 .limit(1)
             ).first()
             if has_alert is None:
-                missed.add((appl_no, product_id))
+                missed.add((appl_no, pid))
     return missed
 
 
@@ -165,13 +167,13 @@ def build_alerts(matches: list[WatchMatch]) -> list[Alert]:
             log.info("alert_skipped_no_version", appl_no=m.listing.appl_no)
             continue
         doc_id, version_id, diff_summary, captured_at = version
-        product_id = m.product.get("id")
-        if not isinstance(product_id, int):
+        pid = product_id(m)
+        if pid is None:
             log.info("alert_skipped_no_product_id", appl_no=m.listing.appl_no)
             continue
         alerts.append(
             Alert(
-                product_id=product_id,
+                product_id=pid,
                 active_ingredient=m.product.get("active_ingredient") or "",
                 listing_appl_no=m.listing.appl_no,
                 listing_psg_type=m.listing.psg_type,

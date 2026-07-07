@@ -81,6 +81,25 @@ def estimate_cost_usd(model: str, usage: LLMUsage) -> float | None:
     ) / 1_000_000
 
 
+def _buffered_stream(
+    provider: LLMProvider,
+    messages: list[LLMMessage],
+    *,
+    temperature: float,
+    max_tokens: int,
+) -> Iterator[LLMStreamChunk]:
+    """Degrade streaming to one buffered chunk built from complete().
+
+    Shared by providers/modes with no real token streaming (OpenAI chat mode,
+    Anthropic) so they still honor the stream() contract: deltas, then the
+    terminal chunk carrying the fully-validated response.
+    """
+    resp = provider.complete(messages, temperature=temperature, max_tokens=max_tokens)
+    if resp.text:
+        yield LLMStreamChunk(delta=resp.text)
+    yield LLMStreamChunk(done=True, response=resp)
+
+
 class LLMProvider(Protocol):
     name: str
 
@@ -221,17 +240,18 @@ class OpenAIProvider:
             response_format=response_format,
         )
 
-    def _complete_responses(
+    def _responses_kwargs(
         self,
         messages: list[LLMMessage],
         *,
-        temperature: float,
         max_tokens: int,
-        response_format: str | None,
-    ) -> LLMResponse:
-        import openai
+        response_format: str | None = None,
+    ) -> dict[str, Any]:
+        """Responses-API request kwargs, shared by complete() and stream().
 
-        client = self._client_or_create()
+        ``response_format`` stays a complete()-only concern: streaming is the
+        synthesizer's prose path and never requests JSON mode.
+        """
         instructions, input_items = self._split_messages(messages)
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -243,15 +263,42 @@ class OpenAIProvider:
         if response_format == "json":
             # Responses API JSON object mode (compatibility bridge for the extractor).
             kwargs["text"] = {"format": {"type": "json_object"}}
+        return kwargs
 
+    def _create_responses(
+        self, kwargs: dict[str, Any], *, temperature: float, stream: bool = False
+    ) -> Any:
+        """One responses.create call with the reasoning-model temperature retry.
+
+        Single home for the quirk workaround so complete() and stream() can
+        never drift: reasoning models (e.g. gpt-5-nano) reject ``temperature``
+        via a structured BadRequestError param; retry once without it. Any
+        other BadRequestError re-raises unchanged.
+        """
+        import openai
+
+        client = self._client_or_create()
+        if stream:
+            kwargs = {**kwargs, "stream": True}
         try:
-            resp = client.responses.create(temperature=temperature, **kwargs)
+            return client.responses.create(temperature=temperature, **kwargs)
         except openai.BadRequestError as exc:
-            # Reasoning models (e.g. gpt-5-nano) reject `temperature`; retry without it.
             if getattr(exc, "param", None) == "temperature":
-                resp = client.responses.create(**kwargs)
-            else:
-                raise
+                return client.responses.create(**kwargs)
+            raise
+
+    def _complete_responses(
+        self,
+        messages: list[LLMMessage],
+        *,
+        temperature: float,
+        max_tokens: int,
+        response_format: str | None,
+    ) -> LLMResponse:
+        kwargs = self._responses_kwargs(
+            messages, max_tokens=max_tokens, response_format=response_format
+        )
+        resp = self._create_responses(kwargs, temperature=temperature)
         # A failed or incomplete (max_output_tokens truncation) response must
         # raise so the caller degrades to an audited refusal: a silently
         # truncated answer would pass citation validation and ship as if
@@ -306,31 +353,13 @@ class OpenAIProvider:
         # Real token streaming is the Responses path (the prod synthesizer). In
         # chat mode we degrade to one buffered chunk so the caller still works.
         if self.mode == "chat":
-            resp = self.complete(messages, temperature=temperature, max_tokens=max_tokens)
-            if resp.text:
-                yield LLMStreamChunk(delta=resp.text)
-            yield LLMStreamChunk(done=True, response=resp)
+            yield from _buffered_stream(
+                self, messages, temperature=temperature, max_tokens=max_tokens
+            )
             return
 
-        import openai
-
-        client = self._client_or_create()
-        instructions, input_items = self._split_messages(messages)
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "input": input_items,
-            "max_output_tokens": max_tokens,
-        }
-        if instructions:
-            kwargs["instructions"] = instructions
-        try:
-            events = client.responses.create(temperature=temperature, stream=True, **kwargs)
-        except openai.BadRequestError as exc:
-            # Reasoning models (e.g. gpt-5-nano) reject `temperature`; retry without it.
-            if getattr(exc, "param", None) == "temperature":
-                events = client.responses.create(stream=True, **kwargs)
-            else:
-                raise
+        kwargs = self._responses_kwargs(messages, max_tokens=max_tokens)
+        events = self._create_responses(kwargs, temperature=temperature, stream=True)
         parts: list[str] = []
         final: Any = None
         for event in events:
@@ -429,10 +458,7 @@ class AnthropicProvider:
         # Anthropic is the fallback provider; serve streaming as one buffered
         # chunk (prod uses OpenAI for real token-by-token). Keeps the Protocol
         # total so callers can feature-detect uniformly.
-        resp = self.complete(messages, temperature=temperature, max_tokens=max_tokens)
-        if resp.text:
-            yield LLMStreamChunk(delta=resp.text)
-        yield LLMStreamChunk(done=True, response=resp)
+        yield from _buffered_stream(self, messages, temperature=temperature, max_tokens=max_tokens)
 
 
 def _model_for_role(s: Any, role: str) -> str:

@@ -13,7 +13,6 @@ from typing import Any
 from urllib.parse import urljoin
 
 import httpx
-from config.settings import get_settings
 from selectolax.parser import HTMLParser
 
 from regwatch.common.text_normalize import canonical_name
@@ -21,6 +20,7 @@ from regwatch.sources._utils import (
     application_number_candidates,
     clean_application_number,
     clean_text,
+    get_openfda_client,
     get_with_retry,
     owned_client,
 )
@@ -94,11 +94,7 @@ def fetch_rems_index_html(client: httpx.Client | None = None) -> str:
 
 
 def _fetch_rems_html(client: httpx.Client | None) -> str:
-    s = get_settings()
-    with owned_client(
-        client,
-        lambda: httpx.Client(timeout=s.http_timeout_s, headers={"User-Agent": s.user_agent}),
-    ) as active_client:
+    with owned_client(client, get_openfda_client) as active_client:
         resp = get_with_retry(active_client, REMS_INDEX_URL)
         resp.raise_for_status()
         return resp.text

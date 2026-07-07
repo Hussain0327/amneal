@@ -38,6 +38,10 @@ from regwatch.common.logging import get_logger
 from regwatch.common.text_normalize import canonical_name as norm_name
 from regwatch.common.text_normalize import stripped_name
 
+# No circular import: nothing in sources imports ingest (verified), so the
+# crawler reuses the tested owned-client pattern instead of hand-rolling it.
+from regwatch.sources._utils import owned_client
+
 log = get_logger(__name__)
 
 PSG_INDEX_URL = "https://www.accessdata.fda.gov/scripts/cder/psg/index.cfm"
@@ -121,28 +125,36 @@ def _td_application_numbers(td: Node) -> list[str]:
     return nums
 
 
+def _html_client() -> httpx.Client:
+    """Owned client for index-page fetches (browser UA defeats Akamai's 503)."""
+    s = get_settings()
+    return httpx.Client(
+        timeout=s.http_timeout_s,
+        headers={"User-Agent": BROWSER_UA, "Accept": "text/html"},
+        follow_redirects=True,
+    )
+
+
+def _pdf_client() -> httpx.Client:
+    """Owned client for PSG PDF downloads (distinct Accept header)."""
+    s = get_settings()
+    return httpx.Client(
+        timeout=s.http_timeout_s,
+        headers={"User-Agent": BROWSER_UA, "Accept": "application/pdf,*/*"},
+        follow_redirects=True,
+    )
+
+
 def fetch_index_html(*, client: httpx.Client | None = None, url: str = PSG_INDEX_URL) -> str:
     """Fetch a PSG index page HTML (200 expected when UA is browser-like).
 
     `url` defaults to the landing page; pass a letter route to page the catalog.
     """
-    s = get_settings()
-    owned = False
-    if client is None:
-        client = httpx.Client(
-            timeout=s.http_timeout_s,
-            headers={"User-Agent": BROWSER_UA, "Accept": "text/html"},
-            follow_redirects=True,
-        )
-        owned = True
-    try:
+    with owned_client(client, _html_client) as active_client:
         _polite_pause()
-        resp = _fetch(client, url)
+        resp = _fetch(active_client, url)
         resp.raise_for_status()
         return resp.text
-    finally:
-        if owned:
-            client.close()
 
 
 class CrawlPageError(RuntimeError):
@@ -188,29 +200,17 @@ def fetch_all_listings(*, client: httpx.Client | None = None) -> list[PsgListing
     drop every watched product in the missing range, so the whole crawl fails
     rather than merge a partial catalog.
     """
-    s = get_settings()
-    owned = False
-    if client is None:
-        client = httpx.Client(
-            timeout=s.http_timeout_s,
-            headers={"User-Agent": BROWSER_UA, "Accept": "text/html"},
-            follow_redirects=True,
-        )
-        owned = True
-    try:
+    with owned_client(client, _html_client) as active_client:
         merged: dict[tuple[str, str | None, str | None, str], PsgListing] = {}
         for letter in string.ascii_uppercase:
             url = PSG_LETTER_URL.format(letter=letter)
-            html = fetch_index_html(client=client, url=url)
+            html = fetch_index_html(client=active_client, url=url)
             ensure_psg_index_markup(html, url=url)
             for row in parse_listings(html):
                 key = (row.appl_no, row.route, row.dosage_form, row.psg_type)
                 merged.setdefault(key, row)
         log.info("psg_catalog_enumerated", listings=len(merged))
         return list(merged.values())
-    finally:
-        if owned:
-            client.close()
 
 
 @retry(
@@ -395,17 +395,9 @@ def download_pdf(url: str, *, client: httpx.Client | None = None) -> tuple[Path,
     """
     s = get_settings()
     s.ensure_dirs()
-    owned = False
-    if client is None:
-        client = httpx.Client(
-            timeout=s.http_timeout_s,
-            headers={"User-Agent": BROWSER_UA, "Accept": "application/pdf,*/*"},
-            follow_redirects=True,
-        )
-        owned = True
-    try:
+    with owned_client(client, _pdf_client) as active_client:
         _polite_pause()
-        data = _stream_capped(client, url, s.pdf_max_bytes)
+        data = _stream_capped(active_client, url, s.pdf_max_bytes)
         if not _looks_like_pdf(data):
             raise PdfInvalidError(f"fetched body is not a PDF (no %PDF header): {url}")
         digest = hashlib.sha256(data).hexdigest()
@@ -415,6 +407,3 @@ def download_pdf(url: str, *, client: httpx.Client | None = None) -> tuple[Path,
         if not path.exists():
             path.write_bytes(data)
         return path, data, digest
-    finally:
-        if owned:
-            client.close()
