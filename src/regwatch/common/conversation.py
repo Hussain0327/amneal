@@ -132,7 +132,10 @@ def get_recent_turns(
             raw = [(m.turn_id, m.role, m.content or "", m.status) for m in rows]
     except Exception:
         # Conversational memory is an ergonomic aid, never required for
-        # correctness — degrade to no memory rather than fail the turn.
+        # correctness -- degrade to no memory rather than fail the turn. But a
+        # SILENT degrade hides a broken DB behind subtly context-less answers
+        # (the recurring silent-failure incident class), so log it.
+        log.warning("get_recent_turns_failed", exc_info=True)
         return []
 
     # `raw` is newest-first; fold into turns keyed by turn_id, preserving order.

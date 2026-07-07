@@ -225,6 +225,34 @@ def test_ensure_postgres_objects_degrades_gracefully_on_contended_lock(
     assert elapsed < 6.0, "boot chunk-DDL did not bound its lock wait"
 
 
+def test_ensure_schema_degrades_gracefully_on_contended_lock(pg_db: ModuleType) -> None:
+    """pgvector_store.ensure_schema is the lazy first-use twin of the boot-time
+    chunk DDL (it re-runs the same CREATE INDEX IF NOT EXISTS statements on the
+    first similarity_search/add_chunks of a process), so it must degrade the same
+    way: under a held ROW EXCLUSIVE lock from a concurrent ingest writer the DDL
+    hits lock_timeout, logs, and skips -- not hang or surface as an uncaught 500
+    on the first request."""
+    from regwatch.store import pgvector_store
+
+    pg_db.init_db()
+    engine = pg_db.get_engine()
+
+    holder = engine.connect()
+    trans = holder.begin()
+    # ROW EXCLUSIVE (what an INSERT/UPSERT writer holds) conflicts with the
+    # ShareLock CREATE INDEX needs -> the first-use DDL must time out, not raise.
+    holder.execute(text("LOCK TABLE chunk IN ROW EXCLUSIVE MODE"))
+    try:
+        start = time.monotonic()
+        pgvector_store.ensure_schema(engine)  # must return, not raise
+        elapsed = time.monotonic() - start
+    finally:
+        trans.rollback()
+        holder.close()
+    # Bounded: one 3s lock_timeout then break, not 3s per every index.
+    assert elapsed < 6.0, "first-use chunk DDL did not bound its lock wait"
+
+
 def test_bootstrap_creates_chunk_table_and_indexes(pg_db: ModuleType) -> None:
     pg_db.init_db()
     with pg_db.get_engine().connect() as conn:

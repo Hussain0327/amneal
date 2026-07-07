@@ -294,9 +294,14 @@ def _extract_and_save_be(doc_id: int, version_id: int, pages: list[str], appl_no
             citations=extraction.citations,
         )
     except Exception as exc:
+        # error_type mirrors the sibling ingest_failed log: this except swallows
+        # both LLM and DB-write failures, and the unchanged-content backfill
+        # re-pays the LLM cost every run until the row exists -- so triaging
+        # "bad LLM JSON" vs "broken DB write" from logs matters.
         log.warning(
             "be_extraction_skipped",
             appl_no=appl_no,
+            error_type=type(exc).__name__,
             error=str(exc),
         )
 

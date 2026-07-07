@@ -433,3 +433,32 @@ def test_revised_ingest_removes_stale_chunks(monkeypatch: pytest.MonkeyPatch) ->
     assert indexed_version_ids == {latest_version_id}
     assert any("Current marker only present in version two" in doc for doc in documents)
     assert all("Obsolete marker only present in version one" not in doc for doc in documents)
+
+
+def test_be_extraction_skip_log_carries_error_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_extract_and_save_be swallows LLM and DB-write failures under one log, and
+    the unchanged-content backfill re-pays the LLM cost every run until the row
+    exists -- so error_type (the triage key the sibling ingest_failed log already
+    carries) must distinguish "bad LLM JSON" from "broken DB write" in logs."""
+
+    class _LogRecorder:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict[str, Any]]] = []
+
+        def warning(self, event: str, **kwargs: Any) -> None:
+            self.events.append((event, kwargs))
+
+    def boom(pages: list[str]) -> object:
+        raise ValueError("bad extraction json")
+
+    recorder = _LogRecorder()
+    monkeypatch.setattr(pipeline_mod, "extract_be", boom)
+    monkeypatch.setattr(pipeline_mod, "log", recorder)
+
+    pipeline_mod._extract_and_save_be(1, 1, PAGES, "ANDA076170")
+
+    assert recorder.events, "no warning logged for the failed extraction"
+    event, kwargs = recorder.events[0]
+    assert event == "be_extraction_skipped"
+    assert kwargs["error_type"] == "ValueError"
+    assert kwargs["appl_no"] == "ANDA076170"
