@@ -118,11 +118,13 @@ jobs:
         if: env.DATABASE_URL != ''
         run: uv python install 3.12
 
-      # Match the SHIPPED prod closure (ci.yml python-audit): llm + orchestration.
+      # Match the SHIPPED prod closure (ci.yml python-audit): llm only. No
+      # `orchestration`: this job runs `regwatch watch` + the threshold sweep
+      # directly, never dagster (compose-only dev tooling; see the header).
       # local-embeddings is intentionally omitted — prod runs EMBEDDING_PROVIDER=openai.
       - name: sync deps
         if: env.DATABASE_URL != ''
-        run: uv sync --extra llm --extra orchestration
+        run: uv sync --extra llm
 
       # NOTE: no `alembic upgrade head` here — the Fly deploy migrates (see the
       # header). `regwatch watch` boots through the _init_postgres stamp guard,

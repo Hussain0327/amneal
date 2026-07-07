@@ -192,11 +192,9 @@ These are enforced in code with tests — see [`tests/test_invariants.py`](tests
 | INV-4 | Never report a run that didn't happen | `watch/alerts.py` skips any match whose `psg_version` is not in the DB |
 | INV-5 | Verified provenance only | `WatchlistEntry` rejects sources outside `{drugsfda, anda_letter, manual}` |
 | INV-6 | Every query is audited | `common/audit.py` writes a `query_log` row on every Q&A path |
+| INV-7 | Cross-product integrity: never blend two applications' data | `whitepaper/populator.py` matches PSGs on exact application-number tokens (with `sources/psg.py`); `tests/test_whitepaper_populator.py` |
+| INV-8 | Structured citations obey a strict token grammar and are honored only when backed | `common/citations.py` `validate_structured_citations`; `whitepaper/populator.py` collapses any unbacked cell to analyst input; `tests/test_citations.py` |
 | INV-9 | PSG answers are always product-resolved and ingredient-filtered — no cross-drug citation survives | `retrieve/resolver.py` + `generate/grounded_qa.py`; `tests/test_cross_drug_leak.py` |
-
-> Invariant IDs are stable identifiers, not a contiguous range — there is no INV-7
-> or INV-8 in force. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full
-> set and [`docs/DECISIONS.md`](docs/DECISIONS.md) for the rationale.
 
 ## API
 

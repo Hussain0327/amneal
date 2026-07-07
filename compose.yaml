@@ -7,6 +7,9 @@ x-regwatch-build: &regwatch-build
   context: .
   args:
     INSTALL_LOCAL_EMBEDDINGS: ${INSTALL_LOCAL_EMBEDDINGS:-true}
+    # true here (false in the Dockerfile/prod): the dagster-* services below run
+    # from this same image, so the compose build must carry the dagster closure.
+    INSTALL_ORCHESTRATION: ${INSTALL_ORCHESTRATION:-true}
 
 x-regwatch-environment: &regwatch-environment
   DATA_DIR: /app/data
