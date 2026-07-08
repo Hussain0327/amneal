@@ -22,8 +22,13 @@ export default function AssemblePage() {
   const lastScopeRld = useRef(scopeRld);
   useEffect(() => {
     // Adopt a NEW non-empty scope onto an untouched field; never let a scope
-    // *clear* blank a prefilled-but-untouched field (the `&& scopeRld` guard).
-    setRld((cur) => (cur === lastScopeRld.current && scopeRld ? scopeRld : cur));
+    // *clear* blank a prefilled-but-untouched field. Advance the ref ONLY when a
+    // real scope arrives: bailing on an empty scope keeps the guard pointed at
+    // the field's current value, so a clear followed by a distinct scope is still
+    // recognized as "untouched" and adopted (rather than desyncing the ref and
+    // freezing the field forever).
+    if (!scopeRld) return;
+    setRld((cur) => (cur === lastScopeRld.current ? scopeRld : cur));
     lastScopeRld.current = scopeRld;
   }, [scopeRld]);
   const [result, setResult] = useState<AssembleResponse | null>(null);
@@ -59,9 +64,9 @@ export default function AssemblePage() {
           Intake
         </div>
         <div className="mt-4 grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(13rem, 1fr))" }}>
-          <Field label="Active ingredient" value={ingredient} onChange={setIngredient} placeholder="albuterol sulfate" />
-          <Field label="Dosage form · optional" value={dosage} onChange={setDosage} placeholder="inhalation aerosol" />
-          <Field label="RLD · brand or appl. no. · optional" value={rld} onChange={setRld} placeholder="e.g. 020503" />
+          <Field id="ingredient" label="Active ingredient" value={ingredient} onChange={setIngredient} placeholder="albuterol sulfate" />
+          <Field id="dosage" label="Dosage form · optional" value={dosage} onChange={setDosage} placeholder="inhalation aerosol" />
+          <Field id="rld" label="RLD · brand or appl. no. · optional" value={rld} onChange={setRld} placeholder="e.g. 020503" />
         </div>
         <div className="mt-5">
           <button className="btn" type="submit" disabled={loading || !ingredient.trim()}>
@@ -71,7 +76,7 @@ export default function AssemblePage() {
       </form>
 
       {error && (
-        <div className="stamp mt-8">
+        <div className="stamp mt-8" role="alert">
           <div className="stamp__tag">Request failed</div>
           <p className="code mt-1" style={{ fontSize: "0.82rem" }}>
             {error}
@@ -122,11 +127,13 @@ export default function AssemblePage() {
 }
 
 function Field({
+  id,
   label,
   value,
   onChange,
   placeholder,
 }: {
+  id: string;
   label: string;
   value: string;
   onChange: (v: string) => void;
@@ -134,10 +141,10 @@ function Field({
 }) {
   return (
     <div>
-      <label className="kicker" style={{ color: "var(--ink-faint)" }}>
+      <label className="kicker" htmlFor={id} style={{ color: "var(--ink-faint)" }}>
         {label}
       </label>
-      <input className="field mt-1" value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
+      <input id={id} className="field mt-1" value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
     </div>
   );
 }

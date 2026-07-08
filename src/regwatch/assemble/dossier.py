@@ -24,6 +24,7 @@ from sqlmodel import select
 
 from regwatch.common.audit import log_query
 from regwatch.common.logging import get_logger
+from regwatch.common.observability import capture_exception
 from regwatch.common.text_normalize import canonical_name, names_match, stripped_name
 from regwatch.generate.grounded_qa import ask
 from regwatch.generate.llm import current_model_name
@@ -39,6 +40,75 @@ DISSOLUTION_DB_URL = "https://www.accessdata.fda.gov/scripts/cder/dissolution/ds
 def _form_tokens(value: str) -> set[str]:
     """Significant dosage-form tokens, dropping short connector words."""
     return {t for t in value.lower().replace(",", " ").split() if len(t) > 2}
+
+
+# Release-type / administration modifiers that mark a *clinically distinct* PSG
+# (its BE recommendations differ), so a plain form must never lenient-match a
+# sibling that carries one — "Tablet" must not pull in "Tablet, Extended
+# Release" just because "tablet" is a substring/shared token of it (INV-5).
+# "immediate"/"ir" and bare route words are intentionally ABSENT: a plain
+# "Tablet" already means immediate-release, so excluding it would only cause
+# false "no PSG found" refusals. Mirrors whitepaper.populator._form_compatible's
+# release-type guard; keep the two in lockstep like names_match already is.
+_FORM_MODIFIERS = frozenset(
+    {
+        "extended",
+        "delayed",
+        "sustained",
+        "controlled",
+        "modified",
+        "chewable",
+        "disintegrating",
+        "effervescent",
+        "sublingual",
+        "buccal",
+    }
+)
+# Common abbreviations normalized to the spelled-out modifier so "Tablet ER" and
+# "Tablet, Extended Release" compare equal.
+_MODIFIER_ALIASES = {
+    "er": "extended",
+    "xr": "extended",
+    "xl": "extended",
+    "dr": "delayed",
+    "sr": "sustained",
+    "cr": "controlled",
+    "odt": "disintegrating",
+}
+
+
+def _form_modifiers(value: str) -> set[str]:
+    """Release-type/administration modifier tokens present in a form string.
+
+    Tokenizes without the ``_form_tokens`` length filter so 2-char abbreviations
+    (ER/XR/DR/...) are seen, then normalizes them to their spelled-out modifier.
+    """
+    toks = {_MODIFIER_ALIASES.get(t, t) for t in value.lower().replace(",", " ").split()}
+    return toks & _FORM_MODIFIERS
+
+
+def _log_query_safe(**kwargs: Any) -> None:
+    """``log_query`` with a DEFINED failure: never raise.
+
+    INV-6 durability must not itself crash the /assemble response — a still-down
+    DB inside the error handler would otherwise reproduce the very gap this
+    closes. Mirrors grounded_qa._log_query_or_skip: log + Sentry-capture and
+    return on any audit-write failure.
+    """
+    try:
+        log_query(**kwargs)
+    except Exception as exc:
+        log.warning("assemble_audit_write_failed", error_type=type(exc).__name__)
+        capture_exception(exc)
+
+
+def _escape_lucene_phrase(value: str) -> str:
+    """Escape a value for embedding inside an openFDA Lucene double-quoted phrase.
+
+    A raw double-quote in ``active_ingredient`` would otherwise terminate the
+    phrase early and corrupt the query (and its displayed source URL).
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _find_matching_psgs(active_ingredient: str, dosage_form: str | None) -> list[dict[str, Any]]:
@@ -57,6 +127,13 @@ def _find_matching_psgs(active_ingredient: str, dosage_form: str | None) -> list
                     # a form token, so "inhalation aerosol" matches "Aerosol, Metered"
                     # while "tablet" is still correctly excluded.
                     if want not in have and not (_form_tokens(want) & _form_tokens(have)):
+                        continue
+                    # ...but never blend across a release-type/administration
+                    # modifier the other side lacks: a plain "Tablet" query must
+                    # not admit "Tablet, Extended Release" (a distinct PSG with
+                    # different BE requirements) just because it is a substring/
+                    # shared token of it (INV-5).
+                    if _form_modifiers(want) != _form_modifiers(have):
                         continue
                 matches.append(
                     {
@@ -113,8 +190,9 @@ def _fetch_rld_label(active_ingredient: str, rld: str | None) -> dict[str, Any] 
     if rld and rld.isdigit():
         query = f'openfda.application_number:"NDA{rld}"'
     else:
-        # Search by generic name (active ingredient)
-        query = f'openfda.generic_name:"{stripped_name(active_ingredient)}"'
+        # Search by generic name (active ingredient). Escape the interpolated
+        # value so a double-quote in the name can't break out of the phrase.
+        query = f'openfda.generic_name:"{_escape_lucene_phrase(stripped_name(active_ingredient))}"'
     params: dict[str, Any] = {"search": query, "limit": 1}
     if s.openfda_api_key:
         params["api_key"] = s.openfda_api_key
@@ -134,7 +212,10 @@ def _fetch_rld_label(active_ingredient: str, rld: str | None) -> dict[str, Any] 
             "application_number": (openfda.get("application_number") or [None])[0],
             "indications_and_usage": " ".join(r.get("indications_and_usage") or [])[:1500],
             "dosage_and_administration": " ".join(r.get("dosage_and_administration") or [])[:1500],
-            "source_url": (f"{OPENFDA_LABEL_URL}?search={query}" if query else OPENFDA_LABEL_URL),
+            # Encode via httpx so the displayed/clickable Source link is
+            # syntactically valid (spaces/quotes escaped); api_key is left out on
+            # purpose (never surface the key in a shown URL).
+            "source_url": str(httpx.URL(OPENFDA_LABEL_URL, params={"search": query})),
         }
     except Exception as exc:
         log.warning("rld_label_fetch_failed", error=str(exc))
@@ -187,8 +268,14 @@ def build_dossier(
     rld: str | None,
     user_id: str | None = None,
 ) -> dict[str, Any]:
-    """Assemble a cited dossier. If no matching PSG is in our store, refuses."""
-    # INV-6: every assemble — refused or not — must leave a durable audit row.
+    """Assemble a cited dossier. If no matching PSG is in our store, refuses.
+
+    INV-6: every assemble — refused, assembled, OR errored mid-build — must leave
+    exactly one durable mode="assemble" row. The heavy work runs inside an error
+    boundary so a DB read or the inner ask() raising (e.g. a transient Postgres
+    blip, the Jun-18 incident class) still writes a status="error" row and
+    degrades to a clean refusal instead of a bare 500 with no audit trail.
+    """
     model_name = current_model_name(role="synthesizer")
     query_text = _assemble_query_text(active_ingredient, dosage_form, rld)
     route_json: dict[str, Any] = {
@@ -197,7 +284,58 @@ def build_dossier(
         "dosage_form": dosage_form,
         "rld": rld,
     }
+    try:
+        return _assemble_dossier(
+            active_ingredient=active_ingredient,
+            dosage_form=dosage_form,
+            rld=rld,
+            user_id=user_id,
+            model_name=model_name,
+            query_text=query_text,
+            route_json=route_json,
+        )
+    except Exception as exc:
+        # An error anywhere in assembly must still leave an audit row (INV-6),
+        # mirroring ask()'s status="error" degrade. The write is failure-safe so
+        # a still-down DB can't re-raise from inside this handler.
+        log.warning("assemble_failed", error_type=type(exc).__name__)
+        capture_exception(exc)
+        markdown = (
+            f"# {active_ingredient} dossier\n\n"
+            "This dossier could not be assembled right now due to a temporary "
+            "error reaching the corpus or guidance service. Please retry shortly. "
+            "No content was invented."
+        )
+        _log_query_safe(
+            mode="assemble",
+            query_text=query_text,
+            retrieved=[],
+            answer_text=markdown,
+            citations=[],
+            refused=True,
+            model_name=model_name,
+            user_id=user_id,
+            status="error",
+            route_json={**route_json, "reason": "error", "error_type": type(exc).__name__},
+        )
+        return {
+            "markdown": markdown,
+            "sections": {"matched_psgs": []},
+            "refused": True,
+        }
 
+
+def _assemble_dossier(
+    *,
+    active_ingredient: str,
+    dosage_form: str | None,
+    rld: str | None,
+    user_id: str | None,
+    model_name: str,
+    query_text: str,
+    route_json: dict[str, Any],
+) -> dict[str, Any]:
+    """Assembly body for build_dossier — see it for the INV-6 error contract."""
     psg_matches = _find_matching_psgs(active_ingredient, dosage_form)
     if not psg_matches:
         markdown = (
@@ -206,7 +344,7 @@ def build_dossier(
             f"Run `uv run regwatch seed` (or a broader ingest) and retry. "
             f"This system never invents PSG content."
         )
-        log_query(
+        _log_query_safe(
             mode="assemble",
             query_text=query_text,
             retrieved=[],
@@ -356,7 +494,7 @@ def build_dossier(
 
     markdown = "\n".join(md_lines)
     qa_citations = [dict(c.__dict__) for c in qa.citations]
-    log_query(
+    _log_query_safe(
         mode="assemble",
         query_text=query_text,
         retrieved=qa.retrieved,
@@ -373,7 +511,11 @@ def build_dossier(
         "sections": {
             "matched_psgs": psgs_section,
             "rld_label": rld_label,
-            "qa_answer": qa.answer,
+            # On a clarify, qa.answer is the inner Q&A's dangling "which form?"
+            # prompt, which the markdown deliberately does NOT embed. Don't leak
+            # it here either — callers get qa_status="clarify" to detect the
+            # ambiguity; the stated-forms note lives in the markdown.
+            "qa_answer": None if qa.status == "clarify" else qa.answer,
             "qa_citations": qa_citations,
             "qa_refused": qa.refused,
             # Surface the inner Q&A status so API callers can detect a multi-form

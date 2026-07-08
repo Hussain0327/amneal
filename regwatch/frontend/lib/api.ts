@@ -331,6 +331,13 @@ async function handle<T>(res: Response, method: string, path: string, gate: bool
     try {
       const body = (await res.json()) as { detail?: unknown };
       if (typeof body.detail === "string") detail = body.detail;
+      // FastAPI request-validation (422) returns detail as an array of
+      // {loc, msg, type}; a field-length reject on /assemble would otherwise
+      // read as a bare "POST /assemble → 422". Surface the first message.
+      else if (Array.isArray(body.detail)) {
+        const first = body.detail[0] as { msg?: unknown } | undefined;
+        if (first && typeof first.msg === "string") detail = first.msg;
+      }
     } catch {
       // non-JSON error body
     }
