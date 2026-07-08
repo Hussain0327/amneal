@@ -454,3 +454,16 @@ def test_assemble_refuses_when_no_matching_psg(auth_client: TestClient) -> None:
     body = r.json()
     assert body["refused"] is True
     assert "No PSG" in body["markdown"]
+
+
+def test_assemble_rejects_out_of_bounds_inputs(auth_client: TestClient) -> None:
+    # active_ingredient min_length=2 -> a 1-char value is a 422, never reaches
+    # build_dossier (these free-text fields flow to the QA prompt + audit row).
+    too_short = auth_client.post("/assemble", json={"active_ingredient": "a"})
+    assert too_short.status_code == 422
+    # rld max_length=200 -> over-long is a 422 as well.
+    too_long = auth_client.post(
+        "/assemble",
+        json={"active_ingredient": "Albuterol Sulfate", "rld": "9" * 201},
+    )
+    assert too_long.status_code == 422
