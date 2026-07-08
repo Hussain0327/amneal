@@ -18,7 +18,7 @@ dependencies = [
     "alembic>=1.18.5",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
-    "fastapi>=0.138.2",
+    "fastapi>=0.139.0",
     "uvicorn[standard]>=0.32",
     "structlog>=26.1.0",
     "rapidfuzz>=3.10",
@@ -28,7 +28,7 @@ dependencies = [
     "tiktoken>=0.8",
     "bcrypt>=5.0.0",
     "python-docx>=1.2.0",
-    "pgvector>=0.3.6",
+    "pgvector>=0.5.0",
     "psycopg[binary]>=3.2",
     "sentry-sdk[fastapi]>=2.64.0",
 ]
@@ -41,10 +41,10 @@ local-embeddings = [
 ]
 llm = [
     "openai>=2.44.0",
-    "anthropic>=0.115.0",
+    "anthropic>=0.116.0",
 ]
 orchestration = [
-    "dagster>=1.13.11,<1.14",
+    "dagster>=1.13.12,<1.14",
     "dagster-webserver>=1.13,<1.14",
     "dagster-postgres>=0.29,<0.30",
 ]
@@ -55,10 +55,10 @@ dev = [
     "pytest-timeout>=2.3",
     "ruff>=0.15.20",
     "black>=24.10",
-    "mypy>=1.13",
+    "mypy>=2.2.0",
     "types-requests",
     "respx>=0.21",
-    "import-linter>=2.12",
+    "import-linter>=2.13",
 ]
 
 [project.scripts]
