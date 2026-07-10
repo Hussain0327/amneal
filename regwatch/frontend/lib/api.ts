@@ -687,10 +687,20 @@ export function buildWhitepaper(
 ): Promise<WhitepaperResponse> {
   // A 422 here is the resolution-failure contract: detail explains what WAS
   // found — surface it verbatim, never retry with a guess.
-  return postJSON<WhitepaperResponse>("/whitepaper", {
-    rld_name: rldName,
-    application_number: applicationNumber,
-  });
+  // Long bound: a populate runs live FDA fetches server-side under its own
+  // deadline (WHITEPAPER_BUILD_TIMEOUT_S, default 90s, kept under this 120s),
+  // so the 30s default would abort legitimate builds before the server's
+  // audited 504 could arrive.
+  return postJSON<WhitepaperResponse>(
+    "/whitepaper",
+    {
+      rld_name: rldName,
+      application_number: applicationNumber,
+    },
+    true,
+    undefined,
+    LONG_TIMEOUT_MS,
+  );
 }
 
 // Validate an RLD name + application number into the canonical spine, without
@@ -702,10 +712,20 @@ export function resolveProduct(
   rldName: string,
   applicationNumber: string,
 ): Promise<WhitepaperSpine> {
-  return postJSON<WhitepaperSpine>("/resolve", {
-    rld_name: rldName,
-    application_number: applicationNumber,
-  });
+  // Same long bound as buildWhitepaper: /resolve runs the same live fetch
+  // phase under the server's WHITEPAPER_BUILD_TIMEOUT_S (default 90s), so the
+  // 30s default would abort locally while the server keeps working and its
+  // eventual 504 would arrive to nobody.
+  return postJSON<WhitepaperSpine>(
+    "/resolve",
+    {
+      rld_name: rldName,
+      application_number: applicationNumber,
+    },
+    true,
+    undefined,
+    LONG_TIMEOUT_MS,
+  );
 }
 
 // Content-Disposition: attachment; filename=whitepaper_020503.docx — also

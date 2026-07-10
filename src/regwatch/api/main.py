@@ -97,6 +97,7 @@ from regwatch.whitepaper import template_fetch
 from regwatch.whitepaper.docx_writer import docx_media_type, write_whitepaper_docx
 from regwatch.whitepaper.populator import (
     SpineResolutionError,
+    WhitepaperBuildTimeoutError,
     build_whitepaper,
     resolve_spine,
     result_fingerprint,
@@ -1165,6 +1166,11 @@ def whitepaper(req: WhitepaperRequest, user: User = Depends(require_user)) -> di
         result = build_whitepaper(req.rld_name, req.application_number, user_id=str(user.id))
     except SpineResolutionError as exc:
         raise HTTPException(status_code=422, detail=exc.detail) from exc
+    except WhitepaperBuildTimeoutError as exc:
+        # Audited inside build_whitepaper (status="error", reason=
+        # "build_deadline_exceeded"). 504 matches the UI's own timeout
+        # vocabulary -- api.ts maps its local aborts to status 504 too.
+        raise HTTPException(status_code=504, detail=exc.detail) from exc
     _persist_whitepaper_run(_user_pk(user), req.rld_name, result)
     return result
 
@@ -1191,6 +1197,10 @@ def resolve(req: ResolveRequest, user: User = Depends(require_user)) -> dict[str
         return resolve_spine(req.rld_name, req.application_number, user_id=str(user.id))
     except SpineResolutionError as exc:
         raise HTTPException(status_code=422, detail=exc.detail) from exc
+    except WhitepaperBuildTimeoutError as exc:
+        # Same fetch-phase deadline as /whitepaper; consistently, no audit row
+        # (this surface writes none on success or failure).
+        raise HTTPException(status_code=504, detail=exc.detail) from exc
 
 
 # ---------- /whitepaper/runs (durable runs + attributed analyst overlay) ----------
