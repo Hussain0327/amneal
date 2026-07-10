@@ -283,6 +283,24 @@ class Settings(BaseSettings):
     # whitepaper_template_path on first use; any fetch failure keeps today's
     # loud FALLBACK_MARKER behavior. Rotation = re-sign + update the secret.
     whitepaper_template_url: str | None = None
+    # Overall deadline (seconds) for the populate's live FDA fetch phase.
+    # POST /whitepaper is a sync handler on the shared thread pool: per-call
+    # HTTP timeouts bound each request but not the whole chain (DailyMed alone
+    # paginates up to 10 pages with retries), so without this a slow source
+    # run pins a shared worker thread for minutes. Enforced at the populator's
+    # parallel-stage checkpoints; on a fetch-phase breach the build fails with
+    # an audited mode="whitepaper" status="error" row
+    # (reason=build_deadline_exceeded) and the API returns 504. During the
+    # post-fetch cell build the lazy REMS index fetch is bounded by the
+    # remaining time and the nested PSG ask() is entry-gated (never started
+    # past the deadline); those breaches degrade the affected cells to analyst
+    # input instead of failing the completed build. Default sits safely under
+    # the UI's 120s bound for POST /whitepaper (LONG_TIMEOUT_MS in
+    # regwatch/frontend/lib/api.ts) so the client is still listening when the
+    # audited 504 arrives, with headroom for an in-flight PSG ask() (bounded
+    # only by its own LLM/HTTP timeouts).
+    # 0 disables the deadline (CLI/batch use; per-call timeouts still apply).
+    whitepaper_build_timeout_s: float = 90.0
 
     # ---------- API ----------
     api_host: str = "127.0.0.1"

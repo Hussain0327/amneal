@@ -25,14 +25,18 @@ This module codes against the PINNED source-layer interface and never edits
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+import time
+from collections.abc import Callable, Iterable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field, fields
 from datetime import UTC, date, datetime
 from typing import Any
 
+from config.settings import get_settings
 from sqlalchemy import func, or_
 from sqlalchemy import select as sa_select
 from sqlmodel import col, select
@@ -133,6 +137,23 @@ class SpineResolutionError(Exception):
         self.detail = detail
 
 
+class WhitepaperBuildTimeoutError(Exception):
+    """Raised when the overall build deadline elapses.
+
+    During the FETCH phase the build is abandoned wholesale (client-safe
+    ``detail``, 504 on the API, audited by ``build_whitepaper`` with its own
+    route_json reason) -- a deadline-truncated context must never populate
+    cells as if its sources had actually been queried (INV-5). During the
+    post-fetch cell build the same type fires at the lazy REMS index fetch,
+    where the cells' existing handlers degrade it to analyst input like any
+    other failed source -- the already-built paper is kept.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
 # ---------------------------------------------------------------------------
 # Module-level fetch wrappers — direct per-handler calls so an HTTP failure is
 # visible to the tri-state logic (search_sources swallows exceptions, which
@@ -213,6 +234,10 @@ class _Ctx:
     rems_error: Exception | None = None
     known_tokens: set[str] = field(default_factory=set)
     warnings: list[str] = field(default_factory=list)
+    # Monotonic build deadline (None = unbounded), stashed for the two live
+    # calls that run AFTER the batched fetch phase: the lazy REMS index fetch
+    # and the nested PSG ask() gate on what remains of it at cell-build time.
+    deadline: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +315,127 @@ def _clip(value: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Concurrent fetch stages + overall build deadline.
+#
+# The five fetch stages group by their real data dependencies:
+#   batch A: _fetch_orange_book || _fetch_drugsfda        (identity needs both)
+#   batch B: _fetch_dailymed || _fetch_ndc || _fetch_psg_store
+#            (each reads only identity fields finalized before the batch)
+# Everything else -- identity resolution, name reconcile, token build, persist,
+# and the cell builders -- stays sequential on the caller's thread. Two live
+# calls run AFTER the batched fetch phase and gate on the stashed ctx.deadline:
+# the lazy REMS index fetch (bounded by the remaining time) and the nested PSG
+# ask() (pre-checked only -- an in-flight LLM turn is never abandoned, it
+# writes its own audit row).
+# ---------------------------------------------------------------------------
+def _build_deadline() -> float | None:
+    """Monotonic deadline for this build; None when the bound is disabled (0)."""
+    timeout_s = get_settings().whitepaper_build_timeout_s
+    if timeout_s <= 0:
+        return None
+    return time.monotonic() + timeout_s
+
+
+def _deadline_remaining(deadline: float | None) -> float | None:
+    """Seconds until the build deadline; None = unbounded. May be <= 0."""
+    if deadline is None:
+        return None
+    return deadline - time.monotonic()
+
+
+def _deadline_detail() -> str:
+    timeout_s = get_settings().whitepaper_build_timeout_s
+    return (
+        f"White-paper build exceeded its {timeout_s:.0f}s deadline while querying FDA "
+        f"sources; the build was abandoned and no partial paper was produced. Retry "
+        f"shortly -- an upstream source may be slow."
+    )
+
+
+def _merge_stage_ctx(ctx: _Ctx, stage_ctx: _Ctx, baseline: dict[str, Any]) -> None:
+    """Apply one completed stage's writes back onto the shared context.
+
+    Deliberately field-generic: every stage ASSIGNS fresh objects over its own
+    disjoint fields (verified for all five stage functions; none mutates a
+    pre-batch object in place), so identity comparison finds exactly what the
+    stage wrote -- a field later added to ``_Ctx`` or to a stage can never be
+    silently dropped by a hand-maintained merge list. The comparison runs
+    against the PRE-BATCH ``baseline``, never the live ``ctx``: a later
+    stage's untouched field still holds the baseline object, and diffing it
+    against a ctx already updated by an earlier stage's merge would read that
+    stale value as a write and clobber the earlier result. ``warnings``
+    extends in merge-call order so the payload order matches the sequential
+    build's.
+    """
+    for f in fields(_Ctx):
+        if f.name == "warnings":
+            continue
+        value = getattr(stage_ctx, f.name)
+        if value is not baseline[f.name]:
+            setattr(ctx, f.name, value)
+    ctx.warnings.extend(stage_ctx.warnings)
+
+
+def _run_stages_concurrently(
+    ctx: _Ctx,
+    stages: Sequence[Callable[[_Ctx], None]],
+    deadline: float | None,
+) -> None:
+    """Run independent fetch stages in parallel under the overall deadline.
+
+    Each stage runs against its own shallow copy of ``ctx`` with a private
+    warnings list; completed copies merge back in SUBMISSION order, so fields
+    AND warning order come out exactly as the old sequential code produced
+    them no matter which thread finishes first, and worker threads never write
+    shared state. Stage functions keep their own per-source try/except, so a
+    failing source degrades identically to the sequential build.
+
+    The deadline is enforced at each ``future.result(timeout=remaining)``. On
+    breach the pool is abandoned WITHOUT waiting (a ``with`` block would join
+    the stalled fetch): in-flight stages self-terminate via their per-call
+    HTTP/DB timeouts and every fetcher context-manages a per-call client or
+    session, so an abandoned thread leaks nothing. The pool is per-build and
+    bounded by the stage count -- a shared pool would let one timed-out
+    build's orphaned work queue starve every later build.
+    """
+    if deadline is not None and deadline - time.monotonic() <= 0:
+        log.warning("whitepaper_build_deadline_exceeded", phase="batch_entry")
+        raise WhitepaperBuildTimeoutError(_deadline_detail())
+    # The pre-batch field snapshot every stage copy started from; merges diff
+    # against THIS (see _merge_stage_ctx). ctx itself is only written by the
+    # merges below, on this thread, after the snapshot.
+    baseline = {f.name: getattr(ctx, f.name) for f in fields(_Ctx)}
+    pool = ThreadPoolExecutor(max_workers=len(stages), thread_name_prefix="whitepaper-fetch")
+    try:
+        work: list[tuple[str, _Ctx, Future[None]]] = []
+        for stage in stages:
+            stage_ctx = copy.copy(ctx)
+            # The shallow copy SHARES the warnings list object; give the stage
+            # its own so appends stay per-stage until the ordered merge.
+            stage_ctx.warnings = []
+            work.append((stage.__name__, stage_ctx, pool.submit(stage, stage_ctx)))
+        for stage_name, stage_ctx, future in work:
+            remaining: float | None = None
+            if deadline is not None:
+                remaining = max(0.0, deadline - time.monotonic())
+            try:
+                future.result(timeout=remaining)
+            except TimeoutError as exc:
+                # Unambiguously the deadline: every stage swallows its own
+                # source exceptions, so a stage-raised TimeoutError never
+                # reaches result() (it would already be a warning).
+                log.warning(
+                    "whitepaper_build_deadline_exceeded",
+                    phase="stage_wait",
+                    stage=stage_name,
+                )
+                raise WhitepaperBuildTimeoutError(_deadline_detail()) from exc
+            _merge_stage_ctx(ctx, stage_ctx, baseline)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+# ---------------------------------------------------------------------------
 # Spine resolution + context build.
 # ---------------------------------------------------------------------------
 _OB_TYPE_TO_APP = {"N": "NDA", "A": "ANDA", "B": "BLA"}
@@ -344,6 +490,7 @@ def _name_matches(rld_name: str, candidates: Iterable[str]) -> bool:
 def _build_context(rld_name: str, application_number: str, *, user_id: str | None) -> _Ctx:
     appl_no, input_type = _split_input(application_number)
     now = datetime.now(UTC)
+    deadline = _build_deadline()
     ctx = _Ctx(
         rld_name=rld_name,
         application_number_input=application_number,
@@ -353,16 +500,17 @@ def _build_context(rld_name: str, application_number: str, *, user_id: str | Non
         normalized_name="",
         now=now,
         user_id=user_id,
+        deadline=deadline,
     )
 
-    _fetch_orange_book(ctx)
-    _fetch_drugsfda(ctx)
+    # Batch A: mutually independent; identity resolution needs both results.
+    _run_stages_concurrently(ctx, (_fetch_orange_book, _fetch_drugsfda), deadline)
     _establish_identity(ctx, input_type)
     _filter_rows_to_application_type(ctx)
     _reconcile_rld_name(ctx)
-    _fetch_dailymed(ctx)
-    _fetch_ndc(ctx)
-    _fetch_psg_store(ctx)
+    # Batch B: independent of one another; each reads only the identity fields
+    # finalized above (resolved type/number, ingredient, product rows).
+    _run_stages_concurrently(ctx, (_fetch_dailymed, _fetch_ndc, _fetch_psg_store), deadline)
     _build_known_tokens(ctx)
     _persist(ctx)
     return ctx
@@ -1213,6 +1361,49 @@ def _rems_query(ctx: _Ctx) -> SourceQuery:
     )
 
 
+def _rems_search_bounded(ctx: _Ctx) -> tuple[list[SourceRecord], int]:
+    """One REMS index fetch, bounded by what remains of the build deadline.
+
+    The index fetch is the one live call that runs OUTSIDE the batched fetch
+    phase (lazy -- cell-build time), so the batch checkpoints never see it:
+    unchecked, its retry budget (3 x per-call HTTP timeout) could run minutes
+    past the client's bound after the fetch phase already spent the deadline.
+    A breach here degrades BOTH REMS cells through their existing handlers
+    (analyst input -- tri-state, INV-5); the rest of the paper is kept, unlike
+    a fetch-phase breach.
+    """
+    query = _rems_query(ctx)
+    remaining = _deadline_remaining(ctx.deadline)
+    if remaining is None:
+        return _rems_search(query)
+    if remaining <= 0:
+        log.warning("whitepaper_build_deadline_exceeded", phase="rems_entry")
+        raise WhitepaperBuildTimeoutError(
+            "Build deadline exceeded before the REMS index could be queried."
+        )
+    # Same abandon-not-join rule as _run_stages_concurrently: the worker is a
+    # pure fetch+parse (no ctx, no DB session), self-terminates via its
+    # per-call HTTP timeouts, and context-manages its own client, so
+    # shutdown(wait=False) leaks nothing.
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whitepaper-rems")
+    try:
+        future = pool.submit(_rems_search, query)
+        try:
+            return future.result(timeout=remaining)
+        except TimeoutError as exc:
+            if future.done():
+                # The WORKER raised a TimeoutError-family error before the
+                # wait expired -- a source failure, not the deadline; let the
+                # normal degrade path cache and name it.
+                raise
+            log.warning("whitepaper_build_deadline_exceeded", phase="rems_wait")
+            raise WhitepaperBuildTimeoutError(
+                "Build deadline exceeded while querying the REMS index."
+            ) from exc
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 def _rems_index_results(ctx: _Ctx) -> tuple[list[SourceRecord], int]:
     """(matched records, TOTAL parsed rows) — ONE index fetch+parse per build.
 
@@ -1223,7 +1414,7 @@ def _rems_index_results(ctx: _Ctx) -> tuple[list[SourceRecord], int]:
         raise ctx.rems_error
     if ctx.rems_result is None:
         try:
-            ctx.rems_result = _rems_search(_rems_query(ctx))
+            ctx.rems_result = _rems_search_bounded(ctx)
         except Exception as exc:
             ctx.rems_error = exc
             raise
@@ -1774,6 +1965,20 @@ def _psg_ask_form_filters(ctx: _Ctx) -> dict[str, str] | None:
 def _ext_psg_requirements(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     if not ctx.normalized_name:
         return _analyst(spec, [], "No normalized ingredient resolved; cannot scope the PSG ask.")
+    remaining = _deadline_remaining(ctx.deadline)
+    if remaining is not None and remaining <= 0:
+        # The nested ask() (retrieval + LLM synthesis + its own audit row) is
+        # the other post-fetch live call the batch checkpoints never see; it
+        # must not START past the build deadline. Entry gate only -- an
+        # in-flight ask is never abandoned -- and skipping degrades exactly
+        # like a failed ask: analyst input, never a guessed answer.
+        log.warning("whitepaper_build_deadline_exceeded", phase="psg_ask_entry")
+        return _analyst(
+            spec,
+            [],
+            "Build deadline exceeded before the scoped PSG ask could run; the PSG corpus "
+            "was not queried (tri-state, INV-5).",
+        )
     question = (
         f"What are the recommended bioequivalence study design and acceptance criteria for "
         f"{ctx.ingredient} generic products?"
@@ -2284,10 +2489,29 @@ def resolve_spine(
 
     Like ``build_whitepaper`` it performs live FDA fetches and refreshes the
     Orange Book / SPL provenance snapshot (via ``_build_context`` → ``_persist``);
-    it simply records no audit row.
+    it simply records no audit row. The shared fetch-phase deadline applies here
+    too: a breach raises ``WhitepaperBuildTimeoutError`` (504 on the API) with,
+    consistently, no audit row.
     """
     ctx = _build_context(rld_name, application_number, user_id=user_id)
     return _spine_from_ctx(ctx)
+
+
+def _log_query_safe(**kwargs: Any) -> None:
+    """``log_query`` with a DEFINED failure: never raise.
+
+    Mirrors ``assemble.dossier._log_query_safe``: on the deadline failure path
+    the audit write must not replace the typed timeout with a naked 500 -- a
+    stalled DB may be the very reason the build ran long. Log + capture and
+    return on any audit-write failure.
+    """
+    try:
+        log_query(**kwargs)
+    except Exception as exc:
+        log.warning("whitepaper_audit_write_failed", error_type=type(exc).__name__)
+        from regwatch.common.observability import capture_exception
+
+        capture_exception(exc)
 
 
 def build_whitepaper(
@@ -2300,8 +2524,10 @@ def build_whitepaper(
 
     Writes exactly one ``log_query`` audit row (mode="whitepaper") on success
     AND on resolution failure (re-raising ``SpineResolutionError`` after the
-    audit row). The PSG-Requirements cell's scoped ``ask()`` writes its own
-    audit row (like the dossier's inner Q&A).
+    audit row) AND on a build-deadline breach (re-raising
+    ``WhitepaperBuildTimeoutError``, its own route_json reason). The
+    PSG-Requirements cell's scoped ``ask()`` writes its own audit row (like
+    the dossier's inner Q&A).
     """
     model_name = current_model_name(role="synthesizer")
     query_text = f"whitepaper rld_name={rld_name!r} application_number={application_number!r}"
@@ -2324,6 +2550,27 @@ def build_whitepaper(
             user_id=user_id,
             status="resolution_failed",
             route_json={**route_json, "reason": "spine_unresolved"},
+        )
+        raise
+    except WhitepaperBuildTimeoutError as exc:
+        # Same audited failure path as an unresolved spine -- one refused
+        # mode="whitepaper" row (status="error", the 009cc41 boundary shape)
+        # with its own reason, then re-raise for the API to map to 504.
+        _log_query_safe(
+            mode="whitepaper",
+            query_text=query_text,
+            retrieved=[],
+            answer_text=exc.detail,
+            citations=[],
+            refused=True,
+            model_name=model_name,
+            user_id=user_id,
+            status="error",
+            route_json={
+                **route_json,
+                "reason": "build_deadline_exceeded",
+                "error_type": type(exc).__name__,
+            },
         )
         raise
 
@@ -2366,6 +2613,7 @@ __all__ = [
     "CELL_SPECS",
     "EXTRACTORS",
     "SpineResolutionError",
+    "WhitepaperBuildTimeoutError",
     "build_whitepaper",
     "resolve_spine",
 ]

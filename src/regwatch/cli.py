@@ -274,7 +274,11 @@ def cmd_whitepaper(
     from rich.table import Table
 
     from regwatch.whitepaper.docx_writer import write_whitepaper_docx
-    from regwatch.whitepaper.populator import SpineResolutionError, build_whitepaper
+    from regwatch.whitepaper.populator import (
+        SpineResolutionError,
+        WhitepaperBuildTimeoutError,
+        build_whitepaper,
+    )
 
     init_db()
     try:
@@ -282,6 +286,15 @@ def cmd_whitepaper(
     except SpineResolutionError as exc:
         rprint(f"[red]could not resolve spine[/red] {exc.detail}")
         raise typer.Exit(code=2) from exc
+    except WhitepaperBuildTimeoutError as exc:
+        # The API-oriented default deadline also applies here; a CLI run with
+        # no client waiting can lift it via WHITEPAPER_BUILD_TIMEOUT_S=0.
+        rprint(f"[red]build deadline exceeded[/red] {exc.detail}")
+        rprint(
+            "set WHITEPAPER_BUILD_TIMEOUT_S=0 to disable the deadline for CLI runs "
+            "(exit may linger while the abandoned fetch drains its per-call HTTP timeouts)"
+        )
+        raise typer.Exit(code=3) from exc
 
     spine = result["spine"]
     rprint(
