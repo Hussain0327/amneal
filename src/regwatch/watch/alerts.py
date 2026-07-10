@@ -102,12 +102,13 @@ def pairs_without_alert(pairs: list[tuple[str, int]]) -> set[tuple[str, int]]:
     """Of these (appl_no, product_id) pairs, the ones whose LATEST psg_version
     has NO alert row FOR THAT PRODUCT.
 
-    INV-4 crash recovery, made PER-PRODUCT. ``ingest_listing`` commits the
-    psg_version row and THEN writes chunks/BE in separate (non-atomic) stores.
-    If that second step crashes, the version is durably committed but no alert
-    was ever built, and every later run reads the matching content_hash as
-    ``unchanged`` and so never re-enters the alert path -- a permanent silent
-    miss.
+    INV-4 crash recovery, made PER-PRODUCT. Alerts are built by this watch
+    stage AFTER ``ingest_listing`` returns, outside the ingest transaction (in
+    BOTH storage modes -- the Postgres-mode atomic commit covers version + doc
+    + chunks + BE, never alerts). A crash between the version commit and alert
+    persistence leaves the version durably committed with no alert, and every
+    later run reads the matching content_hash as ``unchanged`` and so never
+    re-enters the alert path -- a permanent silent miss.
 
     The check is per (psg_version_id, listing_appl_no, product_id) -- the SAME
     granularity as the durable ``uq_alert_version_listing_product`` key -- NOT

@@ -171,13 +171,22 @@ def _matches_head_schema() -> bool:
     in one shot, so stamping head is correct. Later additive migrations (0009
     durable alerts, 0010 chat_message provenance) are pure nullable adds in the
     same create_all, so they ride along — there is no half-state where 0008 is
-    present but a later additive column is missing on a create_all'd DB.
+    present but a later additive column is missing on a create_all'd DB. That
+    ride-along does NOT hold for index-only 0014 when the create_all came from
+    a PRE-0014 build's metadata; _init_sqlite probes the index separately and
+    replays 0014 rather than stamping it away.
     """
     inspector = inspect(get_engine())
     if "answer_feedback" not in set(inspector.get_table_names()):
         return False
     query_columns = {c["name"] for c in inspector.get_columns("query_log")}
     return {"input_tokens", "output_tokens", "cost_usd"} <= query_columns
+
+
+def _has_psg_version_unique_index() -> bool:
+    """0014's shape probe: the unique (psg_document_id, content_hash) index."""
+    indexes = inspect(get_engine()).get_indexes("psg_version")
+    return any(ix["name"] == "uq_psg_version_doc_hash" for ix in indexes)
 
 
 # Hosts reached over a trusted/loopback path where TLS is neither configured
@@ -536,7 +545,16 @@ def _init_sqlite() -> None:
     cfg = _alembic_config()
     if _has_unstamped_post_0005_schema():
         if _matches_head_schema():
-            command.stamp(cfg, "head")
+            if _has_psg_version_unique_index():
+                command.stamp(cfg, "head")
+            else:
+                # create_all from a PRE-0014 build: every 0008..0013 shape is
+                # present (they ride along with create_all), but index-only
+                # 0014 leaves no shape for old metadata to carry -- stamping
+                # head would silently skip the unique index and its
+                # duplicate-race protection forever. Replay just 0014.
+                command.stamp(cfg, "0013_whitepaper_runs")
+                command.upgrade(cfg, "head")
         elif _has_ob_appl_type_columns():
             # 0006-shaped (0007 is an if_not_exists index — replaying it is
             # safe either way): stamp 0006 and apply 0007+.

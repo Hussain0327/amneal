@@ -8,11 +8,17 @@ Given a `PsgListing`, the pipeline:
      (see `_commit_version_and_doc`), so the doc never claims content that
      was not actually ingested.
   3. If the new content hash differs from the latest `psg_version`, creates a
-     new version row, regenerates chunks (in Chroma), regenerates the
-     `be_requirement` extraction. Idempotent on re-run.
+     new version row, regenerates chunks, regenerates the `be_requirement`
+     extraction. Idempotent on re-run.
 
 All vector and DB writes commit before we touch the next PSG so a partial run
-leaves the DB consistent.
+leaves the DB consistent. In Postgres mode a revision lands ATOMICALLY: the
+version row, the doc's content fields, the version's pgvector chunk rows, and
+its be_requirement row (when extraction succeeded) commit in one transaction,
+so a crash mid-ingest can never leave a version without its chunks. In
+SQLite/Chroma dev mode that is impossible (Chroma is not a SQL store), so the
+dev path keeps the historical order -- commit version+doc, then index chunks --
+and relies on the unchanged-path backfill to heal a torn write.
 """
 
 from __future__ import annotations
@@ -23,16 +29,17 @@ from pathlib import Path
 
 from config.settings import get_settings
 from sqlalchemy import desc
-from sqlmodel import Session, select
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session, col, select
 
 from regwatch.common.logging import get_logger
 from regwatch.ingest.pdf_parser import ParsedPdf, parse_pdf
 from regwatch.ingest.psg_crawler import PsgListing, download_pdf
 from regwatch.process.change_detector import summarize_change
-from regwatch.process.chunker import chunk_pdf
+from regwatch.process.chunker import Chunk, chunk_pdf
 from regwatch.process.embedder import get_embedding_provider
-from regwatch.process.extractor import extract_be
-from regwatch.store.db import init_db, session_scope
+from regwatch.process.extractor import ExtractionResult, extract_be
+from regwatch.store.db import engine_dialect, init_db, session_scope
 from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
 from regwatch.store.vector_store import (
     add_chunks,
@@ -77,6 +84,25 @@ def _latest_hash_in_session(s: Session, psg_document_id: int) -> str | None:
         )
     )
     return rows[0] if rows else None
+
+
+def _latest_committed_hash(psg_document_id: int) -> str | None:
+    """Latest version hash via a FRESH session, for classifying a unique-index
+    collision: by the time the insert has failed, our transaction (including
+    its `_latest_hash_in_session` pre-check) has rolled back and is stale by
+    definition, while the colliding winner's commit is visible to a new
+    session. Id breaks captured_at ties the same way migration 0014 picks its
+    dedupe keeper."""
+    with session_scope() as s:
+        rows = list(
+            s.scalars(
+                select(PsgVersion.content_hash)
+                .where(PsgVersion.psg_document_id == psg_document_id)
+                .order_by(col(PsgVersion.captured_at).desc(), col(PsgVersion.id).desc())
+                .limit(1)
+            )
+        )
+        return rows[0] if rows else None
 
 
 def _resolve_psg_document(
@@ -196,6 +222,24 @@ def _be_requirement_exists(version_id: int) -> bool:
         return bool(rows)
 
 
+def _is_duplicate_version_race(exc: IntegrityError) -> bool:
+    """True iff an IntegrityError is the psg_version unique index firing.
+
+    Postgres names the index ('... violates unique constraint
+    "uq_psg_version_doc_hash"'); SQLite names the column pair ('UNIQUE
+    constraint failed: psg_version.psg_document_id, ...') -- the 'UNIQUE
+    constraint failed:' prefix is part of the needle so a (hypothetical) NOT
+    NULL violation on the same column cannot be mistaken for the race. Any
+    other integrity failure in the commit transaction is a real bug and must
+    propagate.
+    """
+    message = str(getattr(exc, "orig", None) or exc)
+    return (
+        "uq_psg_version_doc_hash" in message
+        or "UNIQUE constraint failed: psg_version.psg_document_id" in message
+    )
+
+
 def _commit_version_and_doc(
     *,
     listing: PsgListing,
@@ -204,47 +248,135 @@ def _commit_version_and_doc(
     pdf_path: str,
     parsed_text_path: str | None,
     diff_summary: str | None,
+    chunk_payload: tuple[list[Chunk], list[list[float]]] | None = None,
+    extraction: ExtractionResult | None = None,
 ) -> int | None:
     """Insert the new version AND the doc row's content fields in ONE transaction.
 
-    Returns the new version id, or None when the latest version already carries
-    this hash: an overlapping run (e.g. the watch-daily cron plus a manual
-    `ingest-all` against the same DB) landed the identical revision between the
-    caller's early hash check and this commit. Skipping the duplicate keeps a
-    single version row per revision, so pairs_without_alert cannot re-alert the
-    same FDA change on the next run (INV-4).
+    Postgres mode additionally threads the version's chunk rows and (when
+    extraction succeeded) its be_requirement row through the SAME transaction:
+    `chunk_payload` carries chunks embedded BEFORE this call (no network call
+    may run while the transaction is open -- the 2026-06-18 idle-in-transaction
+    incident class), and the chunk upsert runs on this session's connection.
+    Either everything for the revision lands or nothing does, so a crash can
+    never leave a version row without its chunks. Dev mode (SQLite+Chroma)
+    passes neither payload: Chroma cannot join a SQL transaction, so the caller
+    keeps the historical commit-then-index order there.
 
-    One transaction, two reasons:
-    - The doc row must never describe content that has no version row: a parse
-      or LLM failure aborts before this function, leaving the doc on its prior
-      state instead of advertising a revision that was never ingested.
-    - Re-checking the latest hash here shrinks the cross-process check-then-act
-      window from the whole parse+LLM stretch (seconds to tens of seconds) to
-      milliseconds. A residual window remains because psg_version has no unique
-      (psg_document_id, content_hash) constraint (needs a migration, deferred);
-      the watch-daily workflow concurrency group is the primary guard against
-      overlapping runs.
+    Returns the new version id, or None when this exact revision already
+    landed via an overlapping run (e.g. the watch-daily cron plus a manual
+    `ingest-all` against the same DB). Skipping the duplicate keeps a single
+    version row per revision, so pairs_without_alert cannot re-alert the same
+    FDA change on the next run (INV-4). Two layers catch it:
+    - The in-transaction latest-hash re-check (cheap, catches an overlap that
+      committed during the caller's parse+LLM stretch).
+    - The unique (psg_document_id, content_hash) index (migration 0014), which
+      closes the residual insert race for good: the loser's INSERT raises and
+      is mapped onto the same skip path here -- but ONLY when the colliding
+      row is the doc's latest version (the winner just committed it). A
+      collision with an OLDER version means FDA re-served prior content
+      (hash A -> B -> back to A), which one-row-per-(doc, hash) cannot record
+      as a new version; that re-raises so the run surfaces "error" instead of
+      silently absorbing an FDA change (see the except branch).
+
+    The doc row still never describes content that has no version row: a parse
+    or LLM failure aborts before this function, and a rolled-back transaction
+    reverts the content fields together with the version insert.
     """
-    with session_scope() as s:
-        if _latest_hash_in_session(s, psg_document_id) == content_hash:
+    try:
+        with session_scope() as s:
+            if _latest_hash_in_session(s, psg_document_id) == content_hash:
+                return None
+            v = PsgVersion(
+                psg_document_id=psg_document_id,
+                content_hash=content_hash,
+                recommended_date=listing.recommended_date,
+                parsed_text_path=parsed_text_path,
+                diff_summary=diff_summary,
+            )
+            s.add(v)
+            doc = s.get(PsgDocument, psg_document_id)
+            if doc is None:
+                raise RuntimeError("psg_document row vanished during ingest")
+            _apply_content_fields(doc, listing, content_hash, pdf_path)
+            s.add(doc)
+            s.flush()
+            if v.id is None:
+                raise RuntimeError("psg_version insert did not produce an id")
+            if chunk_payload is not None:
+                chunks, embeddings = chunk_payload
+                if chunks:
+                    ids, metas, texts = _index_rows(psg_document_id, v.id, chunks)
+                    add_chunks(
+                        ids=ids,
+                        embeddings=embeddings,
+                        documents=texts,
+                        metadatas=metas,
+                        conn=s.connection(),
+                    )
+                    log.info("chunks_added", doc_id=psg_document_id, version_id=v.id, n=len(ids))
+            if extraction is not None:
+                s.add(
+                    _be_requirement_row(
+                        psg_document_id=psg_document_id,
+                        version_id=v.id,
+                        fields=extraction.fields,
+                        citations=extraction.citations,
+                    )
+                )
+            return v.id
+    except IntegrityError as exc:
+        if not _is_duplicate_version_race(exc):
+            raise
+        latest_committed = _latest_committed_hash(psg_document_id)
+        if latest_committed == content_hash:
+            # The overlapping run won the insert race after our in-transaction
+            # hash check. The WHOLE transaction (version + doc fields + chunks
+            # + BE row) rolled back, so the winner alone owns this revision
+            # (INV-4).
+            log.info(
+                "duplicate_version_race_skipped",
+                appl_no=listing.appl_no,
+                doc_id=psg_document_id,
+                content_hash=content_hash,
+            )
             return None
-        v = PsgVersion(
-            psg_document_id=psg_document_id,
+        # The colliding row is an OLDER version: FDA re-served prior content
+        # (hash A -> B -> back to A), which one-row-per-(doc, hash) cannot
+        # record as a new version. Treating it as the race skip would silently
+        # drop an FDA change AND re-pay parse/diff (plus PG-mode embeddings and
+        # BE extraction) on every later run, so surface it as an ingest error
+        # -- visible in the watch ledger/digest -- until reverts get an owner-
+        # decided representation (e.g. touch/bump semantics).
+        log.error(
+            "version_revert_unrepresentable",
+            appl_no=listing.appl_no,
+            doc_id=psg_document_id,
             content_hash=content_hash,
-            recommended_date=listing.recommended_date,
-            parsed_text_path=parsed_text_path,
-            diff_summary=diff_summary,
+            latest_hash=latest_committed,
         )
-        s.add(v)
-        doc = s.get(PsgDocument, psg_document_id)
-        if doc is None:
-            raise RuntimeError("psg_document row vanished during ingest")
-        _apply_content_fields(doc, listing, content_hash, pdf_path)
-        s.add(doc)
-        s.flush()
-        if v.id is None:
-            raise RuntimeError("psg_version insert did not produce an id")
-        return v.id
+        raise
+
+
+def _be_requirement_row(
+    psg_document_id: int,
+    version_id: int,
+    fields: dict[str, object],
+    citations: dict[str, object],
+) -> BeRequirement:
+    """The BeRequirement row for one extraction; callers choose the session."""
+    return BeRequirement(
+        psg_document_id=psg_document_id,
+        version_id=version_id,
+        study_type=_scalar_text(fields.get("study_type")),
+        study_design=_scalar_text(fields.get("study_design")),
+        strengths=_scalar_text(fields.get("strengths")),
+        dissolution=_scalar_text(fields.get("dissolution")),
+        waiver_conditions=_scalar_text(fields.get("waiver_conditions")),
+        additional_notes=_scalar_text(fields.get("additional_notes")),
+        fields_json=dict(fields),
+        citations_json=dict(citations),
+    )
 
 
 def _save_be_requirement(
@@ -254,19 +386,7 @@ def _save_be_requirement(
     citations: dict[str, object],
 ) -> None:
     with session_scope() as s:
-        be = BeRequirement(
-            psg_document_id=psg_document_id,
-            version_id=version_id,
-            study_type=_scalar_text(fields.get("study_type")),
-            study_design=_scalar_text(fields.get("study_design")),
-            strengths=_scalar_text(fields.get("strengths")),
-            dissolution=_scalar_text(fields.get("dissolution")),
-            waiver_conditions=_scalar_text(fields.get("waiver_conditions")),
-            additional_notes=_scalar_text(fields.get("additional_notes")),
-            fields_json=dict(fields),
-            citations_json=dict(citations),
-        )
-        s.add(be)
+        s.add(_be_requirement_row(psg_document_id, version_id, fields, citations))
 
 
 def _scalar_text(value: object) -> str | None:
@@ -276,6 +396,27 @@ def _scalar_text(value: object) -> str | None:
         parts = [str(item).strip() for item in value if item not in (None, "")]
         return ", ".join(part for part in parts if part) or None
     return str(value)
+
+
+def _extract_be_for_commit(pages: list[str], appl_no: str) -> ExtractionResult | None:
+    """Postgres path: run the (paid, slow) BE LLM extraction BEFORE the commit
+    transaction opens, so the transaction never sits idle across a network
+    call. Failures are logged and yield None -- the version and its chunks
+    still land, and the unchanged-path backfill retries the extraction on the
+    next run so a one-time outage never permanently drops citations (INV-1),
+    mirroring _extract_and_save_be's swallow on the dev path.
+    """
+    try:
+        return extract_be(pages)
+    except Exception as exc:
+        # Same event/fields as _extract_and_save_be so triage stays one query.
+        log.warning(
+            "be_extraction_skipped",
+            appl_no=appl_no,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return None
 
 
 def _extract_and_save_be(doc_id: int, version_id: int, pages: list[str], appl_no: str) -> None:
@@ -306,10 +447,11 @@ def _extract_and_save_be(doc_id: int, version_id: int, pages: list[str], appl_no
         )
 
 
-def _chunk_metadata_base(doc_id: int, version_id: int, listing: PsgListing) -> dict[str, object]:
+def _chunk_metadata_base(doc_id: int, listing: PsgListing) -> dict[str, object]:
+    # version_id is intentionally absent: _index_rows stamps it, so the
+    # Postgres path can chunk+embed BEFORE the version row (and its id) exists.
     return {
         "doc_id": doc_id,
-        "version_id": version_id,
         "active_ingredient": listing.active_ingredient,
         "normalized_name": listing.normalized_name,
         "dosage_form": listing.dosage_form or "",
@@ -321,25 +463,27 @@ def _chunk_metadata_base(doc_id: int, version_id: int, listing: PsgListing) -> d
     }
 
 
-def _regenerate_chunks(
-    doc_id: int, version_id: int, parsed: ParsedPdf, listing: PsgListing
-) -> None:
-    """Embed and store this version's chunks, then drop any superseded ones.
-
-    Shared by the revised/added path and the unchanged-but-chunkless backfill so
-    both produce an identical, current-only index for the document.
-    """
-    base_meta = _chunk_metadata_base(doc_id, version_id, listing)
-    chunks = chunk_pdf(parsed.pages, base_metadata=base_meta)
-    if not chunks:
-        return
-    embedder = get_embedding_provider()
-    texts = [c.text for c in chunks]
-    embeddings = embedder.embed(texts)
+def _index_rows(
+    doc_id: int, version_id: int, chunks: list[Chunk]
+) -> tuple[list[str], list[dict[str, object]], list[str]]:
+    """Vector-index (ids, metadatas, texts) for one version's chunks."""
     ids = [f"{doc_id}-{version_id}-{c.ordinal}" for c in chunks]
-    metas = [{**c.metadata, "section_path": c.metadata.get("section_path") or ""} for c in chunks]
-    add_chunks(ids=ids, embeddings=embeddings, documents=texts, metadatas=metas)
-    log.info("chunks_added", doc_id=doc_id, version_id=version_id, n=len(chunks))
+    metas: list[dict[str, object]] = [
+        {
+            **c.metadata,
+            "version_id": version_id,
+            "section_path": c.metadata.get("section_path") or "",
+        }
+        for c in chunks
+    ]
+    texts = [c.text for c in chunks]
+    return ids, metas, texts
+
+
+def _cleanup_stale_chunks(doc_id: int, version_id: int) -> None:
+    """Drop superseded chunks for a doc. Failures are logged, not raised: the
+    stale rows are re-collected on the next revision, so cleanup must never
+    take down an ingest whose version+chunks already landed."""
     try:
         deleted = delete_chunks_for_doc_except_version(doc_id=doc_id, keep_version_id=version_id)
         if deleted:
@@ -351,6 +495,28 @@ def _regenerate_chunks(
             keep_version_id=version_id,
             error=str(exc),
         )
+
+
+def _regenerate_chunks(
+    doc_id: int, version_id: int, parsed: ParsedPdf, listing: PsgListing
+) -> None:
+    """Embed and store this version's chunks, then drop any superseded ones.
+
+    Shared by the dev-mode revised/added path and (both modes) the
+    unchanged-but-chunkless backfill, so both produce an identical,
+    current-only index for the document. The Postgres revision path instead
+    threads the chunk upsert through the version-commit transaction (see
+    _commit_version_and_doc).
+    """
+    chunks = chunk_pdf(parsed.pages, base_metadata=_chunk_metadata_base(doc_id, listing))
+    if not chunks:
+        return
+    embedder = get_embedding_provider()
+    ids, metas, texts = _index_rows(doc_id, version_id, chunks)
+    embeddings = embedder.embed(texts)
+    add_chunks(ids=ids, embeddings=embeddings, documents=texts, metadatas=metas)
+    log.info("chunks_added", doc_id=doc_id, version_id=version_id, n=len(chunks))
+    _cleanup_stale_chunks(doc_id, version_id)
 
 
 def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
@@ -367,13 +533,16 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
         if doc_id is None:
             doc_id = _create_psg_document(listing, content_hash, str(path))
         elif latest_hash == content_hash:
-            # Content is unchanged, but a prior run may have committed this
-            # version row and then crashed before its chunks and/or BE row landed
-            # (separate stores, not atomic). Because the hash matches forever,
-            # the normal path never revisits it — so backfill any MISSING chunks
-            # (else this version is a permanent retrieval blind spot) or
-            # be_requirement (missing extraction == missing citations, INV-1)
-            # here. Parse the PDF at most once, only when a gap exists.
+            # Content is unchanged, but this version may still have gaps: a BE
+            # row missing because extraction failed at ingest time (both
+            # modes), or chunks missing from a dev-mode crash between the
+            # version commit and the Chroma write / from prod data that
+            # predates the atomic Postgres commit. Because the hash matches
+            # forever, the normal path never revisits it -- so backfill any
+            # MISSING chunks (else this version is a permanent retrieval blind
+            # spot) or be_requirement (missing extraction == missing
+            # citations, INV-1) here. Parse the PDF at most once, only when a
+            # gap exists.
             latest_version_id = _latest_version_id(doc_id)
             if latest_version_id is not None:
                 need_chunks = not chunks_exist(doc_id, latest_version_id)
@@ -405,6 +574,23 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
             current_text=parsed.text,
             current_page_count=len(parsed.pages),
         )
+
+        # Postgres: everything network-bound (chunking is local, but embedding
+        # and BE extraction are API calls) runs BEFORE the commit transaction,
+        # then version + doc fields + chunks + BE row land atomically. Dev mode
+        # (SQLite+Chroma) cannot join the vector store to a SQL transaction, so
+        # it keeps the historical commit-then-index order and the
+        # unchanged-path backfill below remains its crash recovery.
+        atomic = engine_dialect() == "postgresql"
+        chunk_payload: tuple[list[Chunk], list[list[float]]] | None = None
+        extraction: ExtractionResult | None = None
+        if atomic:
+            chunks = chunk_pdf(parsed.pages, base_metadata=_chunk_metadata_base(doc_id, listing))
+            embeddings = get_embedding_provider().embed([c.text for c in chunks]) if chunks else []
+            chunk_payload = (chunks, embeddings)
+            if extract:
+                extraction = _extract_be_for_commit(parsed.pages, listing.appl_no)
+
         version_id = _commit_version_and_doc(
             listing=listing,
             psg_document_id=doc_id,
@@ -412,6 +598,8 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
             pdf_path=str(path),
             parsed_text_path=_write_parsed_text(doc_id, content_hash, parsed.text),
             diff_summary=diff_summary,
+            chunk_payload=chunk_payload,
+            extraction=extraction,
         )
         if version_id is None:
             # An overlapping run already committed this exact revision (and owns
@@ -419,10 +607,14 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
             # double-count one FDA change (INV-4).
             return "unchanged"
 
-        _regenerate_chunks(doc_id, version_id, parsed, listing)
-
-        if extract:
-            _extract_and_save_be(doc_id, version_id, parsed.pages, listing.appl_no)
+        if atomic:
+            # Post-commit on purpose: cleanup failure must not roll back a
+            # revision that fully landed (see _cleanup_stale_chunks).
+            _cleanup_stale_chunks(doc_id, version_id)
+        else:
+            _regenerate_chunks(doc_id, version_id, parsed, listing)
+            if extract:
+                _extract_and_save_be(doc_id, version_id, parsed.pages, listing.appl_no)
 
         # Classify by version history, not doc-row novelty: a doc row can
         # persist from an earlier run whose parse failed AFTER the row was
