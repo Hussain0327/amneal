@@ -8,6 +8,7 @@ so the threat is a malformed/oversized FDA PDF hanging or OOMing the daily run.
 
 from __future__ import annotations
 
+import io
 import os
 import time
 from collections.abc import Iterator
@@ -18,10 +19,13 @@ import respx
 
 from regwatch.ingest.pdf_parser import (
     ParsedPdf,
+    PdfPageLimitError,
     PdfParseError,
     PdfParseTimeoutError,
     _extract,
     _run_with_timeout,
+    _try_pdfplumber,
+    _try_pypdf,
     parse_pdf,
 )
 from regwatch.ingest.psg_crawler import (
@@ -61,6 +65,20 @@ def _make_text_pdf(text: str) -> bytes:
         xref_pos,
     )
     return pdf
+
+
+def _make_pdf_with_pages(num_pages: int, text: str) -> bytes:
+    """An n-page PDF cloned from _make_text_pdf's page via pypdf, so EVERY page
+    carries extractable text (verified in both engines). No fixture on disk."""
+    from pypdf import PdfReader, PdfWriter
+
+    src = PdfReader(io.BytesIO(_make_text_pdf(text)))
+    writer = PdfWriter()
+    for _ in range(num_pages):
+        writer.add_page(src.pages[0])
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -207,3 +225,107 @@ def test_run_with_timeout_kills_on_timeout() -> None:
     elapsed = time.monotonic() - start
     # Must not have waited for the full 30s sleep — the child is killed.
     assert elapsed < 6.0
+
+
+# ---------------------------------------------------------------------------
+# Boundary: page-count bound (pdf_parser)
+# ---------------------------------------------------------------------------
+
+
+def _boom_extract_text(*args: object, **kwargs: object) -> str:
+    raise AssertionError("extract_text must not run for an over-limit PDF")
+
+
+def test_extract_rejects_over_page_limit() -> None:
+    # One page over the bound must fail with the page-bound message (not the
+    # generic both-engines-failed one) and must not hand back truncated pages.
+    with pytest.raises(PdfPageLimitError, match="pdf_max_pages=3"):
+        _extract(_make_pdf_with_pages(4, "over the bound"), max_pages=3)
+
+
+def test_extract_at_limit_parses_every_page() -> None:
+    # Exactly at the bound parses, and pages stay 1:1 with the PDF: the page
+    # bound must never truncate (truncation would shift every later citation).
+    parsed = _extract(_make_pdf_with_pages(3, "at the bound"), max_pages=3)
+    assert len(parsed.pages) == 3
+    assert all("at the bound" in p for p in parsed.pages)
+
+
+def test_extract_page_bound_zero_disables() -> None:
+    # 0 disables the guard, matching the other two PDF-safety knobs.
+    parsed = _extract(_make_pdf_with_pages(4, "guard off"), max_pages=0)
+    assert len(parsed.pages) == 4
+
+
+def test_pdfplumber_engine_bounds_pages_before_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Booby-trap extraction: if the bound ran after (or during) the page loop,
+    # the AssertionError would trip the engine's generic except and return None
+    # instead of raising the bound error, failing this test.
+    import pdfplumber
+
+    monkeypatch.setattr(pdfplumber.page.Page, "extract_text", _boom_extract_text)
+    with pytest.raises(PdfPageLimitError):
+        _try_pdfplumber(_make_pdf_with_pages(4, "plumber bound"), max_pages=3)
+
+
+def test_pypdf_engine_bounds_pages_before_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    # pypdf's per-page except swallows a raising booby trap into empty pages
+    # (the 1:1 citation invariant), so raises-alone cannot pin placement: a
+    # bound moved AFTER the loop would still raise and pass. Count extraction
+    # calls instead -- any call at all means the bound did not fire first.
+    import pypdf
+
+    calls = {"n": 0}
+
+    def _counting_extract_text(*args: object, **kwargs: object) -> str:
+        calls["n"] += 1
+        return ""
+
+    monkeypatch.setattr(pypdf.PageObject, "extract_text", _counting_extract_text)
+    with pytest.raises(PdfPageLimitError):
+        _try_pypdf(_make_pdf_with_pages(4, "pypdf bound"), max_pages=3)
+    assert calls["n"] == 0  # extraction never ran -- the bound fired first
+
+
+def test_parse_pdf_page_limit_through_subprocess_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Production path: the bound trips INSIDE the spawn child, configured via
+    # the PDF_MAX_PAGES env knob. Exception TYPE does not survive the process
+    # boundary (the child serializes failures to strings), so assert the
+    # observable contract: a prompt PdfParseError that is not a timeout and
+    # names the bound, degrading exactly like any other parse failure.
+    import config.settings as cs
+
+    monkeypatch.setenv("PDF_MAX_PAGES", "2")
+    cs.get_settings.cache_clear()
+    try:
+        with pytest.raises(PdfParseError, match="pdf_max_pages=2") as excinfo:
+            parse_pdf(_make_pdf_with_pages(3, "child bound"), timeout_s=30)
+    finally:
+        cs.get_settings.cache_clear()
+    assert not isinstance(excinfo.value, PdfParseTimeoutError)
+    # The subclass genuinely does not cross the process boundary; only the
+    # message does. If this ever starts failing, the serialization contract
+    # changed and the class docstring needs updating too.
+    assert not isinstance(excinfo.value, PdfPageLimitError)
+
+
+def test_pdf_max_pages_env_override_and_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    import config.settings as cs
+
+    # Default asserted on the field, not an env-built Settings: env_file=".env"
+    # means pydantic-settings reads a host .env directly and delenv cannot
+    # neutralize it -- a dev .env setting PDF_MAX_PAGES would fail an env-built
+    # assertion while CI (no .env) stays green. 500 is generous vs <20-page PSGs.
+    assert cs.Settings.model_fields["pdf_max_pages"].default == 500
+    # setenv beats any .env value (env vars outrank dotenv in pydantic-settings),
+    # so the override half is host-proof without delenv.
+    monkeypatch.setenv("PDF_MAX_PAGES", "7")
+    cs.get_settings.cache_clear()
+    try:
+        assert cs.get_settings().pdf_max_pages == 7
+    finally:
+        cs.get_settings.cache_clear()

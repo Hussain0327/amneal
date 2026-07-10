@@ -38,6 +38,15 @@ class PdfParseTimeoutError(PdfParseError):
     """Extraction exceeded the configured wall-clock budget and was killed."""
 
 
+class PdfPageLimitError(PdfParseError):
+    """Page count exceeds the configured pdf_max_pages bound.
+
+    Catchable only when parsing in-process: the spawn child serializes
+    exceptions to strings, so through parse_pdf's default subprocess path this
+    surfaces as a plain PdfParseError whose message names this class.
+    """
+
+
 _WS = re.compile(r"[ \t]+")
 _NL = re.compile(r"\n{3,}")
 _PAGE_SEP = "\n\f\n"
@@ -50,7 +59,17 @@ def _normalize(text: str) -> str:
     return text.strip()
 
 
-def _try_pdfplumber(pdf_bytes: bytes) -> ParsedPdf | None:
+def _check_page_bound(page_count: int, max_pages: int) -> None:
+    # Bounds the work BEFORE per-page extraction: a page-flood PDF (hundreds of
+    # thousands of near-empty pages fit under pdf_max_bytes) would otherwise
+    # burn the whole parse budget one page at a time. Raised, not returned-None,
+    # so it punches through the engine fallback chain -- the second engine
+    # would only re-count the same pages.
+    if 0 < max_pages < page_count:
+        raise PdfPageLimitError(f"PDF has {page_count} pages, exceeds pdf_max_pages={max_pages}")
+
+
+def _try_pdfplumber(pdf_bytes: bytes, max_pages: int) -> ParsedPdf | None:
     try:
         import pdfplumber
     except Exception as exc:  # pragma: no cover
@@ -59,9 +78,12 @@ def _try_pdfplumber(pdf_bytes: bytes) -> ParsedPdf | None:
     pages: list[str] = []
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            _check_page_bound(len(pdf.pages), max_pages)
             for page in pdf.pages:
                 txt = page.extract_text(x_tolerance=2, y_tolerance=2) or ""
                 pages.append(_normalize(txt))
+    except PdfPageLimitError:
+        raise
     except Exception as exc:
         log.warning("pdfplumber_failed", error=str(exc))
         return None
@@ -72,7 +94,7 @@ def _try_pdfplumber(pdf_bytes: bytes) -> ParsedPdf | None:
     )
 
 
-def _try_pypdf(pdf_bytes: bytes) -> ParsedPdf | None:
+def _try_pypdf(pdf_bytes: bytes, max_pages: int) -> ParsedPdf | None:
     try:
         from pypdf import PdfReader
     except Exception as exc:  # pragma: no cover
@@ -81,6 +103,7 @@ def _try_pypdf(pdf_bytes: bytes) -> ParsedPdf | None:
     pages: list[str] = []
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
+        _check_page_bound(len(reader.pages), max_pages)
         for p in reader.pages:
             try:
                 txt = p.extract_text() or ""
@@ -90,6 +113,8 @@ def _try_pypdf(pdf_bytes: bytes) -> ParsedPdf | None:
                 log.warning("pypdf_page_failed", page=len(pages) + 1, error=str(exc))
                 txt = ""
             pages.append(_normalize(txt))
+    except PdfPageLimitError:
+        raise
     except Exception as exc:
         log.warning("pypdf_failed", error=str(exc))
         return None
@@ -98,17 +123,20 @@ def _try_pypdf(pdf_bytes: bytes) -> ParsedPdf | None:
     return ParsedPdf(text=_PAGE_SEP.join(pages), pages=pages, engine="pypdf")
 
 
-def _extract(pdf_bytes: bytes) -> ParsedPdf:
-    """Pure extraction: pdfplumber, then pypdf. Raises PdfParseError if both fail.
+def _extract(pdf_bytes: bytes, max_pages: int | None = None) -> ParsedPdf:
+    """Pure extraction: pdfplumber, then pypdf. Raises PdfParseError if both fail
+    or the document exceeds max_pages (None resolves from settings, 0 disables).
 
     No timeout/isolation here — that is parse_pdf's job. Kept as a separate
     module-level function so the engine logic stays testable in-process and the
     subprocess worker has a single, picklable entrypoint.
     """
-    parsed = _try_pdfplumber(pdf_bytes)
+    if max_pages is None:
+        max_pages = get_settings().pdf_max_pages
+    parsed = _try_pdfplumber(pdf_bytes, max_pages)
     if parsed is not None and any(p.strip() for p in parsed.pages):
         return parsed
-    parsed = _try_pypdf(pdf_bytes)
+    parsed = _try_pypdf(pdf_bytes, max_pages)
     if parsed is not None and any(p.strip() for p in parsed.pages):
         return parsed
     raise PdfParseError("Failed to extract text from PDF with both pdfplumber and pypdf")
@@ -203,10 +231,16 @@ def parse_pdf(pdf_bytes: bytes, *, timeout_s: float | None = None) -> ParsedPdf:
     pathological PDF cannot hang or OOM the cron/CLI ingest run that calls this
     (the API never reaches this path). Pass or configure timeout_s<=0 to parse
     in-process — used by tests and bulk back-loads where isolation is unwanted.
-    Raises PdfParseError on failure, PdfParseTimeoutError on timeout.
+    Raises PdfParseError on failure (including a document over the configured
+    pdf_max_pages bound), PdfParseTimeoutError on timeout.
     """
     if timeout_s is None:
         timeout_s = get_settings().pdf_parse_timeout_s
+    # Resolved in the parent so there is one source of truth: a child-side
+    # get_settings() would rebuild Settings from env and miss in-process
+    # overrides (a patched get_settings or mutated Settings instance; env-var
+    # overrides WOULD survive, since the spawn child inherits os.environ).
+    max_pages = get_settings().pdf_max_pages
     if timeout_s > 0:  # timeout_s is a resolved float here; <=0 means parse in-process
-        return _run_with_timeout(_extract, (pdf_bytes,), timeout_s)
-    return _extract(pdf_bytes)
+        return _run_with_timeout(_extract, (pdf_bytes, max_pages), timeout_s)
+    return _extract(pdf_bytes, max_pages)
