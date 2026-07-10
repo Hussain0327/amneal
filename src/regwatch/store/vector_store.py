@@ -21,9 +21,12 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import chromadb
+
+if TYPE_CHECKING:  # typing-only: keep Chroma mode free of a runtime SQLA import
+    from sqlalchemy.engine import Connection
 from chromadb.api.models.Collection import Collection
 from chromadb.config import Settings as ChromaSettings
 from config.settings import get_settings
@@ -109,14 +112,26 @@ def add_chunks(
     embeddings: list[list[float]],
     documents: list[str],
     metadatas: list[dict[str, Any]],
+    *,
+    conn: Connection | None = None,
 ) -> None:
+    """Upsert chunks. ``conn`` (Postgres mode only) joins the caller's open
+    transaction so version row and chunks commit or roll back together (the
+    ingest pipeline's atomic revision commit); the caller owns commit/rollback.
+    """
     if not ids:
         return
     if _pg_mode():
         from regwatch.store import pgvector_store
 
-        pgvector_store.add_chunks(ids, embeddings, documents, metadatas)
+        pgvector_store.add_chunks(ids, embeddings, documents, metadatas, conn=conn)
         return
+    if conn is not None:
+        # Unreachable when config is coherent (a caller holding a Postgres
+        # session implies DATABASE_URL, which selects the pgvector branch) --
+        # fail loud rather than silently break the atomicity the caller asked
+        # for: Chroma cannot join a SQL transaction.
+        raise ValueError("add_chunks(conn=...) requires Postgres mode; Chroma is not transactional")
     coll = get_collection()
     coll.upsert(
         ids=ids,

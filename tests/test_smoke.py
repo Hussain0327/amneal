@@ -124,7 +124,7 @@ def test_db_boots_and_round_trips() -> None:
     with get_engine().connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0013_whitepaper_runs"
+            == "0014_psg_version_unique_hash"
         )
     with session_scope() as s:
         s.add(
@@ -163,7 +163,36 @@ def test_init_db_stamps_complete_legacy_schema_without_version_table() -> None:
     with get_engine().connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0013_whitepaper_runs"
+            == "0014_psg_version_unique_hash"
+        )
+
+
+def test_init_db_replays_0014_on_create_all_schema_missing_unique_index() -> None:
+    """A create_all-era DB from a PRE-0014 build carries every 0008..0013 shape
+    but not the index-only 0014 unique index (old metadata never declared it).
+    Stamping such a DB "head" would silently skip the duplicate-race protection
+    forever; init_db must stamp 0013 and replay 0014 instead."""
+    from sqlalchemy import inspect, text
+    from sqlmodel import SQLModel
+
+    from regwatch.store import models  # noqa: F401  (register tables)
+    from regwatch.store.db import get_engine, init_db
+
+    engine = get_engine()
+    SQLModel.metadata.create_all(engine)
+    with engine.begin() as conn:
+        # Current metadata declares the index; dropping it reproduces what an
+        # older build's create_all left behind.
+        conn.execute(text("drop index uq_psg_version_doc_hash"))
+
+    init_db()
+
+    index_names = {ix["name"] for ix in inspect(engine).get_indexes("psg_version")}
+    assert "uq_psg_version_doc_hash" in index_names
+    with engine.connect() as conn:
+        assert (
+            conn.execute(text("select version_num from alembic_version")).scalar_one()
+            == "0014_psg_version_unique_hash"
         )
 
 
@@ -189,7 +218,7 @@ def test_init_db_stamps_complete_legacy_schema_with_empty_version_table() -> Non
     with engine.connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0013_whitepaper_runs"
+            == "0014_psg_version_unique_hash"
         )
 
 

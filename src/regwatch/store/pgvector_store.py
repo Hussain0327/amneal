@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from config.settings import get_settings
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Column, Engine, create_engine
+from sqlalchemy import Column, Connection, Engine, create_engine
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlmodel import Field, SQLModel
@@ -369,11 +369,25 @@ def add_chunks(
     embeddings: list[list[float]],
     documents: list[str],
     metadatas: list[dict[str, Any]],
+    *,
+    conn: Connection | None = None,
 ) -> None:
+    """Batched chunk upsert.
+
+    With ``conn`` the upserts execute on the CALLER'S connection/transaction
+    (the ingest pipeline's atomic version+chunks commit) -- the caller owns
+    commit/rollback and this function must not begin/end anything. Without it,
+    the historical behavior: one self-contained transaction on this store's
+    engine.
+    """
     if not ids:
         return
     if not (len(ids) == len(embeddings) == len(documents) == len(metadatas)):
         raise ValueError("ids, embeddings, documents, metadatas must have equal lengths")
+    if conn is not None and conn.dialect.name != "postgresql":
+        # A non-Postgres session sneaking in here would write chunks to the
+        # wrong database entirely; refuse instead of guessing.
+        raise ValueError("add_chunks(conn=...) requires a Postgres connection")
     rows: list[dict[str, Any]] = []
     for chunk_id, embedding, document, meta in zip(
         ids, embeddings, documents, metadatas, strict=True
@@ -399,10 +413,16 @@ def add_chunks(
             }
         )
     _ensure_ready()
-    engine = get_engine()
-    with engine.begin() as conn:
+    if conn is not None:
         for start in range(0, len(rows), _INSERT_BATCH_SIZE):
             conn.execute(sa_text(_UPSERT_SQL), rows[start : start + _INSERT_BATCH_SIZE])
+    else:
+        engine = get_engine()
+        with engine.begin() as own_conn:
+            for start in range(0, len(rows), _INSERT_BATCH_SIZE):
+                own_conn.execute(sa_text(_UPSERT_SQL), rows[start : start + _INSERT_BATCH_SIZE])
+    # A caller-owned transaction may still roll back after this returns; an
+    # eagerly-cleared cache merely repopulates, so clearing here stays correct.
     _metadata_values_cache.clear()
 
 

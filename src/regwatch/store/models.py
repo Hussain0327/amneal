@@ -68,6 +68,16 @@ class PsgVersion(SQLModel, table=True):
     """A captured version of a PSG document. New rows on every content change."""
 
     __tablename__ = "psg_version"
+    # One version row per revision: two overlapping ingest runs racing the same
+    # content must collide here instead of double-recording one FDA change
+    # (INV-4 -- a duplicate never-alerted row would re-alert it the next day).
+    # Declared in metadata so create_all (the fresh-Postgres bootstrap) and
+    # migration 0014 produce the identical index on both paths. A unique INDEX
+    # (not a UniqueConstraint) because 0014 must add it to existing SQLite DBs
+    # without a batch table rebuild.
+    __table_args__ = (
+        Index("uq_psg_version_doc_hash", "psg_document_id", "content_hash", unique=True),
+    )
 
     id: int | None = Field(default=None, primary_key=True)
     psg_document_id: int = Field(foreign_key="psg_document.id", index=True)
