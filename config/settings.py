@@ -251,9 +251,9 @@ class Settings(BaseSettings):
     # The daily `regwatch watch` run is the SOLE driver of FDA alerts and it
     # fetches+parses PDFs from accessdata.fda.gov. A malformed or oversized PDF
     # must not be able to hang or OOM that run — that would silently stop all
-    # alerting. These bound the input at the I/O boundary and the parse
-    # wall-clock. Neither guard is reachable from the API (parse runs only in the
-    # CLI/cron ingest path). Set either to 0 to disable that guard.
+    # alerting. These bound the input size, the page count, and the parse
+    # wall-clock. None of the guards is reachable from the API (parse runs only
+    # in the CLI/cron ingest path). Set any of them to 0 to disable that guard.
     #
     # Cap the downloaded PDF before it is fully buffered/parsed. Real PSG PDFs
     # are <2 MiB; 50 MiB is a wide margin that still stops a runaway body.
@@ -262,6 +262,14 @@ class Settings(BaseSettings):
     # killable child process (pdfminer's native loops do not reliably honor
     # SIGALRM). 0 disables isolation and parses in-process.
     pdf_parse_timeout_s: float = 60.0
+    # Bound the page count, checked inside the parse child by BOTH engines
+    # before any per-page text extraction. Complements the byte cap: hundreds
+    # of thousands of near-empty pages fit under 50 MiB, and extraction walks
+    # pages one at a time, so a page-flood would burn the whole parse budget
+    # instead of failing fast. Real PSGs run under ~20 pages; 500 is a wide
+    # margin over any legitimate FDA guidance document while still cutting a
+    # flood off in well under the wall-clock cap. 0 disables.
+    pdf_max_pages: int = 500
 
     # ---------- White Paper populator ----------
     # The Word template the CRA White Paper populator fills (python-docx). It is
