@@ -5,5 +5,3 @@
 next-env.d.ts
 .env.local
 *.tsbuildinfo
-# generated OpenAPI dump (intermediate; lib/api-types.ts is the committed artifact)
-openapi.json

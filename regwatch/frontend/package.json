@@ -9,7 +9,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "gen:openapi": "cd ../.. && uv run python -c \"from regwatch.api.main import app; import json; print(json.dumps(app.openapi()))\" > regwatch/frontend/openapi.json",
+    "gen:openapi": "cd ../.. && uv run python scripts/export_openapi.py regwatch/frontend/openapi.json",
     "gen:types": "npm run gen:openapi && openapi-typescript openapi.json -o lib/api-types.ts"
   },
   "dependencies": {

@@ -4,78 +4,17 @@
  */
 
 export interface paths {
-    "/health": {
+    "/assemble": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /**
-         * Health
-         * @description Diagnose the stack: db, chroma, providers. Superset of {"status": "ok"}.
-         *
-         *     503 only when the DB or Chroma is unreachable. An empty corpus is healthy
-         *     (with a warning) so a fresh stack can boot and the ingest service can seed.
-         */
-        get: operations["health_health_get"];
+        get?: never;
         put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/ready": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Ready
-         * @description Readiness probe: 200 only when the DB + vector store are reachable AND the
-         *     LLM client is constructable (key present). Distinct from /health's liveness:
-         *     a load balancer routes traffic on this. No paid LLM call is made - only the
-         *     cheap reachability checks. Both are timeout-bounded by the per-connection
-         *     connect/statement timeouts on the shared engine (the vector-store probe is a
-         *     `SELECT count(*)` in pgvector mode, so a degraded DB is capped by
-         *     DB_STATEMENT_TIMEOUT rather than hanging the probe). 503 names the FIRST
-         *     failed check so an operator sees what to fix.
-         */
-        get: operations["ready_ready_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/metrics": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Metrics
-         * @description Prometheus text-exposition counters derived from the query_log audit table.
-         *
-         *     Hand-rolled (no prometheus_client dependency): exposes total queries by mode
-         *     and the refusal counter. The body is plain text/version-0.0.4.
-         *
-         *     Access is OPT-IN: open like /health and /ready by default (so a scraper
-         *     reaches it without the session cookie), but when METRICS_TOKEN is set the
-         *     request must carry `Authorization: Bearer <token>` or this returns 401.
-         *     /health and /ready are never gated this way.
-         */
-        get: operations["metrics_metrics_get"];
-        put?: never;
-        post?: never;
+        /** Assemble */
+        post: operations["assemble_assemble_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -136,6 +75,128 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/feedback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Feedback
+         * @description Thumbs up/down on one of the caller's own answered Q&A turns (H4).
+         *
+         *     404 for a missing, foreign, or non-qa audit row -- mirroring the docx
+         *     ownership pattern, the response never confirms that someone else's audit
+         *     row exists. Feedback rows are the candidate pool for future eval gold-set
+         *     items (see README).
+         */
+        post: operations["feedback_feedback_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Health
+         * @description Diagnose the stack: db, chroma, providers. Superset of {"status": "ok"}.
+         *
+         *     503 only when the DB or Chroma is unreachable. An empty corpus is healthy
+         *     (with a warning) so a fresh stack can boot and the ingest service can seed.
+         */
+        get: operations["health_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Metrics
+         * @description Prometheus text-exposition counters derived from the query_log audit table.
+         *
+         *     Hand-rolled (no prometheus_client dependency): exposes total queries by mode
+         *     and the refusal counter. The body is plain text/version-0.0.4.
+         *
+         *     Access is OPT-IN: open like /health and /ready by default (so a scraper
+         *     reaches it without the session cookie), but when METRICS_TOKEN is set the
+         *     request must carry `Authorization: Bearer <token>` or this returns 401.
+         *     /health and /ready are never gated this way.
+         */
+        get: operations["metrics_metrics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/products": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Products */
+        get: operations["list_products_products_get"];
+        put?: never;
+        /** Create Product */
+        post: operations["create_product_products_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/products/{product_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Product
+         * @description Remove a product from the watchlist (SOFT: the row is kept).
+         *
+         *     ``on_watchlist`` flips to False instead of deleting the row -- durable
+         *     alert rows reference ``product_id``, so a hard delete would orphan the
+         *     alert history the feed still renders (INV-4), and the row's INV-5
+         *     provenance survives for audit. Idempotent: re-deleting an already-unwatched
+         *     row still returns ``removed: true`` because the caller's goal state holds;
+         *     404 is reserved for ids no Product row ever had, mirroring the "does it
+         *     exist" contract of the other 404s on this surface.
+         */
+        delete: operations["delete_product_products__product_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/query": {
         parameters: {
             query?: never;
@@ -172,7 +233,7 @@ export interface paths {
          *     _build_query_response, so the shapes cannot drift). The Ask UI consumes this
          *     and transparently falls back to POST /query if the stream fails. Rate-limit
          *     (429), ownership (404), and auth (401) are enforced BEFORE the stream opens,
-         *     as real HTTP statuses — never mid-stream.
+         *     as real HTTP statuses -- never mid-stream.
          */
         post: operations["query_stream_query_stream_post"];
         delete?: never;
@@ -181,7 +242,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/feedback": {
+    "/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Ready
+         * @description Readiness probe: 200 only when the DB + vector store are reachable AND the
+         *     LLM client is constructable (key present). Distinct from /health's liveness:
+         *     a load balancer routes traffic on this. No paid LLM call is made - only the
+         *     cheap reachability checks. Both are timeout-bounded by the per-connection
+         *     connect/statement timeouts on the shared engine (the vector-store probe is a
+         *     `SELECT count(*)` in pgvector mode, so a degraded DB is capped by
+         *     DB_STATEMENT_TIMEOUT rather than hanging the probe). 503 names the FIRST
+         *     failed check so an operator sees what to fix.
+         */
+        get: operations["ready_ready_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/resolve": {
         parameters: {
             query?: never;
             header?: never;
@@ -191,15 +279,76 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Feedback
-         * @description Thumbs up/down on one of the caller's own answered Q&A turns (H4).
+         * Resolve
+         * @description Resolve an RLD name + application number to the canonical spine.
          *
-         *     404 for a missing, foreign, or non-qa audit row — mirroring the docx
-         *     ownership pattern, the response never confirms that someone else's audit
-         *     row exists. Feedback rows are the candidate pool for future eval gold-set
-         *     items (see README).
+         *     Deterministic entity resolution, NOT an LLM turn: it writes NO audit row
+         *     (success or failure) and returns no answer text -- it lets a surface pin a
+         *     canonical product without running a full populate. On an unresolved or
+         *     mismatched application it 422s with the resolver's own detail (refuse over
+         *     guess). Rate-limited like /query, /assemble, /whitepaper (it hits live FDA
+         *     sources just as they do).
          */
-        post: operations["feedback_feedback_post"];
+        post: operations["resolve_resolve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Sessions
+         * @description Two queries max -- network RTT amplifies per-row queries ~1000x on Postgres.
+         *
+         *     Query 1 is the session page with the title fallback (first user message)
+         *     folded in as a correlated scalar subquery; query 2 fetches all message
+         *     counts for the page via one GROUP BY. Never N+1.
+         */
+        get: operations["list_sessions_sessions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sessions/{session_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Session */
+        get: operations["get_session_sessions__session_id__get"];
+        put?: never;
+        post?: never;
+        /** Delete Session */
+        delete: operations["delete_session_sessions__session_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Public Settings */
+        get: operations["get_public_settings_settings_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -223,17 +372,17 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/assemble": {
+    "/watch/latest": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** Watch Latest */
+        get: operations["watch_latest_watch_latest_get"];
         put?: never;
-        /** Assemble */
-        post: operations["assemble_assemble_post"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -260,33 +409,6 @@ export interface paths {
          *     ``_persist_whitepaper_run``).
          */
         post: operations["whitepaper_whitepaper_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/resolve": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Resolve
-         * @description Resolve an RLD name + application number to the canonical spine.
-         *
-         *     Deterministic entity resolution, NOT an LLM turn: it writes NO audit row
-         *     (success or failure) and returns no answer text — it lets a surface pin a
-         *     canonical product without running a full populate. On an unresolved or
-         *     mismatched application it 422s with the resolver's own detail (refuse over
-         *     guess). Rate-limited like /query, /assemble, /whitepaper (it hits live FDA
-         *     sources just as they do).
-         */
-        post: operations["resolve_resolve_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -370,6 +492,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/whitepaper/runs/{run_id}/docx": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Whitepaper Run Docx
+         * @description Render the Word document FROM the saved run -- no client echo, no re-populate.
+         *
+         *     Zero live fetches, zero LLM calls: the .docx renders the STORED generated
+         *     layer after re-verifying ``result_fingerprint(sections) == sections_sha256``
+         *     (a mismatch is stored-data corruption: 500 + Sentry, no document), with the
+         *     attributed analyst overlay applied per the writer's INV-3 discipline. The
+         *     official template is lazily fetched on first use (ensure_template); any
+         *     fetch failure keeps the loud FALLBACK_MARKER path. Keeps the /query rate
+         *     limiter (docx assembly is CPU-bound) and writes one lightweight audit row
+         *     (mode="whitepaper", docx_rendered).
+         */
+        post: operations["whitepaper_run_docx_whitepaper_runs__run_id__docx_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/whitepaper/runs/{run_id}/finalize": {
         parameters: {
             query?: never;
@@ -413,161 +564,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/whitepaper/runs/{run_id}/docx": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Whitepaper Run Docx
-         * @description Render the Word document FROM the saved run -- no client echo, no re-populate.
-         *
-         *     Zero live fetches, zero LLM calls: the .docx renders the STORED generated
-         *     layer after re-verifying ``result_fingerprint(sections) == sections_sha256``
-         *     (a mismatch is stored-data corruption: 500 + Sentry, no document), with the
-         *     attributed analyst overlay applied per the writer's INV-3 discipline. The
-         *     official template is lazily fetched on first use (ensure_template); any
-         *     fetch failure keeps the loud FALLBACK_MARKER path. Keeps the /query rate
-         *     limiter (docx assembly is CPU-bound) and writes one lightweight audit row
-         *     (mode="whitepaper", docx_rendered).
-         */
-        post: operations["whitepaper_run_docx_whitepaper_runs__run_id__docx_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/watch/latest": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Watch Latest */
-        get: operations["watch_latest_watch_latest_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/products": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List Products */
-        get: operations["list_products_products_get"];
-        put?: never;
-        /** Create Product */
-        post: operations["create_product_products_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/products/{product_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /**
-         * Delete Product
-         * @description Remove a product from the watchlist (SOFT: the row is kept).
-         *
-         *     ``on_watchlist`` flips to False instead of deleting the row -- durable
-         *     alert rows reference ``product_id``, so a hard delete would orphan the
-         *     alert history the feed still renders (INV-4), and the row's INV-5
-         *     provenance survives for audit. Idempotent: re-deleting an already-unwatched
-         *     row still returns ``removed: true`` because the caller's goal state holds;
-         *     404 is reserved for ids no Product row ever had, mirroring the "does it
-         *     exist" contract of the other 404s on this surface.
-         */
-        delete: operations["delete_product_products__product_id__delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/sessions": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Sessions
-         * @description Two queries max — network RTT amplifies per-row queries ~1000x on Postgres.
-         *
-         *     Query 1 is the session page with the title fallback (first user message)
-         *     folded in as a correlated scalar subquery; query 2 fetches all message
-         *     counts for the page via one GROUP BY. Never N+1.
-         */
-        get: operations["list_sessions_sessions_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/sessions/{session_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Session */
-        get: operations["get_session_sessions__session_id__get"];
-        put?: never;
-        post?: never;
-        /** Delete Session */
-        delete: operations["delete_session_sessions__session_id__delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/settings": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Public Settings */
-        get: operations["get_public_settings_settings_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * AlertRecord
+         * @description One durable alert as ``latest_digest_records`` returns it (the Alert
+         *     dataclass fields plus the read-time-derived ``change_kind``).
+         */
+        AlertRecord: {
+            /** Active Ingredient */
+            active_ingredient: string;
+            /** Captured At */
+            captured_at: string;
+            /** Change Kind */
+            change_kind?: ("new" | "revised") | null;
+            /** Confidence */
+            confidence: number;
+            /** Diff Summary */
+            diff_summary: string | null;
+            /** Listing Appl No */
+            listing_appl_no: string;
+            /** Listing Psg Type */
+            listing_psg_type: string;
+            /** Product Id */
+            product_id: number;
+            /** Psg Document Id */
+            psg_document_id: number;
+            /** Psg Version Id */
+            psg_version_id: number;
+            /** Rationale */
+            rationale: string;
+            /** Source Url */
+            source_url: string;
+        };
         /** AssembleRequest */
         AssembleRequest: {
             /** Active Ingredient */
@@ -584,50 +615,148 @@ export interface components {
         AssembleResponse: {
             /** Markdown */
             markdown: string;
+            /** Refused */
+            refused: boolean;
             /** Sections */
             sections: {
                 [key: string]: unknown;
             };
-            /** Refused */
-            refused: boolean;
         };
         /** AuthUserResponse */
         AuthUserResponse: {
             user: components["schemas"]["UserOut"];
         };
+        /**
+         * ChatMessageOut
+         * @description One rehydrated turn.
+         *
+         *     ``citations``/``clarify``/``related`` are passthrough stored JSON: the
+         *     persisted payloads are re-emitted VERBATIM (older sessions carry legacy
+         *     keys the current wire types no longer produce), so no nested model may
+         *     reshape or strip them. ``role`` stays ``str`` for the same stored-data
+         *     reason - the writers only ever emit "user"/"assistant", but a Literal
+         *     would turn a legacy row into a 500.
+         */
+        ChatMessageOut: {
+            /** Audit Id */
+            audit_id: number | null;
+            /** Citations */
+            citations: {
+                [key: string]: unknown;
+            }[];
+            /** Clarify */
+            clarify: {
+                [key: string]: unknown;
+            }[];
+            /** Content */
+            content: string;
+            /** Created At */
+            created_at: string;
+            /** Id */
+            id: string;
+            /** Interpretation */
+            interpretation: string | null;
+            /** Reason */
+            reason: string | null;
+            /** Related */
+            related: {
+                [key: string]: unknown;
+            }[];
+            /** Role */
+            role: string;
+            /** Status */
+            status: string | null;
+            /** Turn Id */
+            turn_id: string;
+        };
         /** ClarifyOptionOut */
         ClarifyOptionOut: {
-            /** Label */
-            label: string;
-            /** Query */
-            query: string;
             /** Filters */
             filters?: {
                 [key: string]: unknown;
             } | null;
+            /** Label */
+            label: string;
+            /** Query */
+            query: string;
         };
         /** FeedbackRequest */
         FeedbackRequest: {
             /** Audit Id */
             audit_id: number;
-            /** Rating */
-            rating: number;
             /** Comment */
             comment?: string | null;
+            /** Rating */
+            rating: number;
         };
         /** FeedbackResponse */
         FeedbackResponse: {
             /** Audit Id */
             audit_id: number;
-            /** Rating */
-            rating: number;
             /** Comment */
             comment?: string | null;
+            /** Rating */
+            rating: number;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** HealthComponents */
+        HealthComponents: {
+            chroma: components["schemas"]["HealthVectorComponent"];
+            db: components["schemas"]["HealthDbComponent"];
+            embedding: components["schemas"]["HealthEmbeddingComponent"];
+            llm: components["schemas"]["HealthLlmComponent"];
+        };
+        /** HealthDbComponent */
+        HealthDbComponent: {
+            /** Dialect */
+            dialect?: string | null;
+            /** Error */
+            error?: string | null;
+            /** Ok */
+            ok: boolean;
+        };
+        /** HealthEmbeddingComponent */
+        HealthEmbeddingComponent: {
+            /** Provider */
+            provider: string;
+        };
+        /** HealthLlmComponent */
+        HealthLlmComponent: {
+            /** Key Present */
+            key_present: boolean;
+            /** Provider */
+            provider: string;
+        };
+        /** HealthResponse */
+        HealthResponse: {
+            /** Allow Test Providers */
+            allow_test_providers?: boolean | null;
+            components: components["schemas"]["HealthComponents"];
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ok" | "unhealthy";
+            /** Warnings */
+            warnings: string[];
+            /**
+             * Whitepaper Template
+             * @enum {string}
+             */
+            whitepaper_template: "present" | "fetchable" | "absent";
+        };
+        /** HealthVectorComponent */
+        HealthVectorComponent: {
+            /** Corpus Count */
+            corpus_count?: number | null;
+            /** Error */
+            error?: string | null;
+            /** Ok */
+            ok: boolean;
         };
         /** LoginRequest */
         LoginRequest: {
@@ -640,16 +769,16 @@ export interface components {
         ProductCreate: {
             /** Active Ingredient */
             active_ingredient: string;
-            /** Dosage Form */
-            dosage_form?: string | null;
-            /** Route */
-            route?: string | null;
-            /** Rld Name */
-            rld_name?: string | null;
-            /** Rld Application Number */
-            rld_application_number?: string | null;
             /** Company Status */
             company_status?: string | null;
+            /** Dosage Form */
+            dosage_form?: string | null;
+            /** Rld Application Number */
+            rld_application_number?: string | null;
+            /** Rld Name */
+            rld_name?: string | null;
+            /** Route */
+            route?: string | null;
             /**
              * Source
              * @description one of ['anda_letter', 'manual']; 'drugsfda' rows come only from the automated Drugs@FDA import (INV-5)
@@ -658,39 +787,108 @@ export interface components {
             /** Source Url */
             source_url?: string | null;
         };
+        /** ProductCreateResponse */
+        ProductCreateResponse: {
+            /** Added */
+            added: number;
+            /** Products */
+            products: components["schemas"]["ProductRecord"][];
+        };
+        /** ProductDeleteResponse */
+        ProductDeleteResponse: {
+            /** Products */
+            products: components["schemas"]["ProductRecord"][];
+            /** Removed */
+            removed: boolean;
+        };
+        /**
+         * ProductRecord
+         * @description One watchlist row as ``list_watchlist`` projects it.
+         */
+        ProductRecord: {
+            /** Active Ingredient */
+            active_ingredient: string;
+            /** Company Status */
+            company_status: string | null;
+            /** Dosage Form */
+            dosage_form: string | null;
+            /** Id */
+            id: number | null;
+            /** Normalized Name */
+            normalized_name: string;
+            /** Rld Application Number */
+            rld_application_number: string | null;
+            /** Rld Name */
+            rld_name: string | null;
+            /** Route */
+            route: string | null;
+            /** Source */
+            source: string;
+            /** Source Url */
+            source_url: string | null;
+            /** Stripped Name */
+            stripped_name: string;
+        };
+        /** ProductsResponse */
+        ProductsResponse: {
+            /** Count */
+            count: number;
+            /** Products */
+            products: components["schemas"]["ProductRecord"][];
+        };
+        /**
+         * PublicSettings
+         * @description Non-secret config only. The model doubles as an allowlist: a future
+         *     handler edit cannot leak a new Settings field onto the wire without also
+         *     declaring it here (undeclared fields are stripped).
+         */
+        PublicSettings: {
+            /** Company Name */
+            company_name: string;
+            /** Embedding Provider */
+            embedding_provider: string;
+            /** Llm Model */
+            llm_model: string;
+            /** Llm Provider */
+            llm_provider: string;
+            /** Refusal Score Threshold */
+            refusal_score_threshold: number;
+            /** Retrieval Top K */
+            retrieval_top_k: number | null;
+        };
         /** QueryCitation */
         QueryCitation: {
-            /** Short Name */
-            short_name: string;
-            /** Page */
-            page: number;
             /** Chunk Id */
             chunk_id: string;
-            /** Doc Id */
-            doc_id: number;
-            /** Version Id */
-            version_id: number;
-            /** Source Url */
-            source_url: string;
-            /** Snippet */
-            snippet: string;
-            /** Score */
-            score?: number | null;
-            /** Recommended Date */
-            recommended_date?: string | null;
             /** Diff Summary */
             diff_summary?: string | null;
+            /** Doc Id */
+            doc_id: number;
+            /** Page */
+            page: number;
+            /** Recommended Date */
+            recommended_date?: string | null;
+            /** Score */
+            score?: number | null;
+            /** Short Name */
+            short_name: string;
+            /** Snippet */
+            snippet: string;
+            /** Source Url */
+            source_url: string;
+            /** Version Id */
+            version_id: number;
         };
         /** QueryRequest */
         QueryRequest: {
-            /** Question */
-            question: string;
             /** Filters */
             filters?: {
                 [key: string]: unknown;
             } | null;
             /** K */
             k?: number | null;
+            /** Question */
+            question: string;
             /** Session Id */
             session_id?: string | null;
         };
@@ -698,45 +896,102 @@ export interface components {
         QueryResponse: {
             /** Answer */
             answer: string;
-            /** Citations */
-            citations: components["schemas"]["QueryCitation"][];
-            /** Refused */
-            refused: boolean;
-            /** Model Name */
-            model_name: string;
             /** Audit Id */
             audit_id: number;
+            /** Citations */
+            citations: components["schemas"]["QueryCitation"][];
+            /**
+             * Clarify
+             * @default []
+             */
+            clarify: components["schemas"]["ClarifyOptionOut"][];
+            /** Interpretation */
+            interpretation?: string | null;
+            /** Model Name */
+            model_name: string;
+            /** Reason */
+            reason?: string | null;
+            /** Refused */
+            refused: boolean;
+            /**
+             * Related
+             * @default []
+             */
+            related: components["schemas"]["ClarifyOptionOut"][];
             /** Session Id */
             session_id: string;
-            /** Turn Id */
-            turn_id: string;
             /**
              * Status
              * @default answer
              * @enum {string}
              */
             status: "answer" | "summary" | "clarify" | "scope_warning" | "meta" | "refused" | "error";
-            /** Reason */
-            reason?: string | null;
-            /** Interpretation */
-            interpretation?: string | null;
+            /** Turn Id */
+            turn_id: string;
+        };
+        /** ReadyChecks */
+        ReadyChecks: {
+            /** Db */
+            db: boolean;
+            /** Llm */
+            llm: boolean;
+            /** Vector Store */
+            vector_store: boolean;
+        };
+        /** ReadyResponse */
+        ReadyResponse: {
+            checks: components["schemas"]["ReadyChecks"];
+            /** Detail */
+            detail?: string | null;
+            /** Failed */
+            failed?: ("db" | "vector_store" | "llm") | null;
             /**
-             * Clarify
-             * @default []
+             * Status
+             * @enum {string}
              */
-            clarify: components["schemas"]["ClarifyOptionOut"][];
-            /**
-             * Related
-             * @default []
-             */
-            related: components["schemas"]["ClarifyOptionOut"][];
+            status: "ready" | "not_ready";
         };
         /** ResolveRequest */
         ResolveRequest: {
-            /** Rld Name */
-            rld_name: string;
             /** Application Number */
             application_number: string;
+            /** Rld Name */
+            rld_name: string;
+        };
+        /** SessionDetailResponse */
+        SessionDetailResponse: {
+            /** Messages */
+            messages: components["schemas"]["ChatMessageOut"][];
+            session: components["schemas"]["SessionMeta"];
+        };
+        /** SessionListResponse */
+        SessionListResponse: {
+            /** Sessions */
+            sessions: components["schemas"]["SessionSummary"][];
+        };
+        /** SessionMeta */
+        SessionMeta: {
+            /** Created At */
+            created_at: string;
+            /** Id */
+            id: string;
+            /** Title */
+            title: string;
+            /** Updated At */
+            updated_at: string;
+        };
+        /** SessionSummary */
+        SessionSummary: {
+            /** Created At */
+            created_at: string;
+            /** Id */
+            id: string;
+            /** Message Count */
+            message_count: number;
+            /** Title */
+            title: string;
+            /** Updated At */
+            updated_at: string;
         };
         /**
          * SourceKind
@@ -745,77 +1000,115 @@ export interface components {
         SourceKind: "psg" | "orange_book" | "drugsfda" | "shortage" | "ndc" | "rems" | "dailymed";
         /** SourceRecordResponse */
         SourceRecordResponse: {
-            source: components["schemas"]["SourceKind"];
-            /** Title */
-            title: string;
-            /** Source Url */
-            source_url: string;
-            /** Identifiers */
-            identifiers: {
-                [key: string]: string;
-            };
             /** Fields */
             fields: {
                 [key: string]: unknown;
             };
+            /** Identifiers */
+            identifiers: {
+                [key: string]: string;
+            };
+            source: components["schemas"]["SourceKind"];
+            /** Source Url */
+            source_url: string;
+            /** Title */
+            title: string;
         };
         /** SourceSearchRequest */
         SourceSearchRequest: {
-            /**
-             * Query Text
-             * @default
-             */
-            query_text: string;
             /** Active Ingredient */
             active_ingredient?: string | null;
-            /** Brand Name */
-            brand_name?: string | null;
             /** Application Number */
             application_number?: string | null;
-            /** Ndc */
-            ndc?: string | null;
+            /** Brand Name */
+            brand_name?: string | null;
             /** Dosage Form */
             dosage_form?: string | null;
-            /** Route */
-            route?: string | null;
             /**
              * Limit
              * @default 10
              */
             limit: number;
+            /** Ndc */
+            ndc?: string | null;
+            /**
+             * Query Text
+             * @default
+             */
+            query_text: string;
+            /** Route */
+            route?: string | null;
             /** Sources */
             sources?: components["schemas"]["SourceKind"][] | null;
         };
         /** SourceSearchResponse */
         SourceSearchResponse: {
-            /** Routed Sources */
-            routed_sources: components["schemas"]["SourceKind"][];
             /** Records */
             records: components["schemas"]["SourceRecordResponse"][];
+            /** Routed Sources */
+            routed_sources: components["schemas"]["SourceKind"][];
         };
         /** UserOut */
         UserOut: {
-            /** Id */
-            id: number;
-            /** Email */
-            email: string;
             /** Display Name */
             display_name: string;
+            /** Email */
+            email: string;
+            /** Id */
+            id: number;
             /** Role */
             role: string;
         };
         /** ValidationError */
         ValidationError: {
+            /** Context */
+            ctx?: Record<string, never>;
+            /** Input */
+            input?: unknown;
             /** Location */
             loc: (string | number)[];
             /** Message */
             msg: string;
             /** Error Type */
             type: string;
-            /** Input */
-            input?: unknown;
-            /** Context */
-            ctx?: Record<string, never>;
+        };
+        /** WatchLatestResponse */
+        WatchLatestResponse: {
+            /** Alerts */
+            alerts: components["schemas"]["AlertRecord"][];
+            /** Count */
+            count: number;
+            last_run: components["schemas"]["WatchRunSummary"] | null;
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Total */
+            total: number;
+        };
+        /**
+         * WatchRunSummary
+         * @description Telemetry of the newest COMPLETED watch run (the durable ledger row).
+         */
+        WatchRunSummary: {
+            /** Added */
+            added: number;
+            /** Alerts */
+            alerts: number;
+            /** Errors */
+            errors: number;
+            /** Finished At */
+            finished_at: string;
+            /** Listings */
+            listings: number;
+            /** Matched */
+            matched: number;
+            /** Revised */
+            revised: number;
+            /** Started At */
+            started_at: string;
+            /** Unchanged */
+            unchanged: number;
         };
         /** WhitepaperCellRequest */
         WhitepaperCellRequest: {
@@ -824,21 +1117,19 @@ export interface components {
         };
         /** WhitepaperCellResponse */
         WhitepaperCellResponse: {
-            /** Run Id */
-            run_id: number;
             /** Cell Id */
             cell_id: string;
             /** Cleared */
             cleared: boolean;
             input: components["schemas"]["WhitepaperInputOut"] | null;
+            /** Run Id */
+            run_id: number;
         };
         /**
          * WhitepaperInputOut
          * @description One attributed analyst overlay value.
          */
         WhitepaperInputOut: {
-            /** Value */
-            value: string;
             /** Author */
             author: string | null;
             /**
@@ -846,13 +1137,48 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+            /** Value */
+            value: string;
         };
         /** WhitepaperRequest */
         WhitepaperRequest: {
-            /** Rld Name */
-            rld_name: string;
             /** Application Number */
             application_number: string;
+            /** Rld Name */
+            rld_name: string;
+        };
+        /**
+         * WhitepaperResponse
+         * @description The populate result, verbatim.
+         *
+         *     ``spine``/``sections`` are deliberately passthrough (plain dict/list, no
+         *     nested models) for the same INV-3 reason as WhitepaperRunDetailResponse:
+         *     ``_persist_whitepaper_run`` stores this exact payload BEFORE serialization,
+         *     so a typed model that stripped or reshaped a field would make the stored
+         *     run diverge from the HTTP response (tests pin the parity).
+         */
+        WhitepaperResponse: {
+            /** Audit Id */
+            audit_id: number;
+            /** Run Id */
+            run_id: number | null;
+            /** Sections */
+            sections: {
+                [key: string]: unknown;
+            }[];
+            /** Spine */
+            spine: {
+                [key: string]: unknown;
+            };
+            /** Warnings */
+            warnings: string[];
+        };
+        /** WhitepaperRunDeleteResponse */
+        WhitepaperRunDeleteResponse: {
+            /** Deleted */
+            deleted: boolean;
+            /** Run Id */
+            run_id: number;
         };
         /**
          * WhitepaperRunDetailResponse
@@ -864,73 +1190,73 @@ export interface components {
          *     fingerprinted sections payload (INV-3).
          */
         WhitepaperRunDetailResponse: {
-            /** Id */
-            id: number;
-            /** Rld Name Input */
-            rld_name_input: string;
+            /** Analyst Input Count */
+            analyst_input_count: number;
             /** Application Number */
             application_number: string;
             /** Application Type */
             application_type: string;
-            /** Ingredient */
-            ingredient: string;
-            /** Normalized Name */
-            normalized_name: string;
-            /** Spine */
-            spine: {
-                [key: string]: unknown;
-            };
-            /** Sections */
-            sections: {
-                [key: string]: unknown;
-            }[];
-            /** Warnings */
-            warnings: string[];
-            /** Status */
-            status: string;
-            /** Populated Count */
-            populated_count: number;
-            /** Analyst Input Count */
-            analyst_input_count: number;
-            /** Verified Absent Count */
-            verified_absent_count: number;
-            /** Source Audit Id */
-            source_audit_id: number;
-            /** Created By */
-            created_by: string;
-            /** Created By User Id */
-            created_by_user_id: number;
             /**
              * Created At
              * Format: date-time
              */
             created_at: string;
+            /** Created By */
+            created_by: string;
+            /** Created By User Id */
+            created_by_user_id: number;
+            /** Finalized At */
+            finalized_at: string | null;
+            /** Finalized By */
+            finalized_by: string | null;
+            /** Id */
+            id: number;
+            /** Ingredient */
+            ingredient: string;
+            /** Inputs */
+            inputs: {
+                [key: string]: components["schemas"]["WhitepaperInputOut"];
+            };
+            /** Normalized Name */
+            normalized_name: string;
+            /** Populated Count */
+            populated_count: number;
+            /** Rld Name Input */
+            rld_name_input: string;
+            /** Sections */
+            sections: {
+                [key: string]: unknown;
+            }[];
+            /** Source Audit Id */
+            source_audit_id: number;
+            /** Spine */
+            spine: {
+                [key: string]: unknown;
+            };
+            /** Status */
+            status: string;
             /**
              * Updated At
              * Format: date-time
              */
             updated_at: string;
-            /** Finalized At */
-            finalized_at: string | null;
-            /** Finalized By */
-            finalized_by: string | null;
-            /** Inputs */
-            inputs: {
-                [key: string]: components["schemas"]["WhitepaperInputOut"];
-            };
+            /** Verified Absent Count */
+            verified_absent_count: number;
+            /** Warnings */
+            warnings: string[];
         };
         /** WhitepaperRunListResponse */
         WhitepaperRunListResponse: {
             /** Count */
             count: number;
-            /** Total */
-            total: number;
             /** Limit */
             limit: number;
             /** Offset */
             offset: number;
             /** Runs */
             runs: components["schemas"]["WhitepaperRunSummary"][];
+            /** Total */
+            total: number;
         };
         /** WhitepaperRunStatusResponse */
         WhitepaperRunStatusResponse: {
@@ -944,40 +1270,81 @@ export interface components {
          * @description One org-shared run list row (no JSON payloads -- see the detail route).
          */
         WhitepaperRunSummary: {
-            /** Id */
-            id: number;
-            /** Rld Name Input */
-            rld_name_input: string;
+            /** Analyst Input Count */
+            analyst_input_count: number;
             /** Application Number */
             application_number: string;
             /** Application Type */
             application_type: string;
-            /** Ingredient */
-            ingredient: string;
-            /** Normalized Name */
-            normalized_name: string;
-            /** Status */
-            status: string;
-            /** Populated Count */
-            populated_count: number;
-            /** Analyst Input Count */
-            analyst_input_count: number;
-            /** Verified Absent Count */
-            verified_absent_count: number;
-            /** Inputs Count */
-            inputs_count: number;
-            /** Created By */
-            created_by: string;
             /**
              * Created At
              * Format: date-time
              */
             created_at: string;
+            /** Created By */
+            created_by: string;
+            /** Id */
+            id: number;
+            /** Ingredient */
+            ingredient: string;
+            /** Inputs Count */
+            inputs_count: number;
+            /** Normalized Name */
+            normalized_name: string;
+            /** Populated Count */
+            populated_count: number;
+            /** Rld Name Input */
+            rld_name_input: string;
+            /** Status */
+            status: string;
             /**
              * Updated At
              * Format: date-time
              */
             updated_at: string;
+            /** Verified Absent Count */
+            verified_absent_count: number;
+        };
+        /**
+         * WhitepaperSpine
+         * @description The canonical spine ``populator._spine_from_ctx`` emits.
+         *
+         *     Typed here (unlike the /whitepaper embedding, which must stay verbatim
+         *     passthrough for stored-run parity) because /resolve persists nothing: the
+         *     response IS the whole contract. application_type is a code-verified closed
+         *     set - every assignment in populator resolves to an NDA/ANDA/BLA prefix.
+         */
+        WhitepaperSpine: {
+            /** Application Number */
+            application_number: string;
+            /**
+             * Application Type
+             * @enum {string}
+             */
+            application_type: "NDA" | "ANDA" | "BLA";
+            /** Ingredient */
+            ingredient: string;
+            /** Normalized Name */
+            normalized_name: string;
+            /** Product Numbers */
+            product_numbers: string[];
+            /** Setid */
+            setid: string | null;
+            /** Spl Candidates */
+            spl_candidates: components["schemas"]["WhitepaperSplCandidate"][];
+            /** Warnings */
+            warnings: string[];
+        };
+        /** WhitepaperSplCandidate */
+        WhitepaperSplCandidate: {
+            /** Labeler */
+            labeler: string | null;
+            /** Published */
+            published: string | null;
+            /** Setid */
+            setid: string;
+            /** Title */
+            title: string;
         };
     };
     responses: never;
@@ -988,58 +1355,20 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    health_health_get: {
+    assemble_assemble_post: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
+            cookie?: {
+                regwatch_session?: string | null;
             };
         };
-    };
-    ready_ready_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssembleRequest"];
             };
         };
-    };
-    metrics_metrics_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -1047,7 +1376,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["AssembleResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -1145,6 +1483,180 @@ export interface operations {
             };
         };
     };
+    feedback_feedback_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FeedbackRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeedbackResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    health_health_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    metrics_metrics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    list_products_products_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProductsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_product_products_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProductCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProductCreateResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_product_products__product_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                product_id: number;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProductDeleteResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     query_query_post: {
         parameters: {
             query?: never;
@@ -1215,7 +1727,27 @@ export interface operations {
             };
         };
     };
-    feedback_feedback_post: {
+    ready_ready_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadyResponse"];
+                };
+            };
+        };
+    };
+    resolve_resolve_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -1226,7 +1758,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["FeedbackRequest"];
+                "application/json": components["schemas"]["ResolveRequest"];
             };
         };
         responses: {
@@ -1236,7 +1768,133 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["FeedbackResponse"];
+                    "application/json": components["schemas"]["WhitepaperSpine"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_sessions_sessions_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_session_sessions__session_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_session_sessions__session_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_public_settings_settings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublicSettings"];
                 };
             };
             /** @description Validation Error */
@@ -1285,20 +1943,20 @@ export interface operations {
             };
         };
     };
-    assemble_assemble_post: {
+    watch_latest_watch_latest_get: {
         parameters: {
-            query?: never;
+            query?: {
+                since?: string | null;
+                limit?: number;
+                offset?: number;
+            };
             header?: never;
             path?: never;
             cookie?: {
                 regwatch_session?: string | null;
             };
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["AssembleRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -1306,7 +1964,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AssembleResponse"];
+                    "application/json": components["schemas"]["WatchLatestResponse"];
                 };
             };
             /** @description Validation Error */
@@ -1341,46 +1999,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    resolve_resolve_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ResolveRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WhitepaperResponse"];
                 };
             };
             /** @description Validation Error */
@@ -1483,9 +2102,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WhitepaperRunDeleteResponse"];
                 };
             };
             /** @description Validation Error */
@@ -1524,6 +2141,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WhitepaperCellResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    whitepaper_run_docx_whitepaper_runs__run_id__docx_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -1590,313 +2240,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WhitepaperRunStatusResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    whitepaper_run_docx_whitepaper_runs__run_id__docx_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                run_id: number;
-            };
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    watch_latest_watch_latest_get: {
-        parameters: {
-            query?: {
-                since?: string | null;
-                limit?: number;
-                offset?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    list_products_products_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    create_product_products_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ProductCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    delete_product_products__product_id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                product_id: number;
-            };
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    list_sessions_sessions_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_session_sessions__session_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                session_id: string;
-            };
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    delete_session_sessions__session_id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                session_id: string;
-            };
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_public_settings_settings_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
                 };
             };
             /** @description Validation Error */

@@ -1,0 +1,3713 @@
+{
+  "components": {
+    "schemas": {
+      "AlertRecord": {
+        "description": "One durable alert as ``latest_digest_records`` returns it (the Alert\ndataclass fields plus the read-time-derived ``change_kind``).",
+        "properties": {
+          "active_ingredient": {
+            "title": "Active Ingredient",
+            "type": "string"
+          },
+          "captured_at": {
+            "title": "Captured At",
+            "type": "string"
+          },
+          "change_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "new",
+                  "revised"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Kind"
+          },
+          "confidence": {
+            "title": "Confidence",
+            "type": "number"
+          },
+          "diff_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diff Summary"
+          },
+          "listing_appl_no": {
+            "title": "Listing Appl No",
+            "type": "string"
+          },
+          "listing_psg_type": {
+            "title": "Listing Psg Type",
+            "type": "string"
+          },
+          "product_id": {
+            "title": "Product Id",
+            "type": "integer"
+          },
+          "psg_document_id": {
+            "title": "Psg Document Id",
+            "type": "integer"
+          },
+          "psg_version_id": {
+            "title": "Psg Version Id",
+            "type": "integer"
+          },
+          "rationale": {
+            "title": "Rationale",
+            "type": "string"
+          },
+          "source_url": {
+            "title": "Source Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product_id",
+          "active_ingredient",
+          "listing_appl_no",
+          "listing_psg_type",
+          "psg_document_id",
+          "psg_version_id",
+          "captured_at",
+          "diff_summary",
+          "confidence",
+          "rationale",
+          "source_url"
+        ],
+        "title": "AlertRecord",
+        "type": "object"
+      },
+      "AssembleRequest": {
+        "properties": {
+          "active_ingredient": {
+            "maxLength": 200,
+            "minLength": 2,
+            "title": "Active Ingredient",
+            "type": "string"
+          },
+          "dosage_form": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dosage Form"
+          },
+          "rld": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "RLD brand name or application number",
+            "title": "Rld"
+          }
+        },
+        "required": [
+          "active_ingredient"
+        ],
+        "title": "AssembleRequest",
+        "type": "object"
+      },
+      "AssembleResponse": {
+        "properties": {
+          "markdown": {
+            "title": "Markdown",
+            "type": "string"
+          },
+          "refused": {
+            "title": "Refused",
+            "type": "boolean"
+          },
+          "sections": {
+            "additionalProperties": true,
+            "title": "Sections",
+            "type": "object"
+          }
+        },
+        "required": [
+          "markdown",
+          "sections",
+          "refused"
+        ],
+        "title": "AssembleResponse",
+        "type": "object"
+      },
+      "AuthUserResponse": {
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/UserOut"
+          }
+        },
+        "required": [
+          "user"
+        ],
+        "title": "AuthUserResponse",
+        "type": "object"
+      },
+      "ChatMessageOut": {
+        "description": "One rehydrated turn.\n\n``citations``/``clarify``/``related`` are passthrough stored JSON: the\npersisted payloads are re-emitted VERBATIM (older sessions carry legacy\nkeys the current wire types no longer produce), so no nested model may\nreshape or strip them. ``role`` stays ``str`` for the same stored-data\nreason - the writers only ever emit \"user\"/\"assistant\", but a Literal\nwould turn a legacy row into a 500.",
+        "properties": {
+          "audit_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Audit Id"
+          },
+          "citations": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Citations",
+            "type": "array"
+          },
+          "clarify": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Clarify",
+            "type": "array"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "interpretation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interpretation"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "related": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Related",
+            "type": "array"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "turn_id": {
+            "title": "Turn Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "turn_id",
+          "role",
+          "content",
+          "status",
+          "citations",
+          "audit_id",
+          "reason",
+          "interpretation",
+          "clarify",
+          "related",
+          "created_at"
+        ],
+        "title": "ChatMessageOut",
+        "type": "object"
+      },
+      "ClarifyOptionOut": {
+        "properties": {
+          "filters": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filters"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "query": {
+            "title": "Query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "query"
+        ],
+        "title": "ClarifyOptionOut",
+        "type": "object"
+      },
+      "FeedbackRequest": {
+        "properties": {
+          "audit_id": {
+            "title": "Audit Id",
+            "type": "integer"
+          },
+          "comment": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comment"
+          },
+          "rating": {
+            "title": "Rating",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "audit_id",
+          "rating"
+        ],
+        "title": "FeedbackRequest",
+        "type": "object"
+      },
+      "FeedbackResponse": {
+        "properties": {
+          "audit_id": {
+            "title": "Audit Id",
+            "type": "integer"
+          },
+          "comment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comment"
+          },
+          "rating": {
+            "title": "Rating",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "audit_id",
+          "rating"
+        ],
+        "title": "FeedbackResponse",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthComponents": {
+        "properties": {
+          "chroma": {
+            "$ref": "#/components/schemas/HealthVectorComponent"
+          },
+          "db": {
+            "$ref": "#/components/schemas/HealthDbComponent"
+          },
+          "embedding": {
+            "$ref": "#/components/schemas/HealthEmbeddingComponent"
+          },
+          "llm": {
+            "$ref": "#/components/schemas/HealthLlmComponent"
+          }
+        },
+        "required": [
+          "db",
+          "chroma",
+          "llm",
+          "embedding"
+        ],
+        "title": "HealthComponents",
+        "type": "object"
+      },
+      "HealthDbComponent": {
+        "properties": {
+          "dialect": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dialect"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "title": "HealthDbComponent",
+        "type": "object"
+      },
+      "HealthEmbeddingComponent": {
+        "properties": {
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "title": "HealthEmbeddingComponent",
+        "type": "object"
+      },
+      "HealthLlmComponent": {
+        "properties": {
+          "key_present": {
+            "title": "Key Present",
+            "type": "boolean"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "key_present"
+        ],
+        "title": "HealthLlmComponent",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "properties": {
+          "allow_test_providers": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allow Test Providers"
+          },
+          "components": {
+            "$ref": "#/components/schemas/HealthComponents"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "unhealthy"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          },
+          "whitepaper_template": {
+            "enum": [
+              "present",
+              "fetchable",
+              "absent"
+            ],
+            "title": "Whitepaper Template",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "components",
+          "whitepaper_template",
+          "warnings"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "HealthVectorComponent": {
+        "properties": {
+          "corpus_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Corpus Count"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "title": "HealthVectorComponent",
+        "type": "object"
+      },
+      "LoginRequest": {
+        "properties": {
+          "email": {
+            "maxLength": 254,
+            "title": "Email",
+            "type": "string"
+          },
+          "password": {
+            "maxLength": 256,
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "LoginRequest",
+        "type": "object"
+      },
+      "ProductCreate": {
+        "properties": {
+          "active_ingredient": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Active Ingredient",
+            "type": "string"
+          },
+          "company_status": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Company Status"
+          },
+          "dosage_form": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dosage Form"
+          },
+          "rld_application_number": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rld Application Number"
+          },
+          "rld_name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rld Name"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
+          },
+          "source": {
+            "description": "one of ['anda_letter', 'manual']; 'drugsfda' rows come only from the automated Drugs@FDA import (INV-5)",
+            "maxLength": 200,
+            "title": "Source",
+            "type": "string"
+          },
+          "source_url": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Url"
+          }
+        },
+        "required": [
+          "active_ingredient",
+          "source"
+        ],
+        "title": "ProductCreate",
+        "type": "object"
+      },
+      "ProductCreateResponse": {
+        "properties": {
+          "added": {
+            "title": "Added",
+            "type": "integer"
+          },
+          "products": {
+            "items": {
+              "$ref": "#/components/schemas/ProductRecord"
+            },
+            "title": "Products",
+            "type": "array"
+          }
+        },
+        "required": [
+          "added",
+          "products"
+        ],
+        "title": "ProductCreateResponse",
+        "type": "object"
+      },
+      "ProductDeleteResponse": {
+        "properties": {
+          "products": {
+            "items": {
+              "$ref": "#/components/schemas/ProductRecord"
+            },
+            "title": "Products",
+            "type": "array"
+          },
+          "removed": {
+            "title": "Removed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "removed",
+          "products"
+        ],
+        "title": "ProductDeleteResponse",
+        "type": "object"
+      },
+      "ProductRecord": {
+        "description": "One watchlist row as ``list_watchlist`` projects it.",
+        "properties": {
+          "active_ingredient": {
+            "title": "Active Ingredient",
+            "type": "string"
+          },
+          "company_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Company Status"
+          },
+          "dosage_form": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dosage Form"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "normalized_name": {
+            "title": "Normalized Name",
+            "type": "string"
+          },
+          "rld_application_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rld Application Number"
+          },
+          "rld_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rld Name"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "source_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Url"
+          },
+          "stripped_name": {
+            "title": "Stripped Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "active_ingredient",
+          "normalized_name",
+          "stripped_name",
+          "dosage_form",
+          "route",
+          "rld_name",
+          "rld_application_number",
+          "company_status",
+          "source",
+          "source_url"
+        ],
+        "title": "ProductRecord",
+        "type": "object"
+      },
+      "ProductsResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "products": {
+            "items": {
+              "$ref": "#/components/schemas/ProductRecord"
+            },
+            "title": "Products",
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "products"
+        ],
+        "title": "ProductsResponse",
+        "type": "object"
+      },
+      "PublicSettings": {
+        "description": "Non-secret config only. The model doubles as an allowlist: a future\nhandler edit cannot leak a new Settings field onto the wire without also\ndeclaring it here (undeclared fields are stripped).",
+        "properties": {
+          "company_name": {
+            "title": "Company Name",
+            "type": "string"
+          },
+          "embedding_provider": {
+            "title": "Embedding Provider",
+            "type": "string"
+          },
+          "llm_model": {
+            "title": "Llm Model",
+            "type": "string"
+          },
+          "llm_provider": {
+            "title": "Llm Provider",
+            "type": "string"
+          },
+          "refusal_score_threshold": {
+            "title": "Refusal Score Threshold",
+            "type": "number"
+          },
+          "retrieval_top_k": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieval Top K"
+          }
+        },
+        "required": [
+          "embedding_provider",
+          "llm_provider",
+          "llm_model",
+          "retrieval_top_k",
+          "refusal_score_threshold",
+          "company_name"
+        ],
+        "title": "PublicSettings",
+        "type": "object"
+      },
+      "QueryCitation": {
+        "properties": {
+          "chunk_id": {
+            "title": "Chunk Id",
+            "type": "string"
+          },
+          "diff_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diff Summary"
+          },
+          "doc_id": {
+            "title": "Doc Id",
+            "type": "integer"
+          },
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "recommended_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommended Date"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "short_name": {
+            "title": "Short Name",
+            "type": "string"
+          },
+          "snippet": {
+            "title": "Snippet",
+            "type": "string"
+          },
+          "source_url": {
+            "title": "Source Url",
+            "type": "string"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "short_name",
+          "page",
+          "chunk_id",
+          "doc_id",
+          "version_id",
+          "source_url",
+          "snippet"
+        ],
+        "title": "QueryCitation",
+        "type": "object"
+      },
+      "QueryRequest": {
+        "properties": {
+          "filters": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filters"
+          },
+          "k": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "K"
+          },
+          "question": {
+            "maxLength": 4000,
+            "minLength": 2,
+            "title": "Question",
+            "type": "string"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "title": "QueryRequest",
+        "type": "object"
+      },
+      "QueryResponse": {
+        "properties": {
+          "answer": {
+            "title": "Answer",
+            "type": "string"
+          },
+          "audit_id": {
+            "title": "Audit Id",
+            "type": "integer"
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/components/schemas/QueryCitation"
+            },
+            "title": "Citations",
+            "type": "array"
+          },
+          "clarify": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ClarifyOptionOut"
+            },
+            "title": "Clarify",
+            "type": "array"
+          },
+          "interpretation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interpretation"
+          },
+          "model_name": {
+            "title": "Model Name",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "refused": {
+            "title": "Refused",
+            "type": "boolean"
+          },
+          "related": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ClarifyOptionOut"
+            },
+            "title": "Related",
+            "type": "array"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "status": {
+            "default": "answer",
+            "enum": [
+              "answer",
+              "summary",
+              "clarify",
+              "scope_warning",
+              "meta",
+              "refused",
+              "error"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "turn_id": {
+            "title": "Turn Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "answer",
+          "citations",
+          "refused",
+          "model_name",
+          "audit_id",
+          "session_id",
+          "turn_id"
+        ],
+        "title": "QueryResponse",
+        "type": "object"
+      },
+      "ReadyChecks": {
+        "properties": {
+          "db": {
+            "title": "Db",
+            "type": "boolean"
+          },
+          "llm": {
+            "title": "Llm",
+            "type": "boolean"
+          },
+          "vector_store": {
+            "title": "Vector Store",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "db",
+          "vector_store",
+          "llm"
+        ],
+        "title": "ReadyChecks",
+        "type": "object"
+      },
+      "ReadyResponse": {
+        "properties": {
+          "checks": {
+            "$ref": "#/components/schemas/ReadyChecks"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "failed": {
+            "anyOf": [
+              {
+                "enum": [
+                  "db",
+                  "vector_store",
+                  "llm"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "not_ready"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "checks"
+        ],
+        "title": "ReadyResponse",
+        "type": "object"
+      },
+      "ResolveRequest": {
+        "properties": {
+          "application_number": {
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Application Number",
+            "type": "string"
+          },
+          "rld_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Rld Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rld_name",
+          "application_number"
+        ],
+        "title": "ResolveRequest",
+        "type": "object"
+      },
+      "SessionDetailResponse": {
+        "properties": {
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/ChatMessageOut"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "session": {
+            "$ref": "#/components/schemas/SessionMeta"
+          }
+        },
+        "required": [
+          "session",
+          "messages"
+        ],
+        "title": "SessionDetailResponse",
+        "type": "object"
+      },
+      "SessionListResponse": {
+        "properties": {
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/SessionSummary"
+            },
+            "title": "Sessions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "title": "SessionListResponse",
+        "type": "object"
+      },
+      "SessionMeta": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SessionMeta",
+        "type": "object"
+      },
+      "SessionSummary": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "message_count": {
+            "title": "Message Count",
+            "type": "integer"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "created_at",
+          "updated_at",
+          "message_count"
+        ],
+        "title": "SessionSummary",
+        "type": "object"
+      },
+      "SourceKind": {
+        "enum": [
+          "psg",
+          "orange_book",
+          "drugsfda",
+          "shortage",
+          "ndc",
+          "rems",
+          "dailymed"
+        ],
+        "title": "SourceKind",
+        "type": "string"
+      },
+      "SourceRecordResponse": {
+        "properties": {
+          "fields": {
+            "additionalProperties": true,
+            "title": "Fields",
+            "type": "object"
+          },
+          "identifiers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Identifiers",
+            "type": "object"
+          },
+          "source": {
+            "$ref": "#/components/schemas/SourceKind"
+          },
+          "source_url": {
+            "title": "Source Url",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "title",
+          "source_url",
+          "identifiers",
+          "fields"
+        ],
+        "title": "SourceRecordResponse",
+        "type": "object"
+      },
+      "SourceSearchRequest": {
+        "properties": {
+          "active_ingredient": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Ingredient"
+          },
+          "application_number": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Application Number"
+          },
+          "brand_name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand Name"
+          },
+          "dosage_form": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dosage Form"
+          },
+          "limit": {
+            "default": 10,
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "ndc": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ndc"
+          },
+          "query_text": {
+            "default": "",
+            "maxLength": 1000,
+            "title": "Query Text",
+            "type": "string"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
+          },
+          "sources": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/SourceKind"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sources"
+          }
+        },
+        "title": "SourceSearchRequest",
+        "type": "object"
+      },
+      "SourceSearchResponse": {
+        "properties": {
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRecordResponse"
+            },
+            "title": "Records",
+            "type": "array"
+          },
+          "routed_sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceKind"
+            },
+            "title": "Routed Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "routed_sources",
+          "records"
+        ],
+        "title": "SourceSearchResponse",
+        "type": "object"
+      },
+      "UserOut": {
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "display_name",
+          "role"
+        ],
+        "title": "UserOut",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "WatchLatestResponse": {
+        "properties": {
+          "alerts": {
+            "items": {
+              "$ref": "#/components/schemas/AlertRecord"
+            },
+            "title": "Alerts",
+            "type": "array"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "last_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WatchRunSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "count",
+          "total",
+          "limit",
+          "offset",
+          "alerts",
+          "last_run"
+        ],
+        "title": "WatchLatestResponse",
+        "type": "object"
+      },
+      "WatchRunSummary": {
+        "description": "Telemetry of the newest COMPLETED watch run (the durable ledger row).",
+        "properties": {
+          "added": {
+            "title": "Added",
+            "type": "integer"
+          },
+          "alerts": {
+            "title": "Alerts",
+            "type": "integer"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "integer"
+          },
+          "finished_at": {
+            "title": "Finished At",
+            "type": "string"
+          },
+          "listings": {
+            "title": "Listings",
+            "type": "integer"
+          },
+          "matched": {
+            "title": "Matched",
+            "type": "integer"
+          },
+          "revised": {
+            "title": "Revised",
+            "type": "integer"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "string"
+          },
+          "unchanged": {
+            "title": "Unchanged",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "started_at",
+          "finished_at",
+          "listings",
+          "matched",
+          "added",
+          "revised",
+          "unchanged",
+          "errors",
+          "alerts"
+        ],
+        "title": "WatchRunSummary",
+        "type": "object"
+      },
+      "WhitepaperCellRequest": {
+        "properties": {
+          "value": {
+            "anyOf": [
+              {
+                "maxLength": 5024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "title": "WhitepaperCellRequest",
+        "type": "object"
+      },
+      "WhitepaperCellResponse": {
+        "properties": {
+          "cell_id": {
+            "title": "Cell Id",
+            "type": "string"
+          },
+          "cleared": {
+            "title": "Cleared",
+            "type": "boolean"
+          },
+          "input": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WhitepaperInputOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_id",
+          "cell_id",
+          "cleared",
+          "input"
+        ],
+        "title": "WhitepaperCellResponse",
+        "type": "object"
+      },
+      "WhitepaperInputOut": {
+        "description": "One attributed analyst overlay value.",
+        "properties": {
+          "author": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "author",
+          "updated_at"
+        ],
+        "title": "WhitepaperInputOut",
+        "type": "object"
+      },
+      "WhitepaperRequest": {
+        "properties": {
+          "application_number": {
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Application Number",
+            "type": "string"
+          },
+          "rld_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Rld Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rld_name",
+          "application_number"
+        ],
+        "title": "WhitepaperRequest",
+        "type": "object"
+      },
+      "WhitepaperResponse": {
+        "description": "The populate result, verbatim.\n\n``spine``/``sections`` are deliberately passthrough (plain dict/list, no\nnested models) for the same INV-3 reason as WhitepaperRunDetailResponse:\n``_persist_whitepaper_run`` stores this exact payload BEFORE serialization,\nso a typed model that stripped or reshaped a field would make the stored\nrun diverge from the HTTP response (tests pin the parity).",
+        "properties": {
+          "audit_id": {
+            "title": "Audit Id",
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "sections": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Sections",
+            "type": "array"
+          },
+          "spine": {
+            "additionalProperties": true,
+            "title": "Spine",
+            "type": "object"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "spine",
+          "sections",
+          "warnings",
+          "audit_id",
+          "run_id"
+        ],
+        "title": "WhitepaperResponse",
+        "type": "object"
+      },
+      "WhitepaperRunDeleteResponse": {
+        "properties": {
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deleted",
+          "run_id"
+        ],
+        "title": "WhitepaperRunDeleteResponse",
+        "type": "object"
+      },
+      "WhitepaperRunDetailResponse": {
+        "description": "The full stored run.\n\n``spine``/``sections``/``warnings`` are deliberately passthrough fields\n(plain dict/list, no nested models): the response must be VERBATIM what the\naudited populate stored -- serialization may never reshape or filter the\nfingerprinted sections payload (INV-3).",
+        "properties": {
+          "analyst_input_count": {
+            "title": "Analyst Input Count",
+            "type": "integer"
+          },
+          "application_number": {
+            "title": "Application Number",
+            "type": "string"
+          },
+          "application_type": {
+            "title": "Application Type",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "title": "Created By",
+            "type": "string"
+          },
+          "created_by_user_id": {
+            "title": "Created By User Id",
+            "type": "integer"
+          },
+          "finalized_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finalized At"
+          },
+          "finalized_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finalized By"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "ingredient": {
+            "title": "Ingredient",
+            "type": "string"
+          },
+          "inputs": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/WhitepaperInputOut"
+            },
+            "title": "Inputs",
+            "type": "object"
+          },
+          "normalized_name": {
+            "title": "Normalized Name",
+            "type": "string"
+          },
+          "populated_count": {
+            "title": "Populated Count",
+            "type": "integer"
+          },
+          "rld_name_input": {
+            "title": "Rld Name Input",
+            "type": "string"
+          },
+          "sections": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Sections",
+            "type": "array"
+          },
+          "source_audit_id": {
+            "title": "Source Audit Id",
+            "type": "integer"
+          },
+          "spine": {
+            "additionalProperties": true,
+            "title": "Spine",
+            "type": "object"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "verified_absent_count": {
+            "title": "Verified Absent Count",
+            "type": "integer"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "rld_name_input",
+          "application_number",
+          "application_type",
+          "ingredient",
+          "normalized_name",
+          "spine",
+          "sections",
+          "warnings",
+          "status",
+          "populated_count",
+          "analyst_input_count",
+          "verified_absent_count",
+          "source_audit_id",
+          "created_by",
+          "created_by_user_id",
+          "created_at",
+          "updated_at",
+          "finalized_at",
+          "finalized_by",
+          "inputs"
+        ],
+        "title": "WhitepaperRunDetailResponse",
+        "type": "object"
+      },
+      "WhitepaperRunListResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/WhitepaperRunSummary"
+            },
+            "title": "Runs",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "count",
+          "total",
+          "limit",
+          "offset",
+          "runs"
+        ],
+        "title": "WhitepaperRunListResponse",
+        "type": "object"
+      },
+      "WhitepaperRunStatusResponse": {
+        "properties": {
+          "run_id": {
+            "title": "Run Id",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "status"
+        ],
+        "title": "WhitepaperRunStatusResponse",
+        "type": "object"
+      },
+      "WhitepaperRunSummary": {
+        "description": "One org-shared run list row (no JSON payloads -- see the detail route).",
+        "properties": {
+          "analyst_input_count": {
+            "title": "Analyst Input Count",
+            "type": "integer"
+          },
+          "application_number": {
+            "title": "Application Number",
+            "type": "string"
+          },
+          "application_type": {
+            "title": "Application Type",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "title": "Created By",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "ingredient": {
+            "title": "Ingredient",
+            "type": "string"
+          },
+          "inputs_count": {
+            "title": "Inputs Count",
+            "type": "integer"
+          },
+          "normalized_name": {
+            "title": "Normalized Name",
+            "type": "string"
+          },
+          "populated_count": {
+            "title": "Populated Count",
+            "type": "integer"
+          },
+          "rld_name_input": {
+            "title": "Rld Name Input",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "verified_absent_count": {
+            "title": "Verified Absent Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "rld_name_input",
+          "application_number",
+          "application_type",
+          "ingredient",
+          "normalized_name",
+          "status",
+          "populated_count",
+          "analyst_input_count",
+          "verified_absent_count",
+          "inputs_count",
+          "created_by",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "WhitepaperRunSummary",
+        "type": "object"
+      },
+      "WhitepaperSpine": {
+        "description": "The canonical spine ``populator._spine_from_ctx`` emits.\n\nTyped here (unlike the /whitepaper embedding, which must stay verbatim\npassthrough for stored-run parity) because /resolve persists nothing: the\nresponse IS the whole contract. application_type is a code-verified closed\nset - every assignment in populator resolves to an NDA/ANDA/BLA prefix.",
+        "properties": {
+          "application_number": {
+            "title": "Application Number",
+            "type": "string"
+          },
+          "application_type": {
+            "enum": [
+              "NDA",
+              "ANDA",
+              "BLA"
+            ],
+            "title": "Application Type",
+            "type": "string"
+          },
+          "ingredient": {
+            "title": "Ingredient",
+            "type": "string"
+          },
+          "normalized_name": {
+            "title": "Normalized Name",
+            "type": "string"
+          },
+          "product_numbers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Product Numbers",
+            "type": "array"
+          },
+          "setid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Setid"
+          },
+          "spl_candidates": {
+            "items": {
+              "$ref": "#/components/schemas/WhitepaperSplCandidate"
+            },
+            "title": "Spl Candidates",
+            "type": "array"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "application_number",
+          "application_type",
+          "ingredient",
+          "normalized_name",
+          "product_numbers",
+          "setid",
+          "spl_candidates",
+          "warnings"
+        ],
+        "title": "WhitepaperSpine",
+        "type": "object"
+      },
+      "WhitepaperSplCandidate": {
+        "properties": {
+          "labeler": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Labeler"
+          },
+          "published": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published"
+          },
+          "setid": {
+            "title": "Setid",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "setid",
+          "title",
+          "labeler",
+          "published"
+        ],
+        "title": "WhitepaperSplCandidate",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Operational POC for a generic-drug Clinical Regulatory Affairs team. Public FDA data only. The system surfaces, organizes, compares, and cites; it never authors submission content or renders regulatory judgment.",
+    "title": "REGWATCH",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/assemble": {
+      "post": {
+        "operationId": "assemble_assemble_post",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssembleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssembleResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Assemble"
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "operationId": "login_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthUserResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Login",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "description": "Revoke the server-side session and clear the cookie. Never errors.",
+        "operationId": "logout_auth_logout_post",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Logout",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "operationId": "me_auth_me_get",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthUserResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Me",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/feedback": {
+      "post": {
+        "description": "Thumbs up/down on one of the caller's own answered Q&A turns (H4).\n\n404 for a missing, foreign, or non-qa audit row -- mirroring the docx\nownership pattern, the response never confirms that someone else's audit\nrow exists. Feedback rows are the candidate pool for future eval gold-set\nitems (see README).",
+        "operationId": "feedback_feedback_post",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Feedback"
+      }
+    },
+    "/health": {
+      "get": {
+        "description": "Diagnose the stack: db, chroma, providers. Superset of {\"status\": \"ok\"}.\n\n503 only when the DB or Chroma is unreachable. An empty corpus is healthy\n(with a warning) so a fresh stack can boot and the ingest service can seed.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    },
+    "/metrics": {
+      "get": {
+        "description": "Prometheus text-exposition counters derived from the query_log audit table.\n\nHand-rolled (no prometheus_client dependency): exposes total queries by mode\nand the refusal counter. The body is plain text/version-0.0.4.\n\nAccess is OPT-IN: open like /health and /ready by default (so a scraper\nreaches it without the session cookie), but when METRICS_TOKEN is set the\nrequest must carry `Authorization: Bearer <token>` or this returns 401.\n/health and /ready are never gated this way.",
+        "operationId": "metrics_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Metrics"
+      }
+    },
+    "/products": {
+      "get": {
+        "operationId": "list_products_products_get",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Products"
+      },
+      "post": {
+        "operationId": "create_product_products_post",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductCreateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Product"
+      }
+    },
+    "/products/{product_id}": {
+      "delete": {
+        "description": "Remove a product from the watchlist (SOFT: the row is kept).\n\n``on_watchlist`` flips to False instead of deleting the row -- durable\nalert rows reference ``product_id``, so a hard delete would orphan the\nalert history the feed still renders (INV-4), and the row's INV-5\nprovenance survives for audit. Idempotent: re-deleting an already-unwatched\nrow still returns ``removed: true`` because the caller's goal state holds;\n404 is reserved for ids no Product row ever had, mirroring the \"does it\nexist\" contract of the other 404s on this surface.",
+        "operationId": "delete_product_products__product_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product_id",
+            "required": true,
+            "schema": {
+              "title": "Product Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductDeleteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Product"
+      }
+    },
+    "/query": {
+      "post": {
+        "operationId": "query_query_post",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Query"
+      }
+    },
+    "/query/stream": {
+      "post": {
+        "description": "Streaming twin of POST /query (Server-Sent Events).\n\nSame auth, rate limit, ownership, pipeline, and single audit row as /query;\nit streams live progress as ``status`` frames and the SAME validated\nQueryResponse as one terminal ``result`` frame (both built via\n_build_query_response, so the shapes cannot drift). The Ask UI consumes this\nand transparently falls back to POST /query if the stream fails. Rate-limit\n(429), ownership (404), and auth (401) are enforced BEFORE the stream opens,\nas real HTTP statuses -- never mid-stream.",
+        "operationId": "query_stream_query_stream_post",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Query Stream"
+      }
+    },
+    "/ready": {
+      "get": {
+        "description": "Readiness probe: 200 only when the DB + vector store are reachable AND the\nLLM client is constructable (key present). Distinct from /health's liveness:\na load balancer routes traffic on this. No paid LLM call is made - only the\ncheap reachability checks. Both are timeout-bounded by the per-connection\nconnect/statement timeouts on the shared engine (the vector-store probe is a\n`SELECT count(*)` in pgvector mode, so a degraded DB is capped by\nDB_STATEMENT_TIMEOUT rather than hanging the probe). 503 names the FIRST\nfailed check so an operator sees what to fix.",
+        "operationId": "ready_ready_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Ready"
+      }
+    },
+    "/resolve": {
+      "post": {
+        "description": "Resolve an RLD name + application number to the canonical spine.\n\nDeterministic entity resolution, NOT an LLM turn: it writes NO audit row\n(success or failure) and returns no answer text -- it lets a surface pin a\ncanonical product without running a full populate. On an unresolved or\nmismatched application it 422s with the resolver's own detail (refuse over\nguess). Rate-limited like /query, /assemble, /whitepaper (it hits live FDA\nsources just as they do).",
+        "operationId": "resolve_resolve_post",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhitepaperSpine"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resolve"
+      }
+    },
+    "/sessions": {
+      "get": {
+        "description": "Two queries max -- network RTT amplifies per-row queries ~1000x on Postgres.\n\nQuery 1 is the session page with the title fallback (first user message)\nfolded in as a correlated scalar subquery; query 2 fetches all message\ncounts for the page via one GROUP BY. Never N+1.",
+        "operationId": "list_sessions_sessions_get",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Sessions"
+      }
+    },
+    "/sessions/{session_id}": {
+      "delete": {
+        "operationId": "delete_session_sessions__session_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Session"
+      },
+      "get": {
+        "operationId": "get_session_sessions__session_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Session"
+      }
+    },
+    "/settings": {
+      "get": {
+        "operationId": "get_public_settings_settings_get",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicSettings"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Public Settings"
+      }
+    },
+    "/sources/search": {
+      "post": {
+        "operationId": "sources_search_sources_search_post",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceSearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceSearchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sources Search"
+      }
+    },
+    "/watch/latest": {
+      "get": {
+        "operationId": "watch_latest_watch_latest_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Since"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchLatestResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Watch Latest"
+      }
+    },
+    "/whitepaper": {
+      "post": {
+        "description": "Populate the CRA White Paper for an RLD name + NDA/ANDA number.\n\nWrites one whitepaper audit row (in build_whitepaper) on success AND on a\n422 resolution failure. Rate-limited like /query and /assemble. A\nsuccessful populate is persisted as a durable org-shared run and the\nresponse gains ``run_id`` (null when the persist degraded, see\n``_persist_whitepaper_run``).",
+        "operationId": "whitepaper_whitepaper_post",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WhitepaperRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhitepaperResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Whitepaper"
+      }
+    },
+    "/whitepaper/runs": {
+      "get": {
+        "description": "Org-shared saved runs, newest activity first.\n\nAny authenticated analyst sees every run (a product decision, design doc\nsection 10); deletes stay creator-only. Shape follows /watch/latest:\ncount/total/limit/offset so pagination stays truthful.",
+        "operationId": "whitepaper_runs_list_whitepaper_runs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "application_number",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 40,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Application Number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "normalized_name",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Normalized Name"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 40,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhitepaperRunListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Whitepaper Runs List"
+      }
+    },
+    "/whitepaper/runs/{run_id}": {
+      "delete": {
+        "description": "Creator-only (403), drafts-only (409): a finalized paper is a record.",
+        "operationId": "whitepaper_run_delete_whitepaper_runs__run_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhitepaperRunDeleteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Whitepaper Run Delete"
+      },
+      "get": {
+        "description": "One saved run: verbatim generated payload + the analyst overlay.\n\n404 for a missing id -- runs are org-shared, so existence is not a secret\n(the legacy uniform-422 pattern applied only to the per-user audit lookup).",
+        "operationId": "whitepaper_run_detail_whitepaper_runs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhitepaperRunDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Whitepaper Run Detail"
+      }
+    },
+    "/whitepaper/runs/{run_id}/cells/{cell_id}": {
+      "post": {
+        "description": "Set (or clear) one attributed analyst overlay cell (org-shared edit).\n\nA ``null`` or empty-after-cleaning value clears the cell. No query rate\nlimit: a pure bounded DB write, no FDA/LLM call. The store owns the domain\nrules; this boundary maps its typed errors -- 404 missing run, 409\nfinal-frozen or lost-the-concurrent-insert (retry), 422 unknown cell /\noversized value.",
+        "operationId": "whitepaper_run_set_cell_whitepaper_runs__run_id__cells__cell_id__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "cell_id",
+            "required": true,
+            "schema": {
+              "title": "Cell Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WhitepaperCellRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhitepaperCellResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Whitepaper Run Set Cell"
+      }
+    },
+    "/whitepaper/runs/{run_id}/docx": {
+      "post": {
+        "description": "Render the Word document FROM the saved run -- no client echo, no re-populate.\n\nZero live fetches, zero LLM calls: the .docx renders the STORED generated\nlayer after re-verifying ``result_fingerprint(sections) == sections_sha256``\n(a mismatch is stored-data corruption: 500 + Sentry, no document), with the\nattributed analyst overlay applied per the writer's INV-3 discipline. The\nofficial template is lazily fetched on first use (ensure_template); any\nfetch failure keeps the loud FALLBACK_MARKER path. Keeps the /query rate\nlimiter (docx assembly is CPU-bound) and writes one lightweight audit row\n(mode=\"whitepaper\", docx_rendered).",
+        "operationId": "whitepaper_run_docx_whitepaper_runs__run_id__docx_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Whitepaper Run Docx"
+      }
+    },
+    "/whitepaper/runs/{run_id}/finalize": {
+      "post": {
+        "description": "draft -> final: freezes the analyst layer; open to any analyst, audited.\n\nThe store re-verifies the stored sections fingerprint FIRST -- a mismatch\nis stored-data corruption (500 + Sentry), never a client error.",
+        "operationId": "whitepaper_run_finalize_whitepaper_runs__run_id__finalize_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhitepaperRunStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Whitepaper Run Finalize"
+      }
+    },
+    "/whitepaper/runs/{run_id}/reopen": {
+      "post": {
+        "description": "final -> draft: clears the finalize stamp; open to any analyst, audited.",
+        "operationId": "whitepaper_run_reopen_whitepaper_runs__run_id__reopen_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhitepaperRunStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Whitepaper Run Reopen"
+      }
+    }
+  }
+}
