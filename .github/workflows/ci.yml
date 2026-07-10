@@ -217,9 +217,12 @@ jobs:
         working-directory: regwatch/frontend
         run: npm test
 
-  # The /query-family wire types in lib/api.ts are generated from the FastAPI
-  # schema (lib/api-types.ts). Regenerate here and fail if the committed copy is
-  # stale, so the frontend contract can never silently drift from the backend.
+  # The wire types in lib/api.ts are generated from the FastAPI schema
+  # (lib/api-types.ts), and regwatch/frontend/openapi.json is the committed
+  # contract snapshot. Regenerate both here and fail if either committed copy
+  # is stale, so the frontend contract can never silently drift from the
+  # backend in either direction (tests/test_openapi_contract.py is the
+  # matching pytest-side guard).
   frontend-contract:
     runs-on: ubuntu-latest
     steps:
@@ -256,5 +259,10 @@ jobs:
         working-directory: regwatch/frontend
         run: npm run gen:types
 
-      - name: fail if committed api-types.ts is stale
-        run: git diff --exit-code -- regwatch/frontend/lib/api-types.ts
+      # ls-files first: an untracked snapshot or types file would make the
+      # diff below pass vacuously while the committed contract silently
+      # ceased to exist.
+      - name: fail if committed openapi.json or api-types.ts is stale
+        run: |
+          git ls-files --error-unmatch regwatch/frontend/openapi.json regwatch/frontend/lib/api-types.ts
+          git diff --exit-code -- regwatch/frontend/openapi.json regwatch/frontend/lib/api-types.ts

@@ -89,6 +89,34 @@ def test_whitepaper_response_carries_persisted_run_id(
     assert stored["application_number"] == APPL_NO
 
 
+def test_whitepaper_response_matches_persisted_run_payload(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Golden parity: the serialized POST /whitepaper body equals the persisted
+    run, field for field.
+
+    ``_persist_whitepaper_run`` stores the populate result BEFORE response
+    serialization, so if the route's response_model ever strips, renames, or
+    reshapes a field (including a datetime re-format inside the passthrough
+    sections), the stored run and the HTTP response silently diverge -- this
+    is the test that makes that loud.
+    """
+    install_fake_sources(monkeypatch)
+    r = auth_client.post("/whitepaper", json={"rld_name": RLD_NAME, "application_number": APPL_NO})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # The wire carries exactly the populate result plus run_id -- nothing
+    # stripped, nothing invented.
+    assert set(body) == {"spine", "sections", "warnings", "audit_id", "run_id"}
+
+    detail = run_store.get_run(body["run_id"])
+    assert detail is not None
+    assert body["spine"] == detail.spine
+    assert body["sections"] == detail.sections
+    assert body["warnings"] == detail.warnings
+    assert body["audit_id"] == detail.source_audit_id
+
+
 def test_whitepaper_persist_failure_degrades_with_warning(
     auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

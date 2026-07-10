@@ -46,7 +46,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import UTC, date, datetime
 from functools import partial
-from typing import Any
+from typing import Any, Literal
 
 import anyio.to_thread
 from config.settings import Settings, get_settings
@@ -283,7 +283,48 @@ def _llm_key_present(s: Settings) -> bool:
     return True  # echo needs no key
 
 
-@app.get("/health")
+# /health and /ready predate their response models and their wire contract is
+# conditional KEY PRESENCE (e.g. db carries `dialect` on success XOR `error` on
+# failure; `allow_test_providers` appears only when true). The models declare
+# every possible key; response_model_exclude_none reproduces the exact
+# presence semantics - no null-filled keys may appear that were absent before.
+class HealthDbComponent(BaseModel):
+    ok: bool
+    dialect: str | None = None
+    error: str | None = None
+
+
+class HealthVectorComponent(BaseModel):
+    ok: bool
+    corpus_count: int | None = None
+    error: str | None = None
+
+
+class HealthLlmComponent(BaseModel):
+    provider: str
+    key_present: bool
+
+
+class HealthEmbeddingComponent(BaseModel):
+    provider: str
+
+
+class HealthComponents(BaseModel):
+    db: HealthDbComponent
+    chroma: HealthVectorComponent
+    llm: HealthLlmComponent
+    embedding: HealthEmbeddingComponent
+
+
+class HealthResponse(BaseModel):
+    status: Literal["ok", "unhealthy"]
+    components: HealthComponents
+    whitepaper_template: Literal["present", "fetchable", "absent"]
+    warnings: list[str]
+    allow_test_providers: bool | None = None
+
+
+@app.get("/health", response_model=HealthResponse, response_model_exclude_none=True)
 def health(response: Response) -> dict[str, Any]:
     """Diagnose the stack: db, chroma, providers. Superset of {"status": "ok"}.
 
@@ -341,7 +382,21 @@ def _llm_ready(s: Settings) -> tuple[bool, str | None]:
         return False, f"llm provider {s.llm_provider!r} is not constructable"
 
 
-@app.get("/ready")
+class ReadyChecks(BaseModel):
+    db: bool
+    vector_store: bool
+    llm: bool
+
+
+class ReadyResponse(BaseModel):
+    status: Literal["ready", "not_ready"]
+    checks: ReadyChecks
+    # Present only in the not_ready body (see the exclude_none note on /health).
+    failed: Literal["db", "vector_store", "llm"] | None = None
+    detail: str | None = None
+
+
+@app.get("/ready", response_model=ReadyResponse, response_model_exclude_none=True)
 def ready(response: Response) -> dict[str, Any]:
     """Readiness probe: 200 only when the DB + vector store are reachable AND the
     LLM client is constructable (key present). Distinct from /health's liveness:
@@ -938,7 +993,7 @@ def query_stream(req: QueryRequest, user: User = Depends(require_user)) -> Strea
     _build_query_response, so the shapes cannot drift). The Ask UI consumes this
     and transparently falls back to POST /query if the stream fails. Rate-limit
     (429), ownership (404), and auth (401) are enforced BEFORE the stream opens,
-    as real HTTP statuses — never mid-stream.
+    as real HTTP statuses -- never mid-stream.
     """
     _enforce_query_rate_limit(user)
     user_id = str(user.id)
@@ -995,7 +1050,7 @@ def _upsert_feedback(audit_id: int, user_id: str, rating: int, comment: str | No
 def feedback(req: FeedbackRequest, user: User = Depends(require_user)) -> FeedbackResponse:
     """Thumbs up/down on one of the caller's own answered Q&A turns (H4).
 
-    404 for a missing, foreign, or non-qa audit row — mirroring the docx
+    404 for a missing, foreign, or non-qa audit row -- mirroring the docx
     ownership pattern, the response never confirms that someone else's audit
     row exists. Feedback rows are the candidate pool for future eval gold-set
     items (see README).
@@ -1113,6 +1168,25 @@ class WhitepaperRequest(BaseModel):
     application_number: str = Field(..., min_length=1, max_length=40)
 
 
+class WhitepaperResponse(BaseModel):
+    """The populate result, verbatim.
+
+    ``spine``/``sections`` are deliberately passthrough (plain dict/list, no
+    nested models) for the same INV-3 reason as WhitepaperRunDetailResponse:
+    ``_persist_whitepaper_run`` stores this exact payload BEFORE serialization,
+    so a typed model that stripped or reshaped a field would make the stored
+    run diverge from the HTTP response (tests pin the parity).
+    """
+
+    spine: dict[str, Any]
+    sections: list[dict[str, Any]]
+    warnings: list[str]
+    audit_id: int
+    # Always present: null only when persisting the run degraded (see
+    # _persist_whitepaper_run), never absent.
+    run_id: int | None
+
+
 def _user_pk(user: User) -> int:
     if user.id is None:  # pragma: no cover - require_user only returns persisted users
         raise HTTPException(status_code=401, detail="authentication required")
@@ -1151,7 +1225,7 @@ def _persist_whitepaper_run(user_id: int, rld_name_input: str, result: dict[str,
         capture_exception(sanitized)
 
 
-@protected.post("/whitepaper")
+@protected.post("/whitepaper", response_model=WhitepaperResponse)
 def whitepaper(req: WhitepaperRequest, user: User = Depends(require_user)) -> dict[str, Any]:
     """Populate the CRA White Paper for an RLD name + NDA/ANDA number.
 
@@ -1181,12 +1255,38 @@ class ResolveRequest(BaseModel):
     application_number: str = Field(..., min_length=1, max_length=40)
 
 
-@protected.post("/resolve")
+class WhitepaperSplCandidate(BaseModel):
+    setid: str
+    title: str
+    labeler: str | None
+    published: str | None
+
+
+class WhitepaperSpine(BaseModel):
+    """The canonical spine ``populator._spine_from_ctx`` emits.
+
+    Typed here (unlike the /whitepaper embedding, which must stay verbatim
+    passthrough for stored-run parity) because /resolve persists nothing: the
+    response IS the whole contract. application_type is a code-verified closed
+    set - every assignment in populator resolves to an NDA/ANDA/BLA prefix.
+    """
+
+    application_number: str
+    application_type: Literal["NDA", "ANDA", "BLA"]
+    ingredient: str
+    normalized_name: str
+    product_numbers: list[str]
+    setid: str | None
+    spl_candidates: list[WhitepaperSplCandidate]
+    warnings: list[str]
+
+
+@protected.post("/resolve", response_model=WhitepaperSpine)
 def resolve(req: ResolveRequest, user: User = Depends(require_user)) -> dict[str, Any]:
     """Resolve an RLD name + application number to the canonical spine.
 
     Deterministic entity resolution, NOT an LLM turn: it writes NO audit row
-    (success or failure) and returns no answer text — it lets a surface pin a
+    (success or failure) and returns no answer text -- it lets a surface pin a
     canonical product without running a full populate. On an unresolved or
     mismatched application it 422s with the resolver's own detail (refuse over
     guess). Rate-limited like /query, /assemble, /whitepaper (it hits live FDA
@@ -1549,7 +1649,12 @@ def whitepaper_run_docx(run_id: int, user: User = Depends(require_user)) -> Resp
     )
 
 
-@protected.delete("/whitepaper/runs/{run_id}")
+class WhitepaperRunDeleteResponse(BaseModel):
+    deleted: bool
+    run_id: int
+
+
+@protected.delete("/whitepaper/runs/{run_id}", response_model=WhitepaperRunDeleteResponse)
 def whitepaper_run_delete(run_id: int, user: User = Depends(require_user)) -> dict[str, Any]:
     """Creator-only (403), drafts-only (409): a finalized paper is a record."""
     try:
@@ -1580,7 +1685,54 @@ def _record_captured_at(record: dict[str, Any]) -> datetime | None:
         return None
 
 
-@protected.get("/watch/latest")
+class AlertRecord(BaseModel):
+    """One durable alert as ``latest_digest_records`` returns it (the Alert
+    dataclass fields plus the read-time-derived ``change_kind``)."""
+
+    product_id: int
+    active_ingredient: str
+    listing_appl_no: str
+    listing_psg_type: str
+    psg_document_id: int
+    psg_version_id: int
+    captured_at: str
+    diff_summary: str | None
+    confidence: float
+    rationale: str
+    source_url: str
+    # Always set server-side today, but kept OPTIONAL in the schema on purpose:
+    # the frontend deploys independently (Vercel vs Fly) and its consumers
+    # deliberately tolerate an older backend that omits it (lib/api.ts falls
+    # back to the prose marker). Requiring it here would invite client code
+    # that breaks under that deploy skew.
+    change_kind: Literal["new", "revised"] | None = None
+
+
+class WatchRunSummary(BaseModel):
+    """Telemetry of the newest COMPLETED watch run (the durable ledger row)."""
+
+    started_at: str
+    finished_at: str
+    listings: int
+    matched: int
+    added: int
+    revised: int
+    unchanged: int
+    errors: int
+    alerts: int
+
+
+class WatchLatestResponse(BaseModel):
+    count: int
+    total: int
+    limit: int
+    offset: int
+    alerts: list[AlertRecord]
+    # null = no watch run has ever recorded (never inferred; INV-4).
+    last_run: WatchRunSummary | None
+
+
+@protected.get("/watch/latest", response_model=WatchLatestResponse)
 def watch_latest(
     since: datetime | None = None,
     # Bounded page, not a hard window: without offset, alerts past the newest
@@ -1663,13 +1815,48 @@ class ProductCreate(BaseModel):
         return v
 
 
-@protected.get("/products")
+class ProductRecord(BaseModel):
+    """One watchlist row as ``list_watchlist`` projects it."""
+
+    # int | None mirrors the ORM primary-key typing; persisted rows always
+    # carry an id, but the projection type is what the wire promises.
+    id: int | None
+    active_ingredient: str
+    normalized_name: str
+    stripped_name: str
+    dosage_form: str | None
+    route: str | None
+    rld_name: str | None
+    rld_application_number: str | None
+    company_status: str | None
+    source: str
+    source_url: str | None
+
+
+class ProductsResponse(BaseModel):
+    count: int
+    products: list[ProductRecord]
+
+
+class ProductCreateResponse(BaseModel):
+    # Rows actually inserted by the upsert (0 when the entry matched an
+    # existing row and was merged instead) - an int on the wire, not a bool.
+    added: int
+    products: list[ProductRecord]
+
+
+class ProductDeleteResponse(BaseModel):
+    removed: bool
+    products: list[ProductRecord]
+
+
+@protected.get("/products", response_model=ProductsResponse)
 def list_products() -> dict[str, Any]:
     items = list_watchlist()
     return {"count": len(items), "products": items}
 
 
-@protected.post("/products", status_code=201)
+@protected.post("/products", status_code=201, response_model=ProductCreateResponse)
 def create_product(req: ProductCreate) -> dict[str, Any]:
     if req.source not in USER_ASSERTABLE_SOURCES:
         # "drugsfda" is a real source value, so the generic "must be one of"
@@ -1696,7 +1883,7 @@ def create_product(req: ProductCreate) -> dict[str, Any]:
     return {"added": added, "products": list_watchlist()}
 
 
-@protected.delete("/products/{product_id}")
+@protected.delete("/products/{product_id}", response_model=ProductDeleteResponse)
 def delete_product(product_id: int) -> dict[str, Any]:
     """Remove a product from the watchlist (SOFT: the row is kept).
 
@@ -1714,6 +1901,57 @@ def delete_product(product_id: int) -> dict[str, Any]:
 
 
 # ---------- /sessions (per-user chat history) ----------
+class SessionSummary(BaseModel):
+    id: str
+    title: str
+    # isoformat strings, exactly as the handlers emit them (naive-UTC, no
+    # suffix) - typed str so serialization can never re-format them.
+    created_at: str
+    updated_at: str
+    message_count: int
+
+
+class SessionListResponse(BaseModel):
+    sessions: list[SessionSummary]
+
+
+class SessionMeta(BaseModel):
+    id: str
+    title: str
+    created_at: str
+    updated_at: str
+
+
+class ChatMessageOut(BaseModel):
+    """One rehydrated turn.
+
+    ``citations``/``clarify``/``related`` are passthrough stored JSON: the
+    persisted payloads are re-emitted VERBATIM (older sessions carry legacy
+    keys the current wire types no longer produce), so no nested model may
+    reshape or strip them. ``role`` stays ``str`` for the same stored-data
+    reason - the writers only ever emit "user"/"assistant", but a Literal
+    would turn a legacy row into a 500.
+    """
+
+    id: str
+    turn_id: str
+    role: str
+    content: str
+    status: str | None
+    citations: list[dict[str, Any]]
+    audit_id: int | None
+    reason: str | None
+    interpretation: str | None
+    clarify: list[dict[str, Any]]
+    related: list[dict[str, Any]]
+    created_at: str
+
+
+class SessionDetailResponse(BaseModel):
+    session: SessionMeta
+    messages: list[ChatMessageOut]
+
+
 def _session_title(s: Session, row: ChatSession) -> str:
     if row.title:
         return row.title
@@ -1736,9 +1974,9 @@ def _owned_session_or_404(s: Session, session_id: str, user_id: str) -> ChatSess
     return row
 
 
-@protected.get("/sessions")
+@protected.get("/sessions", response_model=SessionListResponse)
 def list_sessions(user: User = Depends(require_user)) -> dict[str, Any]:
-    """Two queries max — network RTT amplifies per-row queries ~1000x on Postgres.
+    """Two queries max -- network RTT amplifies per-row queries ~1000x on Postgres.
 
     Query 1 is the session page with the title fallback (first user message)
     folded in as a correlated scalar subquery; query 2 fetches all message
@@ -1789,7 +2027,7 @@ def list_sessions(user: User = Depends(require_user)) -> dict[str, Any]:
     return {"sessions": sessions}
 
 
-@protected.get("/sessions/{session_id}")
+@protected.get("/sessions/{session_id}", response_model=SessionDetailResponse)
 def get_session(session_id: str, user: User = Depends(require_user)) -> dict[str, Any]:
     with session_scope() as s:
         row = _owned_session_or_404(s, session_id, str(user.id))
@@ -1838,7 +2076,20 @@ def delete_session(session_id: str, user: User = Depends(require_user)) -> None:
 
 
 # ---------- /settings (read-only, no secrets) ----------
-@protected.get("/settings")
+class PublicSettings(BaseModel):
+    """Non-secret config only. The model doubles as an allowlist: a future
+    handler edit cannot leak a new Settings field onto the wire without also
+    declaring it here (undeclared fields are stripped)."""
+
+    embedding_provider: str
+    llm_provider: str
+    llm_model: str
+    retrieval_top_k: int | None
+    refusal_score_threshold: float
+    company_name: str
+
+
+@protected.get("/settings", response_model=PublicSettings)
 def get_public_settings() -> dict[str, Any]:
     s = get_settings()
     return {
