@@ -1,0 +1,418 @@
+"""Step 2 of the strangler migration: the RAG core is stateless.
+
+``ask_core`` performs NO persistence on any path -- it returns (RagOutcome,
+AuditPayload, SessionPatch) and the ``ask()`` shell owns every write (audit
+row first, then the assistant message that references the audit id). Four
+pinned properties:
+
+  * core purity   -- every write function raises if touched while ask_core
+                     runs (success, refusal, clarify, and meta paths alike);
+  * shell ordering -- ask() writes the user message, THEN the audit row, THEN
+                     the assistant message carrying that audit id (INV-6:
+                     the audit write precedes everything the turn leaves
+                     behind except the pre-compute user row);
+  * shell parity  -- ask() persists exactly what the pre-refactor code wrote,
+                     for the answer flow AND each terminal decline family
+                     (audit row fields, both chat messages, filter carry-over);
+  * payload completeness -- every exit status yields an AuditPayload the shell
+                     can log verbatim (INV-6 on every branch) and all three
+                     contract objects stay asdict/JSON-serializable (they are
+                     designed to become a cross-service HTTP contract).
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import asdict
+from typing import Any
+
+import pytest
+from sqlmodel import col, select
+
+from regwatch.common.audit import log_query
+from regwatch.common.conversation import record_message, update_session_filters
+from regwatch.generate import grounded_qa as qa_mod
+from regwatch.generate.rag_contract import AuditPayload, RagOutcome, SessionPatch
+from regwatch.process.embedder import get_embedding_provider
+from regwatch.store.db import init_db, session_scope
+from regwatch.store.models import ChatMessage, ChatSession, QueryLog
+from regwatch.store.vector_store import add_chunks
+from tests.test_invariants import _meta, _seed_corpus, _stub_llm
+
+pytestmark = pytest.mark.invariants
+
+# Everything in grounded_qa that persists (writes) plus the module-level session
+# READ functions: the core must reach session context ONLY through the injected
+# loaders, so touching any of these from inside ask_core is a purity breach.
+_FORBIDDEN_IN_CORE = (
+    "log_query",
+    "_log_query_or_skip",
+    "ensure_session",
+    "record_message",
+    "update_session_filters",
+    "get_session_filters",
+    "get_recent_turns",
+)
+
+
+def _forbid_persistence(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in _FORBIDDEN_IN_CORE:
+
+        def _boom(*args: Any, _name: str = name, **kwargs: Any) -> Any:
+            raise AssertionError(f"stateless ask_core touched {_name}")
+
+        monkeypatch.setattr(qa_mod, name, _boom)
+
+
+def _run_core(question: str) -> tuple[RagOutcome, AuditPayload, SessionPatch]:
+    return qa_mod.ask_core(
+        question,
+        session_id="sess-core",
+        turn_id="turn-core",
+        load_session_filters=lambda: {},
+        load_recent_turns=lambda: [],
+    )
+
+
+def _seed_albuterol() -> None:
+    _seed_corpus(
+        [
+            ("Fasting bioequivalence study with 36 subjects.", _meta(1, 3, "PSG_020503")),
+            ("Dissolution: USP Apparatus 2 at 50 rpm.", _meta(1, 4, "PSG_020503")),
+        ]
+    )
+
+
+def _seed_names(names: list[str]) -> None:
+    """One chunk per drug name (mirrors tests/test_clarify.py) -- a multi-product
+    corpus so a no-drug meta question resolves to none and the meta gate fires."""
+    init_db()
+    embedder = get_embedding_provider()
+    texts = [f"Bioequivalence study guidance for {n}." for n in names]
+    add_chunks(
+        ids=[f"chunk-{i}" for i in range(len(names))],
+        embeddings=embedder.embed(texts),
+        documents=texts,
+        metadatas=[
+            {
+                "doc_id": i + 1,
+                "version_id": (i + 1) * 10,
+                "page": 1,
+                "section_path": "II.A",
+                "normalized_name": n,
+                "dosage_form": "Tablet",
+                "route": "Oral",
+                "source_url": f"http://example/{i}.pdf",
+                "psg_type": "draft",
+                "appl_no": f"0{i}001",
+            }
+            for i, n in enumerate(names)
+        ],
+    )
+
+
+_CITED_ANSWER = "A fasting study is recommended [PSG_020503, p.3]."
+
+
+# ---------- core purity: no writes on any path ----------
+
+
+def test_core_success_path_never_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_albuterol()
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_CITED_ANSWER))
+    _forbid_persistence(monkeypatch)
+
+    outcome, audit, patch = _run_core("What study design is recommended?")
+
+    assert outcome.status == "answer"
+    assert not outcome.refused
+    assert [(c.short_name, c.page) for c in outcome.citations] == [("PSG_020503", 3)]
+    assert outcome.session_id == "sess-core"
+    assert outcome.turn_id == "turn-core"
+    # The validated-answer audit is STRICT (no-audit-no-answer, INV-6) and
+    # carries the degrade turn the shell serves if the audit write fails.
+    assert audit.allow_skip is False
+    assert audit.failure_fallback is not None
+    fb_outcome, fb_audit, _fb_patch = audit.failure_fallback
+    assert fb_outcome.status == "error"
+    assert fb_outcome.refused is True
+    assert "temporarily unavailable" in fb_outcome.answer
+    assert fb_audit.allow_skip is True  # the fallback's own audit may skip to -1
+    # The patch is a description, not an applied write.
+    assert patch.content == outcome.answer
+    assert patch.update_filters is True
+    assert patch.filters["normalized_name"] == "albuterol sulfate"
+
+
+def test_core_refusal_path_never_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    init_db()  # empty corpus: romidepsin is a deliberate must-refuse
+    _forbid_persistence(monkeypatch)
+
+    outcome, audit, patch = _run_core("What does the FDA recommend for romidepsin?")
+
+    assert outcome.refused is True
+    assert outcome.status == "refused"
+    assert outcome.reason == "no_product"
+    assert outcome.citations == []
+    assert audit.refused is True
+    assert audit.allow_skip is True
+    assert audit.failure_fallback is None
+    assert patch.update_filters is False
+
+
+def test_core_clarify_path_never_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_albuterol()
+    _forbid_persistence(monkeypatch)
+
+    outcome, audit, patch = _run_core("albuterol sulfate")
+
+    assert outcome.status == "clarify"
+    assert not outcome.refused
+    assert outcome.clarify  # offered options, never a guess
+    assert outcome.citations == []  # never fabricates
+    assert audit.status == "clarify"
+    assert audit.allow_skip is True
+    assert patch.content == outcome.interpretation
+
+
+def test_core_meta_path_never_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_names(["atorvastatin calcium", "metformin hydrochloride"])
+    _forbid_persistence(monkeypatch)
+
+    outcome, audit, patch = _run_core("what can I ask about?")
+
+    assert outcome.status == "meta"
+    assert outcome.refused is False
+    assert outcome.citations == []  # system-state answer, never evidence
+    assert audit.status == "meta"
+    assert audit.allow_skip is True
+    assert patch.update_filters is False
+
+
+# ---------- shell ordering: audit row before the assistant message ----------
+
+
+def test_shell_write_order_audit_before_assistant_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_albuterol()
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_CITED_ANSWER))
+
+    # The real write functions, taken from their home modules (identical
+    # objects to grounded_qa's module globals before the monkeypatch below).
+    events: list[tuple[str, int | None]] = []
+
+    def _rec_log(**kw: Any) -> int:
+        audit_id = log_query(**kw)
+        events.append(("log_query", audit_id))
+        return audit_id
+
+    def _rec_msg(**kw: Any) -> str:
+        events.append((f"message:{kw['role']}", kw.get("audit_id")))
+        return record_message(**kw)
+
+    def _rec_update(session_id: str | None, filters: dict[str, Any] | None) -> None:
+        events.append(("update_filters", None))
+        update_session_filters(session_id, filters)
+
+    monkeypatch.setattr(qa_mod, "log_query", _rec_log)
+    monkeypatch.setattr(qa_mod, "record_message", _rec_msg)
+    monkeypatch.setattr(qa_mod, "update_session_filters", _rec_update)
+
+    result = qa_mod.ask("What study design is recommended?")
+
+    assert result.status == "answer"
+    assert [kind for kind, _ in events] == [
+        "message:user",
+        "log_query",
+        "message:assistant",
+        "update_filters",
+    ]
+    # The user row predates the audit; the assistant row references it.
+    assert events[0][1] is None
+    assert events[1][1] == result.audit_id
+    assert events[2][1] == result.audit_id
+
+
+# ---------- shell parity: ask() persists the pre-refactor golden ----------
+
+
+def test_shell_persists_the_pre_refactor_golden(monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_albuterol()
+    question = "What study design is recommended?"
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_CITED_ANSWER))
+
+    result = qa_mod.ask(question)
+
+    assert result.status == "answer"
+    assert not result.refused
+    assert result.audit_id > 0
+    with session_scope() as s:
+        row = s.get(QueryLog, result.audit_id)
+        assert row is not None
+        assert row.mode == "qa"
+        assert row.query_text == question
+        assert row.refused is False
+        assert row.status == "answer"
+        assert row.session_id == result.session_id
+        assert row.turn_id == result.turn_id
+        assert row.answer_text == result.answer
+        assert [(c["short_name"], c["page"]) for c in row.citations_json] == [("PSG_020503", 3)]
+        assert list(row.retrieved_json) == result.retrieved
+        route = dict(row.route_json)
+        assert route["reason"] == "retrieval"
+        assert route["response_mode"] == "answer"
+        assert route["filters"]["normalized_name"] == "albuterol sulfate"
+        # Token fields NULL: the echo-stub response reported no usage.
+        assert row.input_tokens is None
+        assert row.output_tokens is None
+        assert row.cost_usd is None
+
+        messages = [
+            (m.role, m.content, m.status, m.model_name, m.audit_id, dict(m.metadata_json or {}))
+            for m in s.scalars(select(ChatMessage).order_by(col(ChatMessage.created_at)))
+        ]
+        session = s.get(ChatSession, result.session_id)
+        assert session is not None
+        session_filters = dict(session.active_filters_json or {})
+
+    assert [m[0] for m in messages] == ["user", "assistant"]
+    _role, u_content, _status, _model, u_audit, _meta_json = messages[0]
+    assert u_content == question
+    assert u_audit is None  # the user row predates the audit write
+    _role, a_content, a_status, a_model, a_audit, a_meta = messages[1]
+    assert a_content == result.answer
+    assert a_status == "answer"
+    assert a_model == "stub"
+    # The shell injected the audit id AFTER logging: the assistant message
+    # references the same audit row the result carries.
+    assert a_audit == result.audit_id
+    assert a_meta["route"]["reason"] == "retrieval"
+    assert a_meta["retrieved"] == result.retrieved
+    # Filter carry-over persisted for the next turn.
+    assert session_filters["normalized_name"] == "albuterol sulfate"
+
+
+# ---------- AuditPayload completeness: every exit status is loggable ----------
+
+
+class _BoomProvider:
+    name = "boom"
+
+    def complete(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("simulated provider outage")
+
+
+def _setup_answer(monkeypatch: pytest.MonkeyPatch) -> str:
+    _seed_albuterol()
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_CITED_ANSWER))
+    return "What study design is recommended?"
+
+
+def _setup_summary(monkeypatch: pytest.MonkeyPatch) -> str:
+    _seed_albuterol()
+    # The paraphrased summary wording scores lower against the echo embedder
+    # than the question-form used elsewhere; the threshold is not what this
+    # scenario pins (status plumbing is), so let retrieval pass.
+    monkeypatch.setenv("REFUSAL_SCORE_THRESHOLD", "0.0")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_CITED_ANSWER))
+    return "Summarize the recommended study design."
+
+
+def _setup_clarify(monkeypatch: pytest.MonkeyPatch) -> str:
+    _seed_albuterol()
+    return "albuterol sulfate"
+
+
+def _setup_scope_warning(monkeypatch: pytest.MonkeyPatch) -> str:
+    init_db()
+    return "What submission strategy should we use to file the ANDA?"
+
+
+def _setup_meta(monkeypatch: pytest.MonkeyPatch) -> str:
+    _seed_names(["atorvastatin calcium", "metformin hydrochloride"])
+    return "what can I ask about?"
+
+
+def _setup_refused(monkeypatch: pytest.MonkeyPatch) -> str:
+    init_db()
+    return "What does the FDA recommend for romidepsin?"
+
+
+def _setup_error(monkeypatch: pytest.MonkeyPatch) -> str:
+    _seed_albuterol()
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _BoomProvider())
+    return "What study design is recommended?"
+
+
+_SCENARIOS = {
+    "answer": _setup_answer,
+    "summary": _setup_summary,
+    "clarify": _setup_clarify,
+    "scope_warning": _setup_scope_warning,
+    "meta": _setup_meta,
+    "refused": _setup_refused,
+    "error": _setup_error,
+}
+
+
+@pytest.mark.parametrize("expected_status", sorted(_SCENARIOS))
+def test_every_exit_status_yields_a_loggable_audit_payload(
+    expected_status: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    question = _SCENARIOS[expected_status](monkeypatch)
+
+    outcome, audit, patch = _run_core(question)
+
+    assert outcome.status == expected_status
+    assert audit.status == expected_status
+    assert audit.query_text == question
+    assert audit.session_id == "sess-core"
+    assert audit.turn_id == "turn-core"
+    # The whole contract stays JSON-serializable: it is designed to cross an
+    # HTTP boundary once the control plane owns the writes.
+    json.dumps([asdict(outcome), asdict(audit), asdict(patch)])
+    # And the shell can log it verbatim -- INV-6 holds on this branch.
+    audit_id = log_query(**audit.log_kwargs())
+    assert audit_id > 0
+    with session_scope() as s:
+        row = s.get(QueryLog, audit_id)
+        assert row is not None
+        assert row.status == expected_status
+        assert row.refused is outcome.refused
+        assert row.query_text == question
+
+
+# ---------- shell parity for the terminal decline families ----------
+
+
+@pytest.mark.parametrize("expected_status", ["refused", "clarify", "meta"])
+def test_shell_terminal_shapes_persist_like_pre_refactor(
+    expected_status: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each decline family still leaves the pre-refactor trail: one audit row
+    (skip-tolerant, INV-6) and an assistant message that references it."""
+    question = _SCENARIOS[expected_status](monkeypatch)
+
+    result = qa_mod.ask(question)
+
+    assert result.status == expected_status
+    assert result.refused is (expected_status == "refused")
+    assert result.citations == []  # declines never carry evidence
+    assert result.audit_id > 0
+    with session_scope() as s:
+        row = s.get(QueryLog, result.audit_id)
+        assert row is not None
+        assert row.status == expected_status
+        assert row.refused is result.refused
+        assert row.answer_text == result.answer
+        messages = [
+            (m.role, m.audit_id, m.status)
+            for m in s.scalars(select(ChatMessage).order_by(col(ChatMessage.created_at)))
+        ]
+    assert [m[0] for m in messages] == ["user", "assistant"]
+    assert messages[1][1] == result.audit_id
+    assert messages[1][2] == expected_status
