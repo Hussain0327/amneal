@@ -11,6 +11,10 @@ Flow:
      to a warning; if the answer has NO valid citations AND it contains
      content, fall back to refusal.
   6. Write an audit log row (INV-6) regardless of outcome and return.
+
+Strangler Step 2: ``ask_core`` computes steps 1-5 and RETURNS what to persist
+(rag_contract dataclasses); the ``ask()`` shell owns step 6 and every other
+write. Callers see the unchanged ``ask()`` / ``QAResult`` surface.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 from config.settings import get_settings
 from sqlalchemy import func
@@ -54,6 +58,27 @@ from regwatch.generate.llm import (
     get_llm_provider,
 )
 from regwatch.generate.prompts import GROUNDED_QA_SYSTEM, GROUNDED_QA_USER
+
+# The core/shell contract types live in rag_contract (a pipeline-free module so
+# they can become a cross-service HTTP contract). Citation / ClarifyOption /
+# QueryStatusLiteral are spelled "as" themselves because api.main, the dossier
+# stubs, and the tests import them from grounded_qa -- that public surface must
+# not move, and mypy strict (no_implicit_reexport) only re-exports the aliased
+# form.
+from regwatch.generate.rag_contract import (
+    AuditPayload,
+    RagOutcome,
+    SessionPatch,
+)
+from regwatch.generate.rag_contract import (
+    Citation as Citation,
+)
+from regwatch.generate.rag_contract import (
+    ClarifyOption as ClarifyOption,
+)
+from regwatch.generate.rag_contract import (
+    QueryStatusLiteral as QueryStatusLiteral,
+)
 from regwatch.retrieve.reranker import rerank_passages
 from regwatch.retrieve.resolver import resolve_brand, resolve_product, suggest_products
 from regwatch.retrieve.retriever import RetrievedPassage, retrieve
@@ -65,41 +90,6 @@ from regwatch.watch.alerts import latest_digest_records
 from regwatch.watch.watchlist import list_watchlist
 
 log = get_logger(__name__)
-
-# The FULL status vocabulary ask() can emit. Defined here (the domain layer)
-# and imported by api.main for the wire model, so the OpenAPI enum -- and the
-# TS union generated from it (lib/api-types.ts) -- can never drift from what
-# the domain actually returns (dependencies point inward).
-QueryStatusLiteral = Literal[
-    "answer", "summary", "clarify", "scope_warning", "meta", "refused", "error"
-]
-
-
-@dataclass
-class Citation:
-    short_name: str
-    page: int
-    chunk_id: str
-    doc_id: int
-    version_id: int
-    source_url: str
-    snippet: str
-    # Tier-2 confidence: the retriever similarity score of the passage this
-    # citation traces to, copied from the matching retrieved passage by
-    # chunk_id (never recomputed). None when no retrieved passage matches —
-    # e.g. a deterministic/uncited path that emits no retrieval. Purely
-    # additive context; INV-1 is unaffected (the citation still traces to a
-    # sent passage — this just annotates it with that passage's score).
-    score: float | None = None
-
-
-@dataclass
-class ClarifyOption:
-    """A clickable follow-up: a plain-language label + the query to resubmit."""
-
-    label: str
-    query: str
-    filters: dict[str, Any] | None = None
 
 
 @dataclass
@@ -309,39 +299,64 @@ def _route_json(
     }
 
 
-def _finish_turn(
-    result: QAResult,
+def _build_patch(
+    outcome: RagOutcome,
     *,
     filters: dict[str, Any],
     route_json: dict[str, Any],
-) -> QAResult:
-    if result.session_id and result.turn_id:
+) -> SessionPatch:
+    """The chat-history mutations this turn implies -- computed, never applied.
+
+    Pure: mirrors what the shell's assistant-message write needs, with the
+    audit_id deliberately absent (the audit row does not exist yet; the shell
+    injects it in _apply_session_patch after logging).
+    """
+    return SessionPatch(
+        session_id=outcome.session_id,
+        turn_id=outcome.turn_id,
+        content=outcome.answer,
+        status=outcome.status,
+        model_name=outcome.model_name,
+        reason=outcome.reason,
+        interpretation=outcome.interpretation,
+        filters=dict(filters),
+        citations=[asdict(c) for c in outcome.citations],
+        clarify=[asdict(o) for o in outcome.clarify],
+        related=[asdict(o) for o in outcome.related],
+        metadata={"retrieved": outcome.retrieved, "route": route_json},
+        update_filters=bool(
+            outcome.status in {"answer", "summary", "clarify"} and filters.get("normalized_name")
+        ),
+    )
+
+
+def _apply_session_patch(patch: SessionPatch, *, audit_id: int) -> None:
+    if patch.session_id and patch.turn_id:
         # Best-effort chat-history write: the audit row (INV-6) is already
         # committed by this point, so a failure here — e.g. the degraded
         # session_id=turn_id fallback has no chat_session row and the assistant
         # FK insert fails on Postgres — must not 500 an already-audited turn.
         try:
             record_message(
-                session_id=result.session_id,
-                turn_id=result.turn_id,
+                session_id=patch.session_id,
+                turn_id=patch.turn_id,
                 role="assistant",
-                content=result.answer,
-                status=result.status,
-                model_name=result.model_name,
-                audit_id=result.audit_id,
-                reason=result.reason,
-                interpretation=result.interpretation,
-                filters=filters,
-                citations=[asdict(c) for c in result.citations],
-                clarify=[asdict(o) for o in result.clarify],
-                related=[asdict(o) for o in result.related],
-                metadata={"retrieved": result.retrieved, "route": route_json},
+                content=patch.content,
+                status=patch.status,
+                model_name=patch.model_name,
+                audit_id=audit_id,
+                reason=patch.reason,
+                interpretation=patch.interpretation,
+                filters=patch.filters,
+                citations=patch.citations,
+                clarify=patch.clarify,
+                related=patch.related,
+                metadata=patch.metadata,
             )
-            if result.status in {"answer", "summary", "clarify"} and filters.get("normalized_name"):
-                update_session_filters(result.session_id, filters)
+            if patch.update_filters:
+                update_session_filters(patch.session_id, patch.filters)
         except Exception:
             log.warning("assistant_record_message_failed", exc_info=True)
-    return result
 
 
 def _looks_vague(question: str, normalized_name: str) -> bool:
@@ -711,6 +726,62 @@ def _log_query_or_skip(**kwargs: Any) -> int:
         return -1
 
 
+def _persist_turn(outcome: RagOutcome, audit: AuditPayload, patch: SessionPatch) -> QAResult:
+    """The shell's write half of a turn: audit row FIRST, then the chat history.
+
+    Everything user-visible is decided by the (pure) core; this function only
+    performs the writes the core described and injects the audit_id they share.
+    """
+    if audit.allow_skip:
+        audit_id = _log_query_or_skip(**audit.log_kwargs())
+    else:
+        try:
+            audit_id = log_query(**audit.log_kwargs())
+        except Exception as exc:
+            # No-audit-no-answer (INV-6): a validated answer with no audit row
+            # is never returned -- but the failure must be DEFINED, not a naked
+            # 500 that the stream-fallback client re-runs (a second paid
+            # synthesis) into the same down DB. Degrade to the core-supplied
+            # fixed-copy status="error" refusal turn, whose own audit is
+            # re-attempted and skipped (flagged) if the DB is still down.
+            log.warning(
+                "qa_answer_audit_write_failed", error=str(exc), error_type=type(exc).__name__
+            )
+            capture_exception(exc)
+            if audit.failure_fallback is None:  # defensive: strict payloads carry one
+                raise
+            fb_outcome, fb_audit, fb_patch = audit.failure_fallback
+            return _persist_turn(fb_outcome, fb_audit, fb_patch)
+    # Terminal-decline log lines, emitted after the audit write exactly as the
+    # pre-split _refuse/_clarify/_meta did (each status maps to one maker, so
+    # the event names cannot drift). The answer/summary path never logged here.
+    if outcome.status == "clarify":
+        log.info(
+            "qa_clarify", reason=outcome.reason, audit_id=audit_id, options=len(outcome.clarify)
+        )
+    elif outcome.status == "meta":
+        log.info("qa_meta", audit_id=audit_id)
+    elif outcome.refused:
+        log.info("qa_refused", reason=outcome.reason, audit_id=audit_id)
+    result = QAResult(
+        answer=outcome.answer,
+        citations=outcome.citations,
+        refused=outcome.refused,
+        model_name=outcome.model_name,
+        audit_id=audit_id,
+        retrieved=outcome.retrieved,
+        status=outcome.status,
+        reason=outcome.reason,
+        interpretation=outcome.interpretation,
+        clarify=outcome.clarify,
+        related=outcome.related,
+        session_id=outcome.session_id,
+        turn_id=outcome.turn_id,
+    )
+    _apply_session_patch(patch, audit_id=audit_id)
+    return result
+
+
 def _refuse(
     *,
     question: str,
@@ -725,11 +796,11 @@ def _refuse(
     answer_text: str | None = None,
     usage: LLMUsage | None = None,
     related: list[ClarifyOption] | None = None,
-) -> QAResult:
+) -> tuple[RagOutcome, AuditPayload]:
     s = get_settings()
     answer = answer_text or s.refusal_text
     audited = _audit_retrieved(passages)
-    audit_id = _log_query_or_skip(
+    audit = AuditPayload(
         mode="qa",
         query_text=question,
         retrieved=audited,
@@ -744,13 +815,11 @@ def _refuse(
         route_json=route_json,
         **_usage_fields(model_name, usage),
     )
-    log.info("qa_refused", reason=reason, audit_id=audit_id)
-    return QAResult(
+    outcome = RagOutcome(
         answer=answer,
         citations=[],
         refused=True,
         model_name=model_name,
-        audit_id=audit_id,
         retrieved=audited,
         status=status,
         reason=reason,
@@ -758,6 +827,7 @@ def _refuse(
         session_id=session_id,
         turn_id=turn_id,
     )
+    return outcome, audit
 
 
 def _clarify(
@@ -774,17 +844,17 @@ def _clarify(
     usage: LLMUsage | None = None,
     related: list[ClarifyOption] | None = None,
     passages: list[RetrievedPassage] | None = None,
-) -> QAResult:
+) -> tuple[RagOutcome, AuditPayload]:
     """Guide instead of guess: we know the product (or a near-match) but need
-    direction. Carries ZERO citations (never fabricates) and logs one audit row
-    (INV-6), exactly like ``_refuse``.
+    direction. Carries ZERO citations (never fabricates) and describes one audit
+    row (INV-6), exactly like ``_refuse``.
 
     ``passages`` is set only by the POST-retrieval defense-in-depth clarifies
     (mixed_products / multi_form backstop) so the audit row keeps the retrieved
     evidence that tripped the guard -- exactly the turns where forensics matter.
     Pre-retrieval clarifies leave it None (nothing was retrieved)."""
     audited = _audit_retrieved(passages or [])
-    audit_id = _log_query_or_skip(
+    audit = AuditPayload(
         mode="qa",
         query_text=question,
         retrieved=audited,
@@ -799,13 +869,11 @@ def _clarify(
         route_json=route_json,
         **_usage_fields(model_name, usage),
     )
-    log.info("qa_clarify", reason=reason, audit_id=audit_id, options=len(options))
-    return QAResult(
+    outcome = RagOutcome(
         answer=interpretation,
         citations=[],
         refused=False,
         model_name=model_name,
-        audit_id=audit_id,
         retrieved=audited,
         status="clarify",
         reason=reason,
@@ -815,6 +883,7 @@ def _clarify(
         session_id=session_id,
         turn_id=turn_id,
     )
+    return outcome, audit
 
 
 def _scope_warning(
@@ -827,7 +896,7 @@ def _scope_warning(
     user_id: str | None,
     route_json: dict[str, Any],
     filters: dict[str, Any] | None = None,
-) -> QAResult:
+) -> tuple[RagOutcome, AuditPayload]:
     # The decline itself never changes (INV-3: we never author the filing
     # decision). But if the question is ABOUT a real product we can name the
     # in-scope, citable sub-questions and hand back re-runnable pointers so the
@@ -983,7 +1052,7 @@ def _meta(
     turn_id: str,
     user_id: str | None,
     route_json: dict[str, Any],
-) -> QAResult:
+) -> tuple[RagOutcome, AuditPayload]:
     """Answer a "what does this system do" question from system state only.
 
     Mirrors ``_scope_warning`` as a terminal handler — one audit row (INV-6),
@@ -993,7 +1062,7 @@ def _meta(
     fabrication-incapable; it can never carry a regulatory claim.
     """
     answer = _meta_answer_text(question)
-    audit_id = _log_query_or_skip(
+    audit = AuditPayload(
         mode="qa",
         query_text=question,
         retrieved=[],
@@ -1007,50 +1076,49 @@ def _meta(
         status="meta",
         route_json=route_json,
     )
-    log.info("qa_meta", audit_id=audit_id)
-    return QAResult(
+    outcome = RagOutcome(
         answer=answer,
         citations=[],
         refused=False,
         model_name=model_name,
-        audit_id=audit_id,
         retrieved=[],
         status="meta",
         reason=reason,
         session_id=session_id,
         turn_id=turn_id,
     )
+    return outcome, audit
 
 
-def ask(
+def ask_core(
     question: str,
     *,
+    session_id: str,
+    turn_id: str,
     filters: dict[str, Any] | None = None,
     k: int | None = None,
-    session_id: str | None = None,
     user_id: str | None = None,
-    turn_id: str | None = None,
-    bind_session: bool = True,
+    load_session_filters: Callable[[], dict[str, Any]],
+    load_recent_turns: Callable[[], list[PriorTurn]],
     on_progress: Callable[[str], None] | None = None,
     on_token: Callable[[str], None] | None = None,
-) -> QAResult:
-    """Grounded Q&A entry point — answer with citations, clarify, or refuse.
+) -> tuple[RagOutcome, AuditPayload, SessionPatch]:
+    """The PURE compute half of a turn: load context -> compute -> describe.
 
-    ``bind_session=False`` keeps ``user_id`` as audit-only attribution (INV-6):
-    the bookkeeping ChatSession stays unowned (user_id NULL) and so invisible
-    to /sessions — for internal callers like the dossier, whose synthetic Q&A
-    must not appear in the caller's chat history.
+    Performs NO persistence on ANY path (success, refusal, clarify, meta, and
+    error paths alike): every branch returns (RagOutcome, AuditPayload,
+    SessionPatch) and the ``ask()`` shell -- later, the Go control plane --
+    performs the writes. Reads are allowed (retrieval reads the vector store,
+    the resolver reads products); session context comes in through the two
+    shell-owned loaders, invoked lazily at exactly the pre-split call points so
+    turns that never carry context over still skip the reads.
 
-    ``on_progress`` (optional) receives short, cosmetic phase strings as the
-    pipeline advances, for a live status ticker (POST /query/stream). It carries
-    NO answer text or citations — INV-1 lives entirely in the post-validation
-    answer path below — and a failing sink can never break or slow the query.
+    ``session_id``/``turn_id`` are the SHELL's ids (already ensured/degraded);
+    the core only threads them into what it returns.
 
-    ``on_token`` (optional) receives provisional answer text deltas for a live
-    "typing" effect. It is cosmetic ONLY: the recorded and returned answer is the
-    post-validation text below, and the refusal sentinel is never streamed as an
-    answer. A missing sink or a non-streaming provider degrades to a single
-    buffered completion with no behavior change.
+    ``on_progress``/``on_token`` behave exactly as documented on ``ask()``:
+    cosmetic, best-effort, never answer-bearing (INV-1 lives in the
+    post-validation result, and the refusal sentinel is never streamed).
     """
     s = get_settings()
 
@@ -1071,30 +1139,6 @@ def ask(
             log.debug("on_token_failed", exc_info=True)
 
     model_name = current_model_name(role="synthesizer")
-    # Session bookkeeping is best-effort: a DB hiccup here must never stop the query
-    # from being processed and audited (INV-6). Degrade to a fresh id on failure.
-    try:
-        session_id = ensure_session(session_id, user_id=user_id if bind_session else None)
-        turn_id = turn_id or new_turn_id()
-        record_message(
-            session_id=session_id,
-            turn_id=turn_id,
-            role="user",
-            content=question,
-            filters=filters,
-        )
-    except SessionOwnershipError:
-        # Lost an ownership race after the API's pre-check — abort rather than
-        # write this caller's turns into another user's session (the API maps
-        # this to its ownership 404).
-        raise
-    except Exception:
-        log.warning("session_setup_failed", exc_info=True)
-        turn_id = turn_id or new_turn_id()
-        # Degrade to a FRESH id, never the requested one: after a failed bind
-        # (e.g. a lost create race on a client-chosen id) the requested session
-        # may belong to someone else, so later writes must not target it.
-        session_id = turn_id
     active_filters: dict[str, Any] = dict(filters or {})
     # Product-key hardening: a caller (API / dossier / clarify option) may pass a
     # normalized_name in any casing or salt-order. Canonicalize it to the exact key
@@ -1105,15 +1149,15 @@ def ask(
 
     # Up to two carry-over sites below read the session filters (product in the
     # resolver's none-branch, then dosage_form/route after resolution). Nothing
-    # mutates them mid-turn (update_session_filters runs in _finish_turn), so
-    # fetch lazily ONCE and reuse instead of two identical row reads per
+    # mutates them mid-turn (the shell applies filter updates after the turn),
+    # so fetch lazily ONCE and reuse instead of two identical row reads per
     # follow-up. Lazy so turns that never carry over still skip the read.
     session_filters_memo: dict[str, Any] | None = None
 
     def _session_filters() -> dict[str, Any]:
         nonlocal session_filters_memo
         if session_filters_memo is None:
-            session_filters_memo = get_session_filters(session_id)
+            session_filters_memo = load_session_filters()
         return session_filters_memo
 
     resolved_by_name = False
@@ -1121,12 +1165,12 @@ def ask(
     response_mode: QueryStatusLiteral = "summary" if _is_summary_request(question) else "answer"
 
     def _decline(
-        maker: Callable[..., QAResult],
+        maker: Callable[..., tuple[RagOutcome, AuditPayload]],
         *,
         reason: str,
         response_mode: str,
         **kw: Any,
-    ) -> QAResult:
+    ) -> tuple[RagOutcome, AuditPayload, SessionPatch]:
         """One ceremony for every terminal decline (_refuse/_clarify/_scope_warning/
         _meta) branch: build the audit route_json and the result TOGETHER so the
         reason/response_mode pairing is single-source -- a branch can no longer
@@ -1141,19 +1185,16 @@ def ask(
             response_mode=response_mode,
         )
         kw.setdefault("model_name", model_name)
-        return _finish_turn(
-            maker(
-                question=question,
-                reason=reason,
-                session_id=session_id,
-                turn_id=turn_id,
-                user_id=user_id,
-                route_json=rj,
-                **kw,
-            ),
-            filters=active_filters,
+        outcome, audit = maker(
+            question=question,
+            reason=reason,
+            session_id=session_id,
+            turn_id=turn_id,
+            user_id=user_id,
             route_json=rj,
+            **kw,
         )
+        return outcome, audit, _build_patch(outcome, filters=active_filters, route_json=rj)
 
     if _is_scope_warning_request(question):
         return _decline(
@@ -1416,9 +1457,10 @@ def ask(
     # source; INV-1 still holds because _validate_citations accepts only THIS
     # turn's passages, so a fact that lived only in a prior turn cannot acquire a
     # valid citation here and is dropped/refused. The current turn's just-written
-    # user row is excluded by turn_id. With no usable history the block is "" so
-    # the prompt is byte-identical to the single-turn form (protects the eval).
-    recent_block = _format_recent(get_recent_turns(session_id, limit=3, exclude_turn_id=turn_id))
+    # user row is excluded by turn_id (the shell bakes that into the loader).
+    # With no usable history the block is "" so the prompt is byte-identical to
+    # the single-turn form (protects the eval).
+    recent_block = _format_recent(load_recent_turns())
     recent_context = (
         "Recent conversation (context ONLY — use it to resolve pronouns and "
         "ellipsis in the question; it is NOT a source and MUST NOT be cited or "
@@ -1551,32 +1593,41 @@ def ask(
     cleaned_answer = re.sub(r"[ \t]{2,}", " ", cleaned_answer).strip()
 
     audited = _audit_retrieved(passages)
-    try:
-        audit_id = log_query(
-            mode="qa",
-            query_text=question,
-            retrieved=audited,
-            answer_text=cleaned_answer,
-            citations=[asdict(c) for c in citations],
-            refused=False,
-            model_name=response.model,
-            session_id=session_id,
-            turn_id=turn_id,
-            user_id=user_id,
-            status=response_mode,
-            route_json=route_json,
-            **_usage_fields(response.model, response.usage),
-        )
-    except Exception as exc:
+    outcome = RagOutcome(
+        answer=cleaned_answer,
+        citations=citations,
+        refused=False,
+        model_name=response.model,
+        retrieved=audited,
+        status=response_mode,
+        reason=route_json.get("reason"),
+        session_id=session_id,
+        turn_id=turn_id,
+    )
+    audit = AuditPayload(
+        mode="qa",
+        query_text=question,
+        retrieved=audited,
+        answer_text=cleaned_answer,
+        citations=[asdict(c) for c in citations],
+        refused=False,
+        model_name=response.model,
+        session_id=session_id,
+        turn_id=turn_id,
+        user_id=user_id,
+        status=response_mode,
+        route_json=route_json,
         # No-audit-no-answer (INV-6): a validated answer with no audit row is
         # never returned -- but the failure must be DEFINED, not a naked 500
         # that the stream-fallback client re-runs (a second paid synthesis)
-        # into the same down DB. Degrade to the fixed-copy status="error"
-        # refusal; _refuse re-attempts the audit and skips it (flagged) if the
-        # DB is still down.
-        log.warning("qa_answer_audit_write_failed", error=str(exc), error_type=type(exc).__name__)
-        capture_exception(exc)
-        return _decline(
+        # into the same down DB. allow_skip=False makes the shell use the
+        # STRICT write; on failure it serves this fallback -- the fixed-copy
+        # status="error" refusal, whose own audit is re-attempted and skipped
+        # (flagged) if the DB is still down. Built eagerly (it is pure):
+        # active_filters/context_applied no longer mutate after synthesis, so
+        # build-time and failure-time route_json are identical.
+        allow_skip=False,
+        failure_fallback=_decline(
             _refuse,
             reason="audit_error",
             response_mode="refused",
@@ -1585,20 +1636,98 @@ def ask(
             status="error",
             answer_text=_SERVICE_UNAVAILABLE_TEXT,
             usage=response.usage,
-        )
-    return _finish_turn(
-        QAResult(
-            answer=cleaned_answer,
-            citations=citations,
-            refused=False,
-            model_name=response.model,
-            audit_id=audit_id,
-            retrieved=audited,
-            status=response_mode,
-            reason=route_json.get("reason"),
+        ),
+        **_usage_fields(response.model, response.usage),
+    )
+    return outcome, audit, _build_patch(outcome, filters=active_filters, route_json=route_json)
+
+
+def ask(
+    question: str,
+    *,
+    filters: dict[str, Any] | None = None,
+    k: int | None = None,
+    session_id: str | None = None,
+    user_id: str | None = None,
+    turn_id: str | None = None,
+    bind_session: bool = True,
+    on_progress: Callable[[str], None] | None = None,
+    on_token: Callable[[str], None] | None = None,
+) -> QAResult:
+    """Grounded Q&A entry point — answer with citations, clarify, or refuse.
+
+    The thin persistence SHELL around ``ask_core``: it owns the session ids and
+    every write (user message, audit row, assistant message, filter carry-over)
+    while the core owns every decision. A future control plane replaces this
+    function without touching the core.
+
+    ``bind_session=False`` keeps ``user_id`` as audit-only attribution (INV-6):
+    the bookkeeping ChatSession stays unowned (user_id NULL) and so invisible
+    to /sessions — for internal callers like the dossier, whose synthetic Q&A
+    must not appear in the caller's chat history.
+
+    ``on_progress`` (optional) receives short, cosmetic phase strings as the
+    pipeline advances, for a live status ticker (POST /query/stream). It carries
+    NO answer text or citations — INV-1 lives entirely in the post-validation
+    answer path — and a failing sink can never break or slow the query.
+
+    ``on_token`` (optional) receives provisional answer text deltas for a live
+    "typing" effect. It is cosmetic ONLY: the recorded and returned answer is the
+    post-validation text, and the refusal sentinel is never streamed as an
+    answer. A missing sink or a non-streaming provider degrades to a single
+    buffered completion with no behavior change.
+    """
+    # Touch settings/model-name BEFORE any write, matching pre-split ask(): both
+    # are lru_cache-backed (near-free on every call after the first) but a first-
+    # ever misconfiguration (e.g. a Settings validation error) must fail BEFORE
+    # the user-message write below, not leave an orphaned question with no
+    # assistant/audit response. ask_core re-reads them (cached, not re-fetched).
+    get_settings()
+    current_model_name(role="synthesizer")
+
+    # Session bookkeeping is best-effort: a DB hiccup here must never stop the query
+    # from being processed and audited (INV-6). Degrade to a fresh id on failure.
+    # The user-message write stays HERE, before compute, so a core exception still
+    # leaves the question in the chat history exactly as before the split.
+    try:
+        session_id = ensure_session(session_id, user_id=user_id if bind_session else None)
+        turn_id = turn_id or new_turn_id()
+        record_message(
             session_id=session_id,
             turn_id=turn_id,
-        ),
-        filters=active_filters,
-        route_json=route_json,
+            role="user",
+            content=question,
+            filters=filters,
+        )
+    except SessionOwnershipError:
+        # Lost an ownership race after the API's pre-check — abort rather than
+        # write this caller's turns into another user's session (the API maps
+        # this to its ownership 404).
+        raise
+    except Exception:
+        log.warning("session_setup_failed", exc_info=True)
+        turn_id = turn_id or new_turn_id()
+        # Degrade to a FRESH id, never the requested one: after a failed bind
+        # (e.g. a lost create race on a client-chosen id) the requested session
+        # may belong to someone else, so later writes must not target it.
+        session_id = turn_id
+
+    # Session context enters the core through loaders the SHELL owns (the core
+    # never touches conversation storage). The loader bodies resolve
+    # get_session_filters/get_recent_turns as module globals at CALL time so
+    # tests that monkeypatch them on this module keep working; a future HTTP
+    # shell passes constants over pre-loaded request data instead.
+    sid, tid = session_id, turn_id
+    outcome, audit, patch = ask_core(
+        question,
+        session_id=sid,
+        turn_id=tid,
+        filters=filters,
+        k=k,
+        user_id=user_id,
+        load_session_filters=lambda: get_session_filters(sid),
+        load_recent_turns=lambda: get_recent_turns(sid, limit=3, exclude_turn_id=tid),
+        on_progress=on_progress,
+        on_token=on_token,
     )
+    return _persist_turn(outcome, audit, patch)
