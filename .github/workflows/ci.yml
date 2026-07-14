@@ -266,3 +266,41 @@ jobs:
         run: |
           git ls-files --error-unmatch regwatch/frontend/openapi.json regwatch/frontend/lib/api-types.ts
           git diff --exit-code -- regwatch/frontend/openapi.json regwatch/frontend/lib/api-types.ts
+
+  # Strangler Step 3 lane (docs/POLYGLOT_TARGET_2026-07-10.md): the Go reverse
+  # proxy under go/ ships inert -- no deploy config runs it yet (rollout plan
+  # in docs/GO_PROXY_ROLLOUT.md) -- but its gate lives here from day one.
+  go-proxy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: setup go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version-file: go/go.mod
+          # Stdlib only for now, so no go.sum exists (setup-go's default cache
+          # key source); key the module/build cache on go.mod instead.
+          cache-dependency-path: go/go.mod
+
+      # gofmt exits 0 even when files need formatting; -l prints offenders,
+      # so fail on any output (this lane's `black --check`).
+      - name: gofmt
+        working-directory: go
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt required for:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: go vet
+        working-directory: go
+        run: go vet ./...
+
+      - name: go test
+        working-directory: go
+        run: go test ./...
