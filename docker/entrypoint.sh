@@ -18,12 +18,20 @@ if [ -d "$DAGSTER_CONFIG_DIR" ]; then
 fi
 
 # Boot-time DB init runs the stamp guard (refuses if the live schema != the
-# build's alembic head) + idempotent ensures + RLS. Skip it for the Fly
-# release_command (`alembic upgrade head`, see fly.toml [deploy]): that command
-# must run the migration to MOVE the stamp to head, and the guard would
-# otherwise refuse and abort the whole deploy before the migration ever ran.
-# The real app boot (CMD = uvicorn) still runs init-db normally.
-if [ "${REGWATCH_INIT_DB:-true}" = "true" ] && [ "${1:-}" != "alembic" ]; then
+# build's alembic head) + idempotent ensures + RLS. Two commands must skip it:
+#   * alembic: the Fly release_command (`alembic upgrade head`, see fly.toml
+#     [deploy]) exists to MOVE the stamp to head; the guard would otherwise
+#     refuse and abort the whole deploy before the migration ever ran.
+#   * regwatch-proxy: the Go proxy (fly.toml [processes] group "proxy") must
+#     boot DB-independent -- a proxy machine crash-looping on the stamp guard
+#     while holding the public port is the 2026-06-18/07-07 incident class,
+#     amplified from one API machine to the entire public edge.
+# The real app boot (group "app", uvicorn) still runs init-db normally.
+run_init_db="${REGWATCH_INIT_DB:-true}"
+case "${1:-}" in
+  alembic|regwatch-proxy|*/regwatch-proxy) run_init_db="false" ;;
+esac
+if [ "$run_init_db" = "true" ]; then
   regwatch init-db
   export REGWATCH_DB_INITIALIZED=1
 fi

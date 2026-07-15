@@ -1,11 +1,19 @@
 app = "amneal"
 primary_region = "iad"
+# Fly sends SIGTERM, then SIGKILL after kill_timeout (default 5s). The Go
+# proxy drains in-flight requests -- live SSE streams included -- for up to
+# 20s on SIGTERM (go/internal/proxy/proxy.go shutdownGrace), so the default
+# would hard-kill every open stream mid-drain on each deploy. Top-level only
+# (Fly has no per-group setting); the headroom is harmless for uvicorn and
+# the release machine, which exit on SIGTERM well inside it. Plain integer
+# seconds -- the one timeout in fly.toml documented WITHOUT a unit suffix.
+kill_timeout = 30
 
 [build]
   [build.args]
     INSTALL_LOCAL_EMBEDDINGS = "false"
-    # Prod never runs Dagster (uvicorn-only CMD; the GitHub Actions cron is the
-    # sole scheduler), so keep its closure out of the shipped image.
+    # Prod never runs Dagster (uvicorn-only app group; the GitHub Actions cron
+    # is the sole scheduler), so keep its closure out of the shipped image.
     INSTALL_ORCHESTRATION = "false"
 
 # Run pending Alembic migrations in a one-off machine BEFORE the rolling deploy
@@ -20,6 +28,32 @@ primary_region = "iad"
 [deploy]
   release_command = "alembic upgrade head"
 
+# Two process groups, ONE image, and Fly runs each group on SEPARATE machines:
+#   app   -- uvicorn. The pre-flip machines already belong to the default
+#           group, which Fly names "app"; reusing that exact name keeps them
+#           mapped to this group instead of orphaning them. The bind is "::",
+#           the ONE deviation from the image CMD (which keeps 0.0.0.0 for
+#           local docker/compose runs; on Fly [processes] supersedes CMD):
+#           6PN is IPv6-only, so an IPv4-only 0.0.0.0 listener would refuse
+#           every proxy->app dial -- including the end-to-end /health check
+#           that admits proxy machines to rotation, i.e. a total public
+#           outage. Uvicorn picks AF_INET6 for any host containing ":" and
+#           never sets IPV6_V6ONLY (bind_socket in the pinned uvicorn), so on
+#           Linux (bindv6only=0 default) "::" is dual-stack: native IPv6 for
+#           the proxy path, IPv4-mapped for whichever family flyd dials for
+#           [checks.app_health] below.
+#   proxy -- the Go reverse proxy (go/cmd/proxy) now holds the public port and
+#           forwards everything verbatim to the app group over 6PN private
+#           networking (UPSTREAM_URL below). Runbook + rollback:
+#           docs/GO_PROXY_ROLLOUT.md.
+# Both commands enter through docker/entrypoint.sh, which runs the init-db
+# stamp guard ONLY for the app group: a proxy machine crash-looping on schema
+# drift while holding the public edge would be the 2026-06-18/07-07 incident
+# class again.
+[processes]
+  app = "uvicorn regwatch.api.main:app --host :: --port 8000"
+  proxy = "regwatch-proxy"
+
 [env]
   EMBEDDING_PROVIDER = "openai"
   AUTH_COOKIE_SECURE = "true"
@@ -27,11 +61,13 @@ primary_region = "iad"
   API_PORT = "8000"
   CORS_ALLOW_ORIGINS_CSV = "https://amneal.vercel.app"
   SENTRY_ENVIRONMENT = "production"
-  # The app only ever serves behind Fly's edge ([http_service] + force_https), so
-  # trust the proxy: _client_ip then keys the per-IP login limiter on the
-  # platform-attested Fly-Client-IP (un-spoofable, set by Fly's edge) instead of
-  # collapsing every request to request.client.host (= the Fly proxy in prod),
-  # which would merge all callers into one IP bucket and gut the spray guard.
+  # The app only ever serves behind Fly's edge + the transparent Go proxy, so
+  # trust the proxy chain: _client_ip then keys the per-IP login limiter on the
+  # platform-attested Fly-Client-IP (un-spoofable, set by Fly's edge; the Go
+  # proxy forwards it byte-for-byte, see go/internal/proxy) instead of
+  # collapsing every request to request.client.host (= the Go proxy's machine
+  # in prod), which would merge all callers into one IP bucket and gut the
+  # spray guard.
   TRUST_PROXY_HEADERS = "true"
   # B1: refuse to boot on the SQLite fallback. DATABASE_URL is a Fly secret
   # (`fly secrets set DATABASE_URL=...`); if it is missing the app must fail
@@ -39,22 +75,58 @@ primary_region = "iad"
   REQUIRE_DATABASE_URL = "true"
   # B4: SENTRY_DSN is a Fly secret (`fly secrets set SENTRY_DSN=...`). Without
   # it the app boots but logs a loud warning — errors would otherwise vanish.
+  #
+  # Read only by the proxy group ([env] is app-wide on Fly; nothing in the
+  # Python app reads it): upstream = the app group's machines via 6PN DNS.
+  # 6PN names resolve to IPv6 (AAAA) ONLY -- which is why [processes].app
+  # binds "::" above; a 0.0.0.0 uvicorn would be unreachable at this URL.
+  # The name resolves to RUNNING app-group machines with no health filtering
+  # -- acceptable because auto_stop_machines is off and [checks.app_health]
+  # below gates app machines during deploys. The proxy listens on its PORT
+  # default 8080, which must match internal_port below.
+  UPSTREAM_URL = "http://app.process.amneal.internal:8000"
 
+# THE TRAFFIC FLIP (docs/GO_PROXY_ROLLOUT.md): the public service fronts the
+# proxy group; uvicorn (group "app") is reachable only over private networking.
 [http_service]
-  internal_port = 8000
+  processes = ["proxy"]
+  internal_port = 8080
   force_https = true
   auto_stop_machines = false
-  # CD-2: keep TWO machines running so a rolling deploy (the default strategy)
-  # always leaves one machine serving while the other is replaced — instead of
-  # stopping the single machine and booting a new one with NOTHING serving
-  # during the grace+init window. Requires `fly scale count 2` once; this floor
-  # only stops Fly from autostopping below it. The /health check below gates
-  # each machine back into rotation before the next is touched.
+  # CD-2, retargeted at the proxy now that it is the public edge: keep TWO
+  # machines running so a rolling deploy always leaves one serving while the
+  # other is replaced. This is a floor against autostop, not a creator: the
+  # first flip deploy creates AT LEAST one proxy machine (typically exactly
+  # one), so run `fly scale count proxy=2 app=2` immediately after it (see
+  # the runbook).
+  # The /health check below gates each machine back into rotation before the
+  # next is touched.
   min_machines_running = 2
 
+  # Deliberately GET /health -- which now traverses proxy -> app -> DB -- and
+  # NOT the proxy-local /healthz: edge rotation must gate on END-TO-END
+  # health, so a proxy whose upstream is unreachable falls out of rotation
+  # instead of staying "healthy" while serving 502s. /healthz remains a
+  # local-liveness debug endpoint only.
   [[http_service.checks]]
     interval = "30s"
     timeout = "10s"
     grace_period = "30s"
     method = "GET"
     path = "/health"
+
+# The app group lost its public service above, and with it the only health
+# check gating its rolling replacement -- an unchecked group rolls on "machine
+# started", which is how a sick boot reaches every machine (the 2026-06-18
+# incident class). This machine check restores the exact pre-flip cadence,
+# aimed straight at uvicorn on 8000.
+[checks]
+  [checks.app_health]
+    processes = ["app"]
+    type = "http"
+    port = 8000
+    method = "GET"
+    path = "/health"
+    interval = "30s"
+    timeout = "10s"
+    grace_period = "30s"
