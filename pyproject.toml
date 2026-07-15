@@ -8,7 +8,7 @@ license = { text = "MIT" }
 authors = [{ name = "Amneal Engineering" }]
 dependencies = [
     "httpx>=0.27",
-    "selectolax>=0.3.21",
+    "selectolax>=0.4.11",
     "tenacity>=9.0",
     "pdfplumber>=0.11.10",
     "pypdf>=6.14.2",  # 6.13.3 fixes GHSA-jm82-fx9c-mx94 (unbounded stream-length DoS)
@@ -36,15 +36,15 @@ dependencies = [
 [project.optional-dependencies]
 local-embeddings = [
     "sentence-transformers>=5.6.0",
-    "torch>=2.12.1,<3",
+    "torch>=2.13.0,<3",
     "transformers<6",
 ]
 llm = [
-    "openai>=2.44.0",
+    "openai>=2.45.0",
     "anthropic>=0.116.0",
 ]
 orchestration = [
-    "dagster>=1.13.12,<1.14",
+    "dagster>=1.13.13,<1.14",
     "dagster-webserver>=1.13,<1.14",
     "dagster-postgres>=0.29,<0.30",
 ]
@@ -53,9 +53,9 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",
     "pytest-timeout>=2.3",
-    "ruff>=0.15.20",
+    "ruff>=0.15.21",
     "black>=24.10",
-    "mypy>=2.2.0",
+    "mypy>=2.3.0",
     "types-requests",
     "respx>=0.21",
     "import-linter>=2.13",
