@@ -5,7 +5,8 @@ uvicorn, alembic and regwatch-proxy record their argv plus the exported
 REGWATCH_DB_INITIALIZED into a shared log) and every path the script writes is
 pointed under tmp_path, so nothing touches the repo, /app, or a real database.
 
-The contract under test (fly.toml topology after the Go proxy traffic flip):
+The contract under test (entrypoint dispatch on $1, across today's app group
+and the staged phase-3 proxy group -- docs/GO_PROXY_ROLLOUT.md):
 
 * ``alembic ...`` (the Fly release_command) skips init-db: the release machine
   exists to MOVE the alembic stamp to head, and the stamp guard would refuse
@@ -93,19 +94,21 @@ def _run(
 
 
 def test_uvicorn_runs_init_db_then_hands_off(tmp_path: Path) -> None:
-    # argv mirrors fly.toml [processes].app verbatim ("::" bind: 6PN is
-    # IPv6-only, see docs/GO_PROXY_ROLLOUT.md) so this test documents the
-    # exact command the app group boots with.
+    # The entrypoint dispatches on $1 only, so this argv is illustrative, not a
+    # contract -- it is NOT parsed from fly.toml and must not be read as the
+    # canonical boot command. (It once carried "--host ::" and quietly outlived
+    # the config it claimed to mirror; that bind is now refuted -- see
+    # docs/GO_PROXY_ROLLOUT.md root cause 2.)
     proc, lines = _run(
         tmp_path,
-        ["uvicorn", "regwatch.api.main:app", "--host", "::", "--port", "8000"],
+        ["uvicorn", "regwatch.api.main:app", "--host", "0.0.0.0", "--port", "8000"],
     )
     assert proc.returncode == 0, proc.stderr
     # init-db ran first (before the export), then uvicorn with argv intact and
     # REGWATCH_DB_INITIALIZED=1 visible to it.
     assert lines == [
         "regwatch|init-db|db_init=unset",
-        "uvicorn|regwatch.api.main:app --host :: --port 8000|db_init=1",
+        "uvicorn|regwatch.api.main:app --host 0.0.0.0 --port 8000|db_init=1",
     ]
 
 

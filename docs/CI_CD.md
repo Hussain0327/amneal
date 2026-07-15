@@ -169,11 +169,18 @@ Two recurring root causes, both verified by reproducing the scan:
 
 1. **esbuild ships a Go binary.** Every "Go stdlib" CVE in `.trivyignore` comes
    from `@esbuild/<platform>/bin/esbuild` (Type=gobinary) in the **web** image,
-   pulled in transitively by vite/vitest. The **API image has no Go binary at all**
-   and its scan passes clean. We do not build esbuild and cannot bump its embedded
-   Go toolchain; only an upstream esbuild release can. esbuild runs as a local code
-   transform, never as a network/TLS peer, so its net/* and crypto/tls CVEs are
-   unreachable -- ignoring them is correct and consistent.
+   pulled in transitively by vite/vitest. We do not build esbuild and cannot bump
+   its embedded Go toolchain; only an upstream esbuild release can. esbuild runs as
+   a local code transform, never as a network/TLS peer, so its net/* and crypto/tls
+   CVEs are unreachable -- ignoring them is correct and consistent.
+
+   **The API image now has a Go binary too, and it is OURS.** Since PR #93 the API
+   image ships `/usr/local/bin/regwatch-proxy`, built from the Dockerfile's
+   digest-pinned `golang:` stage. So a Go stdlib CVE can fire on the **API** image
+   as well -- and the remedy there is the opposite of the esbuild case: bump the
+   pinned `golang:` digest in the Dockerfile and rebuild. Never add an API-image Go
+   CVE to `.trivyignore`; we own that toolchain. Check which image the finding came
+   from before reaching for the ignorefile.
 2. **Trivy flips advisory primary ids (GHSA <-> CVE).** Trivy's legacy ignorefile
    matches the **exact** `VulnerabilityID` and does **not** resolve aliases. When
    Trivy's DB switches an advisory from its GHSA id to a CVE id (as it did for the

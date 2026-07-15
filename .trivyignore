@@ -30,8 +30,12 @@ GHSA-fx2h-pf6j-xcff
 # esbuild ships rebuilt binaries.
 #
 # Verified Jun 2026 by reproducing the CI scan: every CVE below comes from the
-# WEB image's esbuild Go binary, NOT a Python dependency in the API image -- the
-# API image contains no Go binary at all, and its scan already passes clean.
+# WEB image's esbuild Go binary, NOT a Python dependency in the API image.
+# NOTE (Jul 2026): since PR #93 the API image DOES contain a Go binary
+# (/usr/local/bin/regwatch-proxy, built from the Dockerfile's digest-pinned
+# golang stage), so a Go stdlib CVE can now legitimately fire on the API image
+# too. The remedy there is bumping the pinned golang digest and rebuilding --
+# never an entry in this file (we own that toolchain, unlike esbuild's).
 CVE-2023-45288
 CVE-2024-24790
 CVE-2024-34156

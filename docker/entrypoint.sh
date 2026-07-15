@@ -22,10 +22,11 @@ fi
 #   * alembic: the Fly release_command (`alembic upgrade head`, see fly.toml
 #     [deploy]) exists to MOVE the stamp to head; the guard would otherwise
 #     refuse and abort the whole deploy before the migration ever ran.
-#   * regwatch-proxy: the Go proxy (fly.toml [processes] group "proxy") must
-#     boot DB-independent -- a proxy machine crash-looping on the stamp guard
-#     while holding the public port is the 2026-06-18/07-07 incident class,
-#     amplified from one API machine to the entire public edge.
+#   * regwatch-proxy: the Go proxy must boot DB-independent -- a proxy machine
+#     crash-looping on the stamp guard while holding the public port is the
+#     2026-06-18/07-07 incident class, amplified from one API machine to the
+#     entire public edge. Staged for the phase-3 "proxy" process group
+#     (docs/GO_PROXY_ROLLOUT.md); no fly.toml group execs the binary today.
 # The real app boot (group "app", uvicorn) still runs init-db normally.
 run_init_db="${REGWATCH_INIT_DB:-true}"
 case "${1:-}" in

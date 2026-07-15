@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 
-# Build stage for the Go reverse proxy (fly.toml [processes] group "proxy",
-# docs/GO_PROXY_ROLLOUT.md). CGO_ENABLED=0 over a stdlib-only module yields a
+# Build stage for the Go reverse proxy (staged for the phase-3 "proxy" process
+# group, docs/GO_PROXY_ROLLOUT.md; no fly.toml group execs it today).
+# CGO_ENABLED=0 over a stdlib-only module yields a
 # fully static binary, so the python:3.12-slim runtime stage below needs no
 # extra libraries. Digest-pinned like the python base (mutable tag kept as
 # documentation); bump by resolving the multi-arch INDEX digest:
@@ -107,9 +108,10 @@ RUN chmod +x /usr/local/bin/regwatch-entrypoint \
     && if [ "$INSTALL_ORCHESTRATION" = "true" ]; then EXTRAS="$EXTRAS --extra orchestration"; fi \
     && uv sync --frozen $EXTRAS --no-dev
 
-# Static proxy binary (fly.toml [processes] group "proxy" execs it through the
-# entrypoint; inert on app machines). Copied after the python layers on
-# purpose: a Go-only change must not invalidate the uv dependency cache above.
+# Static proxy binary. Ships inert: the phase-3 "proxy" process group
+# (docs/GO_PROXY_ROLLOUT.md) will exec it through the entrypoint; no fly.toml
+# group runs it today. Copied after the python layers on purpose: a Go-only
+# change must not invalidate the uv dependency cache above.
 COPY --from=proxy-build /usr/local/bin/regwatch-proxy /usr/local/bin/regwatch-proxy
 
 # The CRA White Paper Word template is gitignored (internal artifact) and is
@@ -132,7 +134,11 @@ RUN mkdir -p "$DATA_DIR" \
 USER regwatch
 
 ENTRYPOINT ["regwatch-entrypoint"]
-# On Fly this CMD never runs: fly.toml [processes].app supersedes it and binds
-# --host :: instead, because the Go proxy reaches uvicorn over IPv6-only 6PN.
-# 0.0.0.0 stays here for local docker/compose runs on IPv4-only bridges.
+# On Fly, fly.toml [processes].app supersedes this CMD but is byte-identical to
+# it. Do NOT diverge the two onto "--host ::": single-process uvicorn serves via
+# loop.create_server, where asyncio/uvloop force IPV6_V6ONLY=1, so "::" is
+# IPv6-ONLY -- it refuses flyd's IPv4 health-check dials and Fly Proxy's
+# private-IPv4 backhaul. That mistake is root cause 2 of the 2026-07-15 failed
+# deploy; see docs/GO_PROXY_ROLLOUT.md. The dual-stack listener the Go-proxy
+# flip needs is phase-2 work, not a --host flag.
 CMD ["uvicorn", "regwatch.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
