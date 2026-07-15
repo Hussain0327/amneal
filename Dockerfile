@@ -1,5 +1,28 @@
 # syntax=docker/dockerfile:1
 
+# Build stage for the Go reverse proxy (fly.toml [processes] group "proxy",
+# docs/GO_PROXY_ROLLOUT.md). CGO_ENABLED=0 over a stdlib-only module yields a
+# fully static binary, so the python:3.12-slim runtime stage below needs no
+# extra libraries. Digest-pinned like the python base (mutable tag kept as
+# documentation); bump by resolving the multi-arch INDEX digest:
+#   docker manifest inspect golang:1.26.5-alpine
+# Scan note: this puts a Go stdlib binary inside the Trivy-scanned API image,
+# so a fixable Go stdlib CVE can now fail that gate; the remedy is bumping
+# this digest, not .trivyignore.
+FROM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS proxy-build
+# The pinned toolchain alone must satisfy go.mod's `go` directive:
+# GOTOOLCHAIN=local turns "pinned image too old" into a loud build failure
+# instead of a silent mid-build network download of a different toolchain.
+ENV GOTOOLCHAIN=local CGO_ENABLED=0
+WORKDIR /src
+# go.mod before sources so the dependency layer (a no-op while the module is
+# stdlib-only) stays cached across source edits once deps arrive.
+COPY go/go.mod ./
+RUN go mod download
+COPY go/cmd ./cmd
+COPY go/internal ./internal
+RUN go build -trimpath -ldflags "-s -w" -o /usr/local/bin/regwatch-proxy ./cmd/proxy
+
 # Two build flavors, gated by INSTALL_LOCAL_EMBEDDINGS:
 #   * slim (default, production): no torch/sentence-transformers. Run with
 #     EMBEDDING_PROVIDER=openai + OPENAI_API_KEY (+ DATABASE_URL for
@@ -84,6 +107,11 @@ RUN chmod +x /usr/local/bin/regwatch-entrypoint \
     && if [ "$INSTALL_ORCHESTRATION" = "true" ]; then EXTRAS="$EXTRAS --extra orchestration"; fi \
     && uv sync --frozen $EXTRAS --no-dev
 
+# Static proxy binary (fly.toml [processes] group "proxy" execs it through the
+# entrypoint; inert on app machines). Copied after the python layers on
+# purpose: a Go-only change must not invalidate the uv dependency cache above.
+COPY --from=proxy-build /usr/local/bin/regwatch-proxy /usr/local/bin/regwatch-proxy
+
 # The CRA White Paper Word template is gitignored (internal artifact) and is
 # deliberately NOT baked into the image. WHITEPAPER_TEMPLATE_PATH (set above)
 # defaults to a path under the mounted /app/data volume, so an operator drops
@@ -104,4 +132,7 @@ RUN mkdir -p "$DATA_DIR" \
 USER regwatch
 
 ENTRYPOINT ["regwatch-entrypoint"]
+# On Fly this CMD never runs: fly.toml [processes].app supersedes it and binds
+# --host :: instead, because the Go proxy reaches uvicorn over IPv6-only 6PN.
+# 0.0.0.0 stays here for local docker/compose runs on IPv4-only bridges.
 CMD ["uvicorn", "regwatch.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

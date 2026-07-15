@@ -1,100 +1,222 @@
-# Go proxy rollout plan (strangler Step 3, deploy slice)
+# Go proxy rollout (strangler Step 3): the traffic-flip runbook
 
-Status 2026-07-14: the proxy itself (`go/cmd/proxy`) is built, tested, and
-gated in CI, but SHIPS INERT -- fly.toml, the Dockerfile, and deploy.yml are
-untouched and no deployed behavior changes. This document is the plan for the
-NEXT slice, the one that wires it into Fly.
+Status 2026-07-14: AS-BUILT. The proxy itself (`go/cmd/proxy`) merged inert in
+PR #84; THIS change wires it into Fly and flips the public port to it:
 
-Why split the slices: the 2026-06-18 incident class. Deploy-behavior changes
-(boot guards, `release_command`, rolling machine replacement) have taken prod
-down before; keeping "new code lands" and "traffic path changes" in separate,
-individually revertable deploys means the flip commit is a one-file diff and
-rollback is `git revert` + redeploy, never "which half broke".
+- `fly.toml` gains `[processes]` (`app` = the old uvicorn CMD with ONE
+  deliberate change, `--host ::` instead of `0.0.0.0` -- 6PN is IPv6-only,
+  see the topology section; `proxy` = `regwatch-proxy`); `[http_service]`
+  fronts the proxy group on 8080; the app group keeps deploy gating via a
+  machine check (`[checks.app_health]`); `kill_timeout = 30` covers the
+  proxy's 20s SIGTERM drain.
+- `Dockerfile` gains a digest-pinned golang stage that builds the static
+  binary into the shared image at `/usr/local/bin/regwatch-proxy`.
+- `docker/entrypoint.sh` exempts `regwatch-proxy` from the init-db stamp
+  guard (`tests/test_entrypoint_guard.py` locks the skip/run matrix).
 
-## Current topology (fly.toml as of this slice)
+Uvicorn keeps serving exactly what it served before; it just stops holding
+the public port (and binds `::` instead of `0.0.0.0` so the proxy can reach
+it over 6PN).
 
-- Single process group; image CMD runs uvicorn on :8000 (`API_PORT=8000`).
-- `[http_service]` internal_port 8000, force_https, `min_machines_running = 2`,
-  HTTP check on `/health` (served by FastAPI).
-- `[deploy] release_command = "alembic upgrade head"` is the sole migration
-  authority. Nothing in this plan touches it.
-- No `kill_timeout` set, so Fly's default 5s SIGTERM->SIGKILL window applies.
-- `TRUST_PROXY_HEADERS=true`: the app keys its login limiter on Fly-Client-IP
-  with rightmost-XFF fallback (`main.py::_client_ip`). The proxy forwards
-  both verbatim -- covered by Go tests; re-verify end-to-end at the flip.
+## Why this is the risk slice
 
-## Target topology
+Both prod incidents were deploy-topology incidents: 2026-06-18 (boot-guard
+crash loop + lock pileup) and 2026-07-07 (pre-migrated DB vs boot guard
+killing machines on restart). This change alters WHO holds the public port,
+so it ships as ONE commit that is one `git revert` away from the old
+topology, and the deploy is watched end-to-end (matrix below).
 
-Same Fly app, two process groups (Fly runs each group on separate machines):
+Deviations from the earlier plan in this file, on purpose:
 
-```toml
-[processes]
-  app = "<current uvicorn command>"          # unchanged
-  proxy = "/usr/local/bin/regwatch-proxy"
+- One deploy, not three. The staged sequence (binary first, dormant groups
+  second, flip third) optimized for intermediate observability, but each
+  intermediate state was itself a novel topology to debug. A single flip
+  commit keeps exactly one revertable unit; the compensating control is the
+  watched-deploy matrix.
+- The edge health check stays `GET /health` END-TO-END (edge -> proxy -> 6PN
+  -> uvicorn -> DB), NOT the proxy-local `/healthz`. Edge rotation must gate
+  on the whole path: a proxy whose upstream is unreachable has to fall out of
+  rotation, not stay "healthy" while serving 502s. `/healthz` remains a
+  local-liveness debug endpoint only.
+- No flycast address for the app group yet. `app.process.amneal.internal`
+  resolves to RUNNING app machines with no health filtering; that is
+  acceptable while `auto_stop_machines = false` keeps them up and
+  `[checks.app_health]` gates them during rolls. Revisit flycast if app
+  machines ever autostop or the group grows.
+- `[processes].app` is deliberately NOT string-identical to the image CMD:
+  the host is `::` instead of `0.0.0.0` (module, port, and semantics
+  unchanged). Reason in the topology section below; the image CMD keeps
+  `0.0.0.0` for local docker/compose runs, and on Fly `[processes]`
+  supersedes CMD.
 
-[env]
-  # Only the proxy reads these; app-wide [env] is fine.
-  UPSTREAM_URL = "http://app.process.amneal.internal:8000"
-  PORT = "8080"
+## Topology after this commit
 
-[http_service]
-  processes = ["proxy"]   # the flip
-  internal_port = 8080
-  # checks move to GET /healthz (served by the proxy itself)
-```
+Two process groups, one image, SEPARATE machines per group (Fly semantics):
 
-Notes:
+| group | command | port | public? | health gate |
+| ----- | ------- | ---- | ------- | ----------- |
+| proxy | `regwatch-proxy` (via entrypoint) | 8080 (proxy PORT default; must match `internal_port`) | yes, `[http_service]` | edge check `GET /health` through the proxy (end-to-end) |
+| app | `uvicorn regwatch.api.main:app --host :: --port 8000` | 8000 | no | machine check `[checks.app_health]` `GET /health`, same cadence as the old edge check |
 
-- Dockerfile gains a `golang` build stage (CGO_ENABLED=0 static binary) that
-  copies `/usr/local/bin/regwatch-proxy` into the runtime image. Both process
-  groups share one image; an unexecuted binary is inert, so this can land and
-  deploy ahead of any topology change.
-- Process groups are SEPARATE machines, so the proxy cannot reach uvicorn on
-  127.0.0.1. Upstream goes over 6PN private networking:
-  `app.process.amneal.internal:8000`. Caveat: that DNS name resolves to ALL
-  machines in the app group with no health awareness; if that round-robin is
-  not acceptable at flip time, allocate a flycast address for the app group
-  instead (private load balancing that honors health checks).
-- Health checks after the flip: proxy group gets the `[http_service]` check on
-  `/healthz` (local liveness, deliberately independent of the upstream so a
-  Python restart does not recycle proxy machines). The app group keeps a
-  `/health` machine check via `[checks]` since it no longer has a public
-  service.
-- `kill_timeout`: raise to >= 30s for the proxy group. The proxy drains
-  in-flight requests (including SSE) for up to 20s on SIGTERM; under the
-  default 5s window Fly would SIGKILL mid-drain and sever live streams.
-- `/healthz` is intercepted by the proxy (exact path only). FastAPI defines
-  `/health`, not `/healthz`, so nothing is shadowed today; if the Python app
-  ever adds `/healthz` it will not be reachable through the proxy.
-- `min_machines_running`/`fly scale count` apply per process group: keep 2 for
-  proxy (it becomes the public edge) and 2 for app.
+The app bind is `::`, NOT the pre-flip `0.0.0.0`: `app.process.amneal.internal`
+is a 6PN name, and 6PN is IPv6-only, so an IPv4-only listener would refuse
+every proxy->app dial -- including the end-to-end `/health` check that admits
+proxy machines into rotation. With `0.0.0.0` the flip would deploy into a
+total public outage (the exact incident class this runbook exists for).
+Uvicorn selects AF_INET6 for any host containing `:` and never sets
+IPV6_V6ONLY (verified in the pinned uvicorn's `bind_socket`), so on Linux
+(`bindv6only=0` default) `::` is a dual-stack listener: native IPv6 for the
+proxy path, IPv4-mapped for whichever family flyd dials `[checks.app_health]`
+with. Nothing in this repo exercised 6PN before this change, and the Go tests
+(httptest on 127.0.0.1) structurally cannot -- the deploy's own end-to-end
+health check plus matrix row 3 are the first live proof.
 
-## Flip sequence (each step its own deploy, each independently revertable)
+`docker/entrypoint.sh` init-db stamp-guard matrix (tested):
 
-1. Dockerfile: add the Go build stage + binary. Deploy. Prod behavior
-   unchanged (binary never executed); verify /health and a live query.
-2. fly.toml: add `[processes]` (with `[http_service] processes = ["app"]`
-   still pointing at uvicorn), `[env]` UPSTREAM_URL/PORT, app-group
-   `[checks]`. Deploy. Proxy machines boot but take no public traffic;
-   verify from inside the network (`fly ssh console` + curl
-   `proxy.process.amneal.internal:8080/healthz`, then a proxied `/health`).
-3. fly.toml: flip `[http_service]` to `processes = ["proxy"]`,
-   `internal_port = 8080`, check path `/healthz`, `kill_timeout = 30`.
-   Deploy. This is the only traffic-affecting commit.
-4. Smoke immediately: `/health` (now proxied), login (Fly-Client-IP limiter
-   semantics), `/query`, and `/query/stream` -- confirm tokens arrive
-   incrementally, not in one buffered burst at stream end.
-5. Rollback at any point: `git revert` the step-3 commit and redeploy;
-   `[http_service]` routes straight to uvicorn again. Idle proxy machines are
-   harmless. No schema involvement anywhere: `release_command` stays alembic
-   throughout, so the Jun-18 boot-guard/migration failure mode is out of
-   scope for this flip by construction.
+| command | init-db |
+| ------- | ------- |
+| `alembic ...` (release_command) | skipped -- must be able to move the stamp |
+| `regwatch-proxy` (also path-qualified) | skipped -- proxy boots DB-independent; a proxy machine crash-looping on the stamp guard while holding the public port is the 2026-06-18/07-07 incident class |
+| `uvicorn ...` (app group) | runs, then exports `REGWATCH_DB_INITIALIZED=1` |
 
-## Out of scope for the flip
+Header semantics are unchanged: the proxy forwards `Fly-Client-IP` and
+`X-Forwarded-*` byte-for-byte (Go tests cover it), so `_client_ip` under
+`TRUST_PROXY_HEADERS=true` keeps keying the login limiter on the
+edge-attested client IP. `release_command = "alembic upgrade head"` is
+untouched and remains the sole migration authority.
 
-- No auth, routing, or header logic in Go beyond pass-through (that is
-  Step 4, docs/POLYGLOT_TARGET_2026-07-10.md R4).
-- `/query/stream` stays a byte-for-byte relay until CompleteQuery is proven
+## Pre-merge checklist (all mandatory)
+
+- [ ] CI fully green on the PR. `docker-build` is the load-bearing job: the
+      dev host has no docker, so CI is the ONLY place this Dockerfile (golang
+      stage + `COPY --from`) has ever been built. Do not merge on a red or
+      skipped docker-build, ever.
+- [ ] Trivy note: the API image now contains a Go stdlib binary, so the API
+      image scan (ci.yml docker-build + deploy.yml re-scan) can newly fail on
+      a FIXABLE Go stdlib CVE -- previously a web-image-only failure class.
+      The remedy is bumping the pinned `golang:` digest in the Dockerfile and
+      rebuilding, not `.trivyignore`.
+- [ ] `go-proxy` CI lane green (gofmt, vet, tests) and the full python gate
+      (pytest incl. `tests/test_entrypoint_guard.py`, mypy, ruff, black).
+- [ ] `fly config validate` passes against the new `fly.toml`.
+- [ ] Pick a low-traffic window and have `fly logs`, `fly status`, and this
+      runbook open BEFORE merging: merging to main auto-deploys via
+      deploy.yml -> `scripts/fly-deploy.sh` once CI is green.
+
+Known doc drift (follow-up, NOT this slice): docs/DEPLOY.md's one-time
+bootstrap fly.toml example still shows the pre-flip single-group topology
+(public port on uvicorn, no `[processes]`/`[checks]`). Bootstrapping a
+new/DR/staging app from it silently omits the proxy layer; until it is
+refreshed, the real `fly.toml` plus this runbook are the source of truth.
+
+## What the first deploy does (watch it live)
+
+1. deploy.yml runs `scripts/fly-deploy.sh` (bounded retry on transient Fly
+   errors only). `release_command` runs `alembic upgrade head` first --
+   unchanged, and a no-op unless the commit also carries a migration.
+2. Fly CREATES at least one machine (typically exactly one) for the new
+   `proxy` group -- `min_machines_running = 2` is only an autostop floor, it
+   creates nothing -- and BLOCKS until that machine passes smoke checks,
+   reaches `started`, and passes its end-to-end `/health` check. That check
+   dials `app.process.amneal.internal`, which ALREADY resolves: the pre-flip
+   machines belong to the default group, which Fly names `app`. So a proxy
+   that cannot reach uvicorn over 6PN fails the deploy RIGHT HERE, with the
+   still-serving old machines untouched -- zero prod impact. (Order verified
+   against flyctl master `deployMachinesApp`: new-group machine creation and
+   its health-check wait run BEFORE `updateExistingMachines`.)
+3. The existing 2 machines -- kept in the `app` group by name, see step 2 --
+   are updated in place (rolling, one at a time, gated by
+   `[checks.app_health]`): their command flips to the `::` bind and their
+   public service definition moves off them.
+4. During the roll the edge is served by a mix of old-config app machines
+   (uvicorn directly) and the new proxy machine(s); both serve the same API
+   bytes. Two transient signatures are EXPECTED and are not, by themselves,
+   rollback triggers:
+   - isolated proxy `upstream error` / single 502s while an app machine
+     restarts (the Go proxy only auto-retries idempotent requests on dead
+     pooled connections; a POST caught mid-restart can 502 once);
+   - a brief public 503 ("no healthy instances") window if the timing goes
+     adverse (or under an older/newer flyctl that orders the roll
+     differently than verified above).
+   Decision rule, so it lives on paper and not in the operator's head:
+   public 503s persisting beyond ~2 minutes after the proxy machine shows
+   `started`, or its `/health` check never going green, IS the rollback
+   trigger (see Rollback).
+5. IMMEDIATELY after the deploy goes green:
+
+       fly scale count proxy=2 app=2
+
+   Until this runs, one proxy machine is a single point of failure for the
+   entire public edge. Do not leave the deploy in that state; if scaling
+   fails, treat it as a rollback trigger.
+
+## Watched-deploy verification matrix (run every row, in order)
+
+| # | check | how | pass looks like |
+| - | ----- | --- | --------------- |
+| 1 | both groups healthy | `fly status` | 2x `app` + (after scaling) 2x `proxy`, all `started`, all checks passing |
+| 2 | proxy holds the edge | `curl -fsS https://<public-host>/healthz` | `ok` -- served by the proxy itself; uvicorn has no `/healthz` route, so this proves the flip happened |
+| 3 | end-to-end health | `curl -fsS https://<public-host>/health` | 200, `"status": "ok"`, `db.ok: true` -- full edge -> proxy -> 6PN -> uvicorn -> DB path. Also the manual proof of 6PN reachability (proxy dialing uvicorn's `::` bind over IPv6): no pre-prod environment exercises that hop |
+| 4 | auth + cookie flow | login via the frontend (or `curl -c` the login endpoint), then hit an authed route with the cookie | authed 200; cookie round-trips through the proxy |
+| 5 | streaming | authed `curl -N -X POST https://<public-host>/query/stream ...` | `event: token` frames arrive INCREMENTALLY, not one buffered burst at stream end (FlushInterval -1 doing its job) |
+| 6 | Fly-Client-IP reaches the app | from one network, 5 bad logins then a 6th; from a second network (phone hotspot), 1 bad login. Or read app logs for the recorded client IP | 6th attempt 429s while the other network still gets 401 -- limiter keys on the real client IP, not the proxy machine's |
+| 7 | no proxy errors | `fly logs` | no `upstream error:` lines from the proxy during the smoke window |
+
+Row 6 is the limiter-semantics check: if the proxy mangled `Fly-Client-IP` or
+appended to `X-Forwarded-For`, every caller would collapse into one bucket
+(both networks would 429 together) or the fallback would break entirely.
+
+## Rollback
+
+- `git revert` the flip commit, push to main, let CI + deploy.yml ship it
+  (or `bash scripts/fly-deploy.sh` from the reverted checkout in an
+  emergency). `[http_service]` points back at uvicorn:8000 and the
+  single-group topology is restored. No schema involvement in either
+  direction: `release_command` is untouched by flip and revert alike, so the
+  Jun-18 migration failure mode is out of scope by construction.
+- EXPECT A HARD PUBLIC OUTAGE WINDOW (~1-2 min) DURING THE REVERT DEPLOY.
+  Current flyctl destroys the machines of a process group that vanished from
+  the config FIRST, and only then rolls the app machines back onto the
+  service-bearing config (verified in flyctl master `deployMachinesApp`:
+  destroying `machinesToRemove` precedes `updateExistingMachines`; Fly docs
+  concur that the next deploy destroys a deleted group's machines). Between
+  proxy-destroy and the first app machine passing its restored `/health`
+  check -- stop, image pull, init-db, uvicorn boot, check pass -- ZERO
+  machines advertise the public service: the edge hard-503s and in-flight
+  requests/SSE streams are severed. This is the revert WORKING AS DESIGNED.
+  Do NOT interrupt it, second-deploy over it, or improvise `fly machine`
+  commands mid-roll (improvised machine surgery mid-deploy is this repo's
+  documented incident amplifier, 2026-06-18/07-07). Instead watch
+  `fly status` and loop `curl -fsS https://<public-host>/health` until 200.
+- Break-glass, only if the window must be shorter: `fly deploy --strategy
+  immediate` from the reverted checkout replaces all machines at once,
+  skipping health-gating. Acceptable ONLY here because the reverted config
+  is the battle-tested pre-flip topology.
+- Leftover proxy machines -- verify, do not assume: current flyctl
+  auto-destroys them (above), but older flyctl versions may not prune. After
+  the revert deploy, `fly status` MUST show zero `proxy` machines; that
+  check is part of the rollback, not optional hygiene. A surviving proxy
+  machine is NOT inert: fly-proxy routes on per-machine service
+  registration, not on fly.toml, so a survivor still advertises the public
+  http_service on 8080 and keeps taking a share of edge traffic through the
+  reverted-away Go path -- until its end-to-end check fails (the reverted
+  app group's `0.0.0.0` bind is unreachable over 6PN, so post-revert it
+  serves 502s for up to a check cycle before falling out of rotation, and
+  stays one config-drift away from serving again). If the rollback reason
+  was a proxy bug, a survivor is still exercising that bug on live traffic.
+  Destroy immediately, then re-verify with `fly status`:
+
+      fly machine list
+      fly machine destroy <proxy-machine-id> --force   # per proxy machine
+
+- The image keeps the (now unexecuted) proxy binary after a revert of
+  fly.toml alone; that is harmless and needs no separate action.
+
+## Out of scope for this slice (unchanged)
+
+- No auth, routing, or header logic in Go beyond byte-for-byte pass-through
+  (Step 4, docs/POLYGLOT_TARGET_2026-07-10.md R4).
+- `/query/stream` stays a transparent relay until CompleteQuery is proven
   (plan R3).
-- Framework choices (chi, sqlc, golangci-lint lane) are Step 4 decisions;
+- Framework choices (chi, sqlc, golangci-lint lane) remain Step 4 decisions;
   the proxy stays stdlib-only until then.
