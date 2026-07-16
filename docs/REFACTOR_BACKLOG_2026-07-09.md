@@ -260,6 +260,15 @@ _Source: 19-lane multi-agent audit (12 module deep-reads + 7 cross-cutting sweep
 
 ### #24 — api_host/api_port Settings fields are dead; API_HOST/API_PORT env vars are silent cargo across 4 deploy files
 
+> **DONE (2026-07-16, phase-2 dual-stack listener).** Fields + all env copies
+> deleted (.env.example, Dockerfile ENV, fly.toml, compose.yaml, plus stale
+> docs in DEPLOY.md and DOCKER.md). This item's "ALTERNATIVE if the port must
+> be configurable: make the bind read the env" was deliberately NOT taken, and
+> is now actively forbidden: `regwatch serve` HARDCODES the bind list, because
+> a launcher honouring `API_HOST=0.0.0.0` would bind IPv4-only, pass every IPv4
+> gate, ship green, and break only at the phase-3 Go-proxy flip. See
+> docs/GO_PROXY_ROLLOUT.md phase 2.
+
 - **Where:** `config/settings.py:280`
 - **Class:** MEDIUM severity / S effort / dead-code · lane `x-dead-doc` · score 5.5 · confidence 0.92 · verdict CONFIRMED
 - **Now:** The settings fields predate the hardcoded uvicorn CMD; the env vars are copy-paste cargo the env-drift test (test_env_example_drift.py) then FORCES into .env.example (every Settings field must appear there), so the dead knob looks operator-facing. Result: an operational footgun -- a port change that is silently ignored.

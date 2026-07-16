@@ -53,13 +53,14 @@ services:
         required: false
     environment:
       <<: *regwatch-environment
-      API_HOST: 0.0.0.0
-      API_PORT: 8000
     volumes:
       - ./data:/app/data
     ports:
       - "8000:8000"
-    command: ["uvicorn", "regwatch.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    # Same argv as the image CMD and fly.toml [processes].app, so local dev
+    # exercises the real dual-stack listener instead of a uvicorn command prod
+    # no longer runs (docs/GO_PROXY_ROLLOUT.md phase 2).
+    command: ["regwatch", "serve"]
     healthcheck:
       test:
         [

@@ -302,9 +302,6 @@ class Settings(BaseSettings):
     # 0 disables the deadline (CLI/batch use; per-call timeouts still apply).
     whitepaper_build_timeout_s: float = 90.0
 
-    # ---------- API ----------
-    api_host: str = "127.0.0.1"
-    api_port: int = 8000
     # ---------- Auth ----------
     # Cookie-session auth: opaque tokens in an HttpOnly cookie; the DB stores
     # only the sha256 of the token. Secure stays False for the localhost pilot

@@ -158,8 +158,6 @@ combination.
    [env]
      EMBEDDING_PROVIDER = "openai"
      AUTH_COOKIE_SECURE = "true"            # API is behind HTTPS
-     API_HOST = "0.0.0.0"
-     API_PORT = "8000"
      # The Vercel production origin(s); keep this tight.
      CORS_ALLOW_ORIGINS_CSV = "https://regwatch.vercel.app"
 
@@ -272,7 +270,6 @@ railway variables --set DATABASE_URL="$SUPABASE_DB_URL" \
   --set OPENAI_API_KEY="sk-..." \
   --set EMBEDDING_PROVIDER=openai \
   --set AUTH_COOKIE_SECURE=true \
-  --set API_HOST=0.0.0.0 --set API_PORT=8000 \
   --set CORS_ALLOW_ORIGINS_CSV="https://regwatch.vercel.app"
 railway up
 ```
@@ -366,6 +363,18 @@ covers the failure.
    fly releases --image                       # last good release's image ref
    fly deploy --image <previous-image-ref>    # e.g. registry.fly.io/regwatch-api:deployment-…
    ```
+
+   > **Image and config are VERSION-COUPLED since the phase-2 dual-stack
+   > listener (docs/GO_PROXY_ROLLOUT.md).** `fly deploy --image <old>` sends
+   > your CURRENT fly.toml with that old image. Across the phase-2 boundary
+   > that combination does not boot: fly.toml says `[processes].app =
+   > "regwatch serve"` and a pre-phase-2 image has no `serve` subcommand, so
+   > every machine exits non-zero. To roll back ACROSS phase 2, deploy the
+   > reverted CHECKOUT instead -- `git revert` + push to main (CI -> deploy.yml),
+   > or `bash scripts/fly-deploy.sh` from the reverted commit in an emergency --
+   > so the image and `[processes].app` come from the same commit. The same
+   > constraint makes `--strategy immediate` safe ONLY when image and fly.toml
+   > are from one commit. Within a single phase this lever is unaffected.
 
    (Railway: **Deployments → ⋮ → Redeploy** on the previous build.) The DB
    schema is alembic-stamped and verified on boot: an older app that expects

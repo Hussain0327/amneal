@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import socket
+import sys
 from pathlib import Path
 
 import typer
+import uvicorn
 from config.settings import get_settings
 from rich import print as rprint
 from rich.console import Console
+from uvicorn.config import STARTUP_FAILURE
 
-from regwatch.common.logging import configure_logging
+from regwatch.common.logging import configure_logging, get_logger
 from regwatch.store.db import init_db
+
+log = get_logger(__name__)
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="REGWATCH command line.")
 
@@ -18,6 +24,110 @@ app = typer.Typer(no_args_is_help=True, add_completion=False, help="REGWATCH com
 @app.callback()
 def _root() -> None:
     configure_logging()
+
+
+# Phase 2 of the Go proxy rollout (docs/GO_PROXY_ROLLOUT.md). The app must
+# accept BOTH address families on one port:
+#   * IPv4, because flyd's health checks dial IPv4 and Fly Proxy's backhaul
+#     reaches each VM over a private IPv4 address.
+#   * IPv6, because the phase-3 Go proxy dials app.process.amneal.internal, a
+#     6PN name that resolves AAAA-only.
+# One host per family, NOT a single "::" socket: asyncio and uvloop create one
+# socket per host and force IPV6_V6ONLY=1 on the AF_INET6 one (CPython
+# base_events.py, "Disable IPv4/IPv6 dual stack support"). So the two never
+# collide, the result does not depend on the ambient net.ipv6.bindv6only
+# sysctl, and each family keeps its NATIVE peer address -- no ::ffff:-mapped
+# address ever reaches request.client.host or the access log.
+#
+# Hardcoded on purpose. Sourcing this from Settings is exactly how phase 2
+# would silently become a no-op: the dead API_HOST this commit deletes was
+# pinned to "0.0.0.0", which binds IPv4-only, passes every IPv4 gate we have,
+# and would only surface at the phase-3 flip.
+_DUAL_STACK_HOSTS = ["0.0.0.0", "::"]
+_REQUIRED_FAMILIES = frozenset({socket.AF_INET, socket.AF_INET6})
+
+
+class _DualStackServer(uvicorn.Server):
+    """A uvicorn Server that refuses to serve unless BOTH families are bound.
+
+    asyncio silently DROPS a family it cannot bind rather than failing: a
+    socket.socket() that raises (EAFNOSUPPORT) hits a bare ``continue``, and a
+    bind raising EADDRNOTAVAIL is swallowed as "assume the family is not
+    enabled" (CPython base_events.py). Only an all-families failure raises.
+
+    So on a machine without working IPv6 the server comes up happily on IPv4
+    alone: flyd's IPv4 check passes, the machine enters rotation looking
+    healthy, and every phase-3 proxy 6PN dial gets refused. That is the
+    2026-07-15 deploy #106 outage class with no alarm attached. Fail loudly at
+    boot instead -- an unbound family is a broken machine, not a degraded one.
+    """
+
+    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        await super().startup(sockets=sockets)
+        bound = {sock.family for server in self.servers for sock in (server.sockets or ())}
+        missing = _REQUIRED_FAMILIES - bound
+        if missing:
+            log.error(
+                "dual_stack_bind_incomplete",
+                missing=sorted(f.name for f in missing),
+                bound=sorted(f.name for f in bound),
+                hosts=_DUAL_STACK_HOSTS,
+            )
+            # CLOSE the partial bind before exiting -- do not just drain the
+            # lifespan and rely on process death to release the socket. A
+            # half-bound machine still serving IPv4 is the dangerous state (it
+            # passes flyd's IPv4 check and enters rotation while refusing every
+            # proxy 6PN dial), so it must be unreachable even if some future
+            # caller swallows SystemExit. Server.shutdown() closes every
+            # listener, drains connections, and runs the lifespan shutdown.
+            await self.shutdown()
+            # uvicorn's own bind-failure exit code, so the boot fails with a
+            # stable, platform-independent status.
+            sys.exit(STARTUP_FAILURE)
+        # Log the ACTUAL bind, via structlog rather than uvicorn's logger.
+        # uvicorn's own "Uvicorn running on ..." line is not dependable here:
+        # when init-db runs in-process, alembic's fileConfig() disables every
+        # existing logger (its default), silently killing uvicorn's error and
+        # access logs for the rest of the boot. structlog writes straight to
+        # stdout and survives that. `fly logs` is the only live signal during
+        # the phase-2 deploy, so this line is load-bearing, and reporting the
+        # families we actually bound beats echoing back the ones we asked for.
+        log.info(
+            "dual_stack_bind_ok",
+            bound=sorted(f.name for f in bound),
+            addresses=[
+                str(sock.getsockname()[:2])
+                for server in self.servers
+                for sock in (server.sockets or ())
+            ],
+        )
+
+
+def _build_server(hosts: list[str], port: int) -> _DualStackServer:
+    """Build the API server. Split out so tests can drive mutant host lists."""
+    config = uvicorn.Config(
+        "regwatch.api.main:app",
+        host=hosts,  # type: ignore[arg-type]  # uvicorn types host as str; asyncio takes an iterable
+        port=port,
+        # The in-process login-spray limiter (common/ratelimit.py) and the DB
+        # pool assume ONE process. workers>1 would also route the bind through
+        # uvicorn's bind_socket(), which never sets IPV6_V6ONLY and inherits
+        # the ambient sysctl instead.
+        workers=1,
+    )
+    return _DualStackServer(config)
+
+
+@app.command("serve")
+def cmd_serve(port: int = typer.Option(8000, "--port")) -> None:
+    """Serve the API on IPv4 AND IPv6 (the production boot command)."""
+    server = _build_server(_DUAL_STACK_HOSTS, port)
+    # Must run on the MAIN thread: uvicorn's capture_signals() silently no-ops
+    # off-thread, which would drop SIGTERM handling and break the graceful
+    # drain that fly.toml's kill_timeout=30 bounds. Nothing may follow run():
+    # capture_signals re-raises the captured signal, so the process dies BY the
+    # signal and any trailing cleanup would be dead code that reviews as live.
+    server.run()
 
 
 @app.command("init-db")

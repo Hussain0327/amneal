@@ -1,13 +1,19 @@
 # Go proxy rollout (strangler Step 3): the traffic-flip runbook
 
-Status 2026-07-15: FLIP REVERTED -- this tree is PHASE 1 of a three-phase
-re-plan. The one-deploy flip (PR #93 -> deploy run #106) was structurally
-undeployable and never took effect: prod stayed on the uvicorn-direct
-topology throughout. The proxy binary (`go/cmd/proxy`, merged inert in PR #84)
-still ships in the image; the phase-1 config executes it nowhere -- though one
-stray v34 proxy machine is still running it out of rotation until this change
-deploys (see Residue below). Two root causes follow; the flip re-lands via
-phase 2 (dual-stack listener) then phase 3 (the flip).
+Status 2026-07-16: PHASE 1 IS DONE AND VERIFIED LIVE (PR #94, release v35).
+`fly status` shows 2 app machines, ZERO proxy machines (flyctl pruned #106's
+stray v34 machine as predicted), both on v35 with checks passing; /health 200
+with db ok; /healthz 404, proving the edge still terminates at uvicorn. All
+four phase-1 exit criteria below passed on 2026-07-16.
+
+THIS TREE IS PHASE 2: the dual-stack listener (`regwatch serve`). The proxy
+binary (`go/cmd/proxy`, merged inert in PR #84) still ships in the image and
+phase 2 still executes it nowhere. Phase 3 (the flip) is unchanged and still
+gated on its preconditions.
+
+History: the one-deploy flip (PR #93 -> deploy run #106) was structurally
+undeployable and never took effect; prod stayed on the uvicorn-direct topology
+throughout. Two root causes follow.
 
 ## Incident record: deploy #106 structural deadlock (2026-07-15)
 
@@ -108,7 +114,7 @@ flip REQUIRES the phase-2 dual-stack listener.
 
 ## The re-plan: three phases, each independently deployable
 
-### Phase 1 (this change): pure un-flip
+### Phase 1 (DONE, PR #94, live as v35): pure un-flip
 
 fly.toml returns the public edge to uvicorn -- the proven v28-v33
 uvicorn-direct topology, with ONE deliberate runtime delta (kill_timeout,
@@ -116,7 +122,8 @@ below):
 
 - `[processes]` keeps ONLY `app = "uvicorn regwatch.api.main:app --host
   0.0.0.0 --port 8000"` (mirrors the image CMD; pins the group name). The
-  proxy group line is deleted.
+  proxy group line is deleted. (Phase 2 replaced this command with
+  `regwatch serve`; the IPv4-only bind described here is what phase 2 fixes.)
 - `[http_service]`: `processes = ["app"]`, `internal_port = 8000`; keeps
   force_https, `auto_stop_machines = false`, `min_machines_running = 2`, and
   the GET /health check (30s/10s/30s).
@@ -169,36 +176,140 @@ surviving stray's check would START PASSING and it would silently serve a
 share of public traffic through the un-flipped-away Go path. If flyctl ever
 fails to prune it: `fly machine destroy <id> --force`, then re-verify.
 
-### Phase 2 (next PR): a VERIFIED dual-stack listener
+### Phase 2 (this change): a VERIFIED dual-stack listener
 
 Goal: app machines accept BOTH families on :8000 -- IPv4 for flyd checks and
 Fly Proxy backhaul, IPv6 for the proxy's 6PN dials -- with a single uvicorn
-worker (the login-spray limiter and other in-process state assume one
-process).
+worker (the login-spray limiter and the DB pool assume one process).
 
-Recommended mechanism: pre-bind one AF_INET6 socket on `[::]:8000` with
-`IPV6_V6ONLY=0` and hand it to uvicorn, which uses an inherited/passed socket
-verbatim (no v6only applied): either `uvicorn --fd <n>` behind a tiny
-launcher, or programmatic `Server(config).run(sockets=[sock])` via a
-`regwatch serve` entrypoint. Rejected alternatives: `--workers 2` (flips onto
-the dual-stack bind_socket path but doubles memory on 1GB machines and
-splits in-process limiter state); flycast for the app group (re-plumbs
-service exposure; revisit only if app machines ever autostop); proxy+app on
-one machine (changes the approved architecture).
+Mechanism: `regwatch serve` (a subcommand on the existing typer app,
+src/regwatch/cli.py) builds `uvicorn.Config(host=["0.0.0.0", "::"])` and runs
+a `_DualStackServer`. asyncio and uvloop create ONE SOCKET PER HOST and force
+`IPV6_V6ONLY=1` on the AF_INET6 one (CPython base_events.py, "Disable
+IPv4/IPv6 dual stack support"). That buys three properties nothing else did:
 
-Phase 2 must ship with:
+- the two sockets cannot collide, and the result does NOT depend on the
+  ambient `net.ipv6.bindv6only` sysctl -- it is asserted per socket, not
+  inherited;
+- each family keeps its NATIVE peer address, so no `::ffff:`-mapped address
+  ever reaches `request.client.host`, the login limiter, or the access log;
+- it is strictly ADDITIVE: the AF_INET socket is byte-for-byte what v28-v35
+  served; IPv6 is added beside it. After #106, do not touch the path that works.
 
-- a CI test that boots the launcher and asserts BOTH `curl -4 127.0.0.1:PORT`
-  and `curl -6 [::1]:PORT` succeed (this exact gap -- never exercising the
-  bind family -- let root cause 2 merge);
-- fly.toml `[processes].app` updated to the launcher command;
-- live verification after its deploy: checks still passing proves the IPv4
-  path; for the IPv6 path, from one app machine dial the other over 6PN:
-  `fly ssh console -s -C "curl -fsS -6 'http://[<other-machine-6PN-addr>]:8000/health'"`
-  (get addresses from `fly machine status`). Record both results here.
+The bind list is HARDCODED, not read from Settings. The dead `API_HOST` /
+`API_PORT` settings (zero readers repo-wide, yet pinned to `0.0.0.0` in
+fly.toml) are DELETED in this change: a launcher that "helpfully" honoured
+them would bind IPv4-only, pass every IPv4 gate we have, ship green, and
+surface only at the phase-3 flip.
+
+REJECTED, with the measured evidence, so they are not re-proposed:
+
+- **Pre-binding sockets and passing `run(sockets=[...])`** -- both the
+  one-socket (`IPV6_V6ONLY=0`) and two-socket variants. A socket bound by a
+  launcher is bound BEFORE uvicorn imports the app (`config.load()` runs inside
+  `Server._serve`, measured at 2.4s for this app) and before lifespan startup,
+  and a bound port STOPS SENDING RST. Measured, a mid-boot IPv4 connect goes
+  from `ECONNREFUSED in 0.0004s` (today) to one of two bad states, depending on
+  whether the launcher has called `listen()` yet:
+    * bound, not yet listening: the SYN is DROPPED. The dial burns its
+      per-address budget (~2.5s of the proxy's 5s with prod's 2 AAAA) before
+      moving on. A latency and budget cost, not a failover defeat -- see the
+      corrected phase-3 note below.
+    * bound AND listening, app not ready: the handshake COMPLETES from the
+      backlog (measured: connect in 0.0003s, first byte 1.54s later; a GET hung
+      47s in one variant). This is the dangerous one: a completed handshake IS
+      dial success, so address iteration STOPS and the proxy commits to a dead
+      upstream rather than trying the healthy machine.
+  Both are strictly worse than today's instant RST, for zero gain. Pre-importing
+  the app shrinks the window but cannot close it (lifespan is inside it by
+  construction). `regwatch serve` sidesteps the whole class: asyncio binds and
+  listens inside `create_server`, AFTER the import and lifespan, so a booting
+  machine refuses in microseconds exactly as it does today.
+- **`uvicorn --fd <n>`** -- `config.fd` is a single int, so it structurally
+  cannot carry two sockets; `server.py` hardcodes `socket.fromfd(fd, AF_UNIX,
+  ...)`; and it LEAKS the listener across drain (measured: new connections
+  connect-then-hang during shutdown, where the sockets= path refuses in 0.00s).
+- **`--workers 2`** -- `bind_socket()` sets only `SO_REUSEADDR` and NEVER sets
+  `IPV6_V6ONLY`, so its dual-stack-ness is inherited from a kernel sysctl
+  nobody in this repo controls; a `bindv6only=1` host would silently produce a
+  v6only listener with green CI. It also doubles memory (measured app-import
+  RSS 161.9 MB against a 1GB machine) and splits limiter state. NOTE the
+  runbook's old "splits in-process limiter state" argument is weaker than it
+  claimed: `min_machines_running = 2` ALREADY splits it (ratelimit.py says so
+  itself). The sysctl argument is the one that disqualifies it.
+- **Flycast for the app group** -- re-evaluated 2026-07-16 and killed by
+  explicit docs, not silence. Flycast requires the app to bind 0.0.0.0, which
+  uvicorn already does, so the premise was sound and worth checking; it fails
+  on EXPOSURE. Flycast needs a `[[services]]` block, and "If you have public IP
+  addresses assigned to your app, then services in fly.toml are exposed to the
+  public internet" (https://fly.io/docs/networking/flycast/), corroborated at
+  https://fly.io/docs/networking/app-services/. Public Anycast and private
+  Flycast share ONE services table; there is no per-IP or private-only scoping
+  key in the documented `[[services]]` / `[[services.ports]]` schema; omitting
+  the ports block is invalid, not private ("At least one services.ports entry
+  is required"); and the only documented remedy is app-wide `fly ips release`.
+  App `amneal` holds the public ingress IPs and must keep them, so an app-group
+  service on flycast:8000 would ALSO publish plaintext uvicorn on
+  `[2a09:8280:1::127:c772:0]:8000` -- force_https bypassed, proxy bypassed, and
+  `TRUST_PROXY_HEADERS=true` applied to traffic that never crossed Fly's edge,
+  making the limiter's Fly-Client-IP spoofable. Also: `flycast:80` would route
+  to whichever group owns [http_service] (the proxy, after phase 3), so the
+  proxy dialing it re-enters itself. Do not re-propose Flycast unless this app
+  is split into two apps, and argue that on its own merits.
+- **proxy+app on one machine** -- changes the approved architecture.
+
+Phase 2 ships with:
+
+- `tests/test_dual_stack_bind.py`, the gate. It asserts on BEHAVIOUR (can a
+  client of family X get a response?), never on `ss`/`netstat` text -- `tcp46`
+  is a BSD-ism and Linux `ss` prints `tcp6` for a v6only AND a dual-stack
+  listener alike, so a string assertion would pass vacuously on CI and
+  re-create the exact blind spot that let root cause 2 merge. It carries a
+  NEGATIVE CONTROL (each mutant host list must lose exactly the family it
+  dropped), a guard test, a real-`regwatch serve` end-to-end row, and a
+  boot-window fail-fast row. It HARD-FAILS rather than skips when `::1` is
+  unavailable: a skipped gate here is indistinguishable from the bug.
+  Mutation-verified 2026-07-16: reverting the bind to `["0.0.0.0"]` (the #106
+  bug) turns 4 rows RED, including the end-to-end one.
+- `tests/test_boot_command_drift.py`: fly.toml `[processes].app`, the image
+  CMD, and compose's `command` must be the same argv. That mirror was a
+  comment with no test, and this repo has already shipped a boot command that
+  "quietly outlived the config it claimed to mirror".
+- `_DualStackServer`'s guard. asyncio SILENTLY skips a family it cannot bind
+  (`except socket.error: continue` on socket creation, and EADDRNOTAVAIL bind
+  failures swallowed as "assume the family is not enabled"); only an
+  all-families failure raises. Without the guard an IPv6-less machine serves
+  IPv4 only, passes flyd's IPv4 check, enters rotation looking healthy, and
+  refuses every phase-3 proxy dial -- #106 with no alarm. The guard closes the
+  partial bind and exits `STARTUP_FAILURE` (3).
+
+Phase 2 exit criteria (after its deploy):
+
+| # | check | pass looks like |
+| - | ----- | --------------- |
+| 1 | `fly status` | 2 `app` machines, ZERO `proxy`, both on the new VERSION, 1/1 checks passing. Checks passing IS the IPv4 proof (flyd dials IPv4). |
+| 2 | `curl -fsS https://amneal.fly.dev/health` | 200, db ok |
+| 3 | `curl -s -o /dev/null -w '%{http_code}' https://amneal.fly.dev/healthz` | 404 -- still uvicorn at the edge; phase 2 does NOT flip |
+| 4 | **IPv6 over 6PN (MANDATORY, blocking)** | from one app machine dial the other: `fly ssh console -s -C "curl -fsS -6 'http://[<other-machine-6PN-addr>]:8000/health'"` (addresses from `fly machine status`). PASTE THE LITERAL OUTPUT BELOW. |
+| 5 | `fly logs` | one `dual_stack_bind_ok` line per machine, `bound=['AF_INET', 'AF_INET6']` |
+
+Row 4 is not a formality: it is THE ONLY proof of half of phase 2. The IPv4
+half is self-gating (a broken IPv4 bind fails `[[http_service.checks]]` and
+flyctl aborts the roll with the other machine still serving), but NOTHING in
+phase 2 dials IPv6 -- no proxy exists yet. Phase 2 deploys GREEN whether or not
+IPv6 works, and a silent IPv6 failure would surface only at phase 3's admission
+check: #106 reconstructed exactly, one deploy later. Row 5 is the cheap
+belt-and-braces version; row 4 is the real one.
+
+(Row 5 uses structlog deliberately. uvicorn's own "Uvicorn running on ..." line
+is NOT dependable: when init-db runs in-process, alembic's `fileConfig()`
+disables every existing logger by default and silently kills uvicorn's error
+and access logs for the rest of the boot. Prod's entrypoint exports
+REGWATCH_DB_INITIALIZED=1 so the app skips that path, but the launcher logs its
+own bind rather than trust it.)
 
 Phase 2's deploy is otherwise routine: same topology, same checks, rolling
-update. If it wedges, revert it -- the 0.0.0.0 config is always deployable.
+update. If it wedges, revert it -- the phase-1 config is always deployable.
 
 ### Phase 3 (the flip): staged diff, preconditions, watch matrix
 
@@ -270,11 +381,40 @@ What the flip deploy does (watch it live):
    servers.
 5. Expected transient signatures (NOT rollback triggers by themselves):
    - isolated proxy `upstream error` lines / single 502s while an app
-     machine restarts. GETs (including the admission check) self-heal: the
-     Go dialer tries every resolved AAAA within its 5s budget and the
-     transport retries idempotent requests on dead pooled connections.
-     Non-idempotent requests (POSTs) and in-flight SSE on the restarting
-     machine are NOT retried and can each fail once.
+     machine restarts. A REFUSED dial is skipped fast (measured 0.0014s) and
+     the dialer moves to the next AAAA; the transport also retries idempotent
+     requests on dead POOLED connections. Non-idempotent requests (POSTs) and
+     in-flight SSE on the restarting machine are NOT retried and can each fail
+     once.
+     CORRECTION (2026-07-16): an earlier revision of this runbook claimed "the
+     Go dialer tries every resolved AAAA within its 5s budget" as a blanket
+     self-heal. The RETRY half of that is false; the address-iteration half is
+     broadly true. Precisely, all measured against the proxy's own dialer
+     (`net.Dialer{Timeout: 5s}`, go/internal/proxy/proxy.go:82-85) with a stub
+     resolver:
+       * a dial error is NOT retried at the request level. Dial errors are
+         returned BEFORE the transport's retry loop, and `shouldRetryRequest`
+         is gated on `!pc.isReused()` -- only a dead POOLED connection is
+         retried. This is the part the old sentence got wrong.
+       * the 5s budget is split PER ADDRESS, not shared: `partialDeadline`
+         (Go stdlib net/dial.go) gives each address timeRemaining/addrsRemaining
+         with a 2s floor, and Go's DialContext doc states the rule outright
+         ("any dial timeout ... is spread over each consecutive dial"). So with
+         the 2 AAAA prod actually has (2 app machines), a stalled machine costs
+         at most ~2.5s and the OTHER machine is still dialed. Measured, n=2,
+         first address black-holed and second live: 2.5027s, 2 attempts,
+         err=nil -- it connected. Refused dials cost ~0.2ms, so with n=4 all
+         four are dialed (measured 4 attempts in <1ms).
+     So a pre-bind boot window is a LATENCY and budget cost, not the total
+     failover defeat an earlier draft of this section claimed. It is still the
+     reason pre-binding was rejected -- today a booting machine is skipped in
+     microseconds, and pre-binding would make it cost ~2.5s of the proxy's 5s
+     budget per affected request, every rolling deploy, for no gain. The
+     genuinely dangerous variant is a listener that ACCEPTS and then stalls
+     (bind + listen before the app can answer): that completes the handshake,
+     so the dial SUCCEEDS, iteration stops, and the proxy commits to a dead
+     upstream. `regwatch serve` avoids both: nothing is bound until the app is
+     ready, so a booting machine RSTs exactly as it does today.
    - a brief 503 window ONLY under adverse timing or a flyctl whose ordering
      differs from the verified one.
    Decision rule: public 503s persisting beyond ~2 minutes after the first
@@ -389,7 +529,8 @@ tests/test_entrypoint_guard.py):
 | ------- | ------- |
 | `alembic ...` (release_command) | skipped -- must be able to move the stamp |
 | `regwatch-proxy` (also path-qualified) | skipped -- proxy boots DB-independent; a proxy machine crash-looping on the stamp guard while holding the public port is the 2026-06-18/07-07 incident class |
-| `uvicorn ...` (app group) | runs, then exports `REGWATCH_DB_INITIALIZED=1` |
+| `regwatch serve` (app group, since phase 2) | runs, then exports `REGWATCH_DB_INITIALIZED=1`. `$1` is `regwatch`, which matches no skip branch, so it takes the default -- entrypoint.sh needed NO change for phase 2 |
+| `uvicorn ...` (the pre-phase-2 app command) | identical: dispatch is on `$1` alone. Kept as a regression row |
 
 Header semantics: the proxy forwards `Fly-Client-IP` and `X-Forwarded-*`
 byte-for-byte (Go tests cover it), so `_client_ip` under

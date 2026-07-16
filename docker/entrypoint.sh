@@ -27,7 +27,10 @@ fi
 #     2026-06-18/07-07 incident class, amplified from one API machine to the
 #     entire public edge. Staged for the phase-3 "proxy" process group
 #     (docs/GO_PROXY_ROLLOUT.md); no fly.toml group execs the binary today.
-# The real app boot (group "app", uvicorn) still runs init-db normally.
+# The real app boot (group "app") runs `regwatch serve`, so $1 is `regwatch`,
+# which matches no skip branch and takes the init-db default below -- the same
+# behaviour the pre-phase-2 `uvicorn ...` command had. Dispatch is on $1 alone,
+# so it does not depend on which app command ships (docs/GO_PROXY_ROLLOUT.md).
 run_init_db="${REGWATCH_INIT_DB:-true}"
 case "${1:-}" in
   alembic|regwatch-proxy|*/regwatch-proxy) run_init_db="false" ;;
