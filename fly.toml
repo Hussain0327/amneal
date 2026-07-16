@@ -29,31 +29,33 @@ kill_timeout = 30
 [deploy]
   release_command = "alembic upgrade head"
 
-# ONE process group: uvicorn holds the public port -- the exact topology that
-# served v28-v33. The 2026-07-15 one-deploy traffic flip to the Go proxy
-# (PR #93 -> deploy #106) structurally deadlocked and was un-flipped by this
-# change; the flip re-lands as phases 2-3 of docs/GO_PROXY_ROLLOUT.md. The
-# explicit command pins the group name "app" (Fly's default group name, so the
-# existing machines stay mapped to it) and mirrors the image CMD byte-for-byte.
+# ONE process group: the app holds the public port -- the topology that served
+# v28-v35. The 2026-07-15 one-deploy traffic flip to the Go proxy (PR #93 ->
+# deploy #106) structurally deadlocked and was un-flipped by PR #94; the flip
+# re-lands as phase 3 of docs/GO_PROXY_ROLLOUT.md. The explicit command pins
+# the group name "app" (Fly's default group name, so the existing machines stay
+# mapped to it) and mirrors the image CMD -- tests/test_boot_command_drift.py
+# now enforces that mirror instead of trusting a comment to hold it.
 #
-# DO NOT change the bind to "::" as a flip prerequisite. Single-process
-# uvicorn serves via loop.create_server, and asyncio/uvloop force
-# IPV6_V6ONLY=1 on that path (uvicorn's dual-stack bind_socket() runs only
-# under --reload/--workers>1), so "--host ::" is IPv6-ONLY. It would refuse
-# flyd's IPv4 health-check dials and Fly Proxy's private-IPv4 backhaul
-# ("Fly Proxy reaches services through a private IPv4 address on each VM" --
-# Fly docs), wedging the rolling deploy with a machine out of rotation.
-# Verified empirically on the pinned uvicorn 0.51.0 + uvloop 0.22.1
-# (2026-07-15; runbook root cause 2). The dual-stack listener the flip needs
-# is the runbook's phase-2 work, not a --host flag.
+# `regwatch serve` (phase 2) is the DUAL-STACK listener the flip requires: it
+# binds one socket per family, IPv4 for flyd's health checks and Fly Proxy's
+# private-IPv4 backhaul, IPv6 for the phase-3 proxy's AAAA-only 6PN dials.
+#
+# DO NOT "simplify" this back to `uvicorn --host ::`. Single-process uvicorn
+# serves via loop.create_server, and asyncio/uvloop force IPV6_V6ONLY=1 on that
+# path (uvicorn's dual-stack bind_socket() runs only under --reload/--workers>1),
+# so "--host ::" is IPv6-ONLY: it would refuse flyd's IPv4 health-check dials and
+# Fly Proxy's private-IPv4 backhaul, wedging the rolling deploy with a machine out
+# of rotation. Nor to `--host 0.0.0.0`, which is IPv4-only and is precisely what
+# refused the proxy's 6PN dials in #106. Single-process uvicorn cannot serve both
+# families through --host at all; see docs/GO_PROXY_ROLLOUT.md root cause 2 and
+# tests/test_dual_stack_bind.py, which fails on either mutant.
 [processes]
-  app = "uvicorn regwatch.api.main:app --host 0.0.0.0 --port 8000"
+  app = "regwatch serve"
 
 [env]
   EMBEDDING_PROVIDER = "openai"
   AUTH_COOKIE_SECURE = "true"
-  API_HOST = "0.0.0.0"
-  API_PORT = "8000"
   CORS_ALLOW_ORIGINS_CSV = "https://amneal.vercel.app"
   SENTRY_ENVIRONMENT = "production"
   # The app only ever serves behind Fly's edge ([http_service] + force_https),

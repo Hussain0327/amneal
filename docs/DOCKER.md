@@ -39,7 +39,7 @@ by `.github/workflows/watch-daily.yml`, not by the Compose Dagster daemon.
 
 ```text
 docker image: regwatch:local
-  -> api                -> uvicorn regwatch.api.main:app
+  -> api                -> regwatch serve   (dual-stack uvicorn; see docs/GO_PROXY_ROLLOUT.md)
   -> ingest             -> regwatch seed
   -> dagster-code       -> dagster code-server
   -> dagster-webserver  -> dagster UI
@@ -128,8 +128,6 @@ SQLITE_PATH=/app/data/regwatch.db
 RAW_PDF_DIR=/app/data/raw
 PROCESSED_DIR=/app/data/processed
 DATABASE_URL=                        # empty -> SQLite + Chroma; set -> Postgres + pgvector
-API_HOST=0.0.0.0
-API_PORT=8000
 DAGSTER_HOME=/app/data/dagster/home
 ```
 

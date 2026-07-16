@@ -42,10 +42,11 @@ ARG PYTHON_VERSION=3.12
 FROM python:3.12-slim@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e
 ARG INSTALL_LOCAL_EMBEDDINGS=false
 # Dagster ships only when asked for (compose sets true for its dagster-*
-# services). Prod structurally cannot run it (the CMD is uvicorn-only, Fly has
-# no dagster process, and the GitHub Actions cron is the sole scheduler), so
-# baking the orchestration closure into the default image was pure dead weight
-# (size, build time, and Trivy/pip-audit CVE surface for unreachable code).
+# services). Prod structurally cannot run it (fly.toml declares one process
+# group and no dagster process, and the GitHub Actions cron is the sole
+# scheduler), so baking the orchestration closure into the default image was
+# pure dead weight (size, build time, and Trivy/pip-audit CVE surface for
+# unreachable code).
 ARG INSTALL_ORCHESTRATION=false
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -62,9 +63,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     EMBEDDING_PROVIDER=echo \
     WHITEPAPER_TEMPLATE_PATH=/app/data/templates/cra_white_paper_template.docx \
     DAGSTER_CONFIG_DIR=/app/dagster_config \
-    DAGSTER_HOME=/app/data/dagster/home \
-    API_HOST=0.0.0.0 \
-    API_PORT=8000
+    DAGSTER_HOME=/app/data/dagster/home
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -134,11 +133,15 @@ RUN mkdir -p "$DATA_DIR" \
 USER regwatch
 
 ENTRYPOINT ["regwatch-entrypoint"]
-# On Fly, fly.toml [processes].app supersedes this CMD but is byte-identical to
-# it. Do NOT diverge the two onto "--host ::": single-process uvicorn serves via
-# loop.create_server, where asyncio/uvloop force IPV6_V6ONLY=1, so "::" is
-# IPv6-ONLY -- it refuses flyd's IPv4 health-check dials and Fly Proxy's
-# private-IPv4 backhaul. That mistake is root cause 2 of the 2026-07-15 failed
-# deploy; see docs/GO_PROXY_ROLLOUT.md. The dual-stack listener the Go-proxy
-# flip needs is phase-2 work, not a --host flag.
-CMD ["uvicorn", "regwatch.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# On Fly, fly.toml [processes].app supersedes this CMD but has the same argv --
+# tests/test_boot_command_drift.py enforces that now, so this is a contract and
+# no longer a comment nobody checks.
+#
+# `regwatch serve` binds ONE SOCKET PER FAMILY (docs/GO_PROXY_ROLLOUT.md phase
+# 2). Do NOT "simplify" it back to a uvicorn --host flag: "--host ::" is
+# IPv6-ONLY under single-process uvicorn (asyncio/uvloop force IPV6_V6ONLY=1 on
+# the loop.create_server path), so it refuses flyd's IPv4 health checks and Fly
+# Proxy's private-IPv4 backhaul; "--host 0.0.0.0" is IPv4-only and is exactly
+# what refused the Go proxy's 6PN dials in the 2026-07-15 failed deploy. One
+# --host cannot serve both families. See root cause 2 in the runbook.
+CMD ["regwatch", "serve"]

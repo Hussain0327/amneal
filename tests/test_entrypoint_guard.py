@@ -15,9 +15,15 @@ and the staged phase-3 proxy group -- docs/GO_PROXY_ROLLOUT.md):
   init-db: the proxy must boot DB-independent. A proxy machine crash-looping
   on the stamp guard while holding the public port is the 2026-06-18/07-07
   incident class.
-* ``uvicorn ...`` (app process group) runs ``regwatch init-db`` FIRST, exports
-  REGWATCH_DB_INITIALIZED=1, then hands off to uvicorn with argv intact -- and
-  an init-db failure aborts the boot with its exit code (uvicorn never runs:
+* ``regwatch serve`` (app process group, the real fly.toml/Dockerfile boot
+  command since the phase-2 dual-stack listener) runs ``regwatch init-db``
+  FIRST, exports REGWATCH_DB_INITIALIZED=1, then hands off with argv intact.
+  $1 is "regwatch", which matches no skip branch, so it takes the init-db
+  default -- the behaviour the app group has always had.
+* ``uvicorn ...`` (the pre-phase-2 app command) behaves identically. Kept as a
+  regression row: the dispatch is on $1 alone, so it must not start depending
+  on which app command we happen to ship.
+* an init-db failure aborts the boot with its exit code (the app never runs:
   that refusal IS the boot guard).
 * REGWATCH_INIT_DB=false skips init-db for any command (compose opt-out).
 """
@@ -91,6 +97,22 @@ def _run(
     )
     lines = log.read_text().splitlines() if log.exists() else []
     return proc, lines
+
+
+def test_serve_runs_init_db_then_hands_off(tmp_path: Path) -> None:
+    """The REAL app-group boot command (fly.toml [processes].app = `regwatch serve`).
+
+    $1 is "regwatch", not "uvicorn", so this proves the phase-2 command still
+    lands on the init-db default branch rather than silently matching a skip.
+    One stub serves both rows here, so assert on the argv field -- the stub
+    name alone no longer distinguishes init-db from the handoff.
+    """
+    proc, lines = _run(tmp_path, ["regwatch", "serve"])
+    assert proc.returncode == 0, proc.stderr
+    assert lines == [
+        "regwatch|init-db|db_init=unset",
+        "regwatch|serve|db_init=1",
+    ]
 
 
 def test_uvicorn_runs_init_db_then_hands_off(tmp_path: Path) -> None:
