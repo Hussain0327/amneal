@@ -29,13 +29,15 @@ kill_timeout = 30
 [deploy]
   release_command = "alembic upgrade head"
 
-# ONE process group: the app holds the public port -- the topology that served
-# v28-v35. The 2026-07-15 one-deploy traffic flip to the Go proxy (PR #93 ->
-# deploy #106) structurally deadlocked and was un-flipped by PR #94; the flip
-# re-lands as phase 3 of docs/GO_PROXY_ROLLOUT.md. The explicit command pins
-# the group name "app" (Fly's default group name, so the existing machines stay
-# mapped to it) and mirrors the image CMD -- tests/test_boot_command_drift.py
-# now enforces that mirror instead of trusting a comment to hold it.
+# TWO process groups: the Go proxy holds the public port and relays to the app
+# group over 6PN -- phase 3 of docs/GO_PROXY_ROLLOUT.md, re-landing PR #93's
+# flip with the #106 deadlock defused: the proxy's admission /health check now
+# runs against app machines that are ALREADY dual-stack (phase 2 deployed
+# first), so it can pass at admission instead of waiting on the blocked
+# remainder of its own deploy. The explicit app command pins the group name
+# "app" (Fly's default group name, so the existing machines stay mapped to it)
+# and mirrors the image CMD -- tests/test_boot_command_drift.py enforces that
+# mirror instead of trusting a comment to hold it.
 #
 # `regwatch serve` (phase 2) is the DUAL-STACK listener the flip requires: it
 # binds one socket per family, IPv4 for flyd's health checks and Fly Proxy's
@@ -52,6 +54,7 @@ kill_timeout = 30
 # tests/test_dual_stack_bind.py, which fails on either mutant.
 [processes]
   app = "regwatch serve"
+  proxy = "regwatch-proxy"
 
 [env]
   EMBEDDING_PROVIDER = "openai"
@@ -84,8 +87,8 @@ kill_timeout = 30
   UPSTREAM_URL = "http://app.process.amneal.internal:8000"
 
 [http_service]
-  processes = ["app"]
-  internal_port = 8000
+  processes = ["proxy"]
+  internal_port = 8080
   force_https = true
   auto_stop_machines = false
   # CD-2: keep TWO machines running so a rolling deploy (the default strategy)
@@ -96,14 +99,32 @@ kill_timeout = 30
   # before the next is touched.
   min_machines_running = 2
 
-  # GET /health dials uvicorn directly while the app group holds the edge.
-  # After the phase-3 flip this same check becomes END-TO-END through the
-  # proxy (edge -> proxy -> 6PN -> uvicorn -> DB) so a proxy with a dead
-  # upstream falls out of rotation instead of serving 502s "healthily";
-  # /healthz stays a proxy-local liveness debug endpoint only.
+  # GET /health is END-TO-END through the proxy (edge -> proxy -> 6PN ->
+  # uvicorn -> DB) so a proxy with a dead upstream falls out of rotation
+  # instead of serving 502s "healthily"; /healthz stays a proxy-local
+  # liveness debug endpoint only. Byte-identical to the pre-flip check --
+  # only what it traverses changed.
   [[http_service.checks]]
     interval = "30s"
     timeout = "10s"
     grace_period = "30s"
     method = "GET"
     path = "/health"
+
+# The app group loses its public service with the flip, and with it the only
+# health check gating its rolling replacement -- an unchecked group rolls on
+# "machine started" (the 2026-06-18 incident class). This machine check
+# restores the exact pre-flip cadence, aimed straight at uvicorn on 8000.
+# flyd dials it over IPv4 -- the phase-2 dual-stack listener is what makes
+# that pass. Top-level checks never affect routing (the app group is private
+# after the flip); this is deploy gating only.
+[checks]
+  [checks.app_health]
+    processes = ["app"]
+    type = "http"
+    port = 8000
+    method = "GET"
+    path = "/health"
+    interval = "30s"
+    timeout = "10s"
+    grace_period = "30s"
