@@ -1,15 +1,19 @@
 # Go proxy rollout (strangler Step 3): the traffic-flip runbook
 
-Status 2026-07-16: PHASE 1 IS DONE AND VERIFIED LIVE (PR #94, release v35).
-`fly status` shows 2 app machines, ZERO proxy machines (flyctl pruned #106's
-stray v34 machine as predicted), both on v35 with checks passing; /health 200
-with db ok; /healthz 404, proving the edge still terminates at uvicorn. All
-four phase-1 exit criteria below passed on 2026-07-16.
+Status 2026-07-16: PHASES 1 AND 2 ARE BOTH DONE AND VERIFIED LIVE.
 
-THIS TREE IS PHASE 2: the dual-stack listener (`regwatch serve`). The proxy
-binary (`go/cmd/proxy`, merged inert in PR #84) still ships in the image and
-phase 2 still executes it nowhere. Phase 3 (the flip) is unchanged and still
-gated on its preconditions.
+Phase 1 (PR #94, release v35): `fly status` showed 2 app machines, ZERO proxy
+machines (flyctl pruned #106's stray v34 machine as predicted), both on v35
+with checks passing; /health 200 with db ok; /healthz 404, proving the edge
+still terminated at uvicorn. All four phase-1 exit criteria passed 2026-07-16.
+
+Phase 2 (PR #95, merge 7cac0c4, release v36, deployed 2026-07-16 17:39 UTC):
+all five exit criteria passed the same day; row 4's literal both-direction
+output is recorded in the verification record below the criteria table.
+
+THIS TREE IS PHASE 3: the flip. The Go proxy (`go/cmd/proxy`, merged inert in
+PR #84, shipping unexecuted in the image since #93) takes the public edge
+with this change, gated on the preconditions below -- which are now met.
 
 History: the one-deploy flip (PR #93 -> deploy run #106) was structurally
 undeployable and never took effect; prod stayed on the uvicorn-direct topology
@@ -176,7 +180,7 @@ surviving stray's check would START PASSING and it would silently serve a
 share of public traffic through the un-flipped-away Go path. If flyctl ever
 fails to prune it: `fly machine destroy <id> --force`, then re-verify.
 
-### Phase 2 (this change): a VERIFIED dual-stack listener
+### Phase 2 (DONE, PR #95, live as v36): a VERIFIED dual-stack listener
 
 Goal: app machines accept BOTH families on :8000 -- IPv4 for flyd checks and
 Fly Proxy backhaul, IPv6 for the proxy's 6PN dials -- with a single uvicorn
@@ -311,7 +315,39 @@ own bind rather than trust it.)
 Phase 2's deploy is otherwise routine: same topology, same checks, rolling
 update. If it wedges, revert it -- the phase-1 config is always deployable.
 
-### Phase 3 (the flip): staged diff, preconditions, watch matrix
+#### Phase 2 verification record (2026-07-16, release v36)
+
+Deploy: CI run 29519695386 green on merge 7cac0c4; deploy run 29520170065
+success; rolling update completed 17:39 UTC with zero public downtime.
+
+Row 1 (`fly status`): 2 app machines (2862452b517008, 6835429c657118), ZERO
+proxy machines, both started, 1/1 checks passing, both VERSION 36.
+Row 2 (`fly releases`): v36 newest, status complete.
+Row 3 (`curl -fsS https://amneal.fly.dev/health`): 200, `"status":"ok"`,
+db ok (dialect postgresql). /healthz returned 404 -- edge still uvicorn.
+
+Row 4, run in BOTH directions (literal output; 6PN addresses from
+`fly machine status`):
+
+    $ fly ssh console -a amneal --machine 2862452b517008 \
+        -C "curl -fsS -6 http://[fdaa:7f:81ef:a7b:7d5:28e9:bc4f:2]:8000/health"
+    {"status":"ok","components":{"db":{"ok":true,"dialect":"postgresql"},"chroma":{"ok":true,"corpus_count":10749},"llm":{"provider":"openai","key_present":true},"embedding":{"provider":"openai"}},"whitepaper_template":"absent","warnings":[]}
+
+    $ fly ssh console -a amneal --machine 6835429c657118 \
+        -C "curl -fsS -6 http://[fdaa:7f:81ef:a7b:828:565b:a7f9:2]:8000/health"
+    {"status":"ok","components":{"db":{"ok":true,"dialect":"postgresql"},"chroma":{"ok":true,"corpus_count":10749},"llm":{"provider":"openai","key_present":true},"embedding":{"provider":"openai"}},"whitepaper_template":"absent","warnings":[]}
+
+Both dials are IPv6 by construction (`curl -6` to an fdaa 6PN address), so
+each machine's AF_INET6 listener is proven behaviorally, per machine.
+
+Row 5: machine 2862452b517008 logged
+`dual_stack_bind_ok addresses=["('0.0.0.0', 8000)", "('::', 8000)"]
+bound=['AF_INET', 'AF_INET6']`. Machine 6835429c657118's boot line had
+already rotated out of `fly logs` retention when read (it rolled first);
+row 4's second dial is the behavioral proof for that machine, which this
+runbook already ranks above the log line.
+
+### Phase 3 (the flip, THIS change): staged diff, preconditions, watch matrix
 
 Preconditions (hard gates, in order):
 
@@ -426,6 +462,15 @@ What the flip deploy does (watch it live):
    run `fly scale count proxy=2 app=2` (idempotent at 2/2). One proxy
    machine alone is a single point of failure for the entire public edge --
    do not leave the deploy in that state.
+   This row is MANDATORY on EVERY green outcome, not just suspicious ones:
+   verified 2026-07-16 (adversarial review of this diff), a transient
+   failure BETWEEN the two proxy-machine creations ('failed to launch vm' /
+   'no capacity' -- both genuinely transient and matched by
+   TRANSIENT_ERROR_RE) makes fly-deploy.sh retry; the retry then sees
+   "proxy" as an EXISTING 1-machine group, rolls it without re-applying
+   --ha sizing, and reports SUCCESS with one proxy machine holding the
+   whole public edge. Nothing automated checks fleet size post-deploy;
+   this row is the only guard.
 
 Watched-flip verification matrix (run every row, in order):
 
