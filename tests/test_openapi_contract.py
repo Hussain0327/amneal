@@ -38,8 +38,6 @@ NO_JSON_BODY_ROUTES = {
     ("POST", "/query/stream"),
     ("POST", "/whitepaper/runs/{run_id}/docx"),
     ("GET", "/metrics"),
-    ("POST", "/auth/logout"),
-    ("DELETE", "/sessions/{session_id}"),
 }
 
 

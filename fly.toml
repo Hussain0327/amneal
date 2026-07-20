@@ -62,12 +62,12 @@ kill_timeout = 30
   CORS_ALLOW_ORIGINS_CSV = "https://amneal.vercel.app"
   SENTRY_ENVIRONMENT = "production"
   # The app only ever serves behind Fly's edge ([http_service] + force_https),
-  # so trust the proxy: _client_ip then keys the per-IP login limiter on the
-  # platform-attested Fly-Client-IP (un-spoofable, set by Fly's edge) instead
-  # of collapsing every request to request.client.host (= the Fly proxy in
-  # prod), which would merge all callers into one IP bucket and gut the spray
-  # guard. The phase-3 Go proxy forwards these headers byte-for-byte
-  # (go/internal/proxy tests cover it), so this setting survives the flip.
+  # so trust the proxy: the Go login limiter (go/internal/api/clientip.go,
+  # which reads this env var directly since the step-4 auth cutover) keys its
+  # per-IP bucket on the platform-attested Fly-Client-IP (un-spoofable, set by
+  # Fly's edge) instead of collapsing every request to the TCP peer (= Fly's
+  # edge in prod), which would merge all callers into one IP bucket and gut
+  # the spray guard. tests/test_trust_proxy_fly_toml.py guards this line.
   TRUST_PROXY_HEADERS = "true"
   # B1: refuse to boot on the SQLite fallback. DATABASE_URL is a Fly secret
   # (`fly secrets set DATABASE_URL=...`); if it is missing the app must fail

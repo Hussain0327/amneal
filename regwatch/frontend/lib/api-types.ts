@@ -21,60 +21,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/auth/login": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Login */
-        post: operations["login_auth_login_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/auth/logout": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Logout
-         * @description Revoke the server-side session and clear the cookie. Never errors.
-         */
-        post: operations["logout_auth_logout_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/auth/me": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Me */
-        get: operations["me_auth_me_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/feedback": {
         parameters: {
             query?: never;
@@ -291,48 +237,6 @@ export interface paths {
          */
         post: operations["resolve_resolve_post"];
         delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/sessions": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Sessions
-         * @description Two queries max -- network RTT amplifies per-row queries ~1000x on Postgres.
-         *
-         *     Query 1 is the session page with the title fallback (first user message)
-         *     folded in as a correlated scalar subquery; query 2 fetches all message
-         *     counts for the page via one GROUP BY. Never N+1.
-         */
-        get: operations["list_sessions_sessions_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/sessions/{session_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Session */
-        get: operations["get_session_sessions__session_id__get"];
-        put?: never;
-        post?: never;
-        /** Delete Session */
-        delete: operations["delete_session_sessions__session_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -622,53 +526,6 @@ export interface components {
                 [key: string]: unknown;
             };
         };
-        /** AuthUserResponse */
-        AuthUserResponse: {
-            user: components["schemas"]["UserOut"];
-        };
-        /**
-         * ChatMessageOut
-         * @description One rehydrated turn.
-         *
-         *     ``citations``/``clarify``/``related`` are passthrough stored JSON: the
-         *     persisted payloads are re-emitted VERBATIM (older sessions carry legacy
-         *     keys the current wire types no longer produce), so no nested model may
-         *     reshape or strip them. ``role`` stays ``str`` for the same stored-data
-         *     reason - the writers only ever emit "user"/"assistant", but a Literal
-         *     would turn a legacy row into a 500.
-         */
-        ChatMessageOut: {
-            /** Audit Id */
-            audit_id: number | null;
-            /** Citations */
-            citations: {
-                [key: string]: unknown;
-            }[];
-            /** Clarify */
-            clarify: {
-                [key: string]: unknown;
-            }[];
-            /** Content */
-            content: string;
-            /** Created At */
-            created_at: string;
-            /** Id */
-            id: string;
-            /** Interpretation */
-            interpretation: string | null;
-            /** Reason */
-            reason: string | null;
-            /** Related */
-            related: {
-                [key: string]: unknown;
-            }[];
-            /** Role */
-            role: string;
-            /** Status */
-            status: string | null;
-            /** Turn Id */
-            turn_id: string;
-        };
         /** ClarifyOptionOut */
         ClarifyOptionOut: {
             /** Filters */
@@ -757,13 +614,6 @@ export interface components {
             error?: string | null;
             /** Ok */
             ok: boolean;
-        };
-        /** LoginRequest */
-        LoginRequest: {
-            /** Email */
-            email: string;
-            /** Password */
-            password: string;
         };
         /** ProductCreate */
         ProductCreate: {
@@ -958,41 +808,6 @@ export interface components {
             /** Rld Name */
             rld_name: string;
         };
-        /** SessionDetailResponse */
-        SessionDetailResponse: {
-            /** Messages */
-            messages: components["schemas"]["ChatMessageOut"][];
-            session: components["schemas"]["SessionMeta"];
-        };
-        /** SessionListResponse */
-        SessionListResponse: {
-            /** Sessions */
-            sessions: components["schemas"]["SessionSummary"][];
-        };
-        /** SessionMeta */
-        SessionMeta: {
-            /** Created At */
-            created_at: string;
-            /** Id */
-            id: string;
-            /** Title */
-            title: string;
-            /** Updated At */
-            updated_at: string;
-        };
-        /** SessionSummary */
-        SessionSummary: {
-            /** Created At */
-            created_at: string;
-            /** Id */
-            id: string;
-            /** Message Count */
-            message_count: number;
-            /** Title */
-            title: string;
-            /** Updated At */
-            updated_at: string;
-        };
         /**
          * SourceKind
          * @enum {string}
@@ -1047,17 +862,6 @@ export interface components {
             records: components["schemas"]["SourceRecordResponse"][];
             /** Routed Sources */
             routed_sources: components["schemas"]["SourceKind"][];
-        };
-        /** UserOut */
-        UserOut: {
-            /** Display Name */
-            display_name: string;
-            /** Email */
-            email: string;
-            /** Id */
-            id: number;
-            /** Role */
-            role: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -1390,99 +1194,6 @@ export interface operations {
             };
         };
     };
-    login_auth_login_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["LoginRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AuthUserResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    logout_auth_logout_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    me_auth_me_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AuthUserResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     feedback_feedback_post: {
         parameters: {
             query?: never;
@@ -1770,101 +1481,6 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["WhitepaperSpine"];
                 };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    list_sessions_sessions_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SessionListResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_session_sessions__session_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                session_id: string;
-            };
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SessionDetailResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    delete_session_sessions__session_id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                session_id: string;
-            };
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
             /** @description Validation Error */
             422: {

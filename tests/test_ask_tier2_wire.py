@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlmodel import col, select
 
 from regwatch.api import main as api_main
 from regwatch.generate import grounded_qa as qa_mod
@@ -25,10 +26,10 @@ from regwatch.generate.llm import LLMResponse
 from regwatch.process.embedder import get_embedding_provider
 from regwatch.store import queries as queries_mod
 from regwatch.store.db import init_db, session_scope
-from regwatch.store.models import PsgDocument, PsgVersion
+from regwatch.store.models import ChatMessage, PsgDocument, PsgVersion
 from regwatch.store.queries import fetch_citation_recency
 from regwatch.store.vector_store import add_chunks
-from tests.conftest import create_user, login_client
+from tests.conftest import create_user, session_client
 
 
 def _stub_llm(text: str) -> Any:
@@ -213,7 +214,7 @@ def test_refusal_round_trips_reason_and_related(monkeypatch: pytest.MonkeyPatch)
     from regwatch.common.conversation import ensure_session, record_message
 
     user_id = create_user()
-    client: TestClient = login_client()
+    client: TestClient = session_client(user_id)
     try:
         session_id = ensure_session(user_id=str(user_id))
         related = [
@@ -231,11 +232,28 @@ def test_refusal_round_trips_reason_and_related(monkeypatch: pytest.MonkeyPatch)
             related=related,
         )
 
-        got = client.get(f"/sessions/{session_id}")
-        assert got.status_code == 200, got.text
-        assistant = [m for m in got.json()["messages"] if m["role"] == "assistant"]
-        assert assistant, "assistant turn must be persisted"
-        a = assistant[-1]
+        # Persistence is the Python-side contract now (the /sessions WIRE shape
+        # is pinned by Go's TestSessionDetailShapeAndVerbatimPassthrough); read
+        # the stored rows directly.
+        with session_scope() as s:
+            persisted = [
+                {
+                    "role": m.role,
+                    "reason": m.reason,
+                    "interpretation": m.interpretation,
+                    "related": m.related_json,
+                    "citations": m.citations_json,
+                    "clarify": m.clarify_json,
+                }
+                for m in s.scalars(
+                    select(ChatMessage)
+                    .where(ChatMessage.session_id == session_id)
+                    .order_by(col(ChatMessage.created_at).asc())
+                )
+            ]
+        assistant_rows = [m for m in persisted if m["role"] == "assistant"]
+        assert assistant_rows, "assistant turn must be persisted"
+        a = assistant_rows[-1]
         assert a["reason"] == "did_you_mean"
         assert a["interpretation"] == "I couldn't find that exact drug. Did you mean:"
         assert a["related"] == related
@@ -250,8 +268,7 @@ def test_answer_round_trips_audit_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm("A fasting study [PSG_020503, p.3].")
     )
-    create_user()
-    client: TestClient = login_client()
+    client: TestClient = session_client(create_user())
     try:
         r = client.post("/query", json={"question": "What study design is recommended?"})
         assert r.status_code == 200, r.text
@@ -262,10 +279,17 @@ def test_answer_round_trips_audit_id(monkeypatch: pytest.MonkeyPatch) -> None:
         audit_id = body["audit_id"]
         assert isinstance(audit_id, int)
 
-        got = client.get(f"/sessions/{session_id}")
-        assert got.status_code == 200, got.text
-        assistant = [m for m in got.json()["messages"] if m["role"] == "assistant"]
-        assert assistant
-        assert assistant[-1]["audit_id"] == audit_id
+        with session_scope() as s:
+            persisted = [
+                (m.role, m.audit_id)
+                for m in s.scalars(
+                    select(ChatMessage)
+                    .where(ChatMessage.session_id == session_id)
+                    .order_by(col(ChatMessage.created_at).asc())
+                )
+            ]
+        assistant_rows = [m for m in persisted if m[0] == "assistant"]
+        assert assistant_rows
+        assert assistant_rows[-1][1] == audit_id
     finally:
         client.__exit__(None, None, None)

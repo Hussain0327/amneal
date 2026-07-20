@@ -23,7 +23,7 @@ from regwatch.api.main import app
 from regwatch.store.db import session_scope
 from regwatch.store.models import QueryLog, WhitepaperRun
 from tests._whitepaper_stub import APPL_NO, RLD_NAME, install_fake_sources
-from tests.conftest import create_user, login_client
+from tests.conftest import create_user, session_client
 
 ANALYST_CELL = "rd_center"  # manual cell: analyst_input_required in the stub build
 POPULATED_CELL = "product_name"  # auto cell: populated in the stub build
@@ -75,8 +75,7 @@ def _use_absent_template(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None
 
 
 def _other_client() -> TestClient:
-    create_user(OTHER_EMAIL, OTHER_PASSWORD, display_name=OTHER_NAME)
-    return login_client(OTHER_EMAIL, OTHER_PASSWORD)
+    return session_client(create_user(OTHER_EMAIL, OTHER_PASSWORD, display_name=OTHER_NAME))
 
 
 # ---------------------------------------------------------------------------

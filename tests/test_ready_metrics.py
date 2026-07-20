@@ -16,7 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from regwatch.api import main
-from tests.conftest import create_user, login_client
+from tests.conftest import create_user, session_client
 
 if TYPE_CHECKING:
     from fastapi import Request
@@ -95,8 +95,7 @@ def test_metrics_open_and_prometheus_content_type() -> None:
 
 
 def test_metrics_counts_query_log_rows() -> None:
-    create_user()
-    client = login_client()
+    client = session_client(create_user())
     # An out-of-corpus question on the echo provider audits a refusal (qa mode).
     assert client.post("/query", json={"question": "Out of corpus?"}).status_code == 200
 
@@ -110,8 +109,7 @@ def test_metrics_groups_by_mode_without_n_plus_one() -> None:
     # Two qa rows + one assemble row -> the mode label aggregates correctly. This
     # asserts the single grouped query path (no per-row N+1) produces the right
     # per-mode totals.
-    create_user()
-    client = login_client()
+    client = session_client(create_user())
     assert client.post("/query", json={"question": "First out of corpus?"}).status_code == 200
     assert client.post("/query", json={"question": "Second out of corpus?"}).status_code == 200
     assert client.post("/assemble", json={"active_ingredient": "Imaginary XYZ"}).status_code == 200

@@ -11,20 +11,13 @@ import threading
 import time
 from collections import deque
 
-# Login brute-force guard: attempts per email per minute (fixed, not settings —
-# there is no legitimate reason to raise it).
-LOGIN_ATTEMPTS_PER_MINUTE = 10
-# Companion per-IP cap so spraying many DISTINCT emails from one host is also
-# throttled (the per-email key alone misses a username-enumeration sweep). Set
-# above the per-email cap: a small shared office/VPN NAT can have a few users
-# legitimately logging in within the same minute, so this guards the abusive
-# burst without locking out a shared egress IP at the first wrong password.
-LOGIN_ATTEMPTS_PER_IP_PER_MINUTE = 30
 # NOTE (scope): this limiter is in-process, so under fly.toml's
 # min_machines_running=2 each machine keeps its own window and the EFFECTIVE
-# ceiling is ~2x these numbers. A shared-store (Redis/Postgres) limiter is the
-# fix for an exact global cap, but that is a separate, parked item
-# (docs/PROD_READINESS.md #1) - do NOT build it here.
+# ceiling is ~2x the configured limit. A shared-store (Redis/Postgres) limiter
+# is the fix for an exact global cap, but that is a separate, parked item
+# (docs/PROD_READINESS.md #1) - do NOT build it here. The LOGIN limiter moved
+# to the Go proxy with the step-4 auth cutover (go/internal/api/ratelimit.go
+# ports this class); only query_limiter remains Python-side.
 
 
 class RateLimiter:
@@ -53,9 +46,10 @@ class RateLimiter:
     def _sweep(self, now: float) -> None:
         """Evict keys whose whole window has expired. Caller holds the lock.
 
-        Login keys embed the client-supplied email, so without eviction an
-        unauthenticated caller spraying unique emails grows the dict for the
-        life of the process. At most one O(keys) pass per window.
+        Keys can embed caller-supplied identifiers, so without eviction a
+        spray of unique keys grows the dict for the life of the process (the
+        original motivation was login emails, now the Go limiter's problem;
+        the guard stays for any future key shape). One O(keys) pass per window.
         """
         if now - self._last_sweep < self._window_s:
             return
@@ -72,10 +66,8 @@ class RateLimiter:
 
 
 query_limiter = RateLimiter()
-login_limiter = RateLimiter()
 
 
 def reset_for_tests() -> None:
     """Clear limiter state so one test's traffic cannot 429 the next."""
     query_limiter.reset()
-    login_limiter.reset()

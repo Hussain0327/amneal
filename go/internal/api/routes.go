@@ -14,11 +14,10 @@ func text(s string) pgtype.Text {
 
 // Routes returns the native route table the proxy mounts ahead of its relay
 // catch-all. Go 1.22 method patterns route the exact method+path pairs below;
-// everything else -- other paths AND other METHODS on these paths -- falls
-// through to the relay catch-all ("/" matches any method), where Python
-// still answers 405 for method mismatches today. The follow-up deletion PR
-// must decide those 405s' fate explicitly (add method-mismatch patterns or
-// accept upstream 404s); this table must not silently own them.
+// OTHER PATHS fall through to the relay catch-all, and other METHODS on these
+// paths get the explicit 405s registered at the bottom -- since the B2
+// deletion there is no Python handler behind these paths, so a method
+// mismatch left to the relay would surface as an upstream 404.
 func (s *Server) Routes() map[string]http.Handler {
 	routes := map[string]http.Handler{
 		"POST /auth/login":      http.HandlerFunc(s.handleLogin),
@@ -42,7 +41,30 @@ func (s *Server) Routes() map[string]http.Handler {
 			out["OPTIONS "+path] = http.HandlerFunc(s.handlePreflight)
 		}
 	}
+	// Method mismatches: a method-less pattern matches every method the
+	// specific patterns above do not claim. The Allow values reproduce the
+	// FastAPI behavior these paths had (Starlette quirk preserved: Allow
+	// lists the FIRST partially-matching route's methods only -- GET for
+	// /sessions/{id}, never "GET, DELETE").
+	for path, allow := range map[string]string{
+		"/auth/login":    "POST",
+		"/auth/logout":   "POST",
+		"/auth/me":       "GET",
+		"/sessions":      "GET",
+		"/sessions/{id}": "GET",
+	} {
+		out[path] = s.corsSimple(methodNotAllowed(allow))
+	}
 	return out
+}
+
+// methodNotAllowed reproduces FastAPI's 405 body ({"detail":"Method Not
+// Allowed"}) with a hand-set Allow header.
+func methodNotAllowed(allow string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Allow", allow)
+		writeDetail(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+	})
 }
 
 // allowedOrigin reports whether the request Origin is in the configured
