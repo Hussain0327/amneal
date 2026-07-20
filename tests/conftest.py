@@ -50,24 +50,39 @@ def create_user(
         return row.id
 
 
-def login_client(
-    email: str = DEFAULT_USER_EMAIL, password: str = DEFAULT_USER_PASSWORD
-) -> TestClient:
-    """A TestClient logged in through POST /auth/login (httpx keeps the cookie)."""
-    from regwatch.api.main import app
+class AuthedClient(TestClient):
+    """An authenticated TestClient; user_id replaces the old GET /auth/me reads."""
 
-    client = TestClient(app)
-    client.__enter__()  # lifespan → init_db on the per-test DB
-    response = client.post("/auth/login", json={"email": email, "password": password})
-    assert response.status_code == 200, response.text
+    user_id: int
+
+
+def session_client(user_id: int) -> AuthedClient:
+    """An authenticated client whose session row is minted directly -- no HTTP.
+
+    POST /auth/login lives in the Go proxy since the step-4 cutover
+    (go/internal/api/auth.go); this Python app only VERIFIES cookies. The
+    cookie set here is a real regwatch_session token minted by
+    sessions.create_session -- the shared scheme both runtimes speak -- so
+    require_user -> resolve_token runs for real on every request to the
+    surviving protected router. No dependency_overrides, ever: that would be
+    test theater.
+    """
+    from regwatch.api.main import app
+    from regwatch.auth.deps import SESSION_COOKIE
+    from regwatch.auth.sessions import create_session
+
+    client = AuthedClient(app)
+    client.__enter__()  # lifespan -> init_db on the per-test DB
+    raw, _ = create_session(user_id)
+    client.cookies.set(SESSION_COOKIE, raw)
+    client.user_id = user_id
     return client
 
 
 @pytest.fixture
-def auth_client() -> Iterator[TestClient]:
-    """An authenticated TestClient for a freshly created default user."""
-    create_user()
-    client = login_client()
+def auth_client() -> Iterator[AuthedClient]:
+    """An authenticated client for a freshly created default user."""
+    client = session_client(create_user())
     yield client
     client.__exit__(None, None, None)
 
@@ -112,8 +127,9 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     cs.settings = cs.get_settings()
     db_module.reset_for_tests()
     vs_module.reset_for_tests()
-    # The in-memory rate limiters are process-global; clear them so one test's
-    # logins cannot 429 the next test (the login guard is always on).
+    # The in-memory query limiter is process-global; clear it so one test's
+    # traffic cannot 429 the next test. (The login limiter moved to the Go
+    # proxy with the step-4 auth cutover.)
     ratelimit.reset_for_tests()
     # Also clear any cached env that pydantic-settings stashed in process.
     yield

@@ -107,14 +107,15 @@ func NewHandlerWithNative(upstream *url.URL, errLog *log.Logger, native map[stri
 		// before this func runs (stdlib anti-spoofing default), so the trusted
 		// values must be restored explicitly.
 		//
-		// Header contract with src/regwatch/api/main.py::_client_ip under
-		// TRUST_PROXY_HEADERS=true (prod): the backend keys its login-spray
-		// limiter on Fly-Client-IP (Fly-edge-attested, never stripped) and
-		// falls back to the RIGHTMOST X-Forwarded-For hop. Both headers must
-		// reach uvicorn byte-for-byte: an appended hop would make the
-		// rightmost XFF entry Fly's internal proxy address and collapse every
-		// caller into one rate-limit bucket; a stripped XFF would break the
-		// fallback entirely.
+		// Header contract: preserve Fly's edge-attested forwarding values
+		// byte-for-byte for whatever runs downstream. (The login-spray
+		// limiter that originally motivated this now keys on these headers
+		// INSIDE this process -- go/internal/api/clientip.go, step-4 cutover
+		// -- before the relay is ever reached, but the relayed Python app
+		// must still see the true client identity: an appended hop would
+		// make the rightmost XFF entry this proxy's own address and corrupt
+		// any downstream client-IP consumer; a stripped XFF would remove the
+		// fallback entirely.)
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(upstream)
 			// SetURL rewrites the Host header to the upstream's host; keep the

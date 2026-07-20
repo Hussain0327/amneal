@@ -214,13 +214,15 @@ running instance.
 
 ### One authorization chokepoint
 
-There are exactly two ways for a request to skip auth: `GET /health` and the
-`/auth/*` routes. **Everything else** is registered on a single router with a
+Since the step-4 cutover (docs/POLYGLOT_TARGET_2026-07-10.md) the Go proxy
+serves `/auth/*` and `/sessions*` natively at the public edge
+(`go/internal/api`) and MINTS the session cookie; the Python app VERIFIES it.
+Python-side, the only open probes are `GET /health`, `/ready`, and
+`/metrics`. **Everything else** is registered on a single router with a
 router-level dependency:
 
 ```python
-auth_router = APIRouter(prefix="/auth", tags=["auth"])
-protected   = APIRouter(dependencies=[Depends(require_user)])
+protected = APIRouter(dependencies=[Depends(require_user)])
 ```
 
 This makes an accidentally-unauthenticated route *structurally* impossible — you
@@ -233,9 +235,9 @@ visitors through the proxy.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| POST | `/auth/login` | open | Issue the `regwatch_session` cookie |
-| POST | `/auth/logout` | open | Revoke server-side session + clear cookie |
-| GET | `/auth/me` | ✅ | Current user |
+| POST | `/auth/login` | open | Issue the `regwatch_session` cookie (GO-served) |
+| POST | `/auth/logout` | open | Revoke server-side session + clear cookie (GO-served) |
+| GET | `/auth/me` | ✅ | Current user (GO-served) |
 | POST | `/query` | ✅ | Grounded Q&A (the conversational engine) |
 | POST | `/feedback` | ✅ | Thumbs up/down on one of the caller's own answers |
 | POST | `/sources/search` | ✅ | Structured FDA source lookup |
@@ -245,8 +247,8 @@ visitors through the proxy.
 | POST | `/whitepaper/docx` | ✅ | Render a returned White Paper result as `.docx` |
 | GET | `/watch/latest` | ✅ | Recent alerts (optional `since` filter) |
 | GET / POST | `/products` | ✅ | List / add watchlist products |
-| GET | `/sessions` | ✅ | The caller's chat sessions |
-| GET / DELETE | `/sessions/{id}` | ✅ | One session with messages / delete it |
+| GET | `/sessions` | ✅ | The caller's chat sessions (GO-served) |
+| GET / DELETE | `/sessions/{id}` | ✅ | One session with messages / delete it (GO-served) |
 | GET | `/settings` | ✅ | Non-secret config |
 | GET | `/health` | open | Liveness + component diagnostics |
 
@@ -621,27 +623,30 @@ is tied to the deploy path and is deliberately deferred.
 
 ## 14. Authentication & sessions
 
-`auth/` — cookie-session auth, designed so a future SSO swap touches one thin
-boundary.
+`auth/` — the VERIFY half of the cookie-session contract; the MINT half
+(login/logout/me) moved to the Go proxy in step 4 (`go/internal/api/auth.go`),
+still designed so a future SSO swap touches one thin boundary.
 
-- **Login.** `POST /auth/login` verifies a bcrypt password and issues an opaque
-  token in an **HttpOnly, SameSite=Lax** cookie (`regwatch_session`); `secure` is
-  driven by `AUTH_COOKIE_SECURE` (true in prod over TLS). The DB stores only the
-  **sha256** of the token (`auth_session.token_hash`). A fresh session row is
-  created on every login (no session fixation).
-- **Uniform-timing auth.** `authenticate()` burns a bcrypt verify in every branch
-  (unknown email / wrong password / inactive user) and returns one message, so
-  timing can't enumerate accounts.
+- **Login (Go-served).** `POST /auth/login` verifies a bcrypt password and
+  issues an opaque token in an **HttpOnly, SameSite=Lax** cookie
+  (`regwatch_session`); `secure` is driven by `AUTH_COOKIE_SECURE` (true in
+  prod over TLS). The DB stores only the **sha256** of the token
+  (`auth_session.token_hash`) — the SAME rows Python's `resolve_token`
+  verifies, which is what makes the two runtimes one auth system. A fresh
+  session row is created on every login (no session fixation). Uniform-timing
+  credential checks (dummy bcrypt on unknown email, one error message) live
+  in the Go handler and are pinned by its contract tests.
 - **No self-signup.** Accounts are provisioned via `regwatch create-user`.
-- **`require_user` is the swap boundary.** Every protected route depends on it;
-  swapping cookie-lookup for JWT/JWKS (Microsoft/Entra SSO, the planned
-  fast-follow) is a localized change.
-- **Rate limiting** (`common/ratelimit.py`): per-user **30/min**
-  (`RATE_LIMIT_PER_MINUTE`) on the expensive / outbound-FDA routes — `/query`,
-  `/sources/search`, `/resolve`, `/assemble`, `/whitepaper`, `/whitepaper/docx`;
-  a separate **10/email/min** login brute-force guard. The limiter is in-memory
-  / per-process, so a multi-replica deploy needs distributed (gateway) limiting —
-  open work, see `docs/ROADMAP.md`.
+- **`require_user` is the swap boundary.** Every Python protected route
+  depends on it; swapping cookie-lookup for JWT/JWKS (Microsoft/Entra SSO,
+  the planned fast-follow) is a localized change on each side of the split.
+- **Rate limiting**: per-user **30/min** (`RATE_LIMIT_PER_MINUTE`,
+  `common/ratelimit.py`) on the expensive / outbound-FDA routes — `/query`,
+  `/sources/search`, `/resolve`, `/assemble`, `/whitepaper`,
+  `/whitepaper/docx`. The **10/email/min + 30/IP/min** login brute-force
+  guard runs in the Go proxy (`go/internal/api/ratelimit.go`). Limiters are
+  in-memory / per-process, so a multi-replica deploy needs distributed
+  (gateway) limiting — open work, see `docs/ROADMAP.md`.
 - **Session ownership.** `/sessions/{id}` and `/feedback` and `/whitepaper/docx`
   all return **404, not 403**, on a foreign or non-existent row — the response
   never confirms that someone else's resource exists. Legacy NULL-owner sessions

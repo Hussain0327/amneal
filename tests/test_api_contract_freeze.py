@@ -20,7 +20,6 @@ from regwatch.api.main import app
 from regwatch.store.db import session_scope
 from regwatch.store.models import Alert
 from tests._whitepaper_stub import APPL_NO, RLD_NAME, install_fake_sources
-from tests.conftest import create_user, login_client
 
 ALERT_WIRE_KEYS = {
     "product_id",
@@ -61,21 +60,6 @@ PRODUCT_WIRE_KEYS = {
     "company_status",
     "source",
     "source_url",
-}
-
-MESSAGE_WIRE_KEYS = {
-    "id",
-    "turn_id",
-    "role",
-    "content",
-    "status",
-    "citations",
-    "audit_id",
-    "reason",
-    "interpretation",
-    "clarify",
-    "related",
-    "created_at",
 }
 
 SPINE_WIRE_KEYS = {
@@ -173,59 +157,6 @@ def test_settings_wire_keys_exact(auth_client: TestClient) -> None:
     # Default settings ship retrieval_top_k=None: the key must stay PRESENT
     # as null (required-nullable), not vanish.
     assert "retrieval_top_k" in body
-
-
-def test_sessions_wire_keys_and_stored_payload_passthrough() -> None:
-    """Stored citations/clarify/related must round-trip VERBATIM through the
-    response model -- older sessions carry legacy keys (e.g. ``source_url`` in
-    clarify filters) that no current wire type declares, and a nested model
-    would silently strip them."""
-    from regwatch.common.conversation import ensure_session, record_message
-
-    user_id = create_user()
-    client = login_client()
-    try:
-        session_id = ensure_session(user_id=str(user_id))
-        legacy_citation = {
-            "short_name": "PSG_020503",
-            "page": 4,
-            "chunk_id": "020503-4",
-            "doc_id": 1,
-            "version_id": 10,
-            "source_url": "http://example/PSG_020503.pdf",
-            "snippet": "fasting single-dose crossover",
-            # A key no current wire type declares: it must survive verbatim.
-            "legacy_extra": "kept",
-        }
-        legacy_clarify = [
-            {"label": "Tablet", "query": "albuterol tablet", "filters": {"source_url": "legacy"}}
-        ]
-        record_message(
-            session_id=session_id,
-            turn_id="t-legacy",
-            role="assistant",
-            content="A fasting study is recommended [PSG_020503, p.4].",
-            status="answer",
-            citations=[legacy_citation],
-            clarify=legacy_clarify,
-        )
-
-        listing = client.get("/sessions")
-        assert listing.status_code == 200, listing.text
-        summary = listing.json()["sessions"][0]
-        assert set(summary) == {"id", "title", "created_at", "updated_at", "message_count"}
-
-        got = client.get(f"/sessions/{session_id}")
-        assert got.status_code == 200, got.text
-        detail = got.json()
-        assert set(detail) == {"session", "messages"}
-        assert set(detail["session"]) == {"id", "title", "created_at", "updated_at"}
-        message = detail["messages"][-1]
-        assert set(message) == MESSAGE_WIRE_KEYS
-        assert message["citations"] == [legacy_citation]
-        assert message["clarify"] == legacy_clarify
-    finally:
-        client.__exit__(None, None, None)
 
 
 def test_health_failure_component_keys_stay_conditional(

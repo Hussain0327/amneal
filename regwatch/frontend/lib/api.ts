@@ -7,6 +7,12 @@
 // narrow payloads the backend deliberately ships as VERBATIM passthrough
 // (INV-3), so they are plain objects in the schema by design.
 import type { components } from "./api-types";
+import type {
+  ChatMessageOut,
+  SessionDetailResponse,
+  SessionSummary as SessionSummaryWire,
+  UserOut,
+} from "./auth-types";
 
 type Schemas = components["schemas"];
 
@@ -137,9 +143,11 @@ export type ProductsResponse = Schemas["ProductsResponse"];
 
 export type PublicSettings = Schemas["PublicSettings"];
 
-export type User = Schemas["UserOut"];
+// The auth/session wire types live in ./auth-types since the step-4 Go
+// cutover (those routes left the FastAPI schema; Go owns their contract).
+export type User = UserOut;
 
-export type SessionSummary = Schemas["SessionSummary"];
+export type SessionSummary = SessionSummaryWire;
 
 // GET /sessions/{id}. The stored citations/clarify/related payloads are
 // VERBATIM passthrough on the wire (legacy sessions carry keys the current
@@ -149,17 +157,14 @@ export type SessionSummary = Schemas["SessionSummary"];
 // interpretation, and the clarify/related next-step affordances, so a
 // reopened conversation is fully interactive rather than a dead end. role is
 // narrowed the same way: the backend writers only emit user/assistant.
-export type ChatMessage = Omit<
-  Schemas["ChatMessageOut"],
-  "role" | "citations" | "clarify" | "related"
-> & {
+export type ChatMessage = Omit<ChatMessageOut, "role" | "citations" | "clarify" | "related"> & {
   role: "user" | "assistant";
   citations: Citation[];
   clarify: ClarifyOption[];
   related: ClarifyOption[];
 };
 
-export type SessionDetail = Omit<Schemas["SessionDetailResponse"], "messages"> & {
+export type SessionDetail = Omit<SessionDetailResponse, "messages"> & {
   messages: ChatMessage[];
 };
 

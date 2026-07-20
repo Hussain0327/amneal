@@ -33,7 +33,7 @@ from regwatch.api import main as api_main
 from regwatch.generate import grounded_qa as qa_mod
 from regwatch.store.db import session_scope
 from regwatch.store.models import QueryLog
-from tests.conftest import create_user, login_client
+from tests.conftest import create_user, session_client
 from tests.test_invariants import _meta, _seed_corpus, _stub_llm
 
 pytestmark = pytest.mark.invariants
@@ -82,8 +82,7 @@ def test_query_stream_streams_progress_then_one_result_frame(
     _seed_corpus([("Fasting BE study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
     answer = "A fasting bioequivalence study is recommended [PSG_020503, p.3]."
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(answer))
-    create_user()
-    client = login_client()
+    client = session_client(create_user())
     try:
         res = _stream(client, "What study design is recommended?")
         assert res.status_code == 200
@@ -121,8 +120,7 @@ def test_query_stream_matches_blocking_query(monkeypatch: pytest.MonkeyPatch) ->
     _seed_corpus([("Fasting BE study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
     answer = "A fasting study is recommended [PSG_020503, p.3]."
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(answer))
-    create_user()
-    client = login_client()
+    client = session_client(create_user())
     try:
         q = "What study design is recommended?"
         blocking = client.post("/query", json={"question": q})
@@ -145,8 +143,7 @@ def test_query_stream_refuses_fabricated_citation_without_leaking_it(
     _seed_corpus([("Bioequivalence requires a fasting study.", _meta(3, 1, "PSG_333333"))])
     fabricated = "The recommended dose is 100 mg per day [PSG_999999, p.99]."
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(fabricated))
-    create_user()
-    client = login_client()
+    client = session_client(create_user())
     try:
         body = _stream(client, "What is the recommended dose?").text
         # The fabricated citation is never emitted, in any frame.
@@ -166,7 +163,7 @@ def test_query_stream_writes_exactly_one_audit_row(monkeypatch: pytest.MonkeyPat
         qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm("Yes. [PSG_020503, p.3]")
     )
     user_id = create_user()
-    client = login_client()
+    client = session_client(user_id)
     try:
         before = _row_count()
         res = _stream(client, "Is a fasting study recommended?")
@@ -198,10 +195,8 @@ def test_query_stream_foreign_session_is_404_before_stream() -> None:
     """Chat-session ownership is enforced BEFORE the stream opens: another
     user's session_id gets a real 404 (never confirming the session exists),
     not an opened stream that binds the turn into the victim's history."""
-    create_user("a@example.com", "password-for-a")
-    create_user("b@example.com", "password-for-b")
-    a = login_client("a@example.com", "password-for-a")
-    b = login_client("b@example.com", "password-for-b")
+    a = session_client(create_user("a@example.com", "password-for-a"))
+    b = session_client(create_user("b@example.com", "password-for-b"))
     try:
         sid = a.post("/query", json={"question": "Does this exist?"}).json()["session_id"]
         res = b.post(
@@ -222,8 +217,7 @@ def test_query_stream_rate_limited_before_stream(monkeypatch: pytest.MonkeyPatch
     stream (mirrors the buffered /query rate-limit test in test_auth.py)."""
     import config.settings as cs
 
-    create_user()
-    client = login_client()
+    client = session_client(create_user())
     try:
         monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "1")
         cs.get_settings.cache_clear()
@@ -264,8 +258,7 @@ def test_query_stream_failure_closes_without_result_frame(
         raise RuntimeError("internal-detail-must-not-leak")
 
     monkeypatch.setattr(api_main, "ask", exploding_ask)
-    create_user()
-    client = login_client()
+    client = session_client(create_user())
     try:
         res = _stream(client, "Will this fail mid-stream?")
         assert res.status_code == 200
@@ -296,8 +289,7 @@ def test_query_stream_emits_keepalive_comment_during_quiet_gaps(
         return _fake_result()
 
     monkeypatch.setattr(api_main, "ask", quiet_ask)
-    create_user()
-    client = login_client()
+    client = session_client(create_user())
     try:
         res = _stream(client, "Anything at all?")
         assert res.status_code == 200
@@ -330,8 +322,7 @@ def test_query_stream_builds_result_response_off_the_event_loop(
 
     monkeypatch.setattr(api_main, "_build_query_response", probe)
     monkeypatch.setattr(api_main, "ask", lambda **kwargs: _fake_result())
-    create_user()
-    client = login_client()
+    client = session_client(create_user())
     try:
         frames = _parse_sse(_stream(client, "Where does this build?").text)
         assert [e for e, _ in frames][-1] == "result"
@@ -357,8 +348,7 @@ def test_ask_pool_saturation_sheds_with_defined_failures(
         return _fake_result()
 
     monkeypatch.setattr(api_main, "ask", slow_ask)
-    create_user()
-    client = login_client()
+    client = session_client(create_user())
     first: list[int] = []
     worker = threading.Thread(
         target=lambda: first.append(
@@ -398,8 +388,7 @@ def test_query_filters_are_whitelisted_at_the_boundary(
         return _fake_result()
 
     monkeypatch.setattr(api_main, "ask", capture_ask)
-    create_user()
-    client = login_client()
+    client = session_client(create_user())
     try:
         res = client.post(
             "/query",

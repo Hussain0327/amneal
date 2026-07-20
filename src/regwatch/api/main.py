@@ -4,9 +4,6 @@ This is the clean boundary the IT/AI team will wrap or replace. Every
 response is reproducible in Postman from a `.env` and a running instance.
 
 Endpoints (per spec §10.16):
-    POST   /auth/login     — issue a session cookie
-    POST   /auth/logout    — revoke the session cookie
-    GET    /auth/me        — current user
     POST   /query          — grounded Q&A (auth)
     POST   /query/stream   — grounded Q&A, streamed as Server-Sent Events (auth)
     POST   /feedback       — thumbs up/down on one of the caller's answers (auth)
@@ -24,9 +21,6 @@ Endpoints (per spec §10.16):
     GET    /products       — list watchlist (auth)
     POST   /products       — add manual product (auth)
     DELETE /products/{id}  - remove a product from the watchlist (soft) (auth)
-    GET    /sessions       — the caller's chat sessions (auth)
-    GET    /sessions/{id}  — one chat session with messages (auth)
-    DELETE /sessions/{id}  — delete a chat session (auth)
     GET    /settings       — non-secret config (auth)
     GET    /health         — liveness + component diagnostics (open)
     GET    /ready          - readiness: db + vector store + LLM constructable (open)
@@ -50,30 +44,23 @@ from typing import Any, Literal
 
 import anyio.to_thread
 from config.settings import Settings, get_settings
-from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, text, update
 from sqlalchemy import select as sa_select
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, col, select
+from sqlmodel import col, select
 
 from regwatch.assemble.dossier import build_dossier
-from regwatch.auth.deps import SESSION_COOKIE, require_user
-from regwatch.auth.sessions import authenticate, create_session, revoke_token
+from regwatch.auth.deps import require_user
 from regwatch.common.audit import log_query
 from regwatch.common.conversation import SESSION_FILTER_KEYS, SessionOwnershipError
 from regwatch.common.logging import configure_logging, get_logger
 from regwatch.common.observability import capture_exception, init_sentry
-from regwatch.common.ratelimit import (
-    LOGIN_ATTEMPTS_PER_IP_PER_MINUTE,
-    LOGIN_ATTEMPTS_PER_MINUTE,
-    login_limiter,
-    query_limiter,
-)
+from regwatch.common.ratelimit import query_limiter
 from regwatch.generate.grounded_qa import QAResult, QueryStatusLiteral, ask
 from regwatch.process.embedder import assert_embedding_runtime_available
 from regwatch.sources.router import search_sources
@@ -82,7 +69,6 @@ from regwatch.store import whitepaper_runs as run_store
 from regwatch.store.db import engine_dialect, get_engine, init_db, session_scope
 from regwatch.store.models import (
     AnswerFeedback,
-    ChatMessage,
     ChatSession,
     QueryLog,
     User,
@@ -146,9 +132,10 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
             "sentry_disabled_in_production",
             detail="SENTRY_ENVIRONMENT=production but no SENTRY_DSN — errors are not being reported",
         )
-    # Same fail-loud posture for the session cookie: a production deploy that
-    # forgets AUTH_COOKIE_SECURE=true ships the cookie without Secure. Everything
-    # still works, so the gap is silent — make it visible instead.
+    # Same fail-loud posture for the session cookie. The cookie is MINTED by
+    # the Go proxy since the step-4 cutover (which logs its own boot warning
+    # for this misconfig); [env] is app-wide on Fly, so warning here too is a
+    # redundant tripwire on the same silent gap, at zero cost.
     if s.sentry_environment == "production" and not s.auth_cookie_secure:
         log.warning(
             "insecure_session_cookie_in_production",
@@ -242,10 +229,13 @@ def _register_upstream_error_handlers(target: FastAPI) -> None:
 
 _register_upstream_error_handlers(app)
 
-# Single authorization chokepoint: every endpoint except GET /health and the
-# /auth routes is registered on this router, so its router-level dependency
-# makes an accidentally-unauthenticated route impossible.
-auth_router = APIRouter(prefix="/auth", tags=["auth"])
+# Single authorization chokepoint: every endpoint except the app-level open
+# probes (GET /health, /ready, /metrics) is registered on this router, so its
+# router-level dependency makes an accidentally-unauthenticated route
+# impossible. The /auth + /sessions surface lives in the Go proxy now
+# (go/internal/api, step 4 of docs/POLYGLOT_TARGET_2026-07-10.md); Python
+# keeps only the VERIFY side of the auth contract (require_user ->
+# resolve_token over the same auth_session rows the Go binary mints).
 protected = APIRouter(dependencies=[Depends(require_user)])
 
 
@@ -516,110 +506,6 @@ def metrics(request: Request) -> Response:
         raise HTTPException(status_code=401, detail="metrics authentication required")
     body = _render_prometheus(_query_log_counters())
     return Response(content=body, media_type="text/plain; version=0.0.4; charset=utf-8")
-
-
-# ---------- /auth ----------
-class LoginRequest(BaseModel):
-    # max_length bounds the rate limiter's per-key memory — the limiter key
-    # embeds the email — and RFC 5321 caps addresses at 254 chars anyway.
-    email: str = Field(..., max_length=254)
-    password: str = Field(..., max_length=256)
-
-
-class UserOut(BaseModel):
-    id: int
-    email: str
-    display_name: str
-    role: str
-
-
-class AuthUserResponse(BaseModel):
-    user: UserOut
-
-
-def _user_out(user: User) -> UserOut:
-    if user.id is None:  # pragma: no cover — auth only ever returns persisted users
-        raise HTTPException(status_code=401, detail="authentication required")
-    return UserOut(id=user.id, email=user.email, display_name=user.display_name, role=user.role)
-
-
-def _client_ip(request: Request, s: Settings) -> str:
-    """The client IP to key the per-IP login limiter on.
-
-    Any client-supplied forwarding header is spoofable: the LEFTMOST
-    X-Forwarded-For hop is whatever the browser sent, so keying on it would let
-    an attacker rotate a fake value and mint unlimited per-IP buckets, defeating
-    the spray guard. So:
-      * trust_proxy_headers OFF (direct exposure): key on the un-spoofable
-        TCP-level request.client.host.
-      * trust_proxy_headers ON (behind Fly/Vercel): prefer Fly-Client-IP, which
-        Fly's edge sets to the platform-attested real client and a client cannot
-        forge end-to-end. Only if it is absent fall back to the RIGHTMOST XFF
-        hop (the entry our trusted edge appended), never split(",")[0]. The
-        rightmost token is the closest-to-us proxy-attested address; earlier
-        tokens are attacker-controlled and ignored.
-    Falls back to "unknown" only when no source is available (no socket peer),
-    so the limiter never crashes the login path.
-    """
-    if s.trust_proxy_headers:
-        # Fly's platform-attested client IP (set by Fly's edge); not forgeable by
-        # the browser the way XFF's leftmost hop is.
-        fly_client_ip = request.headers.get("fly-client-ip", "").strip()
-        if fly_client_ip:
-            return fly_client_ip
-        forwarded = request.headers.get("x-forwarded-for", "")
-        hops = [hop.strip() for hop in forwarded.split(",") if hop.strip()]
-        if hops:
-            return hops[-1]  # rightmost = appended by our trusted edge, not the client
-    return request.client.host if request.client else "unknown"
-
-
-@auth_router.post("/login", response_model=AuthUserResponse)
-def login(req: LoginRequest, request: Request, response: Response) -> AuthUserResponse:
-    s = get_settings()
-    email = req.email.strip().lower()
-    # Two independent windows: per-email (a targeted brute force on one account)
-    # AND per-IP (a credential-spray sweeping many DISTINCT emails from one host,
-    # which the per-email key alone never sees). Either tripping returns 429.
-    # NOTE: in-process limiter under min_machines_running=2 is ~2x effective; a
-    # shared-store limiter is a separate parked item, NOT built here.
-    ip = _client_ip(request, s)
-    if not login_limiter.allow(
-        f"login:{email}", LOGIN_ATTEMPTS_PER_MINUTE
-    ) or not login_limiter.allow(f"login:ip:{ip}", LOGIN_ATTEMPTS_PER_IP_PER_MINUTE):
-        raise HTTPException(status_code=429, detail="rate limit exceeded")
-    user = authenticate(req.email, req.password)
-    if user is None or user.id is None:
-        # One message for unknown email / wrong password / inactive user;
-        # authenticate() burns a bcrypt verify in every branch (uniform timing).
-        raise HTTPException(status_code=401, detail="invalid email or password")
-    token, _ = create_session(user.id)  # always a fresh row — no session fixation
-    response.set_cookie(
-        key=SESSION_COOKIE,
-        value=token,
-        max_age=s.auth_session_ttl_hours * 3600,
-        httponly=True,
-        samesite="lax",
-        secure=s.auth_cookie_secure,
-        path="/",
-    )
-    return AuthUserResponse(user=_user_out(user))
-
-
-@auth_router.post("/logout", status_code=204)
-def logout(
-    response: Response,
-    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE),
-) -> None:
-    """Revoke the server-side session and clear the cookie. Never errors."""
-    if session_token:
-        revoke_token(session_token)
-    response.delete_cookie(SESSION_COOKIE, path="/")
-
-
-@auth_router.get("/me", response_model=AuthUserResponse)
-def me(user: User = Depends(require_user)) -> AuthUserResponse:
-    return AuthUserResponse(user=_user_out(user))
 
 
 def _enforce_query_rate_limit(user: User) -> None:
@@ -1900,181 +1786,6 @@ def delete_product(product_id: int) -> dict[str, Any]:
     return {"removed": True, "products": list_watchlist()}
 
 
-# ---------- /sessions (per-user chat history) ----------
-class SessionSummary(BaseModel):
-    id: str
-    title: str
-    # isoformat strings, exactly as the handlers emit them (naive-UTC, no
-    # suffix) - typed str so serialization can never re-format them.
-    created_at: str
-    updated_at: str
-    message_count: int
-
-
-class SessionListResponse(BaseModel):
-    sessions: list[SessionSummary]
-
-
-class SessionMeta(BaseModel):
-    id: str
-    title: str
-    created_at: str
-    updated_at: str
-
-
-class ChatMessageOut(BaseModel):
-    """One rehydrated turn.
-
-    ``citations``/``clarify``/``related`` are passthrough stored JSON: the
-    persisted payloads are re-emitted VERBATIM (older sessions carry legacy
-    keys the current wire types no longer produce), so no nested model may
-    reshape or strip them. ``role`` stays ``str`` for the same stored-data
-    reason - the writers only ever emit "user"/"assistant", but a Literal
-    would turn a legacy row into a 500.
-    """
-
-    id: str
-    turn_id: str
-    role: str
-    content: str
-    status: str | None
-    citations: list[dict[str, Any]]
-    audit_id: int | None
-    reason: str | None
-    interpretation: str | None
-    clarify: list[dict[str, Any]]
-    related: list[dict[str, Any]]
-    created_at: str
-
-
-class SessionDetailResponse(BaseModel):
-    session: SessionMeta
-    messages: list[ChatMessageOut]
-
-
-def _session_title(s: Session, row: ChatSession) -> str:
-    if row.title:
-        return row.title
-    first = s.scalars(
-        select(ChatMessage)
-        .where(ChatMessage.session_id == row.id, ChatMessage.role == "user")
-        .order_by(col(ChatMessage.created_at).asc())
-        .limit(1)
-    ).first()
-    if first is not None and first.content:
-        return first.content[:60]
-    return "(untitled)"
-
-
-def _owned_session_or_404(s: Session, session_id: str, user_id: str) -> ChatSession:
-    """NULL-user legacy sessions stay invisible here until adopted via /query."""
-    row = s.get(ChatSession, session_id)
-    if row is None or row.user_id != user_id:
-        raise HTTPException(status_code=404, detail="session not found")
-    return row
-
-
-@protected.get("/sessions", response_model=SessionListResponse)
-def list_sessions(user: User = Depends(require_user)) -> dict[str, Any]:
-    """Two queries max -- network RTT amplifies per-row queries ~1000x on Postgres.
-
-    Query 1 is the session page with the title fallback (first user message)
-    folded in as a correlated scalar subquery; query 2 fetches all message
-    counts for the page via one GROUP BY. Never N+1.
-    """
-    user_id = str(user.id)
-    with session_scope() as s:
-        first_user_message = (
-            sa_select(col(ChatMessage.content))
-            .where(
-                col(ChatMessage.session_id) == col(ChatSession.id),
-                col(ChatMessage.role) == "user",
-            )
-            .order_by(col(ChatMessage.created_at).asc())
-            .limit(1)
-            .correlate(ChatSession)
-            .scalar_subquery()
-        )
-        rows: list[tuple[ChatSession, str | None]] = [
-            (r[0], r[1])
-            for r in s.execute(
-                sa_select(ChatSession, first_user_message)
-                .where(col(ChatSession.user_id) == user_id)
-                .order_by(col(ChatSession.updated_at).desc())
-            )
-        ]
-        session_ids = [row.id for row, _ in rows]
-        counts: dict[str, int] = {}
-        if session_ids:
-            counts = {
-                str(sid): int(n)
-                for sid, n in s.execute(
-                    sa_select(col(ChatMessage.session_id), func.count())
-                    .where(col(ChatMessage.session_id).in_(session_ids))
-                    .group_by(col(ChatMessage.session_id))
-                )
-            }
-        sessions = [
-            {
-                "id": row.id,
-                "title": row.title or (first_msg[:60] if first_msg else "(untitled)"),
-                "created_at": row.created_at.isoformat(),
-                "updated_at": row.updated_at.isoformat(),
-                "message_count": counts.get(row.id, 0),
-            }
-            for row, first_msg in rows
-        ]
-    return {"sessions": sessions}
-
-
-@protected.get("/sessions/{session_id}", response_model=SessionDetailResponse)
-def get_session(session_id: str, user: User = Depends(require_user)) -> dict[str, Any]:
-    with session_scope() as s:
-        row = _owned_session_or_404(s, session_id, str(user.id))
-        messages = s.scalars(
-            select(ChatMessage)
-            .where(ChatMessage.session_id == session_id)
-            .order_by(col(ChatMessage.created_at).asc())
-        ).all()
-        return {
-            "session": {
-                "id": row.id,
-                "title": _session_title(s, row),
-                "created_at": row.created_at.isoformat(),
-                "updated_at": row.updated_at.isoformat(),
-            },
-            "messages": [
-                {
-                    "id": m.id,
-                    "turn_id": m.turn_id,
-                    "role": m.role,
-                    "content": m.content,
-                    "status": m.status,
-                    "citations": list(m.citations_json or []),
-                    # Tier-2: rehydrated turns keep their provenance + next-step
-                    # affordances so a reloaded conversation is fully interactive.
-                    "audit_id": m.audit_id,
-                    "reason": m.reason,
-                    "interpretation": m.interpretation,
-                    "clarify": list(m.clarify_json or []),
-                    "related": list(m.related_json or []),
-                    "created_at": m.created_at.isoformat(),
-                }
-                for m in messages
-            ],
-        }
-
-
-@protected.delete("/sessions/{session_id}", status_code=204)
-def delete_session(session_id: str, user: User = Depends(require_user)) -> None:
-    with session_scope() as s:
-        row = _owned_session_or_404(s, session_id, str(user.id))
-        # One bulk DELETE for the messages instead of a per-row ORM delete
-        # (ChatMessage has no ORM cascades, so a set-based delete is equivalent).
-        s.execute(sa_delete(ChatMessage).where(col(ChatMessage.session_id) == session_id))
-        s.delete(row)
-
-
 # ---------- /settings (read-only, no secrets) ----------
 class PublicSettings(BaseModel):
     """Non-secret config only. The model doubles as an allowlist: a future
@@ -2102,5 +1813,4 @@ def get_public_settings() -> dict[str, Any]:
     }
 
 
-app.include_router(auth_router)
 app.include_router(protected)

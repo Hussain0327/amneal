@@ -8,7 +8,7 @@ Design notes:
 - ``include_local_variables=False``: the SDK default (True) serializes every
   traceback frame's locals into unhandled-exception events — frames in the
   /query path hold ``question``/``answer``/``user_prompt`` (which embeds the
-  retrieved passage texts) and /auth/login frames hold the email, so locals
+  retrieved passage texts), so locals
   capture would defeat the body scrubbing above the moment anything 500s.
 - ``before_send=_scrub_event``: defense-in-depth against SQLAlchemy exception
   messages — ``str(StatementError)`` embeds the failed SQL statement plus a

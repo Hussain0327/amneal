@@ -310,16 +310,15 @@ class Settings(BaseSettings):
     auth_session_ttl_hours: int = 72
     # Per-user requests/minute on POST /query and POST /assemble. 0 disables.
     rate_limit_per_minute: int = 30
-    # Trust platform forwarding headers for the per-IP login limiter key. OFF by
-    # default: when the API is reached directly, X-Forwarded-For is
-    # client-controlled and trusting its leftmost hop lets an attacker rotate a
-    # spoofed IP to defeat the limiter. Turn ON only behind a proxy/load balancer
-    # whose edge attests the real client. Fly APPENDS the observed peer to XFF
-    # (it does NOT overwrite the leftmost hop) and exposes the attested client in
-    # the Fly-Client-IP header, which _client_ip prefers; otherwise it falls back
-    # to the RIGHTMOST XFF hop (the one our trusted edge added), never the
-    # spoofable leftmost. OFF, the limiter keys on the un-spoofable TCP-level
-    # request.client.host.
+    # Trust platform forwarding headers for the per-IP LOGIN limiter key.
+    # Since the step-4 auth cutover the login limiter lives in the Go proxy,
+    # which reads TRUST_PROXY_HEADERS from env itself (go/internal/api,
+    # clientip.go documents the header-trust rationale: Fly-Client-IP first,
+    # rightmost XFF fallback, never the spoofable leftmost hop). The field
+    # stays DECLARED here so the env contract remains one documented list and
+    # .env files carrying it keep validating; nothing Python-side reads it
+    # anymore. tests/test_trust_proxy_fly_toml.py guards the prod fly.toml
+    # value the Go keying depends on.
     trust_proxy_headers: bool = False
     # Opt-in bearer gate for GET /metrics. UNSET (default) keeps /metrics open
     # exactly as today so an existing Prometheus scrape keeps working with no

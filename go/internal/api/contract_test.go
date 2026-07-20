@@ -445,8 +445,13 @@ func TestMeAndLogoutLifecycle(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("me: %d", resp.StatusCode)
 	}
+	// Full body pin: handleMe fills userOut from a DIFFERENT SQL row than
+	// login does (the session join), so a field mix-up there would pass the
+	// login-body test alone.
 	user := decode(t, resp)["user"].(map[string]any)
-	if int32(user["id"].(float64)) != uid {
+	wantKeys(t, user, "id", "email", "display_name", "role")
+	if int32(user["id"].(float64)) != uid || user["email"] != testEmail ||
+		user["display_name"] != "Test Analyst" || user["role"] != "analyst" {
 		t.Fatalf("me user: %v", user)
 	}
 
@@ -747,11 +752,36 @@ func TestAuthWallAndRelayPrecedence(t *testing.T) {
 	}
 
 	// Everything else still relays -- the strangler contract: /query, /health,
-	// unknown paths, and even non-native METHODS under /sessions/{id}.
+	// unknown paths.
 	for _, path := range []string{"/query", "/health", "/products", "/anything/else"} {
 		resp := h.do(t, "GET", path, "", nil)
 		if resp.Header.Get("X-Upstream") != "python" {
 			t.Fatalf("%s must relay to upstream (status %d)", path, resp.StatusCode)
+		}
+	}
+
+	// Method mismatches on Go-owned paths must NOT relay (no Python handler
+	// exists behind them since B2): FastAPI-shaped 405 with the first-match
+	// Allow quirk preserved (GET for /sessions/{id}, never "GET, DELETE").
+	for _, probe := range []struct{ method, path, allow string }{
+		{"GET", "/auth/login", "POST"},
+		{"DELETE", "/auth/logout", "POST"},
+		{"PUT", "/auth/me", "GET"},
+		{"POST", "/sessions", "GET"},
+		{"PUT", "/sessions/some-id", "GET"},
+	} {
+		resp := h.do(t, probe.method, probe.path, "", nil)
+		if resp.StatusCode != 405 {
+			t.Fatalf("%s %s: %d, want 405", probe.method, probe.path, resp.StatusCode)
+		}
+		if got := resp.Header.Get("Allow"); got != probe.allow {
+			t.Fatalf("%s %s Allow=%q, want %q", probe.method, probe.path, got, probe.allow)
+		}
+		if resp.Header.Get("X-Upstream") == "python" {
+			t.Fatalf("%s %s leaked to the relay", probe.method, probe.path)
+		}
+		if body := decode(t, resp); body["detail"] != "Method Not Allowed" {
+			t.Fatalf("405 body: %v", body)
 		}
 	}
 }

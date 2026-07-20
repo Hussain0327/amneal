@@ -18,7 +18,7 @@ from config.settings import get_settings
 
 from regwatch.generate import grounded_qa as qa_mod
 from regwatch.generate.llm import EchoLLMProvider, LLMMessage, LLMResponse, LLMStreamChunk
-from tests.conftest import create_user, login_client
+from tests.conftest import create_user, session_client
 from tests.test_invariants import _meta, _seed_corpus
 from tests.test_query_stream import _parse_sse, _result_payload, _stream
 
@@ -200,8 +200,7 @@ def test_query_stream_emits_token_frames_then_validated_result(
             chunks=["A fasting ", "bioequivalence study ", "is recommended [PSG_020503, p.3]."],
         ),
     )
-    create_user()
-    client = login_client()
+    client = session_client(create_user())
     try:
         frames = _parse_sse(_stream(client, "What study design is recommended?").text)
         events = [e for e, _ in frames]
@@ -232,8 +231,7 @@ def test_query_stream_refusal_streams_zero_token_frames(
     monkeypatch.setattr(
         qa_mod, "get_llm_provider", lambda *a, **k: _streaming_llm(refusal, chunks=list(refusal))
     )
-    create_user()
-    client = login_client()
+    client = session_client(create_user())
     try:
         frames = _parse_sse(_stream(client, "What is the recommended dose?").text)
         events = [e for e, _ in frames]

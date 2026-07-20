@@ -1,8 +1,12 @@
 """DB-backed opaque session tokens.
 
 The raw token lives only in the client's HttpOnly cookie; the DB stores its
-sha256, so a leaked DB cannot be replayed as a session. Login always creates a
-brand-new session row (prevents session fixation).
+sha256, so a leaked DB cannot be replayed as a session. The MINT side of this
+contract (login) lives in the Go proxy now (go/internal/api/auth.go, step 4 of
+docs/POLYGLOT_TARGET_2026-07-10.md) and always creates a brand-new row
+(prevents session fixation); Python keeps the VERIFY side -- resolve_token
+guards every remaining protected route -- plus create_session as the shared
+mint the test suite uses, pinned to the exact scheme both runtimes speak.
 """
 
 from __future__ import annotations
@@ -14,7 +18,6 @@ from datetime import UTC, datetime, timedelta
 from config.settings import get_settings
 from sqlmodel import select
 
-from regwatch.auth.passwords import _DUMMY_HASH, verify_password
 from regwatch.store.db import session_scope
 from regwatch.store.models import AuthSession, User
 
@@ -45,33 +48,14 @@ def _detached_user(user: User) -> User:
     )
 
 
-def authenticate(email: str, password: str) -> User | None:
-    """Credential check with a uniform cost/timing profile.
-
-    Every call runs exactly one bcrypt verify — against the stored hash when the
-    user exists, against a dummy hash when not — so unknown email, wrong
-    password, and inactive user are indistinguishable to a caller.
-    """
-    normalized = email.strip().lower()
-    with session_scope() as s:
-        row = s.scalars(select(User).where(User.email == normalized)).first()
-        user = _detached_user(row) if row is not None else None
-    if user is None:
-        verify_password(password, _DUMMY_HASH)
-        return None
-    if not verify_password(password, user.password_hash):
-        return None
-    if not user.is_active:
-        return None
-    return user
-
-
 def create_session(user_id: int) -> tuple[str, AuthSession]:
     """Create a fresh session row; return (raw token, detached row).
 
-    Login doubles as the opportunistic sweep: expired rows are dead weight
-    whose stale token hashes have no reason to stay at rest, and nothing else
-    runs periodically at pilot scale.
+    Prod logins mint sessions in the Go proxy (same token scheme, same sweep);
+    this Python twin is the test suite's mint and the executable spec of the
+    scheme -- token_urlsafe(32), sha256 at rest, TTL from
+    AUTH_SESSION_TTL_HOURS -- that go/internal/api/auth.go mirrors. The sweep
+    of expired rows rides along exactly as the Go port does it.
     """
     raw = secrets.token_urlsafe(32)
     now = datetime.now(UTC)
@@ -123,13 +107,3 @@ def resolve_token(raw: str) -> User | None:
             row.last_seen_at = now
             s.add(row)
         return _detached_user(user)
-
-
-def revoke_token(raw: str) -> None:
-    """Delete the server-side session for a raw token. Silent when absent."""
-    with session_scope() as s:
-        row = s.scalars(
-            select(AuthSession).where(AuthSession.token_hash == _hash_token(raw))
-        ).first()
-        if row is not None:
-            s.delete(row)

@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import select
 
-from tests.conftest import create_user, login_client
+from tests.conftest import AuthedClient, create_user, session_client
 
 
 def _qa_audit(user_id: int, *, mode: str = "qa") -> int:
@@ -43,29 +43,28 @@ def test_feedback_requires_auth() -> None:
     assert r.status_code == 401
 
 
-def test_feedback_thumbs_up(auth_client: TestClient) -> None:
-    me = auth_client.get("/auth/me").json()["user"]
-    audit_id = _qa_audit(me["id"])
+def test_feedback_thumbs_up(auth_client: AuthedClient) -> None:
+    audit_id = _qa_audit(auth_client.user_id)
     r = auth_client.post("/feedback", json={"audit_id": audit_id, "rating": 1})
     assert r.status_code == 200, r.text
     assert r.json() == {"audit_id": audit_id, "rating": 1, "comment": None}
-    assert _feedback_rows() == [(audit_id, str(me["id"]), 1, None)]
+    assert _feedback_rows() == [(audit_id, str(auth_client.user_id), 1, None)]
 
 
-def test_feedback_thumbs_down_with_comment(auth_client: TestClient) -> None:
-    me = auth_client.get("/auth/me").json()["user"]
-    audit_id = _qa_audit(me["id"])
+def test_feedback_thumbs_down_with_comment(auth_client: AuthedClient) -> None:
+    audit_id = _qa_audit(auth_client.user_id)
     r = auth_client.post(
         "/feedback",
         json={"audit_id": audit_id, "rating": -1, "comment": "cited the wrong dosage form"},
     )
     assert r.status_code == 200, r.text
-    assert _feedback_rows() == [(audit_id, str(me["id"]), -1, "cited the wrong dosage form")]
+    assert _feedback_rows() == [
+        (audit_id, str(auth_client.user_id), -1, "cited the wrong dosage form")
+    ]
 
 
-def test_feedback_rerating_replaces_not_duplicates(auth_client: TestClient) -> None:
-    me = auth_client.get("/auth/me").json()["user"]
-    audit_id = _qa_audit(me["id"])
+def test_feedback_rerating_replaces_not_duplicates(auth_client: AuthedClient) -> None:
+    audit_id = _qa_audit(auth_client.user_id)
     assert (
         auth_client.post(
             "/feedback", json={"audit_id": audit_id, "rating": -1, "comment": "bad"}
@@ -76,15 +75,15 @@ def test_feedback_rerating_replaces_not_duplicates(auth_client: TestClient) -> N
         auth_client.post("/feedback", json={"audit_id": audit_id, "rating": 1}).status_code == 200
     )
     # One row, latest rating wins, the stale comment does not linger.
-    assert _feedback_rows() == [(audit_id, str(me["id"]), 1, None)]
+    assert _feedback_rows() == [(audit_id, str(auth_client.user_id), 1, None)]
 
 
-def test_feedback_404_for_missing_audit_row(auth_client: TestClient) -> None:
+def test_feedback_404_for_missing_audit_row(auth_client: AuthedClient) -> None:
     r = auth_client.post("/feedback", json={"audit_id": 999_999, "rating": 1})
     assert r.status_code == 404
 
 
-def test_feedback_404_for_foreign_audit_row(auth_client: TestClient) -> None:
+def test_feedback_404_for_foreign_audit_row(auth_client: AuthedClient) -> None:
     """Another user's audit row: same 404 as missing — never confirms existence."""
     other_id = create_user(email="other@example.com", password="pw-pw-pw-pw-pw")
     foreign_audit = _qa_audit(other_id)
@@ -93,25 +92,22 @@ def test_feedback_404_for_foreign_audit_row(auth_client: TestClient) -> None:
     assert _feedback_rows() == []
 
 
-def test_feedback_404_for_non_qa_mode(auth_client: TestClient) -> None:
-    me = auth_client.get("/auth/me").json()["user"]
-    audit_id = _qa_audit(me["id"], mode="whitepaper")
+def test_feedback_404_for_non_qa_mode(auth_client: AuthedClient) -> None:
+    audit_id = _qa_audit(auth_client.user_id, mode="whitepaper")
     r = auth_client.post("/feedback", json={"audit_id": audit_id, "rating": 1})
     assert r.status_code == 404
 
 
-def test_feedback_rejects_out_of_range_rating(auth_client: TestClient) -> None:
-    me = auth_client.get("/auth/me").json()["user"]
-    audit_id = _qa_audit(me["id"])
+def test_feedback_rejects_out_of_range_rating(auth_client: AuthedClient) -> None:
+    audit_id = _qa_audit(auth_client.user_id)
     for bad in (0, 2, -2, 5):
         r = auth_client.post("/feedback", json={"audit_id": audit_id, "rating": bad})
         assert r.status_code == 422, f"rating={bad} must be rejected"
     assert _feedback_rows() == []
 
 
-def test_feedback_rejects_oversized_comment(auth_client: TestClient) -> None:
-    me = auth_client.get("/auth/me").json()["user"]
-    audit_id = _qa_audit(me["id"])
+def test_feedback_rejects_oversized_comment(auth_client: AuthedClient) -> None:
+    audit_id = _qa_audit(auth_client.user_id)
     r = auth_client.post(
         "/feedback", json={"audit_id": audit_id, "rating": -1, "comment": "x" * 2001}
     )
@@ -122,8 +118,8 @@ def test_two_users_can_rate_independent_rows() -> None:
     """The (audit_id, user_id) key scopes the upsert per user."""
     uid_a = create_user()
     uid_b = create_user(email="b@example.com", password="pw-pw-pw-pw-pw")
-    client_a = login_client()
-    client_b = login_client(email="b@example.com", password="pw-pw-pw-pw-pw")
+    client_a = session_client(uid_a)
+    client_b = session_client(uid_b)
     try:
         audit_a = _qa_audit(uid_a)
         audit_b = _qa_audit(uid_b)
@@ -141,9 +137,8 @@ def test_two_users_can_rate_independent_rows() -> None:
 
 
 @pytest.mark.parametrize("rating", [-1, 1])
-def test_feedback_accepts_both_valid_ratings(auth_client: TestClient, rating: int) -> None:
-    me = auth_client.get("/auth/me").json()["user"]
-    audit_id = _qa_audit(me["id"])
+def test_feedback_accepts_both_valid_ratings(auth_client: AuthedClient, rating: int) -> None:
+    audit_id = _qa_audit(auth_client.user_id)
     r = auth_client.post("/feedback", json={"audit_id": audit_id, "rating": rating})
     assert r.status_code == 200
     assert r.json()["rating"] == rating

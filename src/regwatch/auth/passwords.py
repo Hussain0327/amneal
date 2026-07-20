@@ -123,6 +123,10 @@ def validate_password_strength(
     return None
 
 
-# Login verifies against this when the email is unknown, so a missing user costs
-# the same bcrypt work as a wrong password - no timing oracle on email existence.
+# Executable spec twin of the Go login's uniform-timing dummy hash
+# (go/internal/api/auth.go dummyHash): the login that verifies against this on
+# unknown emails moved to the Go proxy in step 4, and Go hardcodes the SAME
+# string at the same bcrypt cost so a missing user costs the same work as a
+# wrong password - no timing oracle on email existence. Kept here so the
+# scheme has one documented Python-side anchor next to hash_password.
 _DUMMY_HASH = hash_password("regwatch-dummy-password-for-uniform-timing")
