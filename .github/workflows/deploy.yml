@@ -89,14 +89,18 @@ jobs:
       # ci.yml's docker-build Trivy step EXACTLY: fail on FIXABLE CRITICAL/HIGH
       # vulns (--ignore-unfixed) plus any embedded secret (--scanners vuln,secret,
       # which ignores --ignore-unfixed and gates the same way). --exit-code 1
-      # fails the job -> no deploy. Trivy caches its DB across runs.
+      # fails the job -> no deploy. Trivy caches its DB across runs. Tag pinned
+      # in lockstep with ci.yml (same scanner everywhere -- a finding here that
+      # CI's scan could not see, or vice versa, would be pure version skew);
+      # the vuln DB itself is fetched fresh at scan time, so pinning the tag
+      # does not stale the gate. Bump both files together, deliberately.
       - name: trivy scan (API image)
         run: |
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$HOME/.cache/trivy:/root/.cache/trivy" \
             -v "$GITHUB_WORKSPACE/.trivyignore:/root/.trivyignore" \
-            aquasec/trivy:latest image \
+            aquasec/trivy:0.72.0 image \
             --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
             --ignorefile /root/.trivyignore \
             --scanners vuln,secret regwatch:deploy
