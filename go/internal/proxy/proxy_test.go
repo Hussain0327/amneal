@@ -233,7 +233,7 @@ func TestSSEEventsFlushIncrementally(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request through proxy: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
 		t.Fatalf("Content-Type = %q, want text/event-stream", ct)
 	}
@@ -288,7 +288,7 @@ func TestFlushIntervalFlushesLengthDeclaredResponses(t *testing.T) {
 		// client deadline inside Get itself.
 		t.Fatalf("GET through proxy (FlushInterval regression? headers must flush immediately): %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	// Sanity: the length-declared path must actually be exercised, or the
 	// auto-flush fallback would make this test pass vacuously.
 	if want := int64(len(part1) + len(part2)); resp.ContentLength != want {

@@ -16,9 +16,12 @@ FROM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149a
 # instead of a silent mid-build network download of a different toolchain.
 ENV GOTOOLCHAIN=local CGO_ENABLED=0
 WORKDIR /src
-# go.mod before sources so the dependency layer (a no-op while the module is
-# stdlib-only) stays cached across source edits once deps arrive.
-COPY go/go.mod ./
+# go.mod+go.sum before sources so the dependency-download layer stays cached
+# across source edits. go.sum makes the download sum-VERIFIED; note the deps
+# (pgx, via internal/store) are not linked into the proxy binary until a
+# handler layer imports the store -- `go build ./cmd/proxy` links only
+# imported packages, so the shipped binary is unchanged by PR A.
+COPY go/go.mod go/go.sum ./
 RUN go mod download
 COPY go/cmd ./cmd
 COPY go/internal ./internal

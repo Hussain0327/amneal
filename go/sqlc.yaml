@@ -1,0 +1,32 @@
+# sqlc config for the Go store (polyglot step 4, PR A -- foundation only).
+#
+# schema: a committed pg_dump snapshot SCOPED to the step-4 tables, produced
+# ONLY by scripts/gen-store-schema.sh and drift-gated in CI against a
+# `regwatch init-db` bootstrap (Alembic head). Never hand-edit it.
+#
+# database.uri feeds the sqlc/db-prepare vet rule: every query below is
+# PREPAREd against a real Postgres carrying the real schema, so a query that
+# references a dropped column fails CI instead of failing at runtime. CI
+# loads internal/store/schema.sql into the job's pgvector service and points
+# TEST_DATABASE_URL at it; locally, point TEST_DATABASE_URL at any scratch
+# database that carries the schema (NEVER prod).
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "internal/store/schema.sql"
+    queries: "internal/store/queries"
+    database:
+      uri: "${TEST_DATABASE_URL}"
+    # Without this, a configured `database` flips `sqlc generate` itself onto
+    # the DB-backed analyzer -- making codegen (and `sqlc diff`) fail anywhere
+    # Postgres isn't running. Generation must stay hermetic; the live database
+    # is for `sqlc vet` (db-prepare) only.
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "store"
+        out: "internal/store"
+        sql_package: "pgx/v5"

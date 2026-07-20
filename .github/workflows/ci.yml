@@ -360,6 +360,23 @@ jobs:
   # in docs/GO_PROXY_ROLLOUT.md) -- but its gate lives here from day one.
   go-proxy:
     runs-on: ubuntu-latest
+    env:
+      # The Go store's opt-in tests and sqlc vet's db-prepare rule target this
+      # disposable service DB -- same B8 rationale as lint-type-test: the Go
+      # data layer must be exercised against the datastore prod actually runs.
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -369,9 +386,7 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version-file: go/go.mod
-          # Stdlib only for now, so no go.sum exists (setup-go's default cache
-          # key source); key the module/build cache on go.mod instead.
-          cache-dependency-path: go/go.mod
+          cache-dependency-path: go/go.sum
 
       # gofmt exits 0 even when files need formatting; -l prints offenders,
       # so fail on any output (this lane's `black --check`).
@@ -389,6 +404,89 @@ jobs:
         working-directory: go
         run: go vet ./...
 
+      - name: setup sqlc
+        uses: sqlc-dev/setup-sqlc@bac53b7fb28c039a6c7f5736fd1e89744021bdd6  # v5.0.0
+        with:
+          sqlc-version: "1.31.1"
+
+      # Stale-generated-code gate: the committed *.sql.go must equal what sqlc
+      # generates from the committed schema + queries. Hermetic by design --
+      # sqlc.yaml disables the DB-backed analyzer, so this needs no database.
+      - name: sqlc diff
+        working-directory: go
+        run: sqlc diff
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
+        with:
+          version: v2.12.2
+          working-directory: go
+
+      # db-prepare PREPAREs every query against a real Postgres carrying the
+      # committed snapshot: a query that references a column the schema does
+      # not have fails HERE, not at runtime. Load the snapshot first (psql
+      # ships on the runner). Ordering is load-bearing: go test drops and
+      # recreates schema public itself, so vet must run before it.
+      - name: sqlc vet (db-prepare)
+        working-directory: go
+        run: |
+          psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f internal/store/schema.sql
+          sqlc vet
+
       - name: go test
         working-directory: go
         run: go test ./...
+
+  # Proves the committed Go store schema snapshot (go/internal/store/schema.sql)
+  # still equals what Alembic head actually produces: bootstrap a throwaway
+  # pgvector database the canonical way (regwatch init-db = create_all + stamp,
+  # the only supported fresh-PG path), re-run the EXACT generation pipeline,
+  # and diff against the committed file. A failure means a Python migration
+  # changed a step-4 table without regenerating the Go side -- the two halves
+  # of the polyglot split can never silently disagree about the schema.
+  store-schema-drift:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        with:
+          version: "latest"
+          enable-cache: true
+
+      # EMBEDDING_PROVIDER=openai satisfies the vector-dimension assert with
+      # no API key (same trick as tests/test_postgres_bootstrap.py).
+      - name: bootstrap schema at alembic head
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          EMBEDDING_PROVIDER: openai
+        run: uv run regwatch init-db
+
+      # pg_dump must come from the same pg17 lineage as the service (the
+      # runner's own client refuses newer servers), so run it from the
+      # already-pinned service image; --network host reaches the published
+      # port. No new version pin is introduced here.
+      - name: regenerate + diff the snapshot
+        run: |
+          PGDUMP="docker run --rm --network host -e PGPASSWORD=postgres pgvector/pgvector:pg17 pg_dump" \
+            bash scripts/gen-store-schema.sh \
+            'postgresql://postgres:postgres@localhost:5432/postgres' /tmp/schema.live.sql
+          if ! diff -u go/internal/store/schema.sql /tmp/schema.live.sql; then
+            echo "::error::go/internal/store/schema.sql is stale: a migration changed a step-4 table. Regenerate with scripts/gen-store-schema.sh against a fresh init-db database, run 'sqlc generate', and commit both." >&2
+            exit 1
+          fi
