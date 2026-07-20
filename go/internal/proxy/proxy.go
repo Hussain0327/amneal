@@ -58,11 +58,21 @@ func ConfigFromEnv() (Config, error) {
 	return Config{Upstream: u, Addr: ":" + port}, nil
 }
 
-// NewHandler returns the proxy handler: /healthz is answered locally (Fly
-// liveness for THIS process must not depend on the upstream being up; the
-// Python app keeps its own /health), everything else forwards verbatim.
-// A nil errLog falls back to log.Default(), which writes to stderr.
+// NewHandler returns the relay-only proxy handler: /healthz is answered
+// locally (Fly liveness for THIS process must not depend on the upstream
+// being up; the Python app keeps its own /health), everything else forwards
+// verbatim. A nil errLog falls back to log.Default(), which writes to stderr.
 func NewHandler(upstream *url.URL, errLog *log.Logger) http.Handler {
+	return NewHandlerWithNative(upstream, errLog, nil)
+}
+
+// NewHandlerWithNative is NewHandler plus NATIVE routes served by this binary
+// instead of relayed -- strangler Step 4: the native table grows as surfaces
+// move from FastAPI to Go, and the relay catch-all keeps carrying everything
+// else (streaming included) untouched. Patterns use Go 1.22 ServeMux syntax
+// ("POST /auth/login"); most-specific-pattern-wins makes registration order
+// irrelevant, and an empty/nil map degrades to exactly the old handler.
+func NewHandlerWithNative(upstream *url.URL, errLog *log.Logger, native map[string]http.Handler) http.Handler {
 	if errLog == nil {
 		errLog = log.Default()
 	}
@@ -166,20 +176,32 @@ func NewHandler(upstream *url.URL, errLog *log.Logger) http.Handler {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, "ok\n")
 	})
+	for pattern, h := range native {
+		mux.Handle(pattern, h)
+	}
 	mux.Handle("/", rp)
 	return mux
 }
 
-// Run serves cfg.Addr until SIGTERM/SIGINT, then drains in-flight requests
-// for up to shutdownGrace before force-closing what remains. A nil errLog
-// falls back to log.Default() (stderr).
+// Run serves the relay-only handler on cfg.Addr -- see Serve for the
+// lifecycle. Kept for the no-native-routes path and existing callers.
 func Run(cfg Config, errLog *log.Logger) error {
 	if errLog == nil {
 		errLog = log.Default()
 	}
+	return Serve(cfg.Addr, NewHandler(cfg.Upstream, errLog), errLog)
+}
+
+// Serve runs handler on addr until SIGTERM/SIGINT, then drains in-flight
+// requests for up to shutdownGrace before force-closing what remains. A nil
+// errLog falls back to log.Default() (stderr).
+func Serve(addr string, handler http.Handler, errLog *log.Logger) error {
+	if errLog == nil {
+		errLog = log.Default()
+	}
 	srv := &http.Server{
-		Addr:    cfg.Addr,
-		Handler: NewHandler(cfg.Upstream, errLog),
+		Addr:    addr,
+		Handler: handler,
 		// Slowloris guard on request headers only. ReadTimeout/WriteTimeout
 		// stay 0 on purpose: either one severs long uploads or SSE streams.
 		ReadHeaderTimeout: 10 * time.Second,

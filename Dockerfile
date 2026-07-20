@@ -17,10 +17,11 @@ FROM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149a
 ENV GOTOOLCHAIN=local CGO_ENABLED=0
 WORKDIR /src
 # go.mod+go.sum before sources so the dependency-download layer stays cached
-# across source edits. go.sum makes the download sum-VERIFIED; note the deps
-# (pgx, via internal/store) are not linked into the proxy binary until a
-# handler layer imports the store -- `go build ./cmd/proxy` links only
-# imported packages, so the shipped binary is unchanged by PR A.
+# across source edits. go.sum makes the download sum-VERIFIED. Since the
+# step-4 auth cutover, cmd/proxy imports internal/api + internal/store, so
+# pgx and x/crypto ARE linked into the shipped binary (still static,
+# CGO-free); their Go-module CVEs now gate the Trivy scans like any other
+# shipped dependency -- fix by bumping, never by ignoring.
 COPY go/go.mod go/go.sum ./
 RUN go mod download
 COPY go/cmd ./cmd
