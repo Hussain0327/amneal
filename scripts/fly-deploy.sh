@@ -50,12 +50,32 @@ MAX_DELAY_SECONDS="${FLY_DEPLOY_MAX_DELAY_SECONDS:-60}"
 # the machine-START signature (transient); a real migration failure instead
 # reads "release_command failed running on machine ..." and is not matched here.
 # Matched case-insensitively against the whole captured deploy output.
+#
+# The 50x branch exists for Fly control-plane / remote-builder gateway blips
+# (deploys run `flyctl deploy --remote-only`), whose flyctl error shape is a Go
+# HTTP error: the API host, then the status, ADJACENTLY ("Post
+# https://api.machines.dev: 503 Service Unavailable"). Host-anchored 2026-07-16:
+# a bare 50x phrase also matches an echoed health-CHECK body -- the live
+# 2026-07-15 flip-deadlock body was "502 Bad Gateway / upstream unavailable"
+# (docs/GO_PROXY_ROLLOUT.md) -- which would retry a structurally deadlocked
+# deploy instead of failing fast, if a future flyctl starts printing check
+# output on failure.
+#
+# `[^ ]*: *` (not `.*`) is why this holds: the status must follow the host
+# across a URL path and colon but NO intervening words, so a line carrying BOTH
+# an API URL and a check body ("Post https://api.machines.dev/...: check
+# failed: 502 Bad Gateway / upstream unavailable") does NOT match. Shapes we
+# have no sample of -- status before host, wordy registry/docker forms
+# ("received unexpected HTTP status: 502 Bad Gateway"), *.fly.dev app hosts --
+# deliberately fail fast: a wrong fail-fast costs one manual re-run, a wrong
+# retry costs ~17min of wedged deploy plus a stray proxy machine per attempt,
+# on the group that now holds the public edge.
 TRANSIENT_ERROR_RE='deadline_exceeded'
 TRANSIENT_ERROR_RE="${TRANSIENT_ERROR_RE}|machine still starting"
 TRANSIENT_ERROR_RE="${TRANSIENT_ERROR_RE}|error starting release_command machine"
 TRANSIENT_ERROR_RE="${TRANSIENT_ERROR_RE}|failed to (start|launch) (the )?vm"
 TRANSIENT_ERROR_RE="${TRANSIENT_ERROR_RE}|no capacity|insufficient capacity"
-TRANSIENT_ERROR_RE="${TRANSIENT_ERROR_RE}|50[234] (bad gateway|service unavailable|gateway timeout)"
+TRANSIENT_ERROR_RE="${TRANSIENT_ERROR_RE}|(api\.machines\.dev|api\.fly\.io|registry\.fly\.io)[^ ]*: *50[234] (bad gateway|service unavailable|gateway timeout)"
 
 log() {
   printf '%s [fly-deploy] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2

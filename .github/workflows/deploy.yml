@@ -86,8 +86,20 @@ jobs:
             --ignorefile /root/.trivyignore \
             --scanners vuln,secret regwatch:deploy
 
+      # The SHA below pins only the INSTALLER action; without `version:` the
+      # flyctl BINARY itself resolves "latest" at deploy time. 0.4.71 is the
+      # live-verified pin: deploy run #106 fail-fasted the wedged proxy flip
+      # with NO check-body text in its output, and run #110 shipped v36 --
+      # both resolved latest -> 0.4.71. Bump deliberately (when Fly requires
+      # it, or ~quarterly), and BEFORE bumping re-verify that a
+      # failed-health-check deploy log still contains no check-body text --
+      # defense-in-depth: scripts/fly-deploy.sh's host-anchored classifier
+      # fail-fasts known check-body shapes even if echoed; keeping them out of
+      # the capture entirely also covers echo formats nobody has seen yet.
       - name: setup flyctl
         uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1  # v1
+        with:
+          version: "0.4.71"  # no leading v
 
       # flyctl builds remotely and runs fly.toml [deploy] release_command
       # (alembic upgrade head) before the rolling machine replace. The token is
