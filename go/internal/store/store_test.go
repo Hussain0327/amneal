@@ -72,6 +72,25 @@ func testQueries(t *testing.T) (*pgxpool.Pool, *Queries) {
 		t.Fatalf("NewPool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	// Cross-package serialization: this package and internal/api both
+	// drop/recreate schema public on the SAME TEST_DATABASE_URL, and
+	// `go test ./...` runs the package binaries in PARALLEL -- without this
+	// session advisory lock the bootstraps clobber each other mid-test
+	// ("schema public does not exist", ~80% cold-run CI failure). Held on a
+	// pinned connection for the whole test; released in cleanup (LIFO:
+	// before pool.Close). Key 721001 is shared with internal/api.
+	lockConn, err := pool.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire lock conn: %v", err)
+	}
+	if _, err := lockConn.Exec(context.Background(), "SELECT pg_advisory_lock(721001)"); err != nil {
+		lockConn.Release()
+		t.Fatalf("advisory lock: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = lockConn.Exec(context.Background(), "SELECT pg_advisory_unlock(721001)")
+		lockConn.Release()
+	})
 	stmts := append([]string{"DROP SCHEMA public CASCADE", "CREATE SCHEMA public"},
 		splitStatements(schemaSQL)...)
 	for _, stmt := range stmts {
@@ -353,6 +372,11 @@ func TestEnforceSSLMode(t *testing.T) {
 		{"remote-forced", "postgres://u@db.example.com:5432/db", "postgres://u@db.example.com:5432/db?sslmode=require"},
 		{"operator-override-wins", "postgres://u@db.example.com/db?sslmode=disable", "postgres://u@db.example.com/db?sslmode=disable"},
 		{"non-postgres-untouched", "mysql://u@db.example.com/db", "mysql://u@db.example.com/db"},
+		// SQLAlchemy driver-suffix tolerance: a +psycopg secret must not
+		// silently mis-parse into pgx's keyword/value fallback (which would
+		// boot cleanly and then fail every query).
+		{"sqlalchemy-suffix-stripped-remote", "postgresql+psycopg://u@db.example.com:5432/db", "postgresql://u@db.example.com:5432/db?sslmode=require"},
+		{"sqlalchemy-suffix-stripped-local", "postgresql+psycopg://u@localhost:5432/db", "postgresql://u@localhost:5432/db"},
 	}
 	for _, c := range cases {
 		got, err := enforceSSLMode(c.in)

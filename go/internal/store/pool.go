@@ -97,6 +97,12 @@ func NewPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 		cfg.ConnConfig.ConnectTimeout = time.Duration(seconds) * time.Second
 	}
 
+	// pgx's default QueryExecModeCacheStatement (server-side prepared
+	// statements) is safe ONLY because prod's DATABASE_URL is the Supabase
+	// SESSION pooler (each pooled conn keeps a dedicated backend). If that
+	// URL is ever repointed at the TRANSACTION pooler (port 6543), prepared
+	// statements break ("prepared statement does not exist") and this
+	// default must change to QueryExecModeExec.
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("store: create pool: %w", err)
@@ -116,15 +122,27 @@ func enforceSSLMode(databaseURL string) (string, error) {
 	if !strings.HasPrefix(u.Scheme, "postgres") {
 		return databaseURL, nil
 	}
+	// SQLAlchemy-form scheme tolerance: Python's settings normalizer ACCEPTS
+	// "postgresql+psycopg://" (its own internal driver form), and pgx would
+	// silently mis-parse that scheme via its keyword/value fallback -- the
+	// pool would construct cleanly and every query would then fail, a silent
+	// native-auth outage. Both runtimes must honor the same env contract, so
+	// strip any "+driver" suffix here. Untouched URLs return VERBATIM (no
+	// parse/re-encode round trip), like Python.
+	changed := false
+	if base, _, found := strings.Cut(u.Scheme, "+"); found {
+		u.Scheme = base
+		changed = true
+	}
 	q := u.Query()
-	if q.Has("sslmode") {
-		return databaseURL, nil
-	}
 	host := strings.ToLower(strings.Trim(u.Hostname(), "[]"))
-	if localHosts[host] {
+	if !q.Has("sslmode") && !localHosts[host] {
+		q.Set("sslmode", "require")
+		u.RawQuery = q.Encode()
+		changed = true
+	}
+	if !changed {
 		return databaseURL, nil
 	}
-	q.Set("sslmode", "require")
-	u.RawQuery = q.Encode()
 	return u.String(), nil
 }
