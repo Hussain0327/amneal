@@ -118,9 +118,20 @@ def test_succeeds_first_attempt_without_retry(tmp_path: Path) -> None:
         TRANSIENT_MSG,
         "failed to launch VM: no capacity in iad",
         "Post https://api.machines.dev: 503 Service Unavailable",
+        # The two OTHER anchored control-plane/builder hosts; without these a
+        # mutation dropping them from the host alternation would survive.
+        "Get https://registry.fly.io/v2/: 503 Service Unavailable",
+        "Post https://api.fly.io/graphql: 504 Gateway Timeout",
         "error starting release_command machine: failed to start VM d8: deadline_exceeded",
     ],
-    ids=["machine-start", "no-capacity", "machines-api-503", "release-machine-start"],
+    ids=[
+        "machine-start",
+        "no-capacity",
+        "machines-api-503",
+        "registry-503",
+        "api-fly-io-504",
+        "release-machine-start",
+    ],
 )
 def test_retries_transient_then_succeeds(tmp_path: Path, transient_message: str) -> None:
     proc, invocations = _run(tmp_path, fail_times=1, fail_message=transient_message)
@@ -162,6 +173,25 @@ def test_retries_transient_marker_buried_in_large_multiline_output(tmp_path: Pat
         "Error: smoke checks for machine 1781 failed: context deadline exceeded",
         "Error: release_command failed: could not connect: connection reset by peer",
         "Error: migration failed; please try again with --sql",
+        # The 50x transient branch is HOST-ANCHORED (2026-07-16): it matches only
+        # a Fly control-plane/builder host followed ADJACENTLY by the status.
+        # Without that, a future flyctl that echoes a failing health check's BODY
+        # would retry a deadlocked flip 3x instead of failing fast
+        # (docs/GO_PROXY_ROLLOUT.md). First: the literal #106 check body, verbatim.
+        "502 Bad Gateway / upstream unavailable",
+        # Second: a realistic echoed-check line -- flyctl abort text mixed with
+        # that body on one line. No API host present => must NOT read transient.
+        (
+            "Error: failed to reach a good state: check 'proxy-http' errored: "
+            "502 Bad Gateway / upstream unavailable"
+        ),
+        # Third: the case a bare `host.*50x` anchor would MISS -- an API URL and
+        # a check body on ONE line. Only the `[^ ]*: *` adjacency rejects this;
+        # with `.*` the host would license the unrelated body as transient.
+        (
+            'Error: Post "https://api.machines.dev/v1/apps/amneal/machines/x/wait": '
+            "check failed: 502 Bad Gateway / upstream unavailable"
+        ),
     ],
     ids=[
         "migration",
@@ -170,6 +200,9 @@ def test_retries_transient_marker_buried_in_large_multiline_output(tmp_path: Pat
         "smoke-ctx-deadline",
         "conn-reset",
         "please-try-again",
+        "check-body-502",
+        "check-echo-502-mixed",
+        "api-url-and-check-body-same-line",
     ],
 )
 def test_fails_fast_on_non_transient_error(tmp_path: Path, deterministic_message: str) -> None:

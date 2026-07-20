@@ -506,15 +506,23 @@ app machines. The log read is deterministic and takes one request.
 - Mid-deploy abort at proxy admission: nothing to roll back. Exactly like
   #106, the app machines were never touched and keep serving; blast radius
   zero. scripts/fly-deploy.sh fail-fasts (health-check failures are
-  deliberately non-transient) -- verified in #106. NOTE this holds only
+  deliberately non-transient) -- verified in #106. This originally held only
   because flyctl does not echo the failing check's BODY into deploy output:
   that body is literally "502 Bad Gateway / upstream unavailable", and
-  TRANSIENT_ERROR_RE (scripts/fly-deploy.sh) matches
+  TRANSIENT_ERROR_RE (scripts/fly-deploy.sh) matched a bare
   `50[234] (bad gateway|...)` case-insensitively against the whole captured
-  output. If a flyctl upgrade starts printing check output on failure, a
-  deadlocked flip would retry 3x (~17 min of wedged deploy, and a stray proxy
-  machine per attempt) instead of failing fast. If that ever happens, narrow
-  that regex branch. Destroy any stray proxy machines (below).
+  output, so a flyctl upgrade that started printing check output on failure
+  would have made a deadlocked flip retry 3x (~17 min of wedged deploy, and
+  a stray proxy machine per attempt) instead of failing fast. CLOSED
+  2026-07-16: that 50x branch is now HOST-ANCHORED -- it matches only when a
+  Fly control-plane/builder host (api.machines.dev, api.fly.io,
+  registry.fly.io) precedes the 50x status on the SAME line, the shape of a
+  real flyctl API gateway error ("Post https://api.machines.dev: 503 Service
+  Unavailable"). A check body carries no such host, so even an
+  echo-check-output flyctl fails fast (regression-tested: check-body-502 /
+  check-echo-502-mixed in tests/test_fly_deploy_retry.py). flyctl is also
+  pinned to 0.4.71 in deploy.yml, so its echo behavior cannot drift under us
+  silently. Destroy any stray proxy machines (below).
 - Revert after a successful flip: `git revert` the flip commit, push to
   main, let CI + deploy.yml ship it (or `bash scripts/fly-deploy.sh` from
   the reverted checkout in an emergency). EXPECT A HARD PUBLIC OUTAGE WINDOW
