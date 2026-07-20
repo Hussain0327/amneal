@@ -185,6 +185,24 @@ jobs:
           cache-from: type=gha,scope=web
           cache-to: type=gha,mode=max,scope=web,ignore-error=true
 
+      # With buildx the image bytes exist THREE times by scan time: the
+      # builder's local store (mode=max keeps every stage's layers even after
+      # the GHA cache export completes), the daemon store (load: true), and the
+      # copy Trivy writes to its container /tmp while exporting the image from
+      # the daemon. On 2026-07-20 that third copy hit "no space left on device"
+      # (runs 29751451276 / 29751461848) and failed the gate -- the plain
+      # `docker build` layout never had the buildkit copy, which is why the
+      # same scans were green for months before the cache re-land. The local
+      # buildkit store is expendable here (its useful content is already in the
+      # GHA cache; nothing builds after this point), so drop it before
+      # scanning; that puts peak disk BELOW the old plain-build layout. df
+      # lines are observability for the next disk incident.
+      - name: reclaim buildkit disk before scans
+        run: |
+          df -h /
+          docker buildx prune -af > /dev/null
+          df -h /
+
       # Persist Trivy's vuln DB (~100MB) across ephemeral runners (the scans
       # below mount ~/.cache/trivy). The rolling key writes a fresh copy each run
       # and restores the most recent one, so the cached DB is at most one run
@@ -202,14 +220,18 @@ jobs:
       # failing on those would just pin the build to a moving target with no
       # action to take) PLUS any embedded secrets (--scanners vuln,secret —
       # secret findings ignore --ignore-unfixed and gate the build the same way).
-      # Trivy caches its DB across runs.
+      # Trivy caches its DB across runs. The tag is PINNED (0.72.0, current
+      # 2026-07-20) for the same reason deploy.yml pins flyctl: an unpinned
+      # `latest` makes scanner-behavior drift land silently on whatever PR
+      # happens to run next. The vuln DB stays fresh regardless -- it is
+      # fetched at scan time, not baked into the image tag. Bump deliberately.
       - name: trivy scan (API image)
         run: |
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$HOME/.cache/trivy:/root/.cache/trivy" \
             -v "$GITHUB_WORKSPACE/.trivyignore:/root/.trivyignore" \
-            aquasec/trivy:latest image \
+            aquasec/trivy:0.72.0 image \
             --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
             --ignorefile /root/.trivyignore \
             --scanners vuln,secret regwatch:ci
@@ -220,7 +242,7 @@ jobs:
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$HOME/.cache/trivy:/root/.cache/trivy" \
             -v "$GITHUB_WORKSPACE/.trivyignore:/root/.trivyignore" \
-            aquasec/trivy:latest image \
+            aquasec/trivy:0.72.0 image \
             --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
             --ignorefile /root/.trivyignore \
             --scanners vuln,secret regwatch-web:ci
