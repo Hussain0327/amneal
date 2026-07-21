@@ -61,11 +61,11 @@ def test_health() -> None:
     body = r.json()
     assert body["status"] == "ok"
     components = body["components"]
-    # B1: /health exposes the active datastore dialect so a prod stack on the
-    # SQLite fallback is visible. In tests that dialect is sqlite.
-    assert components["db"] == {"ok": True, "dialect": "sqlite"}
-    assert components["chroma"]["ok"] is True
-    assert components["chroma"]["corpus_count"] == 0
+    # B1: /health exposes the active datastore dialect; postgresql is the only
+    # possible value since R5, and anything else must read as visibly wrong.
+    assert components["db"] == {"ok": True, "dialect": "postgresql"}
+    assert components["vector_store"]["ok"] is True
+    assert components["vector_store"]["corpus_count"] == 0
     assert components["llm"] == {"provider": "echo", "key_present": True}
     assert components["embedding"] == {"provider": "echo"}
     assert body["allow_test_providers"] is True  # conftest opt-in
@@ -89,18 +89,18 @@ def test_health_no_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "openai_api_key" not in r.text
 
 
-def test_health_unhealthy_when_chroma_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_health_unhealthy_when_vector_store_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
     from regwatch.api import main as api_main
 
     def _down() -> int:
-        raise RuntimeError("chroma down")
+        raise RuntimeError("vector store down")
 
     monkeypatch.setattr(api_main, "collection_size", _down)
     r = _open().get("/health")
     assert r.status_code == 503
     body = r.json()
     assert body["status"] == "unhealthy"
-    assert body["components"]["chroma"]["ok"] is False
+    assert body["components"]["vector_store"]["ok"] is False
 
 
 def test_health_unhealthy_when_db_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:

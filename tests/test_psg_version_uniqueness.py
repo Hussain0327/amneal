@@ -20,9 +20,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from regwatch.ingest import pipeline as pipeline_mod
-from regwatch.store.db import get_engine, init_db, session_scope
+from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import PsgDocument, PsgVersion
-from regwatch.store.vector_store import add_chunks, chunks_exist
 from tests.test_pipeline_idempotent import (
     PAGES,
     _listing,
@@ -170,54 +169,3 @@ def test_unrelated_integrity_error_still_propagates(monkeypatch: pytest.MonkeyPa
             diff_summary=None,
         )
     assert _row_count(PsgVersion) == 1
-
-
-def test_dev_mode_crash_before_chunks_keeps_version_and_backfills(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Dev mode (SQLite+Chroma) is intentionally NOT atomic across stores: a
-    crash between the version commit and the Chroma write leaves the version
-    row in place, and the next unchanged-content run backfills the missing
-    chunks. This pins that recovery so the Postgres atomic path never leaks
-    into dev semantics."""
-    state: dict[str, Any] = {"hash": "old-hash", "pages": PAGES}
-    _patch_pipeline_state(monkeypatch, state)
-    init_db()
-    assert pipeline_mod.ingest_listing(_listing()) == "added"
-
-    state["hash"] = "new-hash"
-
-    def crash(*args: Any, **kwargs: Any) -> None:
-        raise RuntimeError("simulated crash between version commit and chunk write")
-
-    monkeypatch.setattr(pipeline_mod, "add_chunks", crash)
-    assert pipeline_mod.ingest_listing(_listing()) == "error"
-    # The version row landed (dev order: commit first, index after) ...
-    assert _row_count(PsgVersion) == 2
-    with session_scope() as s:
-        latest = s.scalars(select(PsgVersion).where(PsgVersion.content_hash == "new-hash")).one()
-        assert latest.id is not None
-        doc_id = latest.psg_document_id
-        latest_id = latest.id
-    # ... without its chunks.
-    assert not chunks_exist(doc_id, latest_id)
-
-    # Same content on the next run: the unchanged path must heal the gap.
-    monkeypatch.setattr(pipeline_mod, "add_chunks", add_chunks)
-    assert pipeline_mod.ingest_listing(_listing()) == "unchanged"
-    assert chunks_exist(doc_id, latest_id)
-    assert _row_count(PsgVersion) == 2
-
-
-def test_facade_rejects_conn_in_chroma_mode() -> None:
-    """Chroma cannot join a SQL transaction; passing conn= there must fail loud
-    instead of silently dropping the atomicity the caller asked for."""
-    init_db()
-    with get_engine().connect() as conn, pytest.raises(ValueError, match="requires Postgres mode"):
-        add_chunks(
-            ids=["c1"],
-            embeddings=[[0.0] * 4],
-            documents=["text"],
-            metadatas=[{"doc_id": 1}],
-            conn=conn,
-        )

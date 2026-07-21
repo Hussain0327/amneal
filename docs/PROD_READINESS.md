@@ -38,16 +38,19 @@ Each item notes where it lives in the tree so the work is actionable cold.
   boundary), and distributed rate limiting is owned by that gateway.
 
 ### 2. Production-grade datastores 🟡 (Postgres/pgvector path landed — proof remains)
-- **Where:** dual-mode storage in [`config/settings.py`](../config/settings.py),
+- **Where:** Postgres-only storage in [`config/settings.py`](../config/settings.py),
   Postgres bootstrap in [`src/regwatch/store/db.py`](../src/regwatch/store/db.py),
   pgvector chunks in
   [`src/regwatch/store/pgvector_store.py`](../src/regwatch/store/pgvector_store.py),
   and the cutover runbook in [`DEPLOY.md`](DEPLOY.md).
-- **Now in place:** `DATABASE_URL` switches the structured store to Postgres
-  and vectors to pgvector in the same database; `REQUIRE_DATABASE_URL=true`
-  refuses SQLite fallback in production; pgvector dimension checks fail fast;
-  the deploy runbook covers Supabase, migration, smoke checks, rollback, uptime,
-  and staging restore drills.
+- **Now in place:** the structured store is Postgres and vectors are pgvector
+  in the same database, everywhere — R5 deleted the SQLite/Chroma dual-mode,
+  so `DATABASE_URL` is unconditionally mandatory (the app refuses to boot
+  without it, no flag needed); pgvector dimension checks fail fast; the
+  deploy runbook covers Supabase, migration, smoke checks, rollback, uptime,
+  and a staging restore (currently a manual Supabase-backup restore; a
+  scripted PG-native `pg_dump` drill is open work, see #7-adjacent notes in
+  `DEPLOY.md` §6.4).
 - **Remaining gap:** the code/runbook are ready, but a real production launch
   still needs the managed database provisioned, the migration completed from a
   clean snapshot, backup/restore actually exercised, and least-privilege app
@@ -127,13 +130,12 @@ Each item notes where it lives in the tree so the work is actionable cold.
   LLM reachability probe is worth its cost/noise.
 
 ### 7. Automated ingest / watch scheduling 🟡 (GitHub cron path landed)
-- **Where:** [`src/regwatch/watch/run.py`](../src/regwatch/watch/run.py),
-  [`src/regwatch/orchestration/definitions.py`](../src/regwatch/orchestration/definitions.py),
-  Compose Dagster services in [`compose.yaml`](../compose.yaml), and
+- **Where:** [`src/regwatch/watch/run.py`](../src/regwatch/watch/run.py) and
   [`.github/workflows/watch-daily.yml`](../.github/workflows/watch-daily.yml).
+  (The Dagster orchestration package, `src/regwatch/orchestration/`, was
+  deleted in R5 — GitHub Actions cron is the sole scheduler.)
 - **Now in place:** `regwatch watch` runs crawl → match → ingest matched PSGs
-  → build durable alerts → write digest; Dagster defines `watch_digest_job` and
-  a daily 06:00 UTC schedule for local/Compose; GitHub Actions defines the
+  → build durable alerts → write digest; GitHub Actions defines the
   production `watch-daily` cron with failure Slack notification, healthcheck
   pings, and advisory threshold-sweep artifact upload. Partial-ingest recovery
   is covered by re-surfacing committed-but-unalerted versions from durable DB
@@ -177,7 +179,7 @@ Each item notes where it lives in the tree so the work is actionable cold.
 
 ### 10. Secrets management
 - **Where:** `.env` on disk, [`config/settings.py`](../config/settings.py).
-- **Have:** `.env`, `.env.local`, local data, Chroma stores, generated docs, and
+- **Have:** `.env`, `.env.local`, local data, generated docs, and
   logs are gitignored; the production runbook uses platform secrets for
   `DATABASE_URL`, `OPENAI_API_KEY`, `SENTRY_DSN`, and optional `OPENFDA_API_KEY`.
 - **Gap:** production still needs an approved secret manager/platform policy and
@@ -195,9 +197,10 @@ Each item notes where it lives in the tree so the work is actionable cold.
   pins npm 11.17.0 (clearing the base image's Debian + npm-bundled-dep CVEs); and
   the frontend lockfile was regenerated cross-platform (it had omitted the
   linux/wasm `@emnapi` branch, which broke `npm ci` on the runners).
-- **Residual:** container resource limits (none in `compose.yaml`/`fly.toml`), and
-  the one accepted `pip-audit` ignore (chromadb `CVE-2026-45829`, server-only RCE;
-  embedded client + pgvector in prod) — drop it when an upstream fix ships.
+- **Residual:** container resource limits (none in `compose.yaml`/`fly.toml`).
+  (The chromadb `pip-audit` ignore this line used to reference no longer
+  applies — chromadb was removed from dependencies along with the
+  SQLite/Chroma dual-mode in R5.)
 
 ---
 

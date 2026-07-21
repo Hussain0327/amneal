@@ -49,6 +49,9 @@ outbox tables for delivery (Slack digest etc.); no Kafka/Redis/NATS.
 - Dual-mode is live: chroma refs in cli/pipeline/retriever/threshold_sweep/
   main; sqlite branches in store/db.py. Dagster is dormant
   (`INSTALL_ORCHESTRATION=false` in prod; orchestration/ + extra exist).
+  (Status as of Jul 10; R5, done: the SQLite/Chroma dual-mode described here
+  has since been deleted — Postgres + pgvector is the only datastore. See
+  `docs/DECISIONS.md`'s R5 entry.)
 - Migration head is 0013 (alembic; Fly release_command is the authority).
 
 ## Corrections to the proposal (mechanics, not shape)
@@ -104,6 +107,8 @@ R5. Deleting SQLite/Chroma dual-mode re-platforms the test suite (20k test
     LOC currently runs largely in SQLite mode locally; CI already has a
     pgvector service). Worth it, but it is its own workstream - schedule it
     early since every later phase writes PG-only tests anyway.
+    (DONE: R5 shipped — tests now run against `TEST_DATABASE_URL`, a
+    disposable local Postgres, not SQLite/Chroma.)
 R6. Deploy topology: run Go as a second process group in the SAME Fly app -
     Go takes the public :8000, uvicorn moves to an internal port. Vercel
     keeps pointing at the same hostname; cookies/CORS unchanged. Watch the
@@ -157,9 +162,10 @@ contract tests before the Python original is deleted.
    migration-tool ownership (C3).
 
 Offsets adopted verbatim: PG/pgvector everywhere then delete dual-mode
-(R5); remove Dagster if GH Actions stays the scheduler (it does); one
-OpenAPI contract -> Go server interfaces + TS client; sqlc; Postgres outbox;
-OIDC directly in Go if SSO is imminent.
+(R5, DONE); remove Dagster if GH Actions stays the scheduler (it does; Dagster
+was removed as part of R5's cutover); one OpenAPI contract -> Go server
+interfaces + TS client; sqlc; Postgres outbox; OIDC directly in Go if SSO is
+imminent.
 
 ## LOC accounting (baseline, verified 2026-07-10)
 

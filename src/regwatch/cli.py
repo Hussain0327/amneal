@@ -132,11 +132,11 @@ def cmd_serve(port: int = typer.Option(8000, "--port")) -> None:
 
 @app.command("init-db")
 def cmd_init_db() -> None:
-    """Create SQLite tables and ensure data directories exist."""
+    """Bootstrap/verify the Postgres schema and ensure data directories exist."""
     s = get_settings()
     s.ensure_dirs()
     init_db()
-    rprint(f"[green]ok[/green] sqlite at {s.sqlite_path}")
+    rprint("[green]ok[/green] postgres schema at head")
 
 
 @app.command("status")
@@ -149,8 +149,7 @@ def cmd_status() -> None:
             "llm_provider": s.llm_provider,
             "llm_model": s.llm_model,
             "data_dir": str(s.data_dir),
-            "sqlite_path": str(s.sqlite_path),
-            "chroma_dir": str(s.chroma_dir),
+            "database": "postgres" if s.database_url else "UNSET (refuses to boot)",
             "retrieval_top_k": s.retrieval_top_k,
             "refusal_score_threshold": s.refusal_score_threshold,
             "company_name": s.company_name,

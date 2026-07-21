@@ -1,8 +1,18 @@
 """Shared test fixtures.
 
-We force a per-test temp data directory so that SQLite, Chroma, and raw PDFs
-are isolated. We default LLM_PROVIDER=echo and EMBEDDING_PROVIDER=echo so
-tests run with no network and no model downloads.
+Postgres-only since R5 (docs/POLYGLOT_TARGET_2026-07-10.md): the suite runs
+against the SAME datastore production runs -- Postgres + pgvector -- via a
+DISPOSABLE database named by TEST_DATABASE_URL. There is no SQLite/Chroma
+fallback anymore; without TEST_DATABASE_URL the run fails loudly (never
+skip-green: a silently-skipped suite reads as passing).
+
+Isolation model: the schema is bootstrapped once (init_db: create_all + stamp
+head + pgvector DDL + RLS) and every test starts with one
+``TRUNCATE ... RESTART IDENTITY CASCADE`` over all public tables except
+alembic_version (~33ms). Tests that deliberately wreck the schema (the
+bootstrap suite drops it, stamps wrong revisions, ...) are self-healing for
+their neighbors: each test first checks the alembic stamp and rebuilds the
+schema from scratch only when it is missing or wrong.
 """
 
 from __future__ import annotations
@@ -13,6 +23,8 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
 
 from regwatch.common import ratelimit
 from regwatch.store import db as db_module
@@ -20,6 +32,33 @@ from regwatch.store import vector_store as vs_module
 
 DEFAULT_USER_EMAIL = "analyst@example.com"
 DEFAULT_USER_PASSWORD = "correct-horse-battery-staple"
+
+_TEST_DB_URL = (os.environ.get("TEST_DATABASE_URL") or "").strip()
+# Hosts we accept as "definitely a disposable database". The host .env carries
+# the LIVE production Supabase URL in DATABASE_URL; this guard makes it
+# structurally impossible for the suite (which drops schemas and truncates
+# every table) to reach anything remote even if an operator exports the wrong
+# variable.
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    if not _TEST_DB_URL:
+        raise pytest.UsageError(
+            "TEST_DATABASE_URL is not set. Since R5 the suite is Postgres-only: "
+            "point TEST_DATABASE_URL at a DISPOSABLE local Postgres database "
+            "with the pgvector extension available, e.g.\n"
+            "  TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5499/regwatch_py_test uv run pytest\n"
+            "(CI provides one via the pgvector service container; locally use "
+            "Postgres.app / docker. The database's contents are DESTROYED.)"
+        )
+    host = (make_url(_TEST_DB_URL).host or "").strip("[]").lower()
+    if host not in _LOCAL_HOSTS:
+        raise pytest.UsageError(
+            f"TEST_DATABASE_URL host {host!r} is not local ({sorted(_LOCAL_HOSTS)}). "
+            "The suite DROPS SCHEMAS and TRUNCATES every table -- refusing to "
+            "run against anything that could be a real database."
+        )
 
 
 def create_user(
@@ -72,7 +111,7 @@ def session_client(user_id: int) -> AuthedClient:
     from regwatch.auth.sessions import create_session
 
     client = AuthedClient(app)
-    client.__enter__()  # lifespan -> init_db on the per-test DB
+    client.__enter__()  # lifespan -> init_db (steady-state re-verify, ~13ms)
     raw, _ = create_session(user_id)
     client.cookies.set(SESSION_COOKIE, raw)
     client.user_id = user_id
@@ -87,9 +126,64 @@ def auth_client() -> Iterator[AuthedClient]:
     client.__exit__(None, None, None)
 
 
+_head_revision_cache: str | None = None
+
+
+def _expected_head() -> str:
+    global _head_revision_cache
+    if _head_revision_cache is None:
+        from alembic.script import ScriptDirectory
+
+        _head_revision_cache = ScriptDirectory.from_config(
+            db_module._alembic_config()
+        ).get_current_head()
+        assert _head_revision_cache is not None
+    return _head_revision_cache
+
+
+def _reset_database() -> None:
+    """Start the test from a clean, current schema -- cheaply when possible.
+
+    Fast path (~35ms): the schema is stamped at head, so one TRUNCATE over
+    every public table except alembic_version resets all data and sequences.
+    Slow path (~700ms, first test of the session and after any test that
+    wrecked the schema): DROP SCHEMA + full init_db bootstrap.
+    """
+    engine = db_module.get_engine()
+    stamped = None
+    try:
+        with engine.connect() as conn:
+            stamped = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    except Exception:
+        stamped = None
+    if stamped != _expected_head():
+        db_module.reset_for_tests()
+        engine = db_module.get_engine()
+        with engine.begin() as conn:
+            conn.execute(text("DROP SCHEMA public CASCADE"))
+            conn.execute(text("CREATE SCHEMA public"))
+        db_module.init_db()
+        return
+    with engine.begin() as conn:
+        tables = (
+            conn.execute(
+                text(
+                    "SELECT tablename FROM pg_tables "
+                    "WHERE schemaname = 'public' AND tablename <> 'alembic_version'"
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if tables:
+            joined = ", ".join(f'public."{t}"' for t in tables)
+            conn.execute(text(f"TRUNCATE {joined} RESTART IDENTITY CASCADE"))
+
+
 @pytest.fixture(autouse=True)
 def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    # Network-free providers by default.
+    # Network-free providers by default. Echo's 1536-dim output matches the
+    # pgvector chunk column, so ingest/query tests embed for real.
     monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
     monkeypatch.setenv("LLM_PROVIDER", "echo")
     # Rate limiting off by default; rate-limit tests opt in explicitly.
@@ -107,35 +201,33 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     # production) can't leak into the "default off" assertions.
     monkeypatch.setenv("SENTRY_DSN", "")
     monkeypatch.setenv("SENTRY_ENVIRONMENT", "dev")
-    # Per-test storage. DATABASE_URL is cleared so a host .env pointing at
-    # Postgres can never leak into the SQLite-default test suite; the
-    # Postgres integration tests opt in via TEST_DATABASE_URL explicitly.
-    monkeypatch.setenv("DATABASE_URL", "")
-    # The B1 prod guard must never fire in the SQLite test suite: a host .env
-    # with REQUIRE_DATABASE_URL=true would otherwise make get_engine() refuse to
-    # boot the moment DATABASE_URL is cleared above.
-    monkeypatch.setenv("REQUIRE_DATABASE_URL", "0")
+    # The one and only datastore: the disposable TEST_DATABASE_URL database.
+    # Setting DATABASE_URL explicitly (rather than clearing it) means a host
+    # .env pointing at production Postgres can never leak into the suite.
+    monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
+    # Prod (Supabase) sessions run in UTC; a scratch Postgres initdb'd on a
+    # laptop defaults to the LOCAL timezone, which would shift every
+    # aware-datetime written into the naive timestamp columns. PGTZ pins the
+    # libpq session timezone so both environments store identical values.
+    monkeypatch.setenv("PGTZ", "UTC")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("CHROMA_DIR", str(tmp_path / "chroma"))
-    monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "regwatch.db"))
     monkeypatch.setenv("RAW_PDF_DIR", str(tmp_path / "raw"))
     monkeypatch.setenv("PROCESSED_DIR", str(tmp_path / "processed"))
-    # Force settings + storage modules to re-init for the test.
+    # Force settings to re-resolve for this test's env.
     import config.settings as cs
 
     cs.get_settings.cache_clear()
     cs.settings = cs.get_settings()
-    db_module.reset_for_tests()
+    # The engine and init_db memo stay WARM across tests (same database) --
+    # _reset_database() rebuilds only when a previous test wrecked the schema.
+    _reset_database()
     vs_module.reset_for_tests()
     # The in-memory query limiter is process-global; clear it so one test's
     # traffic cannot 429 the next test. (The login limiter moved to the Go
     # proxy with the step-4 auth cutover.)
     ratelimit.reset_for_tests()
-    # Also clear any cached env that pydantic-settings stashed in process.
     yield
-    # Cleanup (Chroma keeps a file lock; reset clears it).
     vs_module.reset_for_tests()
-    db_module.reset_for_tests()
 
 
 @pytest.fixture

@@ -1,10 +1,12 @@
-"""Database session management — SQLite (default) or Postgres via DATABASE_URL.
+"""Database session management — Postgres via DATABASE_URL (the only mode).
 
-SQLite remains the dev/test default and its init path is untouched. When
-``DATABASE_URL`` is set (Supabase / local docker Postgres), ``get_engine``
-builds a pooled Postgres engine and ``init_db`` runs the fresh-Postgres
+Postgres-only since R5 (docs/POLYGLOT_TARGET_2026-07-10.md): DATABASE_URL is
+mandatory and ``get_engine`` refuses to build anything else — the SQLite
+fallback that once served dev/tests is gone (tests run against a disposable
+Postgres named by TEST_DATABASE_URL). ``init_db`` runs the fresh-Postgres
 bootstrap: ``create_all`` + ``alembic stamp head`` — NO history replay,
-because migrations 0001-0006 contain SQLite-specific batch ops.
+because migrations 0001-0006 contain SQLite-specific batch ops from the
+pre-Supabase era.
 """
 
 from __future__ import annotations
@@ -35,38 +37,6 @@ _engine_lock = Lock()
 # _engine_lock, so reusing it here would deadlock (Lock is not reentrant).
 _init_lock = Lock()
 _initialized = False
-_BASELINE_TABLES = frozenset(
-    {
-        "product",
-        "psg_document",
-        "psg_version",
-        "be_requirement",
-        "query_log",
-    }
-)
-_CURRENT_TABLES = _BASELINE_TABLES | frozenset(
-    {
-        "chat_session",
-        "chat_message",
-        "user",
-        "auth_session",
-        "ob_product",
-        "ob_patent",
-        "ob_exclusivity",
-        "spl_document",
-    }
-)
-_BASELINE_REVISION = "0001_initial_schema"
-# Stamp targets for unstamped DBs created out-of-band by an older build's
-# create_all. _init_sqlite stamps the NEWEST revision the present shape
-# actually proves, then upgrades — stamping anything newer (e.g. "head")
-# would silently skip the missing migrations. The probes:
-#   - tables through 0005 + the 0002 query_log columns -> at least 0005;
-#   - 0006's appl_type columns on ob_patent/ob_exclusivity -> 0006. 0007 is
-#     only an if_not_exists index, so replaying it over a 0007-shaped DB is a
-#     no-op and needs no probe of its own.
-_PRE_0006_SCHEMA_REVISION = "0005_whitepaper_sources"
-_CURRENT_SCHEMA_REVISION = "0006_ob_appl_type"
 
 # K4: the pgvector chunk store. The embedding column is raw DDL (the `vector`
 # type comes from the pgvector extension); everything else mirrors the Chroma
@@ -115,78 +85,25 @@ def _repo_root() -> Path:
 
 
 def _active_database_url() -> str:
-    s = get_settings()
-    if s.database_url:
-        return s.database_url
-    return f"sqlite:///{s.sqlite_path.as_posix()}"
+    return _required_database_url()
 
 
-def _has_complete_legacy_schema() -> bool:
-    """Detect pre-Alembic DBs that already have the baseline tables."""
-    engine = get_engine()
-    tables = set(inspect(engine).get_table_names())
-    if not tables >= _BASELINE_TABLES:
-        return False
-    with engine.connect() as conn:
-        return MigrationContext.configure(conn).get_current_revision() is None
+def _required_database_url() -> str:
+    """DATABASE_URL, or a loud refusal — there is no fallback datastore.
 
-
-def _has_unstamped_post_0005_schema() -> bool:
-    """Detect DBs created from post-0005 SQLModel metadata before Alembic stamping.
-
-    Verifies the tables through 0005 plus the 0002 query_log columns — i.e.
-    the 0005 shape, NOT anything later. _init_sqlite probes the 0006 columns
-    separately to pick the stamp the shape actually proves.
+    Preserves the B1 fail-loud posture unconditionally: booting without a
+    configured Postgres once meant silently landing on the container's
+    ephemeral SQLite disk; now it is simply an error at first engine use.
     """
-    engine = get_engine()
-    inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
-    if not tables >= _CURRENT_TABLES:
-        return False
-    query_columns = {c["name"] for c in inspector.get_columns("query_log")}
-    if not {"session_id", "turn_id", "status", "route_json", "user_id"} <= query_columns:
-        return False
-    with engine.connect() as conn:
-        return MigrationContext.configure(conn).get_current_revision() is None
-
-
-def _has_ob_appl_type_columns() -> bool:
-    """0006's shape probe: the appl_type column on ob_patent AND ob_exclusivity."""
-    inspector = inspect(get_engine())
-    return all(
-        "appl_type" in {c["name"] for c in inspector.get_columns(t)}
-        for t in ("ob_patent", "ob_exclusivity")
-    )
-
-
-def _matches_head_schema() -> bool:
-    """True when an (unstamped) schema already carries everything past 0007.
-
-    Discriminates a DB created from CURRENT metadata via create_all (stamp it
-    head) from an older-shaped one (stamp what the shape proves, then upgrade
-    so 0008's query_log token columns and answer_feedback actually land).
-
-    Probes 0008's shape (the first revision whose columns this branch must not
-    silently skip): once present, create_all produced the full current metadata
-    in one shot, so stamping head is correct. Later additive migrations (0009
-    durable alerts, 0010 chat_message provenance) are pure nullable adds in the
-    same create_all, so they ride along — there is no half-state where 0008 is
-    present but a later additive column is missing on a create_all'd DB. That
-    ride-along does NOT hold for index-only 0014 when the create_all came from
-    a PRE-0014 build's metadata; _init_sqlite probes the index separately and
-    replays 0014 rather than stamping it away.
-    """
-    inspector = inspect(get_engine())
-    if "answer_feedback" not in set(inspector.get_table_names()):
-        return False
-    query_columns = {c["name"] for c in inspector.get_columns("query_log")}
-    return {"input_tokens", "output_tokens", "cost_usd"} <= query_columns
-
-
-def _has_psg_version_unique_index() -> bool:
-    """0014's shape probe: the unique (psg_document_id, content_hash) index."""
-    indexes = inspect(get_engine()).get_indexes("psg_version")
-    return any(ix["name"] == "uq_psg_version_doc_hash" for ix in indexes)
+    url = (get_settings().database_url or "").strip()
+    if not url:
+        raise RuntimeError(
+            "DATABASE_URL is empty — Postgres is the only datastore since R5 "
+            "(the SQLite fallback is gone). Set DATABASE_URL to a "
+            "Postgres/Supabase URL; tests use TEST_DATABASE_URL (see "
+            "tests/conftest.py)."
+        )
+    return url
 
 
 # Hosts reached over a trusted/loopback path where TLS is neither configured
@@ -282,42 +199,27 @@ def get_engine() -> Engine:
         with _engine_lock:
             if _engine is None:
                 s = get_settings()
-                if s.database_url:
-                    # Hosted Postgres (Supabase session pooler): small pool,
-                    # pre-ping to survive pooler-side connection recycling, and
-                    # per-connection timeouts (see _pg_connect_args) so a stalled
-                    # transaction can never hold a lock indefinitely.
-                    _engine = create_engine(
-                        _enforce_sslmode(s.database_url),
-                        echo=False,
-                        pool_pre_ping=True,
-                        pool_size=5,
-                        max_overflow=5,
-                        pool_recycle=s.db_pool_recycle_s,
-                        connect_args=_pg_connect_args(s),
-                    )
-                else:
-                    # B1: never fall through to SQLite in production. A missing
-                    # DATABASE_URL here would otherwise boot on the container's
-                    # ephemeral disk and silently destroy all data + the audit
-                    # trail on the next recycle, with /health staying green.
-                    if s.require_database_url:
-                        raise RuntimeError(
-                            "REQUIRE_DATABASE_URL is set but DATABASE_URL is empty — "
-                            "refusing to boot on the SQLite fallback. Set DATABASE_URL "
-                            "to the production Postgres/Supabase URL."
-                        )
-                    s.ensure_dirs()
-                    url = f"sqlite:///{s.sqlite_path.as_posix()}"
-                    _engine = create_engine(url, echo=False)
+                # Hosted Postgres (Supabase session pooler): small pool,
+                # pre-ping to survive pooler-side connection recycling, and
+                # per-connection timeouts (see _pg_connect_args) so a stalled
+                # transaction can never hold a lock indefinitely.
+                _engine = create_engine(
+                    _enforce_sslmode(_required_database_url()),
+                    echo=False,
+                    pool_pre_ping=True,
+                    pool_size=5,
+                    max_overflow=5,
+                    pool_recycle=s.db_pool_recycle_s,
+                    connect_args=_pg_connect_args(s),
+                )
     return _engine
 
 
 def engine_dialect() -> str:
-    """Active SQLAlchemy dialect name ('postgresql' | 'sqlite').
+    """Active SQLAlchemy dialect name (always 'postgresql' since R5).
 
-    Surfaced in /health so a production stack accidentally running on SQLite is
-    visibly wrong even if the B1 boot guard were ever bypassed.
+    Kept as a function because /health reports it: a stack whose engine is
+    somehow not Postgres must be visibly wrong, not silently plausible.
     """
     return get_engine().dialect.name
 
@@ -453,8 +355,7 @@ def _ensure_rls_event_trigger(engine: Engine) -> None:
     path (create_all + stamp head) NEVER replays migrations, so without this it
     would be missing the trigger and silently diverge from a migrated DB. We load
     the canonical idempotent DDL from the 0011 file by path (single source of
-    truth; do NOT inline it) -- the same block scripts/migrate_to_supabase.py
-    uses after its own bootstrap, so all bootstrap routes converge on identical
+    truth; do NOT inline it), so every bootstrap route converges on identical
     objects.
 
     Lock-free + idempotent (CREATE OR REPLACE FUNCTION / DROP-then-CREATE
@@ -515,8 +416,9 @@ def _init_postgres(engine: Engine) -> None:
     if tables & set(SQLModel.metadata.tables.keys()):
         exc = RuntimeError(
             "Postgres database has regwatch tables but no alembic_version stamp — "
-            "ambiguous state. Refusing to start: restore from a clean database or "
-            "re-run scripts/migrate_to_supabase.py with --truncate."
+            "ambiguous state. Refusing to start: restore from a clean database "
+            "(or, if this DB was half-bootstrapped, drop its schema and re-run "
+            "`regwatch init-db`)."
         )
         # Explicit Sentry capture point (H1): same migration-mode mismatch class.
         from regwatch.common.observability import capture_exception
@@ -536,45 +438,8 @@ def _init_postgres(engine: Engine) -> None:
     _ensure_rls_event_trigger(engine)
 
 
-def _init_sqlite() -> None:
-    """Apply schema migrations for the active SQLite database (unchanged path)."""
-    from alembic import command
-
-    from regwatch.store import models  # noqa: F401  (registers tables)
-
-    cfg = _alembic_config()
-    if _has_unstamped_post_0005_schema():
-        if _matches_head_schema():
-            if _has_psg_version_unique_index():
-                command.stamp(cfg, "head")
-            else:
-                # create_all from a PRE-0014 build: every 0008..0013 shape is
-                # present (they ride along with create_all), but index-only
-                # 0014 leaves no shape for old metadata to carry -- stamping
-                # head would silently skip the unique index and its
-                # duplicate-race protection forever. Replay just 0014.
-                command.stamp(cfg, "0013_whitepaper_runs")
-                command.upgrade(cfg, "head")
-        elif _has_ob_appl_type_columns():
-            # 0006-shaped (0007 is an if_not_exists index — replaying it is
-            # safe either way): stamp 0006 and apply 0007+.
-            command.stamp(cfg, _CURRENT_SCHEMA_REVISION)
-            command.upgrade(cfg, "head")
-        else:
-            # post-0005/pre-0006 model era: stamp only what the shape proves
-            # and replay 0006+ (appl_type columns + the ob_product N->NDA
-            # normalization) instead of silently skipping them.
-            command.stamp(cfg, _PRE_0006_SCHEMA_REVISION)
-            command.upgrade(cfg, "head")
-    elif _has_complete_legacy_schema():
-        command.stamp(cfg, _BASELINE_REVISION)
-        command.upgrade(cfg, "head")
-    else:
-        command.upgrade(cfg, "head")
-
-
 def init_db() -> None:
-    """Apply/verify the schema for the active database (dialect-aware).
+    """Apply/verify the Postgres schema for the active database.
 
     Memoized per process (reset by ``reset_for_tests``): the schema work is
     idempotent but not free, and ingest calls init_db once per listing.
@@ -587,20 +452,15 @@ def init_db() -> None:
     with _init_lock:
         if _initialized:
             return
-        if engine.dialect.name == "postgresql":
-            _init_postgres(engine)
-            # K6 fail-fast: the embedding provider's dimension must match the
-            # chunk table's vector(1536) AT STARTUP, not on first vector-store
-            # use. Every Postgres-mode entry point funnels through init_db (API
-            # lifespan, `regwatch init-db`, scripts/migrate_to_supabase.py), so
-            # a misconfigured provider refuses to boot instead of 500-ing on
-            # the first query/ingest. Imported lazily so SQLite mode never
-            # touches the pgvector module.
-            from regwatch.store.pgvector_store import assert_embedding_provider_dim
+        _init_postgres(engine)
+        # K6 fail-fast: the embedding provider's dimension must match the
+        # chunk table's vector(1536) AT STARTUP, not on first vector-store
+        # use. Every entry point funnels through init_db (API lifespan,
+        # `regwatch init-db`), so a misconfigured provider refuses to boot
+        # instead of 500-ing on the first query/ingest.
+        from regwatch.store.pgvector_store import assert_embedding_provider_dim
 
-            assert_embedding_provider_dim()
-        else:
-            _init_sqlite()
+        assert_embedding_provider_dim()
         _initialized = True
 
 

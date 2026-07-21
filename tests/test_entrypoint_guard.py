@@ -77,13 +77,8 @@ def _run(
         "STUB_LOG": str(log),
         # Redirect every directory/file the script creates under tmp_path.
         "DATA_DIR": str(data),
-        "CHROMA_DIR": str(data / "chroma"),
-        "SQLITE_PATH": str(data / "regwatch.db"),
         "RAW_PDF_DIR": str(data / "raw"),
         "PROCESSED_DIR": str(data / "processed"),
-        # Nonexistent on purpose: the dagster-config copy branch must no-op.
-        "DAGSTER_CONFIG_DIR": str(tmp_path / "absent-dagster-config"),
-        "DAGSTER_HOME": str(data / "dagster-home"),
         "WHITEPAPER_TEMPLATE_PATH": str(data / "templates" / "template.docx"),
     }
     if env_extra:

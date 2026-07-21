@@ -180,11 +180,11 @@ jobs:
       # ---- Refusal-threshold revalidation (ADVISORY observability) -----------
       # NON-GATING. This re-runs the gold set through the REAL prod retrieval path
       # in THIS job's PROD embedding space (EMBEDDING_PROVIDER=openai + the live
-      # Supabase DATABASE_URL => OpenAI-1536 + pgvector), which CI structurally
-      # cannot exercise (CI runs bge-384 + Chroma). It reports the two score
+      # Supabase DATABASE_URL => OpenAI-1536 + pgvector) against the PROD corpus,
+      # which CI's disposable empty database cannot. It reports the two score
       # distributions (must-answer vs must-refuse) and RECOMMENDS a refusal cutoff
-      # so a human can revalidate the provisional 0.30 default in the post-bge
-      # OpenAI vector space. See docs/DEPLOY.md §"Refusal-threshold revalidation".
+      # so a human can revalidate the provisional 0.30 default in the OpenAI
+      # vector space. See docs/DEPLOY.md §"Refusal-threshold revalidation".
       #
       # It is calibration OBSERVABILITY, NOT a gate: the sweep is read-only w.r.t.
       # the safety path — it never changes REFUSAL_SCORE_THRESHOLD or the 0.30

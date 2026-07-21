@@ -169,16 +169,13 @@ class Settings(BaseSettings):
         return v
 
     # ---------- Storage ----------
-    # DATABASE_URL switches the structured store to Postgres (Supabase). Empty
-    # or unset -> SQLite at sqlite_path, exactly as before (dev/test default).
-    # Vector backend rule (K1): vectors live in pgvector iff database_url is
-    # set; Chroma remains the SQLite-mode backend. There is no separate toggle.
+    # DATABASE_URL names the one and only datastore: Postgres + pgvector
+    # (Supabase in prod, a disposable local Postgres in tests). Postgres-only
+    # since R5 — the SQLite/Chroma dual-mode is gone. The field stays optional
+    # at the pydantic layer so tooling can construct Settings without a DB,
+    # but store/db.py refuses to build an engine when it is empty (the B1
+    # fail-loud posture, now unconditional).
     database_url: str | None = None
-    # Production safety (B1): when true, the app refuses to boot on the SQLite
-    # fallback — a missing/typo'd DATABASE_URL would otherwise silently run on
-    # an ephemeral disk and lose all users, sessions, and the query_log audit
-    # trail (INV-6 evidence) on the next machine recycle. Set in fly.toml.
-    require_database_url: bool = False
 
     # Postgres connection-level timeouts (Supabase session pooler). The app
     # connects as the `postgres` role, which — unlike Supabase's
@@ -210,7 +207,7 @@ class Settings(BaseSettings):
     def _normalize_database_url(cls, v: object) -> str | None:
         """Normalize DATABASE_URL to the SQLAlchemy psycopg v3 driver form.
 
-        - empty/whitespace -> None (SQLite mode)
+        - empty/whitespace -> None (store/db.py refuses to build an engine)
         - 'postgres://' (Heroku/Supabase shorthand) -> 'postgresql://'
         - bare 'postgresql://' -> 'postgresql+psycopg://' (psycopg v3)
         - 'postgresql+psycopg://' passes through unchanged
@@ -229,8 +226,6 @@ class Settings(BaseSettings):
         return url
 
     data_dir: Path = Path("./data")
-    chroma_dir: Path = Path("./data/chroma")
-    sqlite_path: Path = Path("./data/regwatch.db")
     raw_pdf_dir: Path = Path("./data/raw")
     processed_dir: Path = Path("./data/processed")
 
@@ -361,10 +356,8 @@ class Settings(BaseSettings):
     )
 
     def ensure_dirs(self) -> None:
-        for p in (self.data_dir, self.chroma_dir, self.raw_pdf_dir, self.processed_dir):
+        for p in (self.data_dir, self.raw_pdf_dir, self.processed_dir):
             p.mkdir(parents=True, exist_ok=True)
-        # SQLite file's parent
-        self.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache(maxsize=1)

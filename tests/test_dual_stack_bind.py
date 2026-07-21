@@ -230,7 +230,8 @@ async def test_guard_serves_when_both_families_bind() -> None:
 
 @pytest.fixture
 def _serve_env(tmp_path: Path) -> dict[str, str]:
-    """Hermetic env for booting the REAL app: echo providers, throwaway SQLite."""
+    """Hermetic env for booting the REAL app: echo providers, the disposable
+    TEST_DATABASE_URL Postgres (subprocesses don't inherit monkeypatch)."""
     import os
 
     env = dict(os.environ)
@@ -244,11 +245,9 @@ def _serve_env(tmp_path: Path) -> dict[str, str]:
             "OPENAI_API_KEY": "",
             "ANTHROPIC_API_KEY": "",
             "SENTRY_DSN": "",
-            "DATABASE_URL": "",
-            "REQUIRE_DATABASE_URL": "0",
+            "DATABASE_URL": os.environ.get("TEST_DATABASE_URL", ""),
+            "PGTZ": "UTC",
             "DATA_DIR": str(tmp_path),
-            "CHROMA_DIR": str(tmp_path / "chroma"),
-            "SQLITE_PATH": str(tmp_path / "regwatch.db"),
             "RAW_PDF_DIR": str(tmp_path / "raw"),
             "PROCESSED_DIR": str(tmp_path / "processed"),
         }

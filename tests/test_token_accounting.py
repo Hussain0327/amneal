@@ -336,10 +336,26 @@ def test_pre_llm_refusal_keeps_token_fields_null() -> None:
         assert row.cost_usd is None
 
 
-# ---------- migration 0008: both the sqlite upgrade and the metadata path ----------
+# ---------- migration 0008: both the upgrade-replay and the create_all path ----------
 
 
-def test_fresh_sqlite_has_token_columns_and_feedback_table() -> None:
+def _empty_schema() -> None:
+    """Blank slate for migration-replay tests: drop everything, fresh engine.
+
+    The conftest self-heal rebuilds the bootstrapped schema for whichever
+    test runs next.
+    """
+    from sqlalchemy import text
+
+    from regwatch.store import db as db_module
+
+    with db_module.get_engine().begin() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+    db_module.reset_for_tests()
+
+
+def test_fresh_bootstrap_has_token_columns_and_feedback_table() -> None:
     from sqlalchemy import inspect
 
     from regwatch.store.db import get_engine, init_db
@@ -361,6 +377,7 @@ def test_upgrade_path_from_0007_adds_columns_and_table() -> None:
 
     from regwatch.store import db as db_module
 
+    _empty_schema()
     cfg = db_module._alembic_config()
     command.upgrade(cfg, "0007_chat_session_user_updated")
     inspector = inspect(db_module.get_engine())
@@ -381,6 +398,7 @@ def test_downgrade_path_removes_columns_and_table() -> None:
 
     from regwatch.store import db as db_module
 
+    _empty_schema()
     cfg = db_module._alembic_config()
     command.upgrade(cfg, "head")
     command.downgrade(cfg, "0007_chat_session_user_updated")
@@ -390,86 +408,24 @@ def test_downgrade_path_removes_columns_and_table() -> None:
     assert "input_tokens" not in {c["name"] for c in inspector.get_columns("query_log")}
 
 
-def test_unstamped_current_schema_db_is_upgraded_not_stamped_head() -> None:
-    """A 0007-shaped DB without an alembic stamp must gain the 0008 schema on boot.
-
-    Guards the _init_sqlite heuristic: stamping such a database at "head"
-    would silently skip migration 0008 and break the first query insert.
-    """
-    from alembic import command
-    from sqlalchemy import inspect, text
-
-    from regwatch.store import db as db_module
-
-    cfg = db_module._alembic_config()
-    command.upgrade(cfg, "0007_chat_session_user_updated")
-    with db_module.get_engine().begin() as conn:
-        conn.execute(text("DROP TABLE alembic_version"))
-    db_module.get_engine().dispose()
-
-    db_module.init_db()
-    db_module.get_engine().dispose()
-    inspector = inspect(db_module.get_engine())
-    cols = {c["name"] for c in inspector.get_columns("query_log")}
-    assert {"input_tokens", "output_tokens", "cost_usd"} <= cols
-    assert "answer_feedback" in inspector.get_table_names()
-
-
-def test_unstamped_pre_0006_schema_db_replays_0006_onward() -> None:
-    """An unstamped DB with the post-0005/pre-0006 model shape must be stamped
-    at what its shape actually proves (0005), not 0006/0007: 0006 (appl_type
-    columns + the ob_product N->NDA normalization), 0007 (composite index) and
-    0008 all replay instead of being silently skipped (review fix).
-    """
-    from alembic import command
-    from sqlalchemy import inspect, text
-
-    from regwatch.store import db as db_module
-
-    cfg = db_module._alembic_config()
-    command.upgrade(cfg, "0005_whitepaper_sources")
-    with db_module.get_engine().begin() as conn:
-        conn.execute(
-            text(
-                "INSERT INTO ob_product (appl_no, product_no, appl_type, last_fetched_at) "
-                "VALUES ('020503', '001', 'N', '2026-06-12 00:00:00')"
-            )
-        )
-        conn.execute(text("DROP TABLE alembic_version"))
-    db_module.get_engine().dispose()
-
-    db_module.init_db()
-    db_module.get_engine().dispose()
-    inspector = inspect(db_module.get_engine())
-    # 0006 landed: the appl_type columns AND the data normalization.
-    for table in ("ob_patent", "ob_exclusivity"):
-        assert "appl_type" in {c["name"] for c in inspector.get_columns(table)}
-    with db_module.get_engine().connect() as conn:
-        assert conn.execute(text("SELECT appl_type FROM ob_product")).scalar() == "NDA"
-    # 0007 landed: the composite chat_session index.
-    session_indexes = {ix["name"] for ix in inspector.get_indexes("chat_session")}
-    assert "ix_chat_session_user_id_updated_at" in session_indexes
-    # 0008 landed: token columns + answer_feedback.
-    cols = {c["name"] for c in inspector.get_columns("query_log")}
-    assert {"input_tokens", "output_tokens", "cost_usd"} <= cols
-    assert "answer_feedback" in inspector.get_table_names()
-
-
 def test_migration_schema_matches_model_metadata() -> None:
-    """The sqlite alembic path and the Postgres create_all path must agree.
+    """The alembic upgrade-replay path and the create_all path must agree.
 
-    Fresh Postgres never replays migrations (create_all + stamp), so the
-    answer_feedback/query_log shape declared in models.py IS the Postgres
-    schema; this asserts the migration-produced sqlite schema carries the
-    same columns and constraints.
+    A DEPLOYED Postgres reaches head via `alembic upgrade` (the Fly
+    release_command); a FRESH one via create_all + stamp (init_db). The
+    answer_feedback/query_log shape declared in models.py IS the fresh-boot
+    schema, so replaying the full migration history must produce the same
+    columns and constraints -- otherwise the two bootstrap routes diverge.
     """
+    from alembic import command
     from sqlalchemy import inspect
 
-    from regwatch.store.db import get_engine, init_db
+    from regwatch.store import db as db_module
+    from regwatch.store.db import get_engine
     from regwatch.store.models import AnswerFeedback, QueryLog
 
-    init_db()
-    get_engine().dispose()
+    _empty_schema()
+    command.upgrade(db_module._alembic_config(), "head")
     inspector = inspect(get_engine())
 
     model_fb_cols = set(AnswerFeedback.__table__.c.keys())  # type: ignore[attr-defined]

@@ -41,12 +41,6 @@ def test_settings_load() -> None:
     assert "won't guess" in s.refusal_text.lower()
 
 
-def test_database_url_defaults_to_none_sqlite_mode() -> None:
-    from config.settings import get_settings
-
-    assert get_settings().database_url is None
-
-
 def test_database_url_normalized_to_psycopg_driver(monkeypatch: pytest.MonkeyPatch) -> None:
     import config.settings as cs
 
@@ -67,33 +61,32 @@ def test_database_url_normalized_to_psycopg_driver(monkeypatch: pytest.MonkeyPat
     assert cs.get_settings().database_url is None
 
 
-def test_engine_dialect_branches_on_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No server needed: create_engine is lazy, so this proves dispatch only."""
+def test_engine_is_postgres_and_empty_url_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Postgres-only (R5): the engine is psycopg/postgresql, and an empty
+    DATABASE_URL refuses loudly instead of falling back to anything."""
     import config.settings as cs
 
     from regwatch.store import db as db_module
 
-    assert db_module.get_engine().dialect.name == "sqlite"
-
-    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@127.0.0.1:5499/regwatch_test")
-    cs.get_settings.cache_clear()
-    cs.settings = cs.get_settings()
-    db_module.reset_for_tests()
     engine = db_module.get_engine()
     assert engine.dialect.name == "postgresql"
     assert engine.dialect.driver == "psycopg"
+
+    monkeypatch.setenv("DATABASE_URL", "")
+    cs.get_settings.cache_clear()
+    cs.settings = cs.get_settings()
+    db_module.reset_for_tests()
+    with pytest.raises(RuntimeError, match="only datastore"):
+        db_module.get_engine()
     db_module.reset_for_tests()
 
 
-def test_init_db_sqlite_creates_chat_session_composite_index() -> None:
+def test_init_db_creates_chat_session_composite_index() -> None:
     from sqlalchemy import inspect
 
     from regwatch.store.db import get_engine, init_db
 
     init_db()
-    # Migration 0007 creates the index through alembic's own engine; dispose
-    # the cached engine's pool so PRAGMA-based introspection below doesn't
-    # read a pooled connection's pre-migration schema cache.
     get_engine().dispose()
     names = {ix["name"] for ix in inspect(get_engine()).get_indexes("chat_session")}
     assert "ix_chat_session_user_id_updated_at" in names
@@ -148,81 +141,7 @@ def test_db_boots_and_round_trips() -> None:
         assert rows[0].rld_application_number == "021457"
 
 
-def test_init_db_stamps_complete_legacy_schema_without_version_table() -> None:
-    from sqlalchemy import inspect, text
-    from sqlmodel import SQLModel
-
-    from regwatch.store import models  # noqa: F401  (register tables)
-    from regwatch.store.db import get_engine, init_db
-
-    SQLModel.metadata.create_all(get_engine())
-    assert "alembic_version" not in inspect(get_engine()).get_table_names()
-
-    init_db()
-
-    with get_engine().connect() as conn:
-        assert (
-            conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0014_psg_version_unique_hash"
-        )
-
-
-def test_init_db_replays_0014_on_create_all_schema_missing_unique_index() -> None:
-    """A create_all-era DB from a PRE-0014 build carries every 0008..0013 shape
-    but not the index-only 0014 unique index (old metadata never declared it).
-    Stamping such a DB "head" would silently skip the duplicate-race protection
-    forever; init_db must stamp 0013 and replay 0014 instead."""
-    from sqlalchemy import inspect, text
-    from sqlmodel import SQLModel
-
-    from regwatch.store import models  # noqa: F401  (register tables)
-    from regwatch.store.db import get_engine, init_db
-
-    engine = get_engine()
-    SQLModel.metadata.create_all(engine)
-    with engine.begin() as conn:
-        # Current metadata declares the index; dropping it reproduces what an
-        # older build's create_all left behind.
-        conn.execute(text("drop index uq_psg_version_doc_hash"))
-
-    init_db()
-
-    index_names = {ix["name"] for ix in inspect(engine).get_indexes("psg_version")}
-    assert "uq_psg_version_doc_hash" in index_names
-    with engine.connect() as conn:
-        assert (
-            conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0014_psg_version_unique_hash"
-        )
-
-
-def test_init_db_stamps_complete_legacy_schema_with_empty_version_table() -> None:
-    from sqlalchemy import inspect, text
-    from sqlmodel import SQLModel
-
-    from regwatch.store import models  # noqa: F401  (register tables)
-    from regwatch.store.db import get_engine, init_db
-
-    engine = get_engine()
-    SQLModel.metadata.create_all(engine)
-    with engine.begin() as conn:
-        conn.execute(
-            text("create table alembic_version " "(version_num varchar(32) not null primary key)")
-        )
-    assert "alembic_version" in inspect(engine).get_table_names()
-    with engine.connect() as conn:
-        assert conn.execute(text("select version_num from alembic_version")).fetchall() == []
-
-    init_db()
-
-    with engine.connect() as conn:
-        assert (
-            conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0014_psg_version_unique_hash"
-        )
-
-
-def test_chroma_round_trip() -> None:
+def test_vector_store_round_trip() -> None:
     from regwatch.process.embedder import get_embedding_provider
     from regwatch.store.vector_store import add_chunks, collection_size, similarity_search
 

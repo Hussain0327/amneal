@@ -24,11 +24,6 @@ from sqlalchemy import inspect, text
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="TEST_DATABASE_URL not set (postgres integration tests are opt-in)",
-)
-
 
 @pytest.fixture()
 def pg_db(monkeypatch: pytest.MonkeyPatch) -> Iterator[ModuleType]:

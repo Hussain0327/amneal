@@ -178,10 +178,6 @@ def test_0014_keeper_tiebreak_is_max_id_on_equal_captured_at() -> None:
     assert surviving == [expected_keeper]
 
 
-@pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="TEST_DATABASE_URL not set (postgres integration tests are opt-in)",
-)
 def test_0014_dedupes_and_repoints_chunks_on_postgres(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

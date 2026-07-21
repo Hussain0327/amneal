@@ -26,7 +26,6 @@ from typing import Any
 from config.settings import get_settings
 from sqlalchemy import desc, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import col, select
 
 from regwatch.common.logging import get_logger
@@ -213,24 +212,14 @@ def _persist_alerts(alerts: list[Alert]) -> int:
     now = datetime.now(UTC)
     rows = [{**asdict(a), "created_at": now} for a in alerts]
     with session_scope() as s:
-        dialect = s.get_bind().dialect.name
-        if dialect == "postgresql":
-            stmt: Any = (
-                pg_insert(AlertRow.__table__)  # type: ignore[attr-defined]
-                .values(rows)
-                .on_conflict_do_nothing(constraint="uq_alert_version_listing_product")
-            )
-        else:
-            stmt = (
-                sqlite_insert(AlertRow.__table__)  # type: ignore[attr-defined]
-                .values(rows)
-                .on_conflict_do_nothing(
-                    index_elements=["psg_version_id", "listing_appl_no", "product_id"]
-                )
-            )
+        stmt: Any = (
+            pg_insert(AlertRow.__table__)  # type: ignore[attr-defined]
+            .values(rows)
+            .on_conflict_do_nothing(constraint="uq_alert_version_listing_product")
+        )
         # Count via RETURNING, not cursor rowcount: psycopg v3 reports -1 for
         # this multi-VALUES insert form, and ON CONFLICT DO NOTHING emits only
-        # the rows that actually landed - driver-independent on both dialects.
+        # the rows that actually landed.
         result = s.execute(stmt.returning(AlertRow.__table__.c.id))  # type: ignore[attr-defined]
         return len(result.scalars().all())
 

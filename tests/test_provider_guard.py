@@ -18,7 +18,7 @@ from regwatch.store import vector_store
 def _seed_one_chunk() -> None:
     vector_store.add_chunks(
         ids=["chunk-1"],
-        embeddings=[[1.0] + [0.0] * 383],
+        embeddings=[[1.0] + [0.0] * 1535],
         documents=["dissolution testing for albuterol"],
         metadatas=[{"doc_id": 1, "version_id": 1, "page": 1, "source_url": "file://x"}],
     )
@@ -45,11 +45,13 @@ def test_echo_with_seeded_corpus_boots_with_override() -> None:
 
 
 def test_real_providers_with_seeded_corpus_boot(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Names only — the guard must not instantiate (and so download) any model.
+    # Names only — the guard must not instantiate any model. openai is the
+    # 1536-dim provider the PG chunk table admits (K6); constructing it needs
+    # no API key, so this stays network-free.
     _reload_settings(
         monkeypatch,
         REGWATCH_ALLOW_TEST_PROVIDERS="0",
-        EMBEDDING_PROVIDER="local-bge-small",
+        EMBEDDING_PROVIDER="openai",
         LLM_PROVIDER="openai",
     )
     _seed_one_chunk()
@@ -57,7 +59,7 @@ def test_real_providers_with_seeded_corpus_boot(monkeypatch: pytest.MonkeyPatch)
         r = c.get("/health")
         assert r.status_code == 200
         body = r.json()
-        assert body["components"]["embedding"] == {"provider": "local-bge-small"}
+        assert body["components"]["embedding"] == {"provider": "openai"}
         assert body["components"]["llm"]["key_present"] is False
         assert "allow_test_providers" not in body
 
@@ -71,7 +73,7 @@ def test_echo_with_empty_corpus_boots(monkeypatch: pytest.MonkeyPatch) -> None:
         assert r.status_code == 200
         body = r.json()
         assert body["status"] == "ok"
-        assert body["components"]["chroma"]["corpus_count"] == 0
+        assert body["components"]["vector_store"]["corpus_count"] == 0
         assert body["warnings"]
 
 
@@ -87,14 +89,20 @@ def test_local_bge_without_sentence_transformers_refuses_to_boot(
         pass
 
 
-def test_local_bge_with_sentence_transformers_boots(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The probe checks importability only — it must not load the model.
+def test_local_bge_refuses_the_1536_dim_datastore(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Since R5 the only datastore is Postgres with a vector(1536) chunk table,
+    # so 384-dim local-bge-small must fail the K6 dim assert at boot rather
+    # than serve retrieval that can never write or match the corpus. (The
+    # runtime-importability probe still must not load the model.)
     from regwatch.process import embedder
+    from regwatch.store import db as db_module
 
     _reload_settings(monkeypatch, EMBEDDING_PROVIDER="local-bge-small")
     monkeypatch.setattr(embedder, "_module_available", lambda module: True)
-    with TestClient(app) as c:
-        assert c.get("/health").status_code == 200
+    db_module.reset_for_tests()  # force init_db to re-run the dim assert
+    with pytest.raises(RuntimeError, match="384"), TestClient(app):
+        pass
+    db_module.reset_for_tests()
 
 
 def test_openai_embeddings_without_sdk_refuses_to_boot(monkeypatch: pytest.MonkeyPatch) -> None:

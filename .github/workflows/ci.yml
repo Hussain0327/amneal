@@ -60,7 +60,7 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: sync deps
-        run: uv sync --extra dev --extra llm --extra local-embeddings --extra orchestration
+        run: uv sync --extra dev --extra llm --extra local-embeddings
 
       - name: ruff
         run: uv run ruff check src tests migrations
@@ -119,29 +119,20 @@ jobs:
           enable-cache: true
 
       # Audit the SHIPPED production closure: the slim image installs llm only
-      # (Dockerfile defaults INSTALL_LOCAL_EMBEDDINGS=false and
-      # INSTALL_ORCHESTRATION=false; Fly runs EMBEDDING_PROVIDER=openai), so
-      # torch/transformers from `local-embeddings` and the dagster closure from
-      # `orchestration` (compose-only dev tooling) never reach prod and are
-      # intentionally out of scope here: gating prod CI on their noisy,
-      # slow-to-fix CVE cadence would add churn with no prod exposure.
-      # --frozen also asserts uv.lock matches pyproject.
+      # (Dockerfile defaults INSTALL_LOCAL_EMBEDDINGS=false; Fly runs
+      # EMBEDDING_PROVIDER=openai), so torch/transformers from
+      # `local-embeddings` never reach prod and are intentionally out of scope
+      # here: gating prod CI on their noisy, slow-to-fix CVE cadence would add
+      # churn with no prod exposure. --frozen also asserts uv.lock matches
+      # pyproject.
       - name: export runtime dependency set
         run: >-
           uv export --frozen --no-emit-project --no-dev
           --extra llm
           --format requirements-txt --output-file requirements-audit.txt
 
-      # chromadb GHSA-f4j7-r4q5-qw2c (CVE-2026-45829, ChromaToast) is a pre-auth
-      # RCE in the standalone Chroma HTTP *server*; REGWATCH uses the embedded
-      # PersistentClient (and pgvector in prod), so the vulnerable path is never
-      # reachable. No upstream fix is published (last_affected 1.5.9) — remove
-      # this ignore the moment one ships. Both ids are listed because pip-audit
-      # keys the advisory by its GHSA id (PyPI/OSV source), not the CVE alias.
       - name: pip-audit (python deps)
-        run: >-
-          uvx pip-audit -r requirements-audit.txt
-          --ignore-vuln GHSA-f4j7-r4q5-qw2c --ignore-vuln CVE-2026-45829
+        run: uvx pip-audit -r requirements-audit.txt
 
   docker-build:
     runs-on: ubuntu-latest
@@ -327,8 +318,6 @@ jobs:
       - name: install python
         run: uv python install 3.12
 
-      # No `orchestration` extra: the schema dump only imports the FastAPI app,
-      # which never touches the dagster closure.
       - name: sync deps (api importable for the schema dump)
         run: uv sync --extra dev --extra llm
 

@@ -145,8 +145,10 @@ uv run regwatch seed
 # create a login (password is prompted, never passed as an argument)
 uv run regwatch create-user analyst@example.com --name "Analyst"
 
-# run the tests (smoke + invariants + offline eval gate)
-uv run pytest -q
+# run the tests (smoke + invariants + offline eval gate). Postgres-only since
+# R5: point TEST_DATABASE_URL at a DISPOSABLE local Postgres with pgvector
+# (e.g. `docker compose up -d db`, then the URL below; its contents are wiped)
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres uv run pytest -q
 
 # API  ->  http://localhost:8000
 uv run uvicorn regwatch.api.main:app --reload
@@ -169,9 +171,9 @@ proxies `/api/*` to the backend, so only one origin is exposed.
 | Backend | Python 3.11+ (managed by `uv`), FastAPI |
 | Frontend | Next.js 16 (App Router, TypeScript) + React 18 in `regwatch/frontend/`. All four surfaces render in one `(shell)` route group — one sidebar, one product-scope bar. Talks to the API through a same-origin `/api` proxy |
 | LLM | OpenAI via the Responses API (`OPENAI_API_MODE=responses`). Role-specific models: router `gpt-5-nano`, synthesizer + extractor `gpt-5.4-nano` (each falling back to `LLM_MODEL`). Pluggable behind `LLMProvider` — `anthropic` and a test-only `echo` are also supported |
-| Embeddings | Pluggable. Prod: OpenAI `text-embedding-3-small` (1536-dim). Dev/Compose default: local `BAAI/bge-small-en-v1.5` (`--extra local-embeddings`) |
-| Vector store | Prod: **pgvector** in the same Postgres. Dev/CI: ChromaDB persistent-on-disk |
-| Structured store | Prod: **Postgres** (Supabase) via SQLModel; `REQUIRE_DATABASE_URL=true` refuses the SQLite fallback. Dev/CI: SQLite. Schema changes ship as Alembic migrations |
+| Embeddings | Pluggable. Prod AND Compose default: OpenAI `text-embedding-3-small` (1536-dim, matching the pgvector column). Local `BAAI/bge-small-en-v1.5` (384-dim) remains for offline tooling only -- the K6 dim assert refuses it against the app datastore |
+| Vector store | **pgvector** in the same Postgres, everywhere (Supabase in prod, a disposable local/CI Postgres otherwise). No other vector backend since R5 |
+| Structured store | **Postgres** via SQLModel (Supabase in prod); `DATABASE_URL` is mandatory and the app refuses to boot without it. Schema changes ship as Alembic migrations |
 | Retrieval | Two-stage. Stage 1: vector top-k 50 (`VECTOR_TOP_K`). Stage 2: rerank to top-k 8 (`RERANK_TOP_K`); reranker off by default |
 | Ingest | `httpx` + `selectolax`; `pdfplumber` (with `pypdf` fallback); heading- and page-aware chunking (~1000 tokens, ~150 overlap) |
 | Deploy | API on Fly.io, DB + vectors on Supabase, frontend on Vercel; daily Watch via GitHub Actions cron |
@@ -230,7 +232,7 @@ GET    /sessions          the caller's chat sessions (updated_at desc)
 GET    /sessions/{id}     one session + its messages
 DELETE /sessions/{id}     delete a session and its messages
 
-GET    /health            liveness + component diagnostics; 503 when db/chroma is down
+GET    /health            liveness + component diagnostics; 503 when db/vector_store is down
 GET    /ready             readiness: db + vector store + LLM constructability
 GET    /metrics           Prometheus counters; bearer-gated when METRICS_TOKEN is set
 GET    /settings          non-secret config
@@ -296,7 +298,7 @@ config/settings.py        pydantic-settings: all thresholds + secrets
 src/regwatch/
   ingest/                 psg_crawler, pdf_parser, pipeline
   process/                chunker, embedder, extractor, change_detector
-  store/                  db, models, vector_store (Chroma), pgvector_store
+  store/                  db, models, vector_store, pgvector_store
   retrieve/               retriever (stage 1), reranker (stage 2)
   sources/                FDA source handlers + source router
   generate/               LLM provider interface, grounded_qa, prompts
@@ -325,9 +327,9 @@ points:
 
 ## Docker
 
-Full details in [`docs/DOCKER.md`](docs/DOCKER.md). The one image runs the API,
-ingest jobs, and the Dagster code location; Compose adds the Next.js UI and a
-local Dagster OSS stack for development.
+Full details in [`docs/DOCKER.md`](docs/DOCKER.md). The one image runs the API
+and ingest jobs; Compose adds the Next.js UI and a local pgvector Postgres
+service for development.
 
 ```bash
 docker build -t regwatch:local .          # shared image
@@ -335,10 +337,10 @@ docker compose up api                      # API on http://localhost:8000
 docker compose up --build api web          # API + UI (http://localhost:3000)
 ```
 
-Compose mounts `./data` so SQLite, Chroma, and PDFs survive restarts, and
-defaults to local embeddings (`EMBEDDING_PROVIDER=local-bge-small`). For a slim
-production build, set `INSTALL_LOCAL_EMBEDDINGS=false` with
-`EMBEDDING_PROVIDER=openai` + `OPENAI_API_KEY` — see [`docs/DEPLOY.md`](docs/DEPLOY.md).
+Compose mounts `./data` so raw/processed PDFs survive restarts, runs Postgres
+via its `db` service, and defaults to `EMBEDDING_PROVIDER=openai` (set
+`OPENAI_API_KEY` in `.env`; the pgvector chunk table is 1536-dim) — see
+[`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## License
 

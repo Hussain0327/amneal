@@ -37,11 +37,6 @@ from tests.test_pipeline_idempotent import (
 
 TEST_DATABASE_URL = (os.environ.get("TEST_DATABASE_URL") or "").strip()
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="TEST_DATABASE_URL not set (postgres integration tests are opt-in)",
-)
-
 
 class _Embedder1536:
     """Deterministic 1536-dim provider: the pipeline embeds for real in these

@@ -99,13 +99,16 @@ class LocalBgeSmallProvider:
 class EchoEmbeddingProvider:
     """Deterministic, network-free provider for tests.
 
-    Maps each input to a sparse 384-dim hash-based vector. Quality is bad, but
-    it is deterministic and self-contained — useful for unit tests that don't
-    want to download a model.
+    Maps each input to a sparse 1536-dim hash-based vector. Quality is bad,
+    but it is deterministic and self-contained — useful for unit tests that
+    don't want to download a model. The dimension deliberately matches the
+    pgvector ``chunk.embedding vector(1536)`` column (and the K6 boot assert),
+    so the Postgres-only test suite can ingest and query real vectors without
+    any network or model download.
     """
 
     name = "echo"
-    dim = 384
+    dim = 1536
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         out: list[list[float]] = []

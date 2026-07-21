@@ -45,13 +45,6 @@ RUN go build -trimpath -ldflags "-s -w" -o /usr/local/bin/regwatch-proxy ./cmd/p
 ARG PYTHON_VERSION=3.12
 FROM python:3.12-slim@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e
 ARG INSTALL_LOCAL_EMBEDDINGS=false
-# Dagster ships only when asked for (compose sets true for its dagster-*
-# services). Prod structurally cannot run it (fly.toml declares one process
-# group and no dagster process, and the GitHub Actions cron is the sole
-# scheduler), so baking the orchestration closure into the default image was
-# pure dead weight (size, build time, and Trivy/pip-audit CVE surface for
-# unreachable code).
-ARG INSTALL_ORCHESTRATION=false
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -60,14 +53,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     VIRTUAL_ENV=/app/.venv \
     PATH="/app/.venv/bin:${PATH}" \
     DATA_DIR=/app/data \
-    CHROMA_DIR=/app/data/chroma \
-    SQLITE_PATH=/app/data/regwatch.db \
     RAW_PDF_DIR=/app/data/raw \
     PROCESSED_DIR=/app/data/processed \
     EMBEDDING_PROVIDER=echo \
-    WHITEPAPER_TEMPLATE_PATH=/app/data/templates/cra_white_paper_template.docx \
-    DAGSTER_CONFIG_DIR=/app/dagster_config \
-    DAGSTER_HOME=/app/data/dagster/home
+    WHITEPAPER_TEMPLATE_PATH=/app/data/templates/cra_white_paper_template.docx
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -94,7 +83,6 @@ COPY pyproject.toml uv.lock ./
 # values are fixed literals, never user input.
 RUN EXTRAS="--extra llm" \
     && if [ "$INSTALL_LOCAL_EMBEDDINGS" = "true" ]; then EXTRAS="$EXTRAS --extra local-embeddings"; fi \
-    && if [ "$INSTALL_ORCHESTRATION" = "true" ]; then EXTRAS="$EXTRAS --extra orchestration"; fi \
     && uv sync --frozen $EXTRAS --no-dev --no-install-project
 
 COPY README.md alembic.ini ./
@@ -102,13 +90,11 @@ COPY config ./config
 COPY migrations ./migrations
 COPY scripts ./scripts
 COPY src ./src
-COPY docker/dagster $DAGSTER_CONFIG_DIR
 COPY docker/entrypoint.sh /usr/local/bin/regwatch-entrypoint
 
 RUN chmod +x /usr/local/bin/regwatch-entrypoint \
     && EXTRAS="--extra llm" \
     && if [ "$INSTALL_LOCAL_EMBEDDINGS" = "true" ]; then EXTRAS="$EXTRAS --extra local-embeddings"; fi \
-    && if [ "$INSTALL_ORCHESTRATION" = "true" ]; then EXTRAS="$EXTRAS --extra orchestration"; fi \
     && uv sync --frozen $EXTRAS --no-dev
 
 # Static proxy binary. Ships inert: the phase-3 "proxy" process group
@@ -124,7 +110,7 @@ COPY --from=proxy-build /usr/local/bin/regwatch-proxy /usr/local/bin/regwatch-pr
 # real-template fill. Absent it, POST /whitepaper/docx still returns a
 # structurally-equivalent document stamped "(generated without the official CRA
 # template file)" — see docs/DEPLOY.md and src/regwatch/whitepaper/docx_writer.py.
-EXPOSE 8000 4000
+EXPOSE 8000
 
 # Hand /app (the .venv + everything the entrypoint writes under DATA_DIR) to the
 # unprivileged user, then drop privileges. The entrypoint runs `mkdir -p` under
