@@ -35,6 +35,17 @@ type Config struct {
 	// caller LOGS it loudly (Python parity: a warning, never a boot refusal
 	// -- see ConfigFromEnv).
 	Insecure bool
+	// The GET /settings values, resolved from the same env names with the
+	// same pydantic defaults as config/settings.py -- the six-field
+	// PublicSettings allowlist. Parity note: pydantic-settings also loads a
+	// .env FILE, which this does not; inert in prod (.env is .dockerignored
+	// and never in the image), dev-only divergence for a bare local proxy.
+	EmbeddingProvider     string
+	LLMProvider           string
+	LLMModel              string
+	RetrievalTopK         *int // env unset => null on the wire, key present
+	RefusalScoreThreshold float64
+	CompanyName           string
 }
 
 // envBool mirrors pydantic's bool coercion for the subset of spellings that
@@ -94,13 +105,48 @@ func ConfigFromEnv() (Config, error) {
 	// via the Insecure flag (main.go logs it), never refuse.
 	insecure := os.Getenv("SENTRY_ENVIRONMENT") == "production" && !cookieSecure
 
-	return Config{
+	cfg := Config{
 		CookieSecure: cookieSecure,
 		SessionTTL:   time.Duration(ttlHours) * time.Hour,
 		TrustProxy:   trustProxy,
 		CORSOrigins:  origins,
 		Insecure:     insecure,
-	}, nil
+		// Pydantic-default mirrors (config/settings.py); prod fly.toml [env]
+		// overrides EMBEDDING_PROVIDER to "openai", the rest ride defaults.
+		EmbeddingProvider:     envOrDefault("EMBEDDING_PROVIDER", "local-bge-small"),
+		LLMProvider:           envOrDefault("LLM_PROVIDER", "openai"),
+		LLMModel:              envOrDefault("LLM_MODEL", "gpt-5.4-nano"),
+		RefusalScoreThreshold: 0.30,
+		CompanyName:           envOrDefault("COMPANY_NAME", "Amneal"),
+	}
+	if v := strings.TrimSpace(os.Getenv("RETRIEVAL_TOP_K")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("env RETRIEVAL_TOP_K: %q is not an integer", v)
+		}
+		cfg.RetrievalTopK = &n
+	}
+	if v := strings.TrimSpace(os.Getenv("REFUSAL_SCORE_THRESHOLD")); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		// Same range validator, same fail-loud posture as the pydantic field.
+		// The negated >=/<= form rejects NaN too (ParseFloat accepts "nan",
+		// every comparison with which is false -- and a NaN here would make
+		// json.Encoder fail AFTER the 200 header on every GET /settings).
+		if err != nil || !(f >= 0.0 && f <= 1.0) {
+			return Config{}, fmt.Errorf("env REFUSAL_SCORE_THRESHOLD must be in [0, 1], got %q", v)
+		}
+		cfg.RefusalScoreThreshold = f
+	}
+	return cfg, nil
+}
+
+// envOrDefault: pydantic-settings semantics for plain string fields -- an
+// UNSET variable takes the default; a set-but-empty value is kept as "".
+func envOrDefault(name, def string) string {
+	if v, ok := os.LookupEnv(name); ok {
+		return v
+	}
+	return def
 }
 
 // EnvBool is the exported pydantic-parity bool parser for callers outside

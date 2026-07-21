@@ -79,3 +79,11 @@ func textPtr(t pgtype.Text) *string {
 	s := t.String
 	return &s
 }
+
+// textOrNull is textPtr's inverse: a nil *string becomes SQL NULL.
+func textOrNull(p *string) pgtype.Text {
+	if p == nil {
+		return pgtype.Text{}
+	}
+	return pgtype.Text{String: *p, Valid: true}
+}

@@ -18,6 +18,12 @@ func text(s string) pgtype.Text {
 // paths get the explicit 405s registered at the bottom -- since the B2
 // deletion there is no Python handler behind these paths, so a method
 // mismatch left to the relay would surface as an upstream 404.
+//
+// The PR C paths (feedback/settings/products) are deliberately ABSENT from
+// the 405 map: their Python handlers still exist this PR (cutover-only, like
+// PR B), so a method mismatch falls through the method-less relay catch-all
+// to FastAPI's own 405 -- deleting that fallback is C2's job, together with
+// the Python handlers.
 func (s *Server) Routes() map[string]http.Handler {
 	routes := map[string]http.Handler{
 		"POST /auth/login":      http.HandlerFunc(s.handleLogin),
@@ -26,6 +32,12 @@ func (s *Server) Routes() map[string]http.Handler {
 		"GET /sessions":         http.HandlerFunc(s.handleListSessions),
 		"GET /sessions/{id}":    http.HandlerFunc(s.handleGetSession),
 		"DELETE /sessions/{id}": http.HandlerFunc(s.handleDeleteSession),
+
+		"POST /feedback":                http.HandlerFunc(s.handleFeedback),
+		"GET /settings":                 http.HandlerFunc(s.handleGetSettings),
+		"GET /products":                 http.HandlerFunc(s.handleListProducts),
+		"POST /products":                http.HandlerFunc(s.handleCreateProduct),
+		"DELETE /products/{product_id}": http.HandlerFunc(s.handleDeleteProduct),
 	}
 	out := make(map[string]http.Handler, len(routes)*2)
 	seenPaths := map[string]bool{}
