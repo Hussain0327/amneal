@@ -365,9 +365,15 @@ func TestProductCreateListDeleteWire(t *testing.T) {
 	if got := decode(t, h.do(t, "GET", "/products", cookie, nil)); got["count"] != float64(0) {
 		t.Fatalf("count after delete = %v", got["count"])
 	}
-	// Idempotent: the kept, already-unwatched row still answers removed=true.
-	if resp := h.do(t, "DELETE", fmt.Sprintf("/products/%d", id), cookie, nil); resp.StatusCode != 200 {
-		t.Fatalf("re-delete status = %d", resp.StatusCode)
+	// Idempotent: the kept, already-unwatched row still answers removed=true
+	// (the deleted pytest pinned the BODY of the second delete, not just the
+	// status -- the caller's goal state holds, never a 404 or removed=false).
+	resp2 := h.do(t, "DELETE", fmt.Sprintf("/products/%d", id), cookie, nil)
+	if resp2.StatusCode != 200 {
+		t.Fatalf("re-delete status = %d", resp2.StatusCode)
+	}
+	if body := decode(t, resp2); body["removed"] != true {
+		t.Fatalf("re-delete body = %v, want removed=true", body)
 	}
 	// The row itself survives (soft delete, INV-4).
 	var onWatchlist bool
@@ -653,20 +659,33 @@ func TestProductDeleteEdges(t *testing.T) {
 	}
 }
 
-func TestPRCPathsOtherMethodsStillRelay(t *testing.T) {
-	// Cutover-only PR: method mismatches on the PR C paths must keep falling
-	// through to the Python upstream (which still owns those 405s until C2).
+func TestPRCPathsMethodMismatch405s(t *testing.T) {
+	// Since C2 deleted the Python handlers, method mismatches on the PR C
+	// paths must NOT relay (the upstream would 404): FastAPI-shaped 405 with
+	// the empirically-probed first-match Allow values.
 	h := newHarness(t, Config{SessionTTL: 72 * time.Hour})
-	for _, c := range []struct{ method, path string }{
-		{"PUT", "/products"},
-		{"GET", "/feedback"},
-		{"POST", "/settings"},
-		{"PATCH", "/products/1"},
+	for _, c := range []struct{ method, path, allow string }{
+		{"PUT", "/products", "GET"},
+		{"PATCH", "/products", "GET"},
+		{"GET", "/feedback", "POST"},
+		{"PUT", "/feedback", "POST"},
+		{"POST", "/settings", "GET"},
+		{"DELETE", "/settings", "GET"},
+		{"GET", "/products/1", "DELETE"},
+		{"PATCH", "/products/1", "DELETE"},
 	} {
 		resp := h.do(t, c.method, c.path, "", nil)
-		if resp.Header.Get("X-Upstream") != "python" {
-			t.Fatalf("%s %s: must relay to upstream, got status %d without relay header",
-				c.method, c.path, resp.StatusCode)
+		if resp.StatusCode != 405 {
+			t.Fatalf("%s %s: %d, want 405", c.method, c.path, resp.StatusCode)
+		}
+		if got := resp.Header.Get("Allow"); got != c.allow {
+			t.Fatalf("%s %s Allow=%q, want %q", c.method, c.path, got, c.allow)
+		}
+		if resp.Header.Get("X-Upstream") == "python" {
+			t.Fatalf("%s %s leaked to the relay", c.method, c.path)
+		}
+		if body := decode(t, resp); body["detail"] != "Method Not Allowed" {
+			t.Fatalf("405 body: %v", body)
 		}
 	}
 }

@@ -15,15 +15,9 @@ func text(s string) pgtype.Text {
 // Routes returns the native route table the proxy mounts ahead of its relay
 // catch-all. Go 1.22 method patterns route the exact method+path pairs below;
 // OTHER PATHS fall through to the relay catch-all, and other METHODS on these
-// paths get the explicit 405s registered at the bottom -- since the B2
-// deletion there is no Python handler behind these paths, so a method
+// paths get the explicit 405s registered at the bottom -- since the B2/C2
+// deletions there is no Python handler behind these paths, so a method
 // mismatch left to the relay would surface as an upstream 404.
-//
-// The PR C paths (feedback/settings/products) are deliberately ABSENT from
-// the 405 map: their Python handlers still exist this PR (cutover-only, like
-// PR B), so a method mismatch falls through the method-less relay catch-all
-// to FastAPI's own 405 -- deleting that fallback is C2's job, together with
-// the Python handlers.
 func (s *Server) Routes() map[string]http.Handler {
 	routes := map[string]http.Handler{
 		"POST /auth/login":      http.HandlerFunc(s.handleLogin),
@@ -57,13 +51,23 @@ func (s *Server) Routes() map[string]http.Handler {
 	// specific patterns above do not claim. The Allow values reproduce the
 	// FastAPI behavior these paths had (Starlette quirk preserved: Allow
 	// lists the FIRST partially-matching route's methods only -- GET for
-	// /sessions/{id}, never "GET, DELETE").
+	// /sessions/{id}, never "GET, DELETE"; GET for /products because the GET
+	// route was declared before POST in main.py). The C2 rows were probed
+	// empirically against the live FastAPI app before its handlers were
+	// deleted (2026-07-21): PUT/GET /feedback -> POST; POST/DELETE /settings
+	// -> GET; PUT/PATCH /products -> GET; GET/POST/PATCH /products/{id} ->
+	// DELETE.
 	for path, allow := range map[string]string{
 		"/auth/login":    "POST",
 		"/auth/logout":   "POST",
 		"/auth/me":       "GET",
 		"/sessions":      "GET",
 		"/sessions/{id}": "GET",
+
+		"/feedback":              "POST",
+		"/settings":              "GET",
+		"/products":              "GET",
+		"/products/{product_id}": "DELETE",
 	} {
 		out[path] = s.corsSimple(methodNotAllowed(allow))
 	}
