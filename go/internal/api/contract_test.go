@@ -741,6 +741,8 @@ func TestAuthWallAndRelayPrecedence(t *testing.T) {
 	for _, probe := range []struct{ method, path string }{
 		{"GET", "/auth/me"}, {"GET", "/sessions"},
 		{"GET", "/sessions/some-session-id"}, {"DELETE", "/sessions/some-session-id"},
+		{"POST", "/feedback"}, {"GET", "/settings"},
+		{"GET", "/products"}, {"POST", "/products"}, {"DELETE", "/products/1"},
 	} {
 		resp := h.do(t, probe.method, probe.path, "", nil)
 		if resp.StatusCode != 401 {
@@ -752,8 +754,8 @@ func TestAuthWallAndRelayPrecedence(t *testing.T) {
 	}
 
 	// Everything else still relays -- the strangler contract: /query, /health,
-	// unknown paths.
-	for _, path := range []string{"/query", "/health", "/products", "/anything/else"} {
+	// unknown paths. (/products left this list in PR C.)
+	for _, path := range []string{"/query", "/health", "/anything/else"} {
 		resp := h.do(t, "GET", path, "", nil)
 		if resp.Header.Get("X-Upstream") != "python" {
 			t.Fatalf("%s must relay to upstream (status %d)", path, resp.StatusCode)

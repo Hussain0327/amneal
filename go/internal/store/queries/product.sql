@@ -6,12 +6,13 @@
 -- NO ORDER BY (unspecified heap order), so id ASC here is a deliberate
 -- deterministic refinement -- PR C's contract tests pin it as the NEW order.
 --
--- PR C NOTE: CreateProduct alone does NOT implement POST /products. The
--- Python handler runs watchlist.upsert_entries -- an identity MERGE matching
--- on (normalized_name, rld_application_number) with NULL-safe comparison
--- (IS NOT DISTINCT FROM) and a source-rank-gated field merge. PR C adds that
--- candidate-select + merge-update pair; porting POST onto bare CreateProduct
--- would mint duplicate identity rows and always report added=1.
+-- POST /products is upsert_entries (watchlist.py): ListProductsByIdentity
+-- fetches candidates, the HANDLER does the casefolded form/route identity
+-- comparison and the source-rank-gated field merge (Python's `or` treats
+-- empty string as missing -- SQL COALESCE only handles NULL, so the merged
+-- values must be computed in code), then MergeProductIdentityFields or
+-- CreateProduct. Porting POST onto bare CreateProduct would mint duplicate
+-- identity rows and always report added=1.
 
 -- name: ListWatchlistProducts :many
 SELECT * FROM public.product
@@ -34,4 +35,28 @@ RETURNING *;
 -- name: SetProductWatchlist :execrows
 UPDATE public.product
 SET on_watchlist = $2
+WHERE id = $1;
+
+-- The upsert_entries candidate select: the EXACT two-column identity Python's
+-- SQLAlchemy emits (== None compiles to IS NULL, so IS NOT DISTINCT FROM
+-- reproduces both branches). Form/route filtering happens in the handler
+-- (casefold + whitespace-collapse; None matches only None). ORDER BY id ASC
+-- is a determinism refinement: Python takes the first of unordered results.
+-- name: ListProductsByIdentity :many
+SELECT * FROM public.product
+WHERE normalized_name = sqlc.arg(normalized_name)
+  AND rld_application_number IS NOT DISTINCT FROM sqlc.narg(rld_application_number)
+ORDER BY id ASC;
+
+-- The merge half of upsert_entries: final values are computed in the handler
+-- (rank gating + empty-string-falsy semantics), this just writes them.
+-- active_ingredient/normalized_name/dosage_form/route/added_at are NEVER
+-- touched on merge; on_watchlist always re-sets true (import-refresh model).
+-- name: MergeProductIdentityFields :exec
+UPDATE public.product
+SET company_status = $2,
+    rld_name = $3,
+    source = $4,
+    source_url = $5,
+    on_watchlist = true
 WHERE id = $1;

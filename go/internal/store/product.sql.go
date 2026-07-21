@@ -92,6 +92,56 @@ func (q *Queries) GetProduct(ctx context.Context, id int32) (Product, error) {
 	return i, err
 }
 
+const listProductsByIdentity = `-- name: ListProductsByIdentity :many
+SELECT id, active_ingredient, normalized_name, dosage_form, route, rld_name, rld_application_number, company_status, source, source_url, on_watchlist, added_at FROM public.product
+WHERE normalized_name = $1
+  AND rld_application_number IS NOT DISTINCT FROM $2
+ORDER BY id ASC
+`
+
+type ListProductsByIdentityParams struct {
+	NormalizedName       string
+	RldApplicationNumber pgtype.Text
+}
+
+// The upsert_entries candidate select: the EXACT two-column identity Python's
+// SQLAlchemy emits (== None compiles to IS NULL, so IS NOT DISTINCT FROM
+// reproduces both branches). Form/route filtering happens in the handler
+// (casefold + whitespace-collapse; None matches only None). ORDER BY id ASC
+// is a determinism refinement: Python takes the first of unordered results.
+func (q *Queries) ListProductsByIdentity(ctx context.Context, arg ListProductsByIdentityParams) ([]Product, error) {
+	rows, err := q.db.Query(ctx, listProductsByIdentity, arg.NormalizedName, arg.RldApplicationNumber)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Product
+	for rows.Next() {
+		var i Product
+		if err := rows.Scan(
+			&i.ID,
+			&i.ActiveIngredient,
+			&i.NormalizedName,
+			&i.DosageForm,
+			&i.Route,
+			&i.RldName,
+			&i.RldApplicationNumber,
+			&i.CompanyStatus,
+			&i.Source,
+			&i.SourceUrl,
+			&i.OnWatchlist,
+			&i.AddedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listWatchlistProducts = `-- name: ListWatchlistProducts :many
 
 SELECT id, active_ingredient, normalized_name, dosage_form, route, rld_name, rld_application_number, company_status, source, source_url, on_watchlist, added_at FROM public.product
@@ -107,12 +157,13 @@ ORDER BY id ASC
 // NO ORDER BY (unspecified heap order), so id ASC here is a deliberate
 // deterministic refinement -- PR C's contract tests pin it as the NEW order.
 //
-// PR C NOTE: CreateProduct alone does NOT implement POST /products. The
-// Python handler runs watchlist.upsert_entries -- an identity MERGE matching
-// on (normalized_name, rld_application_number) with NULL-safe comparison
-// (IS NOT DISTINCT FROM) and a source-rank-gated field merge. PR C adds that
-// candidate-select + merge-update pair; porting POST onto bare CreateProduct
-// would mint duplicate identity rows and always report added=1.
+// POST /products is upsert_entries (watchlist.py): ListProductsByIdentity
+// fetches candidates, the HANDLER does the casefolded form/route identity
+// comparison and the source-rank-gated field merge (Python's `or` treats
+// empty string as missing -- SQL COALESCE only handles NULL, so the merged
+// values must be computed in code), then MergeProductIdentityFields or
+// CreateProduct. Porting POST onto bare CreateProduct would mint duplicate
+// identity rows and always report added=1.
 func (q *Queries) ListWatchlistProducts(ctx context.Context) ([]Product, error) {
 	rows, err := q.db.Query(ctx, listWatchlistProducts)
 	if err != nil {
@@ -144,6 +195,39 @@ func (q *Queries) ListWatchlistProducts(ctx context.Context) ([]Product, error) 
 		return nil, err
 	}
 	return items, nil
+}
+
+const mergeProductIdentityFields = `-- name: MergeProductIdentityFields :exec
+UPDATE public.product
+SET company_status = $2,
+    rld_name = $3,
+    source = $4,
+    source_url = $5,
+    on_watchlist = true
+WHERE id = $1
+`
+
+type MergeProductIdentityFieldsParams struct {
+	ID            int32
+	CompanyStatus pgtype.Text
+	RldName       pgtype.Text
+	Source        string
+	SourceUrl     pgtype.Text
+}
+
+// The merge half of upsert_entries: final values are computed in the handler
+// (rank gating + empty-string-falsy semantics), this just writes them.
+// active_ingredient/normalized_name/dosage_form/route/added_at are NEVER
+// touched on merge; on_watchlist always re-sets true (import-refresh model).
+func (q *Queries) MergeProductIdentityFields(ctx context.Context, arg MergeProductIdentityFieldsParams) error {
+	_, err := q.db.Exec(ctx, mergeProductIdentityFields,
+		arg.ID,
+		arg.CompanyStatus,
+		arg.RldName,
+		arg.Source,
+		arg.SourceUrl,
+	)
+	return err
 }
 
 const setProductWatchlist = `-- name: SetProductWatchlist :execrows

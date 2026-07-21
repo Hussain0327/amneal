@@ -48,20 +48,6 @@ LAST_RUN_WIRE_KEYS = {
     "alerts",
 }
 
-PRODUCT_WIRE_KEYS = {
-    "id",
-    "active_ingredient",
-    "normalized_name",
-    "stripped_name",
-    "dosage_form",
-    "route",
-    "rld_name",
-    "rld_application_number",
-    "company_status",
-    "source",
-    "source_url",
-}
-
 SPINE_WIRE_KEYS = {
     "application_number",
     "application_type",
@@ -115,48 +101,6 @@ def test_watch_latest_alert_and_last_run_keys_exact(auth_client: TestClient) -> 
     assert alert["diff_summary"] is None
     assert alert["change_kind"] in {"new", "revised"}
     assert set(body["last_run"]) == LAST_RUN_WIRE_KEYS
-
-
-def test_products_create_delete_wire_keys_and_added_count(auth_client: TestClient) -> None:
-    payload = {"active_ingredient": "Romidepsin", "source": "manual"}
-    r = auth_client.post("/products", json=payload)
-    assert r.status_code == 201
-    body = r.json()
-    assert set(body) == {"added", "products"}
-    # `added` is the upsert's inserted-row COUNT (int), not a bool -- coercing
-    # it would flip the wire from 1 to true.
-    assert body["added"] == 1 and not isinstance(body["added"], bool)
-    product = body["products"][0]
-    assert set(product) == PRODUCT_WIRE_KEYS
-
-    # Re-adding the same identity merges instead of inserting: added == 0.
-    again = auth_client.post("/products", json=payload)
-    assert again.status_code == 201
-    assert again.json()["added"] == 0 and not isinstance(again.json()["added"], bool)
-
-    listing = auth_client.get("/products").json()
-    assert set(listing) == {"count", "products"}
-    assert set(listing["products"][0]) == PRODUCT_WIRE_KEYS
-
-    removed = auth_client.delete(f"/products/{product['id']}")
-    assert removed.status_code == 200
-    assert set(removed.json()) == {"removed", "products"}
-    assert removed.json()["removed"] is True
-
-
-def test_settings_wire_keys_exact(auth_client: TestClient) -> None:
-    body = auth_client.get("/settings").json()
-    assert set(body) == {
-        "embedding_provider",
-        "llm_provider",
-        "llm_model",
-        "retrieval_top_k",
-        "refusal_score_threshold",
-        "company_name",
-    }
-    # Default settings ship retrieval_top_k=None: the key must stay PRESENT
-    # as null (required-nullable), not vanish.
-    assert "retrieval_top_k" in body
 
 
 def test_health_failure_component_keys_stay_conditional(

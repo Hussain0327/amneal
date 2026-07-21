@@ -74,7 +74,8 @@ def test_health() -> None:
 
 
 def test_health_no_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Mirror the /settings discipline: key PRESENCE only, never a value.
+    # No-secrets discipline (same as Go's /settings allowlist struct): key
+    # PRESENCE only, never a value.
     import config.settings as cs
 
     monkeypatch.setenv("LLM_PROVIDER", "openai")
@@ -114,15 +115,6 @@ def test_health_unhealthy_when_db_unreachable(monkeypatch: pytest.MonkeyPatch) -
     body = r.json()
     assert body["status"] == "unhealthy"
     assert body["components"]["db"]["ok"] is False
-
-
-def test_settings_no_secrets(auth_client: TestClient) -> None:
-    r = auth_client.get("/settings")
-    assert r.status_code == 200
-    body = r.json()
-    assert "embedding_provider" in body
-    assert "openai_api_key" not in body
-    assert "anthropic_api_key" not in body
 
 
 def test_cors_allowlist() -> None:
@@ -205,97 +197,6 @@ def test_sources_search_accepts_explicit_source_without_network(
     body = r.json()
     assert body["routed_sources"] == ["psg"]
     assert body["records"] == []
-
-
-def test_create_product_rejects_bad_source(auth_client: TestClient) -> None:
-    r = auth_client.post(
-        "/products",
-        json={"active_ingredient": "Foo", "source": "model_memory"},
-    )
-    assert r.status_code == 422
-
-
-def test_create_product_rejects_drugsfda_source(auth_client: TestClient) -> None:
-    """INV-5 at the API boundary: 'drugsfda' means machine-verified provenance
-    from the automated Drugs@FDA import. A hand-typed row claiming it would
-    fabricate that verification, so the API refuses it outright."""
-    r = auth_client.post(
-        "/products",
-        json={"active_ingredient": "Foo", "source": "drugsfda"},
-    )
-    assert r.status_code == 422
-    assert "automated" in r.json()["detail"]
-    # Nothing was persisted under the fabricated provenance.
-    listing = auth_client.get("/products").json()
-    assert not any(p["source"] == "drugsfda" for p in listing["products"])
-
-
-def test_create_product_rejects_blank_active_ingredient(auth_client: TestClient) -> None:
-    """Empty/whitespace-only names normalize to "" -- permanently unmatchable
-    junk (DELETE /products only soft-unwatches; the row is kept forever).
-    422 at the boundary."""
-    for bad in ("", "   ", "\t\n"):
-        r = auth_client.post(
-            "/products",
-            json={"active_ingredient": bad, "source": "manual"},
-        )
-        assert r.status_code == 422, f"accepted blank active_ingredient {bad!r}"
-
-    # Padded-but-real names are stored stripped, not rejected.
-    r = auth_client.post(
-        "/products",
-        json={"active_ingredient": "  Padded Name  ", "source": "manual"},
-    )
-    assert r.status_code == 201
-    listing = auth_client.get("/products").json()
-    assert any(p["active_ingredient"] == "Padded Name" for p in listing["products"])
-
-
-def test_create_and_list_product(auth_client: TestClient) -> None:
-    auth_client.post(
-        "/products",
-        json={
-            "active_ingredient": "Romidepsin",
-            "dosage_form": "Injection",
-            "route": "Intravenous",
-            "rld_name": "Istodax",
-            "rld_application_number": "208574",
-            "company_status": "approved",
-            "source": "anda_letter",
-            "source_url": "file://internal/approval.pdf",
-        },
-    )
-    listing = auth_client.get("/products").json()
-    assert listing["count"] >= 1
-    assert any(p["active_ingredient"] == "Romidepsin" for p in listing["products"])
-
-
-def test_delete_product_unwatches_and_is_idempotent(auth_client: TestClient) -> None:
-    """DELETE soft-unwatches: 200 + removed=true + the updated watchlist. A
-    re-delete of the (kept, already-unwatched) row is idempotent -- the
-    caller's goal state holds, so it is removed=true again, never a 404."""
-    created = auth_client.post(
-        "/products",
-        json={"active_ingredient": "Romidepsin", "source": "manual"},
-    )
-    assert created.status_code == 201
-    product_id = created.json()["products"][0]["id"]
-
-    r = auth_client.delete(f"/products/{product_id}")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["removed"] is True
-    assert all(p["id"] != product_id for p in body["products"])
-    assert auth_client.get("/products").json()["count"] == 0
-
-    again = auth_client.delete(f"/products/{product_id}")
-    assert again.status_code == 200
-    assert again.json()["removed"] is True
-
-
-def test_delete_product_404_when_row_never_existed(auth_client: TestClient) -> None:
-    r = auth_client.delete("/products/999999")
-    assert r.status_code == 404
 
 
 def test_watch_latest_returns_empty_when_no_alerts(auth_client: TestClient) -> None:

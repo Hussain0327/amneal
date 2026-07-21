@@ -6,7 +6,6 @@ response is reproducible in Postman from a `.env` and a running instance.
 Endpoints (per spec §10.16):
     POST   /query          — grounded Q&A (auth)
     POST   /query/stream   — grounded Q&A, streamed as Server-Sent Events (auth)
-    POST   /feedback       — thumbs up/down on one of the caller's answers (auth)
     POST   /sources/search — structured FDA source lookup (auth)
     POST   /assemble       — build a cited dossier for a target product (auth)
     POST   /whitepaper     — populate the CRA White Paper (RLD + appl no) (auth)
@@ -18,10 +17,6 @@ Endpoints (per spec §10.16):
     POST   /whitepaper/runs/{id}/docx - render a saved run as .docx (auth)
     DELETE /whitepaper/runs/{id} - creator-only draft delete (auth)
     GET    /watch/latest   — recent alerts (auth)
-    GET    /products       — list watchlist (auth)
-    POST   /products       — add manual product (auth)
-    DELETE /products/{id}  - remove a product from the watchlist (soft) (auth)
-    GET    /settings       — non-secret config (auth)
     GET    /health         — liveness + component diagnostics (open)
     GET    /ready          - readiness: db + vector store + LLM constructable (open)
     GET    /metrics        - Prometheus counters from the query_log audit
@@ -51,8 +46,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, text, update
 from sqlalchemy import select as sa_select
-from sqlalchemy.exc import IntegrityError
-from sqlmodel import col, select
+from sqlmodel import col
 
 from regwatch.assemble.dossier import build_dossier
 from regwatch.auth.deps import require_user
@@ -68,7 +62,6 @@ from regwatch.sources.types import SourceKind, SourceQuery
 from regwatch.store import whitepaper_runs as run_store
 from regwatch.store.db import engine_dialect, get_engine, init_db, session_scope
 from regwatch.store.models import (
-    AnswerFeedback,
     ChatSession,
     QueryLog,
     User,
@@ -78,7 +71,6 @@ from regwatch.store.queries import fetch_citation_recency
 from regwatch.store.vector_store import collection_size
 from regwatch.watch.alerts import count_digest_records, latest_digest_records
 from regwatch.watch.runs import latest_watch_run
-from regwatch.watch.watchlist import add_manual_product, list_watchlist, set_on_watchlist
 from regwatch.whitepaper import template_fetch
 from regwatch.whitepaper.docx_writer import docx_media_type, write_whitepaper_docx
 from regwatch.whitepaper.populator import (
@@ -892,69 +884,6 @@ def query_stream(req: QueryRequest, user: User = Depends(require_user)) -> Strea
     )
 
 
-# ---------- /feedback ----------
-class FeedbackRequest(BaseModel):
-    audit_id: int
-    rating: int
-    comment: str | None = Field(None, max_length=2000)
-
-    @field_validator("rating")
-    @classmethod
-    def _check_rating(cls, v: int) -> int:
-        if v not in (-1, 1):
-            raise ValueError("rating must be -1 (thumbs down) or 1 (thumbs up)")
-        return v
-
-
-class FeedbackResponse(BaseModel):
-    audit_id: int
-    rating: int
-    comment: str | None = None
-
-
-def _upsert_feedback(audit_id: int, user_id: str, rating: int, comment: str | None) -> None:
-    """One feedback row per (audit_id, user_id) — re-rating replaces."""
-    with session_scope() as s:
-        existing = s.scalars(
-            select(AnswerFeedback).where(
-                AnswerFeedback.audit_id == audit_id,
-                AnswerFeedback.user_id == user_id,
-            )
-        ).first()
-        if existing is None:
-            s.add(
-                AnswerFeedback(audit_id=audit_id, user_id=user_id, rating=rating, comment=comment)
-            )
-        else:
-            existing.rating = rating
-            existing.comment = comment
-            s.add(existing)
-        s.flush()
-
-
-@protected.post("/feedback", response_model=FeedbackResponse)
-def feedback(req: FeedbackRequest, user: User = Depends(require_user)) -> FeedbackResponse:
-    """Thumbs up/down on one of the caller's own answered Q&A turns (H4).
-
-    404 for a missing, foreign, or non-qa audit row -- mirroring the docx
-    ownership pattern, the response never confirms that someone else's audit
-    row exists. Feedback rows are the candidate pool for future eval gold-set
-    items (see README).
-    """
-    user_id = str(user.id)
-    with session_scope() as s:
-        row = s.get(QueryLog, req.audit_id)
-        if row is None or row.mode != "qa" or row.user_id != user_id:
-            raise HTTPException(status_code=404, detail="answer not found")
-    try:
-        _upsert_feedback(req.audit_id, user_id, req.rating, req.comment)
-    except IntegrityError:
-        # Lost a concurrent-insert race on uq_answer_feedback_audit_user — the
-        # row exists now, so the retry takes the replace branch.
-        _upsert_feedback(req.audit_id, user_id, req.rating, req.comment)
-    return FeedbackResponse(audit_id=req.audit_id, rating=req.rating, comment=req.comment)
-
-
 # ---------- /sources/search ----------
 class SourceSearchRequest(BaseModel):
     # These fields are interpolated into outbound FDA query params; cap them so a
@@ -1656,160 +1585,6 @@ def watch_latest(
         # cron that has been dead for a week -- this can (INV-4: it is only
         # ever a run that actually happened, never inferred).
         "last_run": latest_watch_run(),
-    }
-
-
-# ---------- /products ----------
-# INV-5 at the API boundary: POST /products is a HUMAN assertion, so it may
-# only claim provenance a human can actually stand behind. "drugsfda" (also in
-# watchlist.ALLOWED_SOURCES) means "machine-verified against the automated
-# Drugs@FDA import"; accepting it on a hand-typed row would fabricate that
-# verification. Kept as an explicit literal (not ALLOWED_SOURCES minus
-# drugsfda) so a future machine source fails CLOSED here by default.
-USER_ASSERTABLE_SOURCES = frozenset({"manual", "anda_letter"})
-
-
-class ProductCreate(BaseModel):
-    # Persisted to the watchlist — cap free-text fields for the same reason the
-    # rest of the surface does (consistency + bounded per-row storage).
-    active_ingredient: str = Field(..., min_length=1, max_length=200)
-    dosage_form: str | None = Field(None, max_length=200)
-    route: str | None = Field(None, max_length=200)
-    rld_name: str | None = Field(None, max_length=200)
-    rld_application_number: str | None = Field(None, max_length=40)
-    company_status: str | None = Field(None, max_length=200)
-    source: str = Field(
-        ...,
-        max_length=200,
-        description=(
-            f"one of {sorted(USER_ASSERTABLE_SOURCES)}; 'drugsfda' rows come only "
-            "from the automated Drugs@FDA import (INV-5)"
-        ),
-    )
-    source_url: str | None = Field(None, max_length=2000)
-
-    @field_validator("active_ingredient")
-    @classmethod
-    def _require_non_blank_ingredient(cls, v: str) -> str:
-        # A whitespace-only name normalizes to "" -- permanently unmatchable
-        # junk (DELETE /products only soft-unwatches: the row itself is kept
-        # forever for alert-history integrity). Reject at the boundary; store
-        # the stripped form so the row matches what was meant.
-        v = v.strip()
-        if not v:
-            raise ValueError("active_ingredient must not be blank")
-        return v
-
-
-class ProductRecord(BaseModel):
-    """One watchlist row as ``list_watchlist`` projects it."""
-
-    # int | None mirrors the ORM primary-key typing; persisted rows always
-    # carry an id, but the projection type is what the wire promises.
-    id: int | None
-    active_ingredient: str
-    normalized_name: str
-    stripped_name: str
-    dosage_form: str | None
-    route: str | None
-    rld_name: str | None
-    rld_application_number: str | None
-    company_status: str | None
-    source: str
-    source_url: str | None
-
-
-class ProductsResponse(BaseModel):
-    count: int
-    products: list[ProductRecord]
-
-
-class ProductCreateResponse(BaseModel):
-    # Rows actually inserted by the upsert (0 when the entry matched an
-    # existing row and was merged instead) - an int on the wire, not a bool.
-    added: int
-    products: list[ProductRecord]
-
-
-class ProductDeleteResponse(BaseModel):
-    removed: bool
-    products: list[ProductRecord]
-
-
-@protected.get("/products", response_model=ProductsResponse)
-def list_products() -> dict[str, Any]:
-    items = list_watchlist()
-    return {"count": len(items), "products": items}
-
-
-@protected.post("/products", status_code=201, response_model=ProductCreateResponse)
-def create_product(req: ProductCreate) -> dict[str, Any]:
-    if req.source not in USER_ASSERTABLE_SOURCES:
-        # "drugsfda" is a real source value, so the generic "must be one of"
-        # would read as a typo rather than the policy it is.
-        if req.source == "drugsfda":
-            detail = (
-                "source 'drugsfda' is machine-verified provenance: those rows "
-                "come only from the automated Drugs@FDA import, never manual "
-                f"entry (INV-5). Use one of {sorted(USER_ASSERTABLE_SOURCES)}."
-            )
-        else:
-            detail = f"source must be one of {sorted(USER_ASSERTABLE_SOURCES)} (INV-5)"
-        raise HTTPException(status_code=422, detail=detail)
-    added = add_manual_product(
-        active_ingredient=req.active_ingredient,
-        dosage_form=req.dosage_form,
-        route=req.route,
-        rld_name=req.rld_name,
-        rld_application_number=req.rld_application_number,
-        company_status=req.company_status,
-        source=req.source,
-        source_url=req.source_url,
-    )
-    return {"added": added, "products": list_watchlist()}
-
-
-@protected.delete("/products/{product_id}", response_model=ProductDeleteResponse)
-def delete_product(product_id: int) -> dict[str, Any]:
-    """Remove a product from the watchlist (SOFT: the row is kept).
-
-    ``on_watchlist`` flips to False instead of deleting the row -- durable
-    alert rows reference ``product_id``, so a hard delete would orphan the
-    alert history the feed still renders (INV-4), and the row's INV-5
-    provenance survives for audit. Idempotent: re-deleting an already-unwatched
-    row still returns ``removed: true`` because the caller's goal state holds;
-    404 is reserved for ids no Product row ever had, mirroring the "does it
-    exist" contract of the other 404s on this surface.
-    """
-    if not set_on_watchlist(product_id, False):
-        raise HTTPException(status_code=404, detail="product not found")
-    return {"removed": True, "products": list_watchlist()}
-
-
-# ---------- /settings (read-only, no secrets) ----------
-class PublicSettings(BaseModel):
-    """Non-secret config only. The model doubles as an allowlist: a future
-    handler edit cannot leak a new Settings field onto the wire without also
-    declaring it here (undeclared fields are stripped)."""
-
-    embedding_provider: str
-    llm_provider: str
-    llm_model: str
-    retrieval_top_k: int | None
-    refusal_score_threshold: float
-    company_name: str
-
-
-@protected.get("/settings", response_model=PublicSettings)
-def get_public_settings() -> dict[str, Any]:
-    s = get_settings()
-    return {
-        "embedding_provider": s.embedding_provider,
-        "llm_provider": s.llm_provider,
-        "llm_model": s.llm_model,
-        "retrieval_top_k": s.retrieval_top_k,
-        "refusal_score_threshold": s.refusal_score_threshold,
-        "company_name": s.company_name,
     }
 
 

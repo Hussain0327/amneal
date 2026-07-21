@@ -21,31 +21,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/feedback": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Feedback
-         * @description Thumbs up/down on one of the caller's own answered Q&A turns (H4).
-         *
-         *     404 for a missing, foreign, or non-qa audit row -- mirroring the docx
-         *     ownership pattern, the response never confirms that someone else's audit
-         *     row exists. Feedback rows are the candidate pool for future eval gold-set
-         *     items (see README).
-         */
-        post: operations["feedback_feedback_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/health": {
         parameters: {
             query?: never;
@@ -92,52 +67,6 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/products": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List Products */
-        get: operations["list_products_products_get"];
-        put?: never;
-        /** Create Product */
-        post: operations["create_product_products_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/products/{product_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /**
-         * Delete Product
-         * @description Remove a product from the watchlist (SOFT: the row is kept).
-         *
-         *     ``on_watchlist`` flips to False instead of deleting the row -- durable
-         *     alert rows reference ``product_id``, so a hard delete would orphan the
-         *     alert history the feed still renders (INV-4), and the row's INV-5
-         *     provenance survives for audit. Idempotent: re-deleting an already-unwatched
-         *     row still returns ``removed: true`` because the caller's goal state holds;
-         *     404 is reserved for ids no Product row ever had, mirroring the "does it
-         *     exist" contract of the other 404s on this surface.
-         */
-        delete: operations["delete_product_products__product_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -236,23 +165,6 @@ export interface paths {
          *     sources just as they do).
          */
         post: operations["resolve_resolve_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/settings": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Public Settings */
-        get: operations["get_public_settings_settings_get"];
-        put?: never;
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -537,24 +449,6 @@ export interface components {
             /** Query */
             query: string;
         };
-        /** FeedbackRequest */
-        FeedbackRequest: {
-            /** Audit Id */
-            audit_id: number;
-            /** Comment */
-            comment?: string | null;
-            /** Rating */
-            rating: number;
-        };
-        /** FeedbackResponse */
-        FeedbackResponse: {
-            /** Audit Id */
-            audit_id: number;
-            /** Comment */
-            comment?: string | null;
-            /** Rating */
-            rating: number;
-        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -614,97 +508,6 @@ export interface components {
             error?: string | null;
             /** Ok */
             ok: boolean;
-        };
-        /** ProductCreate */
-        ProductCreate: {
-            /** Active Ingredient */
-            active_ingredient: string;
-            /** Company Status */
-            company_status?: string | null;
-            /** Dosage Form */
-            dosage_form?: string | null;
-            /** Rld Application Number */
-            rld_application_number?: string | null;
-            /** Rld Name */
-            rld_name?: string | null;
-            /** Route */
-            route?: string | null;
-            /**
-             * Source
-             * @description one of ['anda_letter', 'manual']; 'drugsfda' rows come only from the automated Drugs@FDA import (INV-5)
-             */
-            source: string;
-            /** Source Url */
-            source_url?: string | null;
-        };
-        /** ProductCreateResponse */
-        ProductCreateResponse: {
-            /** Added */
-            added: number;
-            /** Products */
-            products: components["schemas"]["ProductRecord"][];
-        };
-        /** ProductDeleteResponse */
-        ProductDeleteResponse: {
-            /** Products */
-            products: components["schemas"]["ProductRecord"][];
-            /** Removed */
-            removed: boolean;
-        };
-        /**
-         * ProductRecord
-         * @description One watchlist row as ``list_watchlist`` projects it.
-         */
-        ProductRecord: {
-            /** Active Ingredient */
-            active_ingredient: string;
-            /** Company Status */
-            company_status: string | null;
-            /** Dosage Form */
-            dosage_form: string | null;
-            /** Id */
-            id: number | null;
-            /** Normalized Name */
-            normalized_name: string;
-            /** Rld Application Number */
-            rld_application_number: string | null;
-            /** Rld Name */
-            rld_name: string | null;
-            /** Route */
-            route: string | null;
-            /** Source */
-            source: string;
-            /** Source Url */
-            source_url: string | null;
-            /** Stripped Name */
-            stripped_name: string;
-        };
-        /** ProductsResponse */
-        ProductsResponse: {
-            /** Count */
-            count: number;
-            /** Products */
-            products: components["schemas"]["ProductRecord"][];
-        };
-        /**
-         * PublicSettings
-         * @description Non-secret config only. The model doubles as an allowlist: a future
-         *     handler edit cannot leak a new Settings field onto the wire without also
-         *     declaring it here (undeclared fields are stripped).
-         */
-        PublicSettings: {
-            /** Company Name */
-            company_name: string;
-            /** Embedding Provider */
-            embedding_provider: string;
-            /** Llm Model */
-            llm_model: string;
-            /** Llm Provider */
-            llm_provider: string;
-            /** Refusal Score Threshold */
-            refusal_score_threshold: number;
-            /** Retrieval Top K */
-            retrieval_top_k: number | null;
         };
         /** QueryCitation */
         QueryCitation: {
@@ -1194,41 +997,6 @@ export interface operations {
             };
         };
     };
-    feedback_feedback_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["FeedbackRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FeedbackResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     health_health_get: {
         parameters: {
             query?: never;
@@ -1265,105 +1033,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
-                };
-            };
-        };
-    };
-    list_products_products_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProductsResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    create_product_products_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ProductCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProductCreateResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    delete_product_products__product_id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                product_id: number;
-            };
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProductDeleteResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -1480,37 +1149,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WhitepaperSpine"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_public_settings_settings_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: {
-                regwatch_session?: string | null;
-            };
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PublicSettings"];
                 };
             };
             /** @description Validation Error */
