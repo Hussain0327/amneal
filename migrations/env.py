@@ -24,9 +24,10 @@ def _database_url() -> str:
     """Resolve the migration target URL.
 
     Precedence: an explicitly configured sqlalchemy.url (set by store/db.py or
-    a caller-supplied Config) > DATABASE_URL from settings (Postgres) > the
-    SQLite file. Postgres never replays the SQLite-era migration history —
-    store/db.py only ever stamps it — but `alembic stamp` still runs this env.
+    a caller-supplied Config) > DATABASE_URL from settings. Postgres-only since
+    R5: with neither set, refuse loudly -- the same fail-loud posture as
+    store/db.py, so a bare `alembic upgrade head` (the Fly release_command)
+    with a missing DATABASE_URL secret reads as config rot, not a stack trace.
     """
     configured = config.get_main_option("sqlalchemy.url")
     if configured:
@@ -34,7 +35,10 @@ def _database_url() -> str:
     s = get_settings()
     if s.database_url:
         return s.database_url
-    return f"sqlite:///{s.sqlite_path.as_posix()}"
+    raise RuntimeError(
+        "DATABASE_URL is empty -- Postgres is the only datastore since R5. "
+        "Set DATABASE_URL (or sqlalchemy.url) before running alembic."
+    )
 
 
 def run_migrations_offline() -> None:

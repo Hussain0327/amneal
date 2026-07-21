@@ -4,8 +4,8 @@ This document records the Docker work added to REGWATCH and how to use it.
 
 The goal is not Kubernetes or full production deployment yet. The goal is a
 reliable local/container baseline that can run the Python API, Next.js UI,
-ingest jobs, and Dagster orchestration without changing the core application
-code.
+and ingest jobs without changing the core application code. (Dagster
+orchestration was removed in R5; GitHub Actions cron is the sole scheduler.)
 
 ## What Was Added
 
@@ -14,36 +14,29 @@ code.
 | `Dockerfile` | Builds the shared Python application image. |
 | `regwatch/frontend/Dockerfile` | Builds the local Next.js UI image. |
 | `.dockerignore` | Keeps secrets, local data, docs, caches, and local tooling out of the image context. |
-| `compose.yaml` | Defines the API, UI, one-shot ingest, and Dagster services. |
+| `compose.yaml` | Defines the API, UI, one-shot ingest, and pgvector `db` services. |
 | `docker/entrypoint.sh` | Creates container data directories and runs `regwatch init-db` before app start. |
-| `docker/dagster/` | Dagster instance and workspace configuration for Compose. |
 | `.github/workflows/ci.yml` | Adds a Docker image build check in CI. |
-| `pyproject.toml` / `uv.lock` | Moves heavy local embedding dependencies behind the `local-embeddings` extra and Dagster behind the `orchestration` extra. |
+| `pyproject.toml` / `uv.lock` | Moves heavy local embedding dependencies behind the `local-embeddings` extra. |
 | `src/regwatch/api/main.py` | Avoids running DB initialization twice when the entrypoint already ran it. |
 | `src/regwatch/process/embedder.py` | Gives a clear error if local embeddings are requested without installing the extra. |
 
 ## Container Shape
 
-One Python image is reused for app and orchestration jobs:
+One Python image is reused for app and ingest jobs:
 
 1. API service
 2. Ingest service
-3. Dagster code server, webserver, and daemon
 
 The API is a long-running service. Ingest is intentionally a separate one-shot
-command so a large 30-minute data load does not block API startup. Dagster
-wraps two CLIs as asset jobs: a manual `seed_corpus_job` (`regwatch seed`) and a
-`watch_digest_job` (`regwatch watch`) on a daily `watch_daily_schedule`
-(`0 6 * * *` UTC). This is local orchestration only; production Watch is driven
-by `.github/workflows/watch-daily.yml`, not by the Compose Dagster daemon.
+command so a large 30-minute data load does not block API startup. Production
+Watch is driven by `.github/workflows/watch-daily.yml`; there is no local
+orchestration daemon (Dagster was removed in R5).
 
 ```text
 docker image: regwatch:local
   -> api                -> regwatch serve   (dual-stack uvicorn; see docs/GO_PROXY_ROLLOUT.md)
   -> ingest             -> regwatch seed
-  -> dagster-code       -> dagster code-server
-  -> dagster-webserver  -> dagster UI
-  -> dagster-daemon     -> Dagster run/schedule daemon
 
 docker image: regwatch-web:local
   -> web                -> npm run dev
@@ -66,7 +59,7 @@ docker compose up api
 Run the full local stack:
 
 ```bash
-docker compose up --build api web dagster-postgres dagster-code dagster-webserver dagster-daemon
+docker compose up --build api web
 ```
 
 Local endpoints:
@@ -74,7 +67,6 @@ Local endpoints:
 ```text
 UI:      http://localhost:3000
 API:     http://localhost:8000
-Dagster: http://localhost:3001
 ```
 
 Run the current one-shot seed ingest:
@@ -89,66 +81,50 @@ Validate Compose syntax:
 docker compose config --quiet
 ```
 
-Run the seed corpus from Dagster:
-
-1. Open `http://localhost:3001`.
-2. Select `seed_corpus_job`.
-3. Launch materialization/run manually.
-
 ## Data Persistence
 
 Compose mounts the host `./data` directory into the container at `/app/data`.
 
 That means these survive container restarts:
 
-- SQLite database
-- Chroma vector store
 - raw PDF files
 - processed output files
-- Dagster compute logs and local artifact storage
 
-Dagster's run, event, and schedule metadata uses the `dagster-postgres` service
-and the named `dagster-postgres` Docker volume. REGWATCH application data stays
-in `./data`.
-
-This SQLite + Chroma layout under `./data` is the local/container default.
-Compose also wires a `DATABASE_URL` build/runtime variable (empty by default):
-set it to a Postgres URL and the structured store **and** the vectors (pgvector)
-move into that one Postgres database, leaving `./data` for raw/processed files
-and logs. That Postgres/pgvector pairing is the production datastore path — see
-`docs/DEPLOY.md`. (Managed Postgres/pgvector is not yet provisioned; see
-`docs/ROADMAP.md`.)
+The structured store and the vectors both live in Postgres, not under `./data`
+(the `db` Compose service, a pgvector-image Postgres, backed by the named
+`db-data` Docker volume). Postgres + pgvector is the only datastore since R5 —
+there is no SQLite/Chroma fallback. `DATABASE_URL` is mandatory; Compose
+defaults it to the `db` service (`postgresql://postgres:postgres@db:5432/postgres`)
+but you can point it at a Supabase session-pooler URL instead — see
+`docs/DEPLOY.md`.
 
 Container defaults:
 
 ```text
 DATA_DIR=/app/data
-CHROMA_DIR=/app/data/chroma
-SQLITE_PATH=/app/data/regwatch.db
 RAW_PDF_DIR=/app/data/raw
 PROCESSED_DIR=/app/data/processed
-DATABASE_URL=                        # empty -> SQLite + Chroma; set -> Postgres + pgvector
-DAGSTER_HOME=/app/data/dagster/home
+DATABASE_URL=postgresql://postgres:postgres@db:5432/postgres   # Compose default; Postgres + pgvector, mandatory
 ```
 
 ## Embedding Modes
 
-Compose defaults to the real local model:
+Compose defaults to `EMBEDDING_PROVIDER=openai` (`INSTALL_LOCAL_EMBEDDINGS=true`
+is still the build-arg default, so the image can also run local embeddings if
+you override the env var). Since R5 the Compose `db` service is a
+`vector(1536)` pgvector Postgres, and OpenAI's `text-embedding-3-small` is the
+only bundled provider whose dimension matches — `local-bge-small` (384-dim) is
+rejected at boot by the dimension assert (`assert_embedding_provider_dim` in
+`store/pgvector_store.py`). `local-bge-small` remains available for
+offline/eval tooling, not as the app datastore's embedding provider.
 
 ```text
 INSTALL_LOCAL_EMBEDDINGS=true        # compose build-arg default
-EMBEDDING_PROVIDER=local-bge-small   # compose environment default
+EMBEDDING_PROVIDER=openai            # compose environment default; plus OPENAI_API_KEY
 ```
 
-so an out-of-the-box `docker compose up --build` ships sentence-transformers
-and produces real embeddings. (The bare Docker *image* — built without compose
-— keeps an in-image `EMBEDDING_PROVIDER=echo` default: good for empty-corpus
-smoke boots only, because echo produces low-quality deterministic test
-vectors. The API refuses to boot `local-bge-small` on an image built without
-sentence-transformers.)
-
 For a slim no-torch stack — the production pairing, see `docs/DEPLOY.md` —
-set both in `.env`:
+set:
 
 ```text
 INSTALL_LOCAL_EMBEDDINGS=false
@@ -170,7 +146,7 @@ docker compose --profile ingest run --rm ingest
 Do not load the full 2,000+ PSG corpus with `EMBEDDING_PROVIDER=echo`.
 
 This is now enforced at startup: when an `echo` embedding/LLM provider faces a
-**non-empty** Chroma corpus, the API refuses to boot with a `RuntimeError`
+**non-empty** pgvector corpus, the API refuses to boot with a `RuntimeError`
 explaining the fix (switch to a real provider, or set
 `REGWATCH_ALLOW_TEST_PROVIDERS=1` for tests/CI). A fresh stack with an empty
 corpus still boots on `echo`, so the ingest service can seed it — but the next
@@ -189,8 +165,8 @@ The fix was:
 1. Keep the application embedding provider pluggable.
 2. Move `sentence-transformers`, `torch`, and `transformers` into the
    `local-embeddings` optional extra.
-3. Keep the slim Docker baseline build on `--extra llm --extra orchestration`
-   only (no torch); add `--extra local-embeddings` only for the heavier image.
+3. Keep the slim Docker baseline build on `--extra llm` only (no torch); add
+   `--extra local-embeddings` only for the heavier image.
 4. Use the PyTorch CPU index for Linux when the local embedding extra is
    installed.
 
@@ -228,13 +204,13 @@ GET http://127.0.0.1:8000/health
 `{"status":"ok"}`, so the Compose healthcheck is unchanged:
 
 ```json
-{"status":"ok","components":{"db":{"ok":true},"chroma":{"ok":true,"corpus_count":123},
- "llm":{"provider":"openai","key_present":true},"embedding":{"provider":"local-bge-small"}},
+{"status":"ok","components":{"db":{"ok":true},"vector_store":{"ok":true,"corpus_count":123},
+ "llm":{"provider":"openai","key_present":true},"embedding":{"provider":"openai"}},
  "warnings":[]}
 ```
 
-It returns HTTP 503 with `"status":"unhealthy"` only when the DB or Chroma is
-actually unreachable. An empty corpus is healthy (with a warning) so a fresh
+It returns HTTP 503 with `"status":"unhealthy"` only when the DB or the vector
+store is actually unreachable. An empty corpus is healthy (with a warning) so a fresh
 stack can boot and the ingest service can seed it. Key presence is reported as
 a boolean only — never a value.
 
@@ -272,7 +248,7 @@ The local container shape is:
 api container      -> FastAPI / Python evidence service
 web container      -> Next.js / TypeScript UI (proxies /api -> api)
 ingest container   -> scheduled or one-shot FDA data loads
-dagster containers -> orchestration UI, code location, daemon, metadata DB
+db container       -> Postgres + pgvector (structured store + vectors)
 ```
 
 ## Large Ingest Notes
@@ -291,7 +267,7 @@ Needed next:
 - retry/backoff per FDA source
 - explicit prevention of broad ingest with test embeddings
 - eventually a scheduled job or orchestrated worker instead of manual
-  `docker compose run` or manual Dagster launches
+  `docker compose run` launches
 
 ## Not Done Yet For Production
 

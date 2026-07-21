@@ -12,13 +12,11 @@ Given a `PsgListing`, the pipeline:
      extraction. Idempotent on re-run.
 
 All vector and DB writes commit before we touch the next PSG so a partial run
-leaves the DB consistent. In Postgres mode a revision lands ATOMICALLY: the
-version row, the doc's content fields, the version's pgvector chunk rows, and
-its be_requirement row (when extraction succeeded) commit in one transaction,
-so a crash mid-ingest can never leave a version without its chunks. In
-SQLite/Chroma dev mode that is impossible (Chroma is not a SQL store), so the
-dev path keeps the historical order -- commit version+doc, then index chunks --
-and relies on the unchanged-path backfill to heal a torn write.
+leaves the DB consistent. A revision lands ATOMICALLY: the version row, the
+doc's content fields, the version's pgvector chunk rows, and its
+be_requirement row (when extraction succeeded) commit in one transaction, so
+a crash mid-ingest can never leave a version without its chunks (the sole
+path since R5 -- the non-transactional SQLite/Chroma dev mode is gone).
 """
 
 from __future__ import annotations
@@ -39,7 +37,7 @@ from regwatch.process.change_detector import summarize_change
 from regwatch.process.chunker import Chunk, chunk_pdf
 from regwatch.process.embedder import get_embedding_provider
 from regwatch.process.extractor import ExtractionResult, extract_be
-from regwatch.store.db import engine_dialect, init_db, session_scope
+from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
 from regwatch.store.vector_store import (
     add_chunks,
@@ -226,7 +224,7 @@ def _is_duplicate_version_race(exc: IntegrityError) -> bool:
     """True iff an IntegrityError is the psg_version unique index firing.
 
     Postgres names the index ('... violates unique constraint
-    "uq_psg_version_doc_hash"'); SQLite names the column pair ('UNIQUE
+    "uq_psg_version_doc_hash"'); other backends may name the column pair ('UNIQUE
     constraint failed: psg_version.psg_document_id, ...') -- the 'UNIQUE
     constraint failed:' prefix is part of the needle so a (hypothetical) NOT
     NULL violation on the same column cannot be mistaken for the race. Any
@@ -259,8 +257,8 @@ def _commit_version_and_doc(
     may run while the transaction is open -- the 2026-06-18 idle-in-transaction
     incident class), and the chunk upsert runs on this session's connection.
     Either everything for the revision lands or nothing does, so a crash can
-    never leave a version row without its chunks. Dev mode (SQLite+Chroma)
-    passes neither payload: Chroma cannot join a SQL transaction, so the caller
+    never leave a version row without its chunks. Passing neither payload is
+    the legacy non-atomic calling convention: the caller
     keeps the historical commit-then-index order there.
 
     Returns the new version id, or None when this exact revision already
@@ -575,21 +573,17 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
             current_page_count=len(parsed.pages),
         )
 
-        # Postgres: everything network-bound (chunking is local, but embedding
-        # and BE extraction are API calls) runs BEFORE the commit transaction,
-        # then version + doc fields + chunks + BE row land atomically. Dev mode
-        # (SQLite+Chroma) cannot join the vector store to a SQL transaction, so
-        # it keeps the historical commit-then-index order and the
-        # unchanged-path backfill below remains its crash recovery.
-        atomic = engine_dialect() == "postgresql"
-        chunk_payload: tuple[list[Chunk], list[list[float]]] | None = None
+        # Everything network-bound (chunking is local, but embedding and BE
+        # extraction are API calls) runs BEFORE the commit transaction, then
+        # version + doc fields + chunks + BE row land atomically -- the sole
+        # ingest path since R5 removed the non-transactional SQLite/Chroma
+        # dev mode.
+        chunks = chunk_pdf(parsed.pages, base_metadata=_chunk_metadata_base(doc_id, listing))
+        embeddings = get_embedding_provider().embed([c.text for c in chunks]) if chunks else []
+        chunk_payload = (chunks, embeddings)
         extraction: ExtractionResult | None = None
-        if atomic:
-            chunks = chunk_pdf(parsed.pages, base_metadata=_chunk_metadata_base(doc_id, listing))
-            embeddings = get_embedding_provider().embed([c.text for c in chunks]) if chunks else []
-            chunk_payload = (chunks, embeddings)
-            if extract:
-                extraction = _extract_be_for_commit(parsed.pages, listing.appl_no)
+        if extract:
+            extraction = _extract_be_for_commit(parsed.pages, listing.appl_no)
 
         version_id = _commit_version_and_doc(
             listing=listing,
@@ -607,14 +601,9 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
             # double-count one FDA change (INV-4).
             return "unchanged"
 
-        if atomic:
-            # Post-commit on purpose: cleanup failure must not roll back a
-            # revision that fully landed (see _cleanup_stale_chunks).
-            _cleanup_stale_chunks(doc_id, version_id)
-        else:
-            _regenerate_chunks(doc_id, version_id, parsed, listing)
-            if extract:
-                _extract_and_save_be(doc_id, version_id, parsed.pages, listing.appl_no)
+        # Post-commit on purpose: cleanup failure must not roll back a
+        # revision that fully landed (see _cleanup_stale_chunks).
+        _cleanup_stale_chunks(doc_id, version_id)
 
         # Classify by version history, not doc-row novelty: a doc row can
         # persist from an earlier run whose parse failed AFTER the row was

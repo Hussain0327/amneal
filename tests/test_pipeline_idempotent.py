@@ -21,7 +21,7 @@ from regwatch.ingest.pdf_parser import ParsedPdf
 from regwatch.ingest.psg_crawler import PsgListing
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
-from regwatch.store.vector_store import collection_size, get_collection
+from regwatch.store.vector_store import collection_size
 
 PAGES = [
     "I. Introduction\nThis Product-Specific Guidance describes the agency's "
@@ -420,16 +420,15 @@ def test_revised_ingest_removes_stale_chunks(monkeypatch: pytest.MonkeyPatch) ->
     latest_version_id = version_ids[-1]
     assert isinstance(latest_version_id, int)
 
-    indexed = get_collection().get(include=["documents", "metadatas"])
-    metadatas = indexed.get("metadatas") or []
-    documents = indexed.get("documents") or []
+    from regwatch.store.pgvector_store import Chunk
 
-    assert metadatas
-    indexed_version_ids: set[int] = set()
-    for meta in metadatas:
-        raw_version: object = (meta or {}).get("version_id") if isinstance(meta, dict) else None
-        if isinstance(raw_version, str | int | float):
-            indexed_version_ids.add(int(raw_version))
+    with session_scope() as s:
+        indexed = [
+            (r.version_id, r.text or "") for r in s.scalars(select(Chunk))
+        ]  # extract INSIDE the session: rows detach when session_scope closes
+    assert indexed
+    indexed_version_ids = {v for v, _ in indexed if v is not None}
+    documents = [text for _, text in indexed]
     assert indexed_version_ids == {latest_version_id}
     assert any("Current marker only present in version two" in doc for doc in documents)
     assert all("Obsolete marker only present in version one" not in doc for doc in documents)

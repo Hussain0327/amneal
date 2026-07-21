@@ -25,7 +25,7 @@ to be read top-to-bottom once, then used as a reference. Companion docs:
 6. [The grounded Q&A engine](#6-the-grounded-qa-engine)
 7. [Source layer (rules-first router + handlers)](#7-source-layer-rules-first-router--handlers)
 8. [Ingest & processing pipeline](#8-ingest--processing-pipeline)
-9. [Storage layer (dual-mode)](#9-storage-layer-dual-mode)
+9. [Storage layer (Postgres + pgvector)](#9-storage-layer-postgres--pgvector)
 10. [Data model](#10-data-model)
 11. [White Paper populator](#11-white-paper-populator)
 12. [Dossier assembler](#12-dossier-assembler)
@@ -63,10 +63,12 @@ it **guides with clickable options** instead of guessing.
 
 Three tiers, one browser-visible origin. This is the **target topology** the code
 and runbook ([`DEPLOY.md`](DEPLOY.md)) are built for. Production is **live** on
-managed Supabase Postgres/pgvector (schema at migration `0009`, self-migrated on
-each deploy by the Fly `release_command` — see §9); a gateway/TLS/SSO front-door
-is still open work (see `docs/ROADMAP.md`). Locally and in CI the stack still runs
-entirely on SQLite + Chroma (the dual-mode path of §9).
+managed Supabase Postgres/pgvector (schema self-migrated on each deploy by the
+Fly `release_command` — see §9); a gateway/TLS/SSO front-door is still open
+work (see `docs/ROADMAP.md`). Postgres + pgvector is the only datastore since
+R5 (the SQLite/Chroma dual-mode was deleted); locally and in CI the stack runs
+against a disposable Postgres (`TEST_DATABASE_URL` for tests), same schema as
+prod.
 
 ```
                          Browser (analyst)
@@ -116,12 +118,12 @@ Consequences of this choice:
 
 | Concern | Local / dev / CI | Production |
 |---|---|---|
-| Structured store | SQLite (`data/regwatch.db`) | Postgres (Supabase) |
-| Vector store | Chroma (`data/chroma`) | pgvector (same Postgres DB) |
-| Embeddings | local `bge-small` (384-dim) | OpenAI `text-embedding-3-small` (1536-dim) |
-| Selector | `DATABASE_URL` **empty** | `DATABASE_URL` **set** |
+| Structured store | Postgres (disposable local/CI instance) | Postgres (Supabase) |
+| Vector store | pgvector (same instance) | pgvector (same Postgres DB) |
+| Embeddings | `echo` test provider (1536-dim) or OpenAI | OpenAI `text-embedding-3-small` (1536-dim) |
+| `DATABASE_URL` | required — `TEST_DATABASE_URL` for tests | required |
 
-The entire stack swap is driven by one variable — see §9.
+Postgres + pgvector is the only datastore since R5 — see §9.
 
 ---
 
@@ -187,8 +189,8 @@ package is one stage with a clean boundary:
  sources/   →   ingest/   →   process/   →   store/   →   retrieve/   →   generate/
  (FDA APIs:     (crawl PSG    (chunk,        (Postgres   (embed query,    (grounded LLM
   7 handlers)    listings,     embed,         + pgvector   vector top-k,    synthesis +
-                 parse PDFs)   extract BE)    OR SQLite    rerank, scope    citation
-                                             + Chroma)     to product)      validation)
+                 parse PDFs)   extract BE)    only)        rerank, scope    citation
+                                                            to product)      validation)
 
  watch/      change detection + digests/alerts over the same store
  assemble/   higher-order composer: cited dossier (built on retrieve + generate)
@@ -196,7 +198,6 @@ package is one stage with a clean boundary:
  auth/       cookie sessions, bcrypt passwords, require_user dependency
  common/     audit, citations, conversation memory, ratelimit, observability, logging
  eval/       offline gold-set metrics (the regression gate)
- orchestration/  Dagster definitions (configured but DORMANT)
  api/        the FastAPI surface — the one boundary IT will wrap or replace
  cli.py      operator commands (seed, ingest-all, create-user, watch, …)
 ```
@@ -351,8 +352,8 @@ open-field ANN. This is also why per-drug queries don't need HNSW (§9).
 querying the vector store it computes the set of **current** `psg_version` ids for
 the filtered documents (via `_current_version_ids_for_filters`) and constrains the
 search to them, so a superseded chunk can never be cited even if it's still in the
-index. (A pure vector-only mode — used by some unit tests that seed Chroma without
-a SQLite catalog — is detected and skipped.)
+index. (A pure vector-only mode — used by some unit tests that seed pgvector chunks
+without a matching structured-store catalog row — is detected and skipped.)
 
 ### Conversation memory
 
@@ -426,13 +427,13 @@ exceptions and returns whatever the other handlers produced.
 
 ## 8. Ingest & processing pipeline
 
-Offline/batch path that fills the stores (run via `regwatch` CLI commands and,
-optionally, Dagster).
+Offline/batch path that fills the stores (run via `regwatch` CLI commands;
+GitHub Actions cron is the sole scheduler — see §13).
 
 ```
 psg_crawler  →  pdf_parser  →  chunker  →  embedder  →  store.add_chunks
-(A–Z letter     (extract       (split     (bge-small    (Chroma or pgvector)
- routes →        text +         into        OR OpenAI       +
+(A–Z letter     (extract       (split     (OpenAI or     (pgvector)
+ routes →        text +         into        bge-small       +
  ~1,795 PSGs)    pages)         passages)   1536-dim)   psg_document/version rows
 
 change_detector → content_hash compare → new PsgVersion on change → re-embed,
@@ -456,41 +457,33 @@ Key properties:
 
 ---
 
-## 9. Storage layer (dual-mode)
+## 9. Storage layer (Postgres + pgvector)
 
-The cleverest abstraction in the codebase. **One environment variable swaps the
-entire persistence stack**, and no caller changes.
+**(R5 removed the SQLite/Chroma dual-mode described in earlier revisions of
+this section — see git history for the pre-R5 two-backend design.)** Postgres
++ pgvector is now the only datastore, everywhere: `DATABASE_URL` is mandatory
+and the app refuses to boot without it, so there is no toggle and no fallback
+path left to document.
 
-```
-                         DATABASE_URL
-                        ┌──────┴───────┐
-                  empty │              │ set
-                        ▼              ▼
-        SQLite (structured) +    Postgres (structured) +
-        Chroma (vectors)         pgvector (vectors, SAME DB)
-```
+- `store/vector_store.py` is a thin wrapper over `store/pgvector_store.py`.
+  Every public function (`similarity_search`, `add_chunks`, `collection_size`,
+  `distinct_metadata_values`, `delete_chunks_for_doc_except_version`) talks to
+  pgvector directly. Callers — retriever, ingest, watch, resolver, API
+  health — never see a backend choice.
 
-- `store/vector_store.py` is a **facade**. Every public function
-  (`similarity_search`, `add_chunks`, `collection_size`,
-  `distinct_metadata_values`, `delete_chunks_for_doc_except_version`) dispatches
-  on `_pg_mode()` (a non-empty `DATABASE_URL`) to either Chroma or
-  `store/pgvector_store.py`. Callers — retriever, ingest, watch, resolver, API
-  health — never know which backend is live.
-
-- **Score-convention parity is the linchpin.** Both backends return
-  `Hit.score` as cosine similarity in `[0, 1]`, computed as
-  `score = 1 - cosine_distance / 2` (1.0 identical, 0.5 orthogonal, 0.0 opposite).
-  Because the score means the same thing on both backends, the **refusal
-  threshold (0.30) is calibrated once** and behaves identically in dev and prod.
-  This is the #1 migration risk and is why the SQLite→Supabase cutover must be
-  rehearsed against a snapshot before going live (that restore drill is open work
-  — see `docs/ROADMAP.md`).
+- **Score convention.** `Hit.score` is cosine similarity in `[0, 1]`, computed
+  as `score = 1 - cosine_distance / 2` (1.0 identical, 0.5 orthogonal, 0.0
+  opposite). The refusal threshold (0.30) is calibrated against this one
+  convention.
 
 - **Embedding provider is paired to the vector dimension.** Production uses
   OpenAI `text-embedding-3-small` (1536-dim) — chosen over local `bge-small`
   (384-dim) specifically so the API image sheds torch and fits a cheap host. The
   pgvector chunk column is `vector(1536)`; startup **fails fast** on a
-  provider/table dimension mismatch.
+  provider/table dimension mismatch (the `K6` dim assert in
+  `assert_embedding_provider_dim`), which is why `local-bge-small` (384-dim)
+  is rejected against the app datastore and stays available only for
+  offline/eval tooling.
 
 - **pgvector index strategy:** per-drug queries (the common path) use a B-tree
   filter on `normalized_name` + exact distance — which beats HNSW for filtered
@@ -500,19 +493,20 @@ entire persistence stack**, and no caller changes.
 - **RLS:** deny-all on every public table. The FDA corpus is org-shared by
   design, so per-user RLS only ever applies to chat tables as defense-in-depth.
 
-- **JSON columns** become `JSONB` on Postgres and plain `JSON` on SQLite via a
-  single `_json_column()` helper (`with_variant`), so the same Python types work
-  on both dialects.
+- **JSON columns** are `JSONB` on Postgres (single dialect since R5; the prior
+  `_json_column()` SQLite/Postgres variant helper is gone).
 
-- **Schema bootstrap (two paths):** a *fresh, empty* Postgres database is created
-  via `create_all` + `alembic stamp head` (no history replay — migrations 0001–0006
-  contain SQLite-specific batch ops; `store/db.py::_init_postgres`). An *existing*
-  Supabase database is migrated *incrementally*: `fly.toml`'s
-  `[deploy] release_command = "alembic upgrade head"` runs pending migrations on a
-  one-off machine before the app machines roll, so a 0009 image never boots against
-  a 0008 DB (the 2026-06-18 incident). The live DB is at `0009`. SQLite/dev uses the
-  normal alembic upgrade path. Constraints and composite indexes are declared in
-  SQLModel `__table_args__` so `create_all`, alembic autogenerate, and the
+- **Schema bootstrap (two paths):** a *fresh, empty* Postgres database is
+  created via `create_all` + `alembic stamp head` (no history replay —
+  `store/db.py::_init_postgres`). An *existing* Supabase database is migrated
+  *incrementally*: `fly.toml`'s `[deploy] release_command = "alembic upgrade
+  head"` runs pending migrations on a one-off machine before the app machines
+  roll, so a newer image never boots against an older-schema DB (the
+  2026-06-18 incident). Tests run the identical alembic path against
+  `TEST_DATABASE_URL` (a disposable local Postgres), so dev/CI and prod share
+  one migration history — there is no separate SQLite migration branch
+  anymore. Constraints and composite indexes are declared in SQLModel
+  `__table_args__` so `create_all`, alembic autogenerate, and the
   hand-written migrations all agree.
 
 ---
@@ -615,11 +609,11 @@ history sidebar. Output is markdown + structured sections + a refusal flag.
   `watch/` UI). The digest run history doubles as INV-4 evidence ("nothing was
   fabricated; here's the run log").
 
-Scheduling: `orchestration/definitions.py` defines Dagster assets, but Dagster is
-currently **dormant** — the scheduler can live anywhere once data is in Supabase
-(cron on the deploy host running `regwatch watch`, a GitHub Actions scheduled
-workflow against the remote DB, or Dagster if the job count grows). That choice
-is tied to the deploy path and is deliberately deferred.
+Scheduling: GitHub Actions cron (`.github/workflows/watch-daily.yml`) is the
+sole scheduler, running `regwatch watch` against the live Supabase Postgres
+each day. The Dagster orchestration package (`src/regwatch/orchestration/`)
+was deleted in R5 along with the SQLite/Chroma-era local orchestration
+stack — there is no local scheduler daemon anymore.
 
 ---
 
@@ -739,8 +733,8 @@ for the annotated surface. The load-bearing knobs:
 
 | Variable | Effect |
 |---|---|
-| `DATABASE_URL` | **The dual-mode switch** — empty = SQLite+Chroma; set = Postgres+pgvector |
-| `EMBEDDING_PROVIDER` | `local-bge-small` (384-dim) \| `openai` (1536-dim, required in PG mode) \| `echo` |
+| `DATABASE_URL` | **Mandatory** — Postgres + pgvector connection string; the app refuses to boot without it (no fallback since R5) |
+| `EMBEDDING_PROVIDER` | `openai` (1536-dim, matches the `vector(1536)` chunk column) \| `local-bge-small` (384-dim, offline/eval tooling only — rejected by the K6 dim assert against the app datastore) \| `echo` (1536-dim, test-only) |
 | `LLM_PROVIDER` + `ROUTER_MODEL` / `SYNTHESIZER_MODEL` / `EXTRACTOR_MODEL` | Role-specific models (cheap classifier, capable synthesizer/extractor) |
 | `VECTOR_TOP_K` (50) / `RERANK_TOP_K` (8) / `RERANKER_ENABLED` (false) | Two-stage retrieval sizing |
 | `REFUSAL_SCORE_THRESHOLD` (0.30) | The refuse-over-guess line (INV-2) |
@@ -760,9 +754,10 @@ provider face a real corpus (tests/CI only).
 2. **Deterministic before probabilistic.** Entity resolution, source routing,
    and clarify logic are rules-based and unit-testable; the LLM only synthesizes
    from pre-vetted, product-scoped passages.
-3. **One toggle, two worlds.** `DATABASE_URL` swaps SQLite+Chroma ↔
-   Postgres+pgvector with score-convention parity, so dev/test never touch the
-   cloud and prod behaves identically.
+3. **One datastore, one score convention.** Postgres + pgvector is the only
+   backend (since R5); dev/CI run it against a disposable local/CI instance
+   (never the cloud), and prod behaves identically because it's the same code
+   path.
 4. **One auth chokepoint, one audit spine, one contract boundary.** Security
    (`require_user` router), traceability (`query_log`), and the IT handoff
    (`api/main.py`) each have exactly one place to reason about.

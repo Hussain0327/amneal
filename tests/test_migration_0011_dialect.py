@@ -18,8 +18,6 @@ from types import ModuleType
 from typing import Any
 from unittest import mock
 
-import pytest
-
 
 def _load_migration() -> ModuleType:
     path = (
@@ -106,17 +104,16 @@ def test_rls_event_trigger_sql_is_idempotent_shape() -> None:
 
 TEST_DATABASE_URL = (os.environ.get("TEST_DATABASE_URL") or "").strip()
 
-requires_pg = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="TEST_DATABASE_URL not set (postgres integration test is opt-in)",
-)
 
-
-@requires_pg
 def test_event_trigger_auto_enables_rls_on_new_table() -> None:
     import sqlalchemy as sa
 
-    engine = sa.create_engine(TEST_DATABASE_URL)
+    # Bare postgresql:// URLs default SQLAlchemy to the absent psycopg2
+    # driver; force psycopg v3 the same way config.settings normalizes.
+    url = TEST_DATABASE_URL
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg://" + url.removeprefix("postgresql://")
+    engine = sa.create_engine(url)
     try:
         with engine.begin() as conn:
             conn.execute(sa.text("DROP SCHEMA public CASCADE"))

@@ -1,8 +1,6 @@
-"""pgvector-backed chunk store — the Postgres-mode twin of the Chroma store.
+"""pgvector-backed chunk store — the only vector backend since R5.
 
-Active iff ``DATABASE_URL`` is set (K1 vector-backend rule): vectors live in
-pgvector when the app runs against Postgres/Supabase, and in Chroma otherwise.
-`store/vector_store.py` owns the public interface and dispatches here; callers
+`store/vector_store.py` owns the public interface and delegates here; callers
 never import this module directly.
 
 Schema (K4): one ``chunk`` table whose btree-indexed metadata columns mirror
@@ -28,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from config.settings import get_settings
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Column, Connection, Engine, create_engine
+from sqlalchemy import Column, Connection, Engine
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlmodel import Field, SQLModel
@@ -98,7 +96,6 @@ class Chunk(SQLModel, table=True):
 
 
 _engine: Engine | None = None
-_owns_engine = False
 _schema_ready = False
 _metadata_values_cache: dict[str, tuple[float, frozenset[str]]] = {}
 
@@ -137,54 +134,18 @@ ON CONFLICT (id) DO UPDATE SET
 """
 
 
-def _normalize_url(url: str) -> str:
-    """Force SQLAlchemy onto the psycopg v3 driver (K1)."""
-    if url.startswith("postgresql+psycopg://"):
-        return url
-    if url.startswith("postgresql://"):
-        return "postgresql+psycopg://" + url.removeprefix("postgresql://")
-    if url.startswith("postgres://"):
-        return "postgresql+psycopg://" + url.removeprefix("postgres://")
-    return url
-
-
 def get_engine() -> Engine:
-    """The engine for the pgvector store.
+    """The engine for the pgvector store: `store/db.py`'s shared pool.
 
-    Reuses `store/db.py`'s engine when it is already Postgres (one shared
-    pool); otherwise builds its own from DATABASE_URL with the K2 pool
-    parameters. The fallback keeps this module testable independent of the
-    db bootstrap integration order.
+    Since R5 the db engine is always Postgres (there is no other dialect), so
+    the old build-my-own-engine fallback is gone -- one pool, one set of K2
+    parameters, owned by db.py.
     """
-    global _engine, _owns_engine
+    global _engine
     if _engine is None:
-        from regwatch.store.vector_store import _database_url
-
-        url = _database_url()
-        if url is None:
-            raise RuntimeError("pgvector store requires DATABASE_URL (Postgres mode)")
         from regwatch.store import db as db_module
 
-        shared = db_module.get_engine()
-        if shared.dialect.name == "postgresql":
-            _engine = shared
-            _owns_engine = False
-        else:
-            # store-1/store-7: route the fallback through the SAME hardening as
-            # db.py's engine so it inherits sslmode=require (remote hosts) plus
-            # the per-connection GUC timeouts AND the connect_timeout handshake
-            # bound. _enforce_sslmode takes the psycopg-normalized URL and
-            # returns a SQLAlchemy URL (password preserved).
-            s = get_settings()
-            _engine = create_engine(
-                db_module._enforce_sslmode(_normalize_url(url)),
-                pool_pre_ping=True,
-                pool_size=5,
-                max_overflow=5,
-                pool_recycle=s.db_pool_recycle_s,
-                connect_args=db_module._pg_connect_args(s),
-            )
-            _owns_engine = True
+        _engine = db_module.get_engine()
     return _engine
 
 
@@ -303,12 +264,13 @@ def _ensure_ready() -> None:
 
 
 def reset_for_tests() -> None:
-    """Drop cached engine/schema state so tests can re-point DATABASE_URL."""
-    global _engine, _owns_engine, _schema_ready
-    if _engine is not None and _owns_engine:
-        _engine.dispose()
+    """Drop cached engine/schema state so tests can re-point DATABASE_URL.
+
+    The engine reference is db.py's shared pool -- db.reset_for_tests()
+    owns disposing it; here we only drop the reference and caches.
+    """
+    global _engine, _schema_ready
     _engine = None
-    _owns_engine = False
     _schema_ready = False
     _metadata_values_cache.clear()
 

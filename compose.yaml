@@ -1,20 +1,16 @@
-# INSTALL_LOCAL_EMBEDDINGS defaults to true here (NOT in the Dockerfile, where
-# the slim no-torch image stays the default) so the out-of-the-box compose
-# build ships sentence-transformers — matching the default
-# EMBEDDING_PROVIDER=local-bge-small below. For a slim compose stack set
-# INSTALL_LOCAL_EMBEDDINGS=false AND EMBEDDING_PROVIDER=openai together.
+# INSTALL_LOCAL_EMBEDDINGS still defaults to true here (NOT in the Dockerfile,
+# where the slim no-torch image stays the default) so offline/eval tooling that
+# wants sentence-transformers has it. The APP default is EMBEDDING_PROVIDER=
+# openai below -- since R5 the pgvector chunk table is 1536-dim and refuses
+# 384-dim local-bge-small at boot. Set INSTALL_LOCAL_EMBEDDINGS=false for a
+# slim build.
 x-regwatch-build: &regwatch-build
   context: .
   args:
     INSTALL_LOCAL_EMBEDDINGS: ${INSTALL_LOCAL_EMBEDDINGS:-true}
-    # true here (false in the Dockerfile/prod): the dagster-* services below run
-    # from this same image, so the compose build must carry the dagster closure.
-    INSTALL_ORCHESTRATION: ${INSTALL_ORCHESTRATION:-true}
 
 x-regwatch-environment: &regwatch-environment
   DATA_DIR: /app/data
-  CHROMA_DIR: /app/data/chroma
-  SQLITE_PATH: /app/data/regwatch.db
   RAW_PDF_DIR: /app/data/raw
   PROCESSED_DIR: /app/data/processed
   # CRA White Paper Word template. Lives under the mounted ./data volume, so
@@ -23,28 +19,32 @@ x-regwatch-environment: &regwatch-environment
   # structurally-equivalent document with a visible "(generated without the
   # official CRA template file)" marker. The template is gitignored (internal).
   WHITEPAPER_TEMPLATE_PATH: /app/data/templates/cra_white_paper_template.docx
-  # Empty -> SQLite + Chroma under /app/data (local default). Set to a Postgres
-  # URL (Supabase session pooler) to move the structured store AND vectors
-  # (pgvector) to Postgres — see docs/DEPLOY.md.
-  DATABASE_URL: ${DATABASE_URL:-}
-  # local-bge-small needs the heavier image — the compose build default
-  # (INSTALL_LOCAL_EMBEDDINGS=true, see x-regwatch-build above) provides it.
-  # For a slim stack set INSTALL_LOCAL_EMBEDDINGS=false and use
-  # EMBEDDING_PROVIDER=openai + OPENAI_API_KEY instead; the API refuses to
-  # boot local-bge-small on an image without sentence-transformers. The old
-  # `echo` default bricked a seeded stack: the API fails fast when a test
-  # provider faces a non-empty corpus.
-  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local-bge-small}
-
-x-dagster-environment: &dagster-environment
-  DAGSTER_CONFIG_DIR: /app/dagster_config
-  DAGSTER_HOME: /app/data/dagster/home
-  DAGSTER_POSTGRES_USER: ${DAGSTER_POSTGRES_USER:-dagster}
-  DAGSTER_POSTGRES_PASSWORD: ${DAGSTER_POSTGRES_PASSWORD:-dagster}
-  DAGSTER_POSTGRES_DB: ${DAGSTER_POSTGRES_DB:-dagster}
-  DAGSTER_POSTGRES_HOST: dagster-postgres
+  # Postgres-only since R5: defaults to the compose `db` service (pgvector
+  # image, same as CI). Point at a Supabase session-pooler URL to run against
+  # a hosted database instead — see docs/DEPLOY.md.
+  DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/postgres}
+  # Postgres-only means the chunk table is vector(1536), so the provider must
+  # be 1536-dim: openai (set OPENAI_API_KEY in .env). local-bge-small is
+  # 384-dim and the K6 dim assert refuses it at boot -- it remains available
+  # only for offline/eval tooling, not the app datastore.
+  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
 
 services:
+  db:
+    # Same image family as CI's service container: Postgres 17 + pgvector.
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   api:
     build: *regwatch-build
     image: ${REGWATCH_IMAGE:-regwatch:local}
@@ -61,6 +61,9 @@ services:
     # exercises the real dual-stack listener instead of a uvicorn command prod
     # no longer runs (docs/GO_PROXY_ROLLOUT.md phase 2).
     command: ["regwatch", "serve"]
+    depends_on:
+      db:
+        condition: service_healthy
     healthcheck:
       test:
         [
@@ -103,104 +106,13 @@ services:
     volumes:
       - ./data:/app/data
     command: ["regwatch", "seed"]
-
-  dagster-postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: ${DAGSTER_POSTGRES_USER:-dagster}
-      POSTGRES_PASSWORD: ${DAGSTER_POSTGRES_PASSWORD:-dagster}
-      POSTGRES_DB: ${DAGSTER_POSTGRES_DB:-dagster}
-    volumes:
-      - dagster-postgres:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
-      interval: 10s
-      timeout: 8s
-      retries: 5
-
-  dagster-code:
-    image: ${REGWATCH_IMAGE:-regwatch:local}
-    build: *regwatch-build
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      <<: [*regwatch-environment, *dagster-environment]
-      REGWATCH_INIT_DB: "false"
-    volumes:
-      - ./data:/app/data
-    expose:
-      - "4000"
-    command:
-      [
-        "dagster",
-        "code-server",
-        "start",
-        "-h",
-        "0.0.0.0",
-        "-p",
-        "4000",
-        "-m",
-        "regwatch.orchestration.definitions",
-      ]
-    healthcheck:
-      test: ["CMD", "dagster", "api", "grpc-health-check", "-p", "4000"]
-      interval: 10s
-      timeout: 8s
-      retries: 20
-      start_period: 20s
+    # init-db (the entrypoint) hard-requires Postgres since R5, and
+    # `docker compose run` only auto-starts declared dependencies -- without
+    # this a standalone ingest run on a fresh checkout has no db to reach.
     depends_on:
-      dagster-postgres:
-        condition: service_healthy
-
-  dagster-webserver:
-    image: ${REGWATCH_IMAGE:-regwatch:local}
-    build: *regwatch-build
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      <<: [*regwatch-environment, *dagster-environment]
-      REGWATCH_INIT_DB: "false"
-    volumes:
-      - ./data:/app/data
-    ports:
-      - "3001:3000"
-    command:
-      [
-        "dagster-webserver",
-        "-h",
-        "0.0.0.0",
-        "-p",
-        "3000",
-        "-w",
-        "/app/data/dagster/home/workspace.yaml",
-      ]
-    depends_on:
-      dagster-postgres:
-        condition: service_healthy
-      dagster-code:
-        condition: service_healthy
-
-  dagster-daemon:
-    image: ${REGWATCH_IMAGE:-regwatch:local}
-    build: *regwatch-build
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      <<: [*regwatch-environment, *dagster-environment]
-      REGWATCH_INIT_DB: "false"
-    volumes:
-      - ./data:/app/data
-    command: ["dagster-daemon", "run", "-w", "/app/data/dagster/home/workspace.yaml"]
-    restart: on-failure
-    depends_on:
-      dagster-postgres:
-        condition: service_healthy
-      dagster-code:
+      db:
         condition: service_healthy
 
 volumes:
-  dagster-postgres:
+  db-data:
   web-node-modules:

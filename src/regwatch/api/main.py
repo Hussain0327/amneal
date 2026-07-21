@@ -248,7 +248,7 @@ def _db_component() -> dict[str, Any]:
         return {"ok": False, "error": "unreachable"}
 
 
-def _chroma_component() -> dict[str, Any]:
+def _vector_store_component() -> dict[str, Any]:
     try:
         return {"ok": True, "corpus_count": collection_size()}
     except Exception as exc:
@@ -293,7 +293,7 @@ class HealthEmbeddingComponent(BaseModel):
 
 class HealthComponents(BaseModel):
     db: HealthDbComponent
-    chroma: HealthVectorComponent
+    vector_store: HealthVectorComponent
     llm: HealthLlmComponent
     embedding: HealthEmbeddingComponent
 
@@ -308,16 +308,16 @@ class HealthResponse(BaseModel):
 
 @app.get("/health", response_model=HealthResponse, response_model_exclude_none=True)
 def health(response: Response) -> dict[str, Any]:
-    """Diagnose the stack: db, chroma, providers. Superset of {"status": "ok"}.
+    """Diagnose the stack: db, pgvector, providers. Superset of {"status": "ok"}.
 
-    503 only when the DB or Chroma is unreachable. An empty corpus is healthy
-    (with a warning) so a fresh stack can boot and the ingest service can seed.
+    503 only when the DB or the vector store is unreachable. An empty corpus is
+    healthy (with a warning) so a fresh stack can boot and the ingest can seed.
     """
     s = get_settings()
     db = _db_component()
-    chroma = _chroma_component()
+    vector_store = _vector_store_component()
     warnings: list[str] = []
-    if chroma["ok"] and chroma["corpus_count"] == 0:
+    if vector_store["ok"] and vector_store["corpus_count"] == 0:
         warnings.append("corpus is empty — run `regwatch seed` (or the compose ingest profile)")
     if s.embedding_provider == "echo" or s.llm_provider == "echo":
         warnings.append("test-grade 'echo' provider in use — retrieval quality is degraded")
@@ -325,7 +325,9 @@ def health(response: Response) -> dict[str, Any]:
         "status": "ok",
         "components": {
             "db": db,
-            "chroma": chroma,
+            # Renamed from "chroma" with R5: pgvector is the only backend. An
+            # ops probe reading the old key must update (see DEPLOY.md).
+            "vector_store": vector_store,
             "llm": {"provider": s.llm_provider, "key_present": _llm_key_present(s)},
             "embedding": {"provider": s.embedding_provider},
         },
@@ -339,7 +341,7 @@ def health(response: Response) -> dict[str, Any]:
     }
     if s.allow_test_providers:
         body["allow_test_providers"] = True
-    if not (db["ok"] and chroma["ok"]):
+    if not (db["ok"] and vector_store["ok"]):
         body["status"] = "unhealthy"
         response.status_code = 503
     return body
@@ -390,9 +392,9 @@ def ready(response: Response) -> dict[str, Any]:
     failed check so an operator sees what to fix.
     """
     db = _db_component()
-    chroma = _chroma_component()
+    vector_store = _vector_store_component()
     llm_ok, llm_reason = _llm_ready(get_settings())
-    checks = {"db": db["ok"], "vector_store": chroma["ok"], "llm": llm_ok}
+    checks = {"db": db["ok"], "vector_store": vector_store["ok"], "llm": llm_ok}
     if all(checks.values()):
         return {"status": "ready", "checks": checks}
     failed = next(name for name, ok in checks.items() if not ok)

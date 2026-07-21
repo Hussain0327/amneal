@@ -13,9 +13,6 @@ kill_timeout = 30
 [build]
   [build.args]
     INSTALL_LOCAL_EMBEDDINGS = "false"
-    # Prod never runs Dagster (uvicorn-only app group; the GitHub Actions cron
-    # is the sole scheduler), so keep its closure out of the shipped image.
-    INSTALL_ORCHESTRATION = "false"
 
 # Run pending Alembic migrations in a one-off machine BEFORE the rolling deploy
 # of the app machines. This moves the live schema to the build's head so the
@@ -69,9 +66,10 @@ kill_timeout = 30
   # edge in prod), which would merge all callers into one IP bucket and gut
   # the spray guard. tests/test_trust_proxy_fly_toml.py guards this line.
   TRUST_PROXY_HEADERS = "true"
-  # B1: refuse to boot on the SQLite fallback. DATABASE_URL is a Fly secret
-  # (`fly secrets set DATABASE_URL=...`); if it is missing the app must fail
-  # loudly, not silently run on ephemeral disk and lose the audit trail.
+  # Consumed by the GO PROXY (go/cmd/proxy reads it via api.EnvBool): with it
+  # set, a proxy machine refuses to serve auth when DATABASE_URL is missing.
+  # The Python side no longer reads it -- since R5 there is no SQLite fallback
+  # and store/db.py refuses an empty DATABASE_URL unconditionally.
   REQUIRE_DATABASE_URL = "true"
   # B4: SENTRY_DSN is a Fly secret (`fly secrets set SENTRY_DSN=...`). Without
   # it the app boots but logs a loud warning -- errors would otherwise vanish.

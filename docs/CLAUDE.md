@@ -2,13 +2,15 @@
 
 This file mirrors Section 15 of the project spec. **Read this before touching anything else.**
 
-> **Implementation status (2026-06-16):** REGWATCH is built and shipped on `main`,
-> not a greenfield build. The hard rules below are still in force, but the
-> phase-by-phase "How to build" plan is historical — Phases 0–5 are done
-> (ingest/extract, cited Q&A, Watch, Assemble, eval), plus auth, the White Paper
-> populator, the dual-mode SQLite/Postgres+pgvector datastore path, and a Next.js
-> App Router frontend (Streamlit is fully retired). For current state and open
-> work see `README.md`, `docs/ARCHITECTURE.md`, `docs/DEPLOY.md`,
+> **Implementation status (2026-06-16, storage note updated for R5):** REGWATCH
+> is built and shipped on `main`, not a greenfield build. The hard rules below
+> are still in force, but the phase-by-phase "How to build" plan is historical
+> — Phases 0–5 are done (ingest/extract, cited Q&A, Watch, Assemble, eval),
+> plus auth, the White Paper populator, and a Next.js App Router frontend
+> (Streamlit is fully retired). The datastore path was originally dual-mode
+> SQLite/Postgres+pgvector; R5 deleted the SQLite/Chroma side, so Postgres +
+> pgvector is now the only datastore. For current state and open work see
+> `README.md`, `docs/ARCHITECTURE.md`, `docs/DEPLOY.md`,
 > `docs/PROD_READINESS.md`, and `docs/ROADMAP.md`.
 
 ## Hard rules
@@ -38,11 +40,11 @@ This file mirrors Section 15 of the project spec. **Read this before touching an
 
 ## Defaults you can take without asking
 
-- Embedding provider: local `BAAI/bge-small-en-v1.5` via `sentence-transformers`.
+- Embedding provider: pluggable, default `openai` (`text-embedding-3-small`, 1536-dim, matching the pgvector chunk column). Local `BAAI/bge-small-en-v1.5` via `sentence-transformers` remains available for offline/eval tooling only (384-dim; rejected against the app datastore by the dimension assert).
 - LLM provider: pluggable, default `openai` with model from `LLM_MODEL` (an `anthropic` provider also ships). The `echo` provider is for tests.
 - Refusal threshold: configurable via `REFUSAL_SCORE_THRESHOLD` (tuned on the gold set).
-- Vector store: ChromaDB persistent client at `data/chroma`.
-- Structured store: SQLite at `data/regwatch.db`.
+- Vector store: pgvector, in the same Postgres database as the structured store. No other vector backend since R5.
+- Structured store: Postgres via `DATABASE_URL` (Supabase in prod; a disposable local/CI Postgres otherwise). `DATABASE_URL` is mandatory — the app refuses to boot without it.
 
 ## When to ask the user
 

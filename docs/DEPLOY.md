@@ -16,10 +16,10 @@ embeddings: OpenAI text-embedding-3-small (1536) · LLM: OpenAI (existing config
 auth: custom cookie sessions (unchanged) — Supabase Auth is NOT used
 ```
 
-Mode rule (no separate toggle): `DATABASE_URL` empty → SQLite + Chroma exactly
-as today. `DATABASE_URL` set → Postgres + pgvector, and `EMBEDDING_PROVIDER`
-must be `openai` (the `chunk` table is `vector(1536)`; the API fails fast on a
-dimension mismatch).
+Postgres + pgvector is the only datastore (R5 deleted the SQLite/Chroma
+dual-mode): `DATABASE_URL` is mandatory and the app refuses to boot without
+it. `EMBEDDING_PROVIDER` must be `openai` (the `chunk` table is
+`vector(1536)`; the API fails fast on a dimension mismatch).
 
 Prerequisites on your machine: `uv`, `docker`, `flyctl` (or `railway`),
 `vercel` CLI (optional — the dashboard works too), repo checked out, and the
@@ -64,75 +64,16 @@ Supabase's auto-exposed Data API roles (`anon`/`authenticated`) — the REST
 surface sees nothing. Our API connects as the `postgres` role, which bypasses
 RLS. Do not add policies and do not disable RLS from the dashboard.
 
-## 2. Migrate the data (SQLite + Chroma → Postgres + pgvector)
+## 2. Migrate the data (historical, SQLite + Chroma → Postgres + pgvector)
 
-Run from the repo on the machine that has the production `data/` directory.
-
-1. **Quiesce writers, then snapshot** the live corpus (the script must NEVER
-   point at live paths). Stop the API, any `regwatch watch`/ingest run, and
-   the Dagster services first — a plain file copy of an open SQLite database
-   (`data/regwatch.db`, and Chroma's internal `chroma.sqlite3`) taken
-   mid-write can be torn or silently miss the latest rows, and step 4's
-   verification table compares the TARGET against this SNAPSHOT, never
-   against live `data/` — a stale or torn snapshot would pass it.
-
-   ```bash
-   # with the API / watcher / Dagster stopped:
-   mkdir -p /tmp/regwatch-snapshot
-   sqlite3 data/regwatch.db ".backup /tmp/regwatch-snapshot/regwatch.db"
-   cp -R data/chroma /tmp/regwatch-snapshot/chroma
-   ```
-
-   `sqlite3 .backup` produces a transactionally consistent copy (a plain `cp`
-   of the db + journal can capture them at different instants). Copy
-   `data/chroma` only while nothing has the Chroma client open — Chroma has
-   no equivalent online-backup hook.
-
-2. Make sure deps are synced and the OpenAI key is available (re-embedding
-   every chunk costs real money but text-embedding-3-small is cheap —
-   ~$0.02 per 1M tokens; the full PSG corpus is a few dollars at most):
-
-   ```bash
-   uv sync --extra llm
-   export OPENAI_API_KEY=sk-...
-   ```
-
-3. Rehearse the relational copy first (no embedding spend):
-
-   ```bash
-   uv run python scripts/migrate_to_supabase.py \
-     --sqlite /tmp/regwatch-snapshot/regwatch.db \
-     --chroma /tmp/regwatch-snapshot/chroma \
-     --database-url "$SUPABASE_DB_URL" \
-     --skip-embed
-   ```
-
-   Expect: per-table `copied N rows` lines, a verification table where every
-   row says `OK`, and exit code 0.
-
-4. Real run (wipes the rehearsal rows, then copies + re-embeds everything):
-
-   ```bash
-   uv run python scripts/migrate_to_supabase.py \
-     --sqlite /tmp/regwatch-snapshot/regwatch.db \
-     --chroma /tmp/regwatch-snapshot/chroma \
-     --database-url "$SUPABASE_DB_URL" \
-     --truncate
-   ```
-
-   The chunk step prints `chunks: N/total re-embedded + inserted` as it goes.
-   The run is only a success if the final verification table is all `OK`
-   (including `chunk (chroma -> pgvector)`) and it prints
-   `migration complete — all counts verified`. ANY mismatch exits nonzero —
-   rerun with `--truncate`; never ship a partial copy.
-
-5. Spot-check in Supabase: **Table Editor** → `psg_document`, `chunk`,
-   `user` — row counts must match the verification table.
-
-Idempotency rules: the script refuses a non-empty target without
-`--truncate`; `--truncate` makes reruns safe. Sequences are reset
-(`setval(max(id)+1)`) after the copy, so new inserts can't collide with
-copied ids.
+This step no longer applies: R5 deleted the SQLite/Chroma dual-mode, so there
+is no local datastore left to cut over from — Postgres + pgvector is the only
+datastore from a fresh checkout onward. `scripts/migrate_to_supabase.py` (the
+one-time SQLite/Chroma-to-Supabase copier) and its `scripts/restore_drill.sh`
+wrapper were deleted in the same change. For the original cutover procedure
+and its verification steps, see git history (the pre-R5 revision of this
+file). A PG-native `pg_dump`/restore drill is the noted open follow-up (see
+§6.4).
 
 ## 3. API on Fly.io (primary)
 
@@ -188,10 +129,10 @@ combination.
      OPENFDA_API_KEY="..."        # optional
    ```
 
-   `DATABASE_URL` is mandatory in production: `fly.toml` sets
-   `REQUIRE_DATABASE_URL = "true"`, so if this secret is missing the app
-   **refuses to boot** rather than silently running on an ephemeral SQLite
-   disk and losing the audit trail (B1). `SENTRY_DSN` is strongly recommended:
+   `DATABASE_URL` is mandatory everywhere since R5 (no `REQUIRE_DATABASE_URL`
+   flag exists anymore — Postgres + pgvector is the only datastore), so if
+   this secret is missing the app **refuses to boot** rather than losing the
+   audit trail (B1). `SENTRY_DSN` is strongly recommended:
    without it the app still boots but logs a loud `sentry_disabled_in_production`
    warning, and 500s go only to stderr (B4).
 
@@ -255,8 +196,8 @@ Notes:
 - **`data/` inside the container is scratch** in Postgres mode (raw PDFs from
   ingest runs land there). Q&A/whitepaper serving needs only Postgres; don't
   attach a volume unless you run ingest/watch on this machine.
-- **Watch/Dagster:** Dagster is still local/Compose only for this deploy. The
-  production Watch path is the `watch-daily.yml` GitHub Actions cron; configure
+- **Watch:** the production Watch path is the `watch-daily.yml` GitHub Actions
+  cron (the sole scheduler; Dagster was removed in R5). Configure
   `WATCH_DATABASE_URL`, `WATCH_OPENAI_API_KEY`, and optional
   `WATCH_HEALTHCHECK_URL` / `SLACK_WEBHOOK_URL` per `docs/SECRETS_RUNBOOK.md`.
   Keep ad hoc `regwatch watch` runs for break-glass recovery, not as the normal
@@ -389,17 +330,12 @@ covers the failure.
    rows, and any other writes since that backup are lost. Verify with the §5
    smoke checklist before calling it done.
 
-3. **App-level fallback (Postgres unusable — last resort).** Unset
-   `DATABASE_URL` (and set `EMBEDDING_PROVIDER` to match the local store) and
-   the stack runs SQLite + Chroma from the pre-cutover `data/` snapshot
-   exactly as before the migration. **Honest caveat — this is continuity,
-   not rollback:** everything written to Postgres after the cutover (users,
-   sessions, `query_log` audit rows, newly ingested PSGs) does NOT exist in
-   the SQLite copy, and everything written during the fallback will not be
-   in Postgres. The two stores diverge from the moment of cutover. Returning
-   to Postgres later means a fresh SQLite/Chroma snapshot and a re-run of
-   `scripts/migrate_to_supabase.py --truncate` (idempotent under
-   `--truncate`; refuses a non-empty target otherwise).
+3. ~~**App-level fallback (Postgres unusable).**~~ **(removed in R5)** —
+   unsetting `DATABASE_URL` to fall back to a local SQLite/Chroma copy was
+   possible before R5 deleted that dual-mode; the app now refuses to boot
+   without `DATABASE_URL`, so there is no local fallback lever. If Postgres
+   is unusable, lever 2 (restore from a Supabase backup) is the only option
+   short of standing up a new Postgres instance.
 
 ### 6.2 Uptime
 
@@ -409,11 +345,11 @@ Point an external monitor at the one open endpoint:
 - **Expected:** HTTP `200` with compact JSON shaped like
 
   ```json
-  {"status":"ok","components":{"db":{"ok":true},"chroma":{"ok":true,"corpus_count":1795},"llm":{"provider":"openai","key_present":true},"embedding":{"provider":"openai"}},"warnings":[]}
+  {"status":"ok","components":{"db":{"ok":true},"vector_store":{"ok":true,"corpus_count":1795},"llm":{"provider":"openai","key_present":true},"embedding":{"provider":"openai"}},"warnings":[]}
   ```
 
-  (the `chroma` key reports the *active* vector store — pgvector when
-  `DATABASE_URL` is set). When the DB or vector store is unreachable the API
+  (the `vector_store` key reports pgvector, the only vector store since R5).
+  When the DB or vector store is unreachable the API
   returns **503** with `"status":"unhealthy"`, so a plain HTTP-status monitor
   already catches real outages.
 - **UptimeRobot** (free tier): HTTP(s) monitor on the URL, 5-minute interval;
@@ -441,8 +377,9 @@ inactive repos.
 score is below it. That `0.30` was calibrated in the **bge-384** cosine era.
 Production now embeds with **OpenAI text-embedding-3-small (1536)** — a different
 vector space with a different cosine-similarity distribution — so `0.30` is
-**PROVISIONAL** until it is revalidated in the prod space. CI cannot do this: CI
-runs bge-384 + Chroma, not OpenAI-1536 + pgvector.
+**PROVISIONAL** until it is revalidated in the prod space. CI cannot do this:
+CI runs pgvector against a disposable local Postgres (`TEST_DATABASE_URL`)
+with the 1536-dim `echo` test provider, not real OpenAI embeddings.
 
 **Where it runs:** the daily `watch-daily` job (§ the watch cron) now emits an
 **advisory, non-gating** revalidation. After the crawl, it re-runs the gold set
@@ -494,35 +431,25 @@ they differ by project ref.
 
 **Monthly drill:**
 
-1. Get a restorable copy into staging. Either:
-   - **Backup path (preferred — exercises the real recovery lever):**
-     Supabase prod → **Database → Backups** → download the latest daily
-     backup and restore it into `regwatch-staging` (dashboard restore, or
-     `psql "<staging-url>" < backup.sql` run by the operator).
-   - **Snapshot path:** re-run the migration from the SQLite/Chroma snapshot
-     through the wrapper:
+1. Get a restorable copy into staging via the Backup path (the only
+   recovery lever now — the SQLite/Chroma snapshot path and its
+   `scripts/restore_drill.sh` wrapper were deleted in R5 along with the
+   dual-mode datastore; see git history for the old snapshot-based drill):
+   Supabase prod → **Database → Backups** → download the latest daily
+   backup and restore it into `regwatch-staging` (dashboard restore, or
+   `psql "<staging-url>" < backup.sql` run by the operator).
 
-     ```bash
-     DATABASE_URL='postgresql://postgres.<STAGING-ref>:<pw>@aws-0-<region>.pooler.supabase.com:5432/postgres' \
-       ./scripts/restore_drill.sh /tmp/regwatch-snapshot
-     ```
+   A staging DB still stamped at an older revision (e.g. by last month's
+   drill, run before a schema-advancing release) needs advancing before the
+   restore is usable:
 
-     The wrapper runs `scripts/migrate_to_supabase.py --truncate` against the
-     target and prints the migrate script's per-table verification table.
-     This step passes only when every row is `OK` and the exit code is 0.
-     `DRILL_SKIP_EMBED=1` rehearses the relational copy with no OpenAI
-     embedding spend (`chunk` stays empty — fine for a schema/data drill,
-     not for smoke step 7).
+   ```bash
+   DATABASE_URL='<staging-url>' uv run alembic upgrade head
+   ```
 
-     A staging DB still stamped at an older revision (e.g. by last month's
-     drill, run before a schema-advancing release) makes this step refuse
-     with `stamped at alembic revision … but this build expects …` —
-     `--truncate` clears rows, not schema, so it cannot self-heal. Advance
-     staging first, then re-run the drill:
-
-     ```bash
-     DATABASE_URL='<staging-url>' uv run alembic upgrade head
-     ```
+   **Open follow-up:** a PG-native `pg_dump`/`pg_restore` drill script
+   (replacing the deleted `restore_drill.sh`) is not yet built; until then
+   this step is a manual dashboard restore.
 2. Point a local API at staging and smoke it:
    `DATABASE_URL='<staging-url>' EMBEDDING_PROVIDER=openai uv run uvicorn
    regwatch.api.main:app --port 8099`, then run the §5 checklist against
@@ -531,16 +458,11 @@ they differ by project ref.
 3. Record date + result (a line in the team log is enough). Anything that
    fails here failed on staging — fix it now, not mid-incident.
 
-**Hard guard:** `scripts/restore_drill.sh` refuses to run — before any
-network call or subprocess, reserved exit code 4 — when the target URL
-contains the production project ref `xvhbfmoynibkcghazzxc`. The ref appears
-in the pooler username (`postgres.<ref>@…pooler.supabase.com`) and in the
-direct-connection host (`db.<ref>.supabase.co`), so it is matched anywhere
-in the URL, case-insensitively and after percent-decoding (an encoded ref
-cannot slip past). Bare non-loopback IP hosts are refused too — they carry
-no ref for the guard to vet (loopback stays allowed, so a local docker
-Postgres still works as a rehearsal target). Residual limit: the guard is
-textual; a production target reached through a hostname alias containing
-neither the ref nor an IP is out of its scope. The drill can truncate
-staging; it can never truncate production. Covered by
-`tests/test_restore_drill.py`.
+**(removed in R5):** `scripts/restore_drill.sh` used to guard against pointing
+the snapshot-restore path at the production project ref
+(`xvhbfmoynibkcghazzxc`) before any network call, refusing to run against it
+or against a bare non-loopback IP host. That script and its dedicated test
+(`tests/test_restore_drill.py`) were deleted along with the SQLite/Chroma
+migration tooling; the same "never target prod by accident" discipline still
+applies operator-side to the manual dashboard restore above. See git history
+for the guard's original implementation if a scripted equivalent is rebuilt.

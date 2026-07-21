@@ -30,10 +30,10 @@ export interface paths {
         };
         /**
          * Health
-         * @description Diagnose the stack: db, chroma, providers. Superset of {"status": "ok"}.
+         * @description Diagnose the stack: db, pgvector, providers. Superset of {"status": "ok"}.
          *
-         *     503 only when the DB or Chroma is unreachable. An empty corpus is healthy
-         *     (with a warning) so a fresh stack can boot and the ingest service can seed.
+         *     503 only when the DB or the vector store is unreachable. An empty corpus is
+         *     healthy (with a warning) so a fresh stack can boot and the ingest can seed.
          */
         get: operations["health_health_get"];
         put?: never;
@@ -456,10 +456,10 @@ export interface components {
         };
         /** HealthComponents */
         HealthComponents: {
-            chroma: components["schemas"]["HealthVectorComponent"];
             db: components["schemas"]["HealthDbComponent"];
             embedding: components["schemas"]["HealthEmbeddingComponent"];
             llm: components["schemas"]["HealthLlmComponent"];
+            vector_store: components["schemas"]["HealthVectorComponent"];
         };
         /** HealthDbComponent */
         HealthDbComponent: {

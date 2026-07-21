@@ -215,10 +215,6 @@ def pg_alerts_db(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     db_module.reset_for_tests()
 
 
-@pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="TEST_DATABASE_URL not set (postgres integration tests are opt-in)",
-)
 def test_persist_alerts_postgres_on_conflict_do_nothing(pg_alerts_db: None) -> None:
     """The pg_insert branch upserts by constraint name and stays idempotent."""
     from regwatch.watch.alerts import _persist_alerts

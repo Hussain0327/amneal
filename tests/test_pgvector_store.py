@@ -1,4 +1,4 @@
-"""pgvector chunk store — interface + score parity with the Chroma backend.
+"""pgvector chunk store — interface + score parity with the retired Chroma backend.
 
 These tests need a real Postgres with the pgvector extension available.
 Set TEST_DATABASE_URL (e.g. a `pgvector/pgvector:pg17` docker container) to
@@ -21,10 +21,6 @@ from sqlalchemy import text as sa_text
 
 TEST_DATABASE_URL = (os.environ.get("TEST_DATABASE_URL") or "").strip()
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="TEST_DATABASE_URL not set; Postgres-backed pgvector tests skipped",
-)
 
 DIM = 1536
 
@@ -80,7 +76,7 @@ def _pg_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     pgvector_store.reset_for_tests()
 
 
-def test_dispatch_round_trip_without_touching_chroma() -> None:
+def test_facade_round_trip() -> None:
     from regwatch.store import vector_store as vs
 
     texts = ["fasting bioequivalence", "single-dose crossover", "dissolution method 2"]
@@ -94,8 +90,6 @@ def test_dispatch_round_trip_without_touching_chroma() -> None:
     hits = vs.similarity_search(_unit(0), k=3)
     assert [h.chunk_id for h in hits] == ["a", "b", "c"]
     assert hits[0].text == "fasting bioequivalence"
-    # The Chroma client must never have been built — pg mode bypasses it.
-    assert vs._client is None
 
 
 def test_score_mapping_matches_chroma_convention() -> None:
@@ -244,13 +238,13 @@ def test_wrong_embedding_dim_rejected() -> None:
 
 
 def test_provider_dim_mismatch_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
-    """K6: postgres mode + a 384-dim provider must refuse to serve."""
+    """K6: a 384-dim provider (local-bge-small) must refuse to serve."""
     import config.settings as cs
 
     from regwatch.store import pgvector_store
     from regwatch.store import vector_store as vs
 
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "local-bge-small")
     cs.get_settings.cache_clear()
     pgvector_store.reset_for_tests()
     with pytest.raises(RuntimeError, match="vector\\(1536\\)"):

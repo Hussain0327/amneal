@@ -1,56 +1,24 @@
-"""Vector store facade: ChromaDB by default, pgvector in Postgres mode.
+"""Vector store facade over pgvector (the only backend since R5).
 
-Chunks live in a single collection. Each chunk's metadata carries enough to
-build a citation (`doc_id`, `version_id`, `page`, `source_url`) and enough to
-filter by drug (`normalized_name`, `dosage_form`, `route`).
+Chunks live in the ``chunk`` table (store/pgvector_store.py). Each chunk's
+metadata carries enough to build a citation (`doc_id`, `version_id`, `page`,
+`source_url`) and enough to filter by drug (`normalized_name`, `dosage_form`,
+`route`). ``Hit.score`` is cosine similarity in [0, 1], computed as
+``1 - cosine_distance / 2`` — the scale the refusal threshold is calibrated
+against.
 
-Backend rule (K1): when DATABASE_URL is set the app runs against
-Postgres/Supabase and vectors live in pgvector (`store/pgvector_store.py`);
-otherwise Chroma remains the SQLite-mode backend, exactly as before. Every
-public function here dispatches on that single switch, so callers
-(retriever, ingest pipeline, watch, API health, resolver) never change.
-Both backends return `Hit.score` on the same scale — cosine similarity in
-[0, 1], computed as `1 - cosine_distance / 2` — so the refusal threshold
-means the same thing everywhere.
+This module stays as the seam every caller imports (retriever, ingest
+pipeline, watch, API health, resolver) — the Chroma half of the old dual-mode
+dispatch is gone, but keeping the facade means callers never changed.
 """
 
 from __future__ import annotations
 
-import contextlib
-import os
-import sys
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import chromadb
-
-if TYPE_CHECKING:  # typing-only: keep Chroma mode free of a runtime SQLA import
+if TYPE_CHECKING:  # typing-only import to avoid a cycle with pgvector_store
     from sqlalchemy.engine import Connection
-from chromadb.api.models.Collection import Collection
-from chromadb.config import Settings as ChromaSettings
-from config.settings import get_settings
-
-COLLECTION = "regwatch_chunks"
-
-
-def _database_url() -> str | None:
-    """The K1 backend switch: a non-empty DATABASE_URL means Postgres mode.
-
-    Reads `settings.database_url` when the settings cluster has landed the
-    field, with a direct env fallback so the dispatch behaves per contract
-    regardless of integration order (pydantic maps the field to the same
-    DATABASE_URL env var, so the two sources agree once both exist).
-    """
-    raw: object = getattr(get_settings(), "database_url", None)
-    url = raw.strip() if isinstance(raw, str) else ""
-    if not url:
-        url = (os.environ.get("DATABASE_URL") or "").strip()
-    return url or None
-
-
-def _pg_mode() -> bool:
-    return _database_url() is not None
 
 
 @dataclass
@@ -61,50 +29,10 @@ class Hit:
     score: float  # cosine similarity in [0, 1] (we convert from distance)
 
 
-_client: chromadb.api.ClientAPI | None = None
-# key -> (cached_at_monotonic, values). The TTL bounds cross-process staleness
-# (a separate ingest process adding a drug); same-process writes still clear it.
-_metadata_values_cache: dict[str, tuple[float, frozenset[str]]] = {}
-
-
-def _metadata_cache_fresh(cached_at: float) -> bool:
-    ttl = get_settings().metadata_cache_ttl_s
-    return ttl <= 0 or (time.monotonic() - cached_at) < ttl
-
-
-def get_client() -> chromadb.api.ClientAPI:
-    global _client
-    if _client is None:
-        s = get_settings()
-        s.ensure_dirs()
-        _client = chromadb.PersistentClient(
-            path=s.chroma_dir.as_posix(),
-            settings=ChromaSettings(anonymized_telemetry=False, allow_reset=True),
-        )
-    return _client
-
-
-def get_collection() -> Collection:
-    client = get_client()
-    return client.get_or_create_collection(
-        name=COLLECTION,
-        metadata={"hnsw:space": "cosine"},
-    )
-
-
 def reset_for_tests() -> None:
-    global _client
-    if _client is not None:
-        with contextlib.suppress(Exception):
-            _client.reset()
-    _client = None
-    _metadata_values_cache.clear()
-    # Only reset the pgvector backend if something already imported it —
-    # importing it here eagerly would register its SQLModel table for every
-    # SQLite-mode test run.
-    pg = sys.modules.get("regwatch.store.pgvector_store")
-    if pg is not None:
-        pg.reset_for_tests()
+    from regwatch.store import pgvector_store
+
+    pgvector_store.reset_for_tests()
 
 
 def add_chunks(
@@ -115,64 +43,27 @@ def add_chunks(
     *,
     conn: Connection | None = None,
 ) -> None:
-    """Upsert chunks. ``conn`` (Postgres mode only) joins the caller's open
-    transaction so version row and chunks commit or roll back together (the
-    ingest pipeline's atomic revision commit); the caller owns commit/rollback.
+    """Upsert chunks. ``conn`` joins the caller's open transaction so version
+    row and chunks commit or roll back together (the ingest pipeline's atomic
+    revision commit); the caller owns commit/rollback.
     """
     if not ids:
         return
-    if _pg_mode():
-        from regwatch.store import pgvector_store
+    from regwatch.store import pgvector_store
 
-        pgvector_store.add_chunks(ids, embeddings, documents, metadatas, conn=conn)
-        return
-    if conn is not None:
-        # Unreachable when config is coherent (a caller holding a Postgres
-        # session implies DATABASE_URL, which selects the pgvector branch) --
-        # fail loud rather than silently break the atomicity the caller asked
-        # for: Chroma cannot join a SQL transaction.
-        raise ValueError("add_chunks(conn=...) requires Postgres mode; Chroma is not transactional")
-    coll = get_collection()
-    coll.upsert(
-        ids=ids,
-        embeddings=embeddings,  # type: ignore[arg-type]
-        documents=documents,
-        metadatas=metadatas,  # type: ignore[arg-type]
-    )
-    _metadata_values_cache.clear()
+    pgvector_store.add_chunks(ids, embeddings, documents, metadatas, conn=conn)
 
 
 def delete_chunks_for_doc_except_version(doc_id: int, keep_version_id: int) -> int:
     """Delete indexed chunks for one PSG document except the current version.
 
-    SQLite remains the version audit store. Chroma is only the current-answer
-    search index, so old chunks for the same PSG document should not remain
-    retrievable after a revision.
+    Old chunks for the same PSG document must not remain retrievable after a
+    revision — the chunk table is the current-answer search index; psg_version
+    stays the audit store.
     """
-    if _pg_mode():
-        from regwatch.store import pgvector_store
+    from regwatch.store import pgvector_store
 
-        return pgvector_store.delete_chunks_for_doc_except_version(doc_id, keep_version_id)
-    coll = get_collection()
-    res = coll.get(
-        where={"doc_id": {"$eq": doc_id}},  # type: ignore[arg-type, dict-item]
-        include=["metadatas"],  # type: ignore[list-item]
-    )
-    ids_to_delete: list[str] = []
-    for chunk_id, meta in zip(res.get("ids") or [], res.get("metadatas") or [], strict=False):
-        raw_version: object = (meta or {}).get("version_id") if isinstance(meta, dict) else None
-        try:
-            version_id = int(raw_version) if isinstance(raw_version, str | int | float) else 0
-        except (TypeError, ValueError):
-            version_id = 0
-        if version_id != keep_version_id:
-            ids_to_delete.append(chunk_id)
-
-    if not ids_to_delete:
-        return 0
-    coll.delete(ids=ids_to_delete)
-    _metadata_values_cache.clear()
-    return len(ids_to_delete)
+    return pgvector_store.delete_chunks_for_doc_except_version(doc_id, keep_version_id)
 
 
 def similarity_search(
@@ -181,79 +72,36 @@ def similarity_search(
     k: int = 8,
     where: dict[str, Any] | None = None,
 ) -> list[Hit]:
-    if _pg_mode():
-        from regwatch.store import pgvector_store
+    from regwatch.store import pgvector_store
 
-        return pgvector_store.similarity_search(query_embedding, k=k, where=where)
-    coll = get_collection()
-    res = coll.query(
-        query_embeddings=[query_embedding],  # type: ignore[arg-type]
-        n_results=k,
-        where=where,  # type: ignore[arg-type]
-        include=["documents", "metadatas", "distances"],  # type: ignore[list-item]
-    )
-    hits: list[Hit] = []
-    ids = (res.get("ids") or [[]])[0]
-    docs = (res.get("documents") or [[]])[0]
-    metas = (res.get("metadatas") or [[]])[0]
-    dists = (res.get("distances") or [[]])[0]
-    for i, chunk_id in enumerate(ids):
-        # Score convention (shared with store/pgvector_store.py): Chroma's
-        # cosine distance d = 1 - cos_sim ∈ [0, 2]; score = 1 - d/2 ∈ [0, 1]
-        # (1.0 identical, 0.5 orthogonal, 0.0 opposite). The refusal
-        # threshold is calibrated against this scale on both backends.
-        sim = 1.0 - float(dists[i]) / 2.0
-        sim = max(0.0, min(1.0, sim))  # clamp for float-precision overshoot
-        hits.append(Hit(chunk_id=chunk_id, text=docs[i], metadata=dict(metas[i] or {}), score=sim))
-    return hits
+    return pgvector_store.similarity_search(query_embedding, k=k, where=where)
 
 
 def collection_size() -> int:
-    if _pg_mode():
-        from regwatch.store import pgvector_store
+    from regwatch.store import pgvector_store
 
-        return pgvector_store.collection_size()
-    return int(get_collection().count())
+    return pgvector_store.collection_size()
 
 
 def chunks_exist(doc_id: int, version_id: int) -> bool:
     """True iff the search index holds at least one chunk for (doc_id, version_id).
 
     Used by the ingest pipeline to detect a version row that committed but whose
-    chunks never landed (a crash between the two non-atomic stores), so retrieval
-    is never silently blind to a drug whose hash already matches.
+    chunks never landed, so retrieval is never silently blind to a drug whose
+    hash already matches.
     """
-    if _pg_mode():
-        from regwatch.store import pgvector_store
+    from regwatch.store import pgvector_store
 
-        return pgvector_store.chunks_exist(doc_id, version_id)
-    where: dict[str, Any] = {
-        "$and": [{"doc_id": {"$eq": doc_id}}, {"version_id": {"$eq": version_id}}]
-    }
-    res = get_collection().get(where=where, limit=1)  # type: ignore[arg-type]
-    return bool(res.get("ids"))
+    return pgvector_store.chunks_exist(doc_id, version_id)
 
 
 def distinct_metadata_values(key: str) -> set[str]:
     """All distinct non-empty string values of one metadata `key` across chunks.
 
     Used by the product resolver to learn which drugs the corpus can answer
-    about. Cached because a full Chroma metadata scan is too expensive once the
-    PSG corpus grows beyond the POC seed set. `add_chunks` and test resets
-    invalidate this cache.
+    about (pgvector_store caches this with a TTL; `add_chunks` and test resets
+    invalidate it).
     """
-    if _pg_mode():
-        from regwatch.store import pgvector_store
+    from regwatch.store import pgvector_store
 
-        return pgvector_store.distinct_metadata_values(key)
-    cached = _metadata_values_cache.get(key)
-    if cached is not None and _metadata_cache_fresh(cached[0]):
-        return set(cached[1])
-    got = get_collection().get(include=["metadatas"])
-    out: set[str] = set()
-    for meta in got.get("metadatas") or []:
-        value = (meta or {}).get(key)
-        if isinstance(value, str) and value:
-            out.add(value)
-    _metadata_values_cache[key] = (time.monotonic(), frozenset(out))
-    return out
+    return pgvector_store.distinct_metadata_values(key)

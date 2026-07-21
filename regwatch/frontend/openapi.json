@@ -196,9 +196,6 @@
       },
       "HealthComponents": {
         "properties": {
-          "chroma": {
-            "$ref": "#/components/schemas/HealthVectorComponent"
-          },
           "db": {
             "$ref": "#/components/schemas/HealthDbComponent"
           },
@@ -207,11 +204,14 @@
           },
           "llm": {
             "$ref": "#/components/schemas/HealthLlmComponent"
+          },
+          "vector_store": {
+            "$ref": "#/components/schemas/HealthVectorComponent"
           }
         },
         "required": [
           "db",
-          "chroma",
+          "vector_store",
           "llm",
           "embedding"
         ],
@@ -1636,7 +1636,7 @@
     },
     "/health": {
       "get": {
-        "description": "Diagnose the stack: db, chroma, providers. Superset of {\"status\": \"ok\"}.\n\n503 only when the DB or Chroma is unreachable. An empty corpus is healthy\n(with a warning) so a fresh stack can boot and the ingest service can seed.",
+        "description": "Diagnose the stack: db, pgvector, providers. Superset of {\"status\": \"ok\"}.\n\n503 only when the DB or the vector store is unreachable. An empty corpus is\nhealthy (with a warning) so a fresh stack can boot and the ingest can seed.",
         "operationId": "health_health_get",
         "responses": {
           "200": {
