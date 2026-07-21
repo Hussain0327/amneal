@@ -215,8 +215,9 @@ running instance.
 ### One authorization chokepoint
 
 Since the step-4 cutover (docs/POLYGLOT_TARGET_2026-07-10.md) the Go proxy
-serves `/auth/*` and `/sessions*` natively at the public edge
-(`go/internal/api`) and MINTS the session cookie; the Python app VERIFIES it.
+serves `/auth/*`, `/sessions*`, `/feedback`, `/settings`, and `/products*`
+natively at the public edge (`go/internal/api`) and MINTS the session cookie;
+the Python app VERIFIES it.
 Python-side, the only open probes are `GET /health`, `/ready`, and
 `/metrics`. **Everything else** is registered on a single router with a
 router-level dependency:
@@ -239,17 +240,18 @@ visitors through the proxy.
 | POST | `/auth/logout` | open | Revoke server-side session + clear cookie (GO-served) |
 | GET | `/auth/me` | ✅ | Current user (GO-served) |
 | POST | `/query` | ✅ | Grounded Q&A (the conversational engine) |
-| POST | `/feedback` | ✅ | Thumbs up/down on one of the caller's own answers |
+| POST | `/feedback` | ✅ | Thumbs up/down on one of the caller's own answers (GO-served) |
 | POST | `/sources/search` | ✅ | Structured FDA source lookup |
 | POST | `/resolve` | ✅ | Deterministic entity resolution (RLD + appl no) → canonical spine; pins the scope bar without a populate |
 | POST | `/assemble` | ✅ | Build a cited dossier |
 | POST | `/whitepaper` | ✅ | Populate the CRA White Paper (RLD + appl no) |
 | POST | `/whitepaper/docx` | ✅ | Render a returned White Paper result as `.docx` |
 | GET | `/watch/latest` | ✅ | Recent alerts (optional `since` filter) |
-| GET / POST | `/products` | ✅ | List / add watchlist products |
+| GET / POST | `/products` | ✅ | List / add watchlist products (GO-served) |
+| DELETE | `/products/{id}` | ✅ | Soft-unwatch a product (row kept, INV-4) (GO-served) |
 | GET | `/sessions` | ✅ | The caller's chat sessions (GO-served) |
 | GET / DELETE | `/sessions/{id}` | ✅ | One session with messages / delete it (GO-served) |
-| GET | `/settings` | ✅ | Non-secret config |
+| GET | `/settings` | ✅ | Non-secret config (GO-served) |
 | GET | `/health` | open | Liveness + component diagnostics |
 
 ### `POST /resolve` is deliberately not an LLM turn

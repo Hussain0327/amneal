@@ -16,26 +16,15 @@ RUN apt-get update \
 # node:20-slim ships npm 10.8.2, whose *bundled* deps (tar, glob, minimatch,
 # cross-spawn under /usr/local/lib/node_modules/npm) carry fixable CRITICAL/HIGH
 # CVEs that trivy flags. Pin a known-good npm whose bundled set is patched:
-# 11.17.0 ships tar 7.5.16, glob 13, minimatch 10 and drops cross-spawn. This is
+# 11.18.0 ships tar 7.5.19 (CVE-2026-59873/-59874), brace-expansion 5.0.7
+# (CVE-2026-13149), undici 6.27.0 (CVE-2026-12151 — this pin previously had to
+# patch npm's bundled undici in place; 11.18.0 bundles the fixed one, so that
+# surgery is gone), glob 13, minimatch 10, and drops cross-spawn. npm 12 needs
+# Node >=22, so 11.18.0 is the newest pin this node:20 base can take. This is
 # npm's own toolchain, not the app — app deps are pinned by package-lock.json
 # below. Bump this pin when a future CVE forces it; don't float to @latest, which
 # would re-pull an unverified npm on every build (supply-chain surface).
-#
-# Same finding class, second source: npm@11.17.0 *itself* bundles undici 6.26.0
-# (at node_modules/npm/node_modules/undici) → fixable HIGH CVE-2026-12151
-# (WebSocket DoS). 11.17.0 is the latest stable npm (only 12.0.0-pre exists), so
-# there is no newer release to bump to. Patch npm's bundled undici in place to
-# 6.27.0 — the minimal fixed 6.x, a semver-compatible patch, used by npm only as a
-# build-time registry client (not in the running app). The `test` asserts the swap
-# took, so a future npm layout change fails the build loudly instead of silently
-# shipping the vulnerable copy. Drop this once a stable npm bundles undici>=6.27.0.
-RUN npm install -g npm@11.17.0 \
-    && _u="$(npm root -g)/npm/node_modules/undici" \
-    && npm pack undici@6.27.0 --pack-destination /tmp >/dev/null \
-    && rm -rf "$_u" && mkdir -p "$_u" \
-    && tar -xzf /tmp/undici-6.27.0.tgz -C "$_u" --strip-components=1 \
-    && rm -f /tmp/undici-6.27.0.tgz \
-    && test "$(node -p "require('$_u/package.json').version")" = "6.27.0"
+RUN npm install -g npm@11.18.0
 
 ENV NEXT_TELEMETRY_DISABLED=1
 

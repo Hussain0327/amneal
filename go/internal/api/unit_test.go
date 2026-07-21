@@ -7,6 +7,7 @@ package api
 
 import (
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -185,5 +186,60 @@ func TestConfigFromEnvGuardsAndDefaults(t *testing.T) {
 	t.Setenv("AUTH_SESSION_TTL_HOURS", "not-a-number")
 	if _, err := ConfigFromEnv(); err == nil {
 		t.Fatal("non-integer TTL is operator config rot and must fail loudly")
+	}
+}
+
+func TestConfigFromEnvPublicSettings(t *testing.T) {
+	for _, name := range []string{"AUTH_COOKIE_SECURE", "TRUST_PROXY_HEADERS", "AUTH_SESSION_TTL_HOURS",
+		"CORS_ALLOW_ORIGINS_CSV", "SENTRY_ENVIRONMENT", "EMBEDDING_PROVIDER", "LLM_PROVIDER",
+		"LLM_MODEL", "RETRIEVAL_TOP_K", "REFUSAL_SCORE_THRESHOLD", "COMPANY_NAME"} {
+		// t.Setenv registers restoration of the original value; the Unsetenv
+		// after it gives the UNSET state envOrDefault distinguishes from "".
+		t.Setenv(name, "")
+		_ = os.Unsetenv(name)
+	}
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("defaults: %v", err)
+	}
+	// The pydantic-default mirrors from config/settings.py.
+	if cfg.EmbeddingProvider != "local-bge-small" || cfg.LLMProvider != "openai" ||
+		cfg.LLMModel != "gpt-5.4-nano" || cfg.RetrievalTopK != nil ||
+		cfg.RefusalScoreThreshold != 0.30 || cfg.CompanyName != "Amneal" {
+		t.Fatalf("settings defaults: %+v", cfg)
+	}
+
+	// Prod override (fly.toml [env] is app-wide, so proxy machines see it).
+	t.Setenv("EMBEDDING_PROVIDER", "openai")
+	t.Setenv("RETRIEVAL_TOP_K", "8")
+	cfg, err = ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("overrides: %v", err)
+	}
+	if cfg.EmbeddingProvider != "openai" || cfg.RetrievalTopK == nil || *cfg.RetrievalTopK != 8 {
+		t.Fatalf("settings overrides: %+v", cfg)
+	}
+
+	// Fail-loud parsing, like the pydantic field validators.
+	t.Setenv("RETRIEVAL_TOP_K", "eight")
+	if _, err := ConfigFromEnv(); err == nil {
+		t.Fatal("non-integer RETRIEVAL_TOP_K must fail loudly")
+	}
+	t.Setenv("RETRIEVAL_TOP_K", "8")
+	t.Setenv("REFUSAL_SCORE_THRESHOLD", "1.5")
+	if _, err := ConfigFromEnv(); err == nil {
+		t.Fatal("out-of-range REFUSAL_SCORE_THRESHOLD must fail loudly")
+	}
+	// ParseFloat accepts "nan"; pydantic's 0<=v<=1 rejects it. A NaN slipping
+	// through would break GET /settings (json.Encoder cannot marshal NaN,
+	// failing after the 200 header on every request).
+	t.Setenv("REFUSAL_SCORE_THRESHOLD", "nan")
+	if _, err := ConfigFromEnv(); err == nil {
+		t.Fatal("NaN REFUSAL_SCORE_THRESHOLD must fail loudly")
+	}
+	t.Setenv("REFUSAL_SCORE_THRESHOLD", "0.45")
+	cfg, err = ConfigFromEnv()
+	if err != nil || cfg.RefusalScoreThreshold != 0.45 {
+		t.Fatalf("threshold override: %+v err=%v", cfg, err)
 	}
 }

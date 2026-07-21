@@ -9,6 +9,9 @@
 import type { components } from "./api-types";
 import type {
   ChatMessageOut,
+  ProductRecord as ProductRecordWire,
+  ProductsResponse as ProductsResponseWire,
+  PublicSettings as PublicSettingsWire,
   SessionDetailResponse,
   SessionSummary as SessionSummaryWire,
   UserOut,
@@ -138,10 +141,12 @@ export type WatchRunSummary = Schemas["WatchRunSummary"];
 // happened.
 export type WatchLatest = Schemas["WatchLatestResponse"];
 
-export type ProductRecord = Schemas["ProductRecord"];
-export type ProductsResponse = Schemas["ProductsResponse"];
+// The products/settings wire types live in ./auth-types since C2 (Go owns
+// their contract); exported names unchanged so consumers need no edits.
+export type ProductRecord = ProductRecordWire;
+export type ProductsResponse = ProductsResponseWire;
 
-export type PublicSettings = Schemas["PublicSettings"];
+export type PublicSettings = PublicSettingsWire;
 
 // The auth/session wire types live in ./auth-types since the step-4 Go
 // cutover (those routes left the FastAPI schema; Go owns their contract).

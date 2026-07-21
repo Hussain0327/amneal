@@ -41,14 +41,14 @@ def _anon() -> TestClient:
 
 # ---------- the 401 wall ----------
 
+# /products and /settings left this table with C2: those routes no longer
+# exist in the Python app (Go serves them), so their 401-wall coverage lives
+# in go/internal/api/contract_c_test.go (TestProductsRequireAuth etc.).
 _PROTECTED: list[tuple[str, str, dict[str, object] | None]] = [
     ("post", "/query", {"question": "what is required?"}),
     ("post", "/sources/search", {"query_text": "x", "sources": ["psg"]}),
     ("post", "/assemble", {"active_ingredient": "albuterol"}),
     ("get", "/watch/latest", None),
-    ("get", "/products", None),
-    ("post", "/products", {"active_ingredient": "Foo", "source": "manual"}),
-    ("get", "/settings", None),
 ]
 
 
@@ -72,7 +72,7 @@ def test_invalid_session_cookie_rejected() -> None:
     # lives in Go; this pins the Python VERIFY side over the wire.
     c = _anon()
     c.cookies.set(SESSION_COOKIE, "not-a-real-token")
-    r = c.get("/settings")
+    r = c.get("/watch/latest")
     assert r.status_code == 401
     assert r.json() == {"detail": "authentication required"}
 
@@ -93,10 +93,10 @@ def test_expired_session_cookie_rejected_and_purged() -> None:
         oldest.expires_at = datetime.now(UTC) - timedelta(hours=1)
         s.add(oldest)
 
-    assert expired.get("/settings").status_code == 401
+    assert expired.get("/watch/latest").status_code == 401
     with session_scope() as s:
         assert len(s.scalars(select(AuthSession)).all()) == 1  # only the live row
-    assert live.get("/settings").status_code == 200
+    assert live.get("/watch/latest").status_code == 200
 
     # And the mint-side sweep (create_session deletes ALL expired rows before
     # inserting -- the same sweep the Go login performs): expire the live row,
@@ -108,7 +108,7 @@ def test_expired_session_cookie_rejected_and_purged() -> None:
     fresh = session_client(uid)
     with session_scope() as s:
         assert len(s.scalars(select(AuthSession)).all()) == 1  # sweep ran
-    assert fresh.get("/settings").status_code == 200
+    assert fresh.get("/watch/latest").status_code == 200
 
 
 def test_health_stays_open() -> None:
@@ -323,7 +323,7 @@ def test_cli_create_user_and_list_users() -> None:
 def test_cli_deactivate_user_blocks_access() -> None:
     runner = CliRunner()
     client = session_client(create_user())
-    assert client.get("/settings").status_code == 200
+    assert client.get("/watch/latest").status_code == 200
     result = runner.invoke(cli_app, ["deactivate-user", DEFAULT_USER_EMAIL])
     assert result.exit_code == 0, result.output
     # The CLI deletes the user's session rows in the same transaction as the
@@ -331,7 +331,7 @@ def test_cli_deactivate_user_blocks_access() -> None:
     # the wire (the inactive-user branch is pinned separately below). Refusal
     # of NEW logins for a deactivated account is Go's
     # TestLoginFailuresShareOneMessage.
-    assert client.get("/settings").status_code == 401
+    assert client.get("/watch/latest").status_code == 401
 
 
 def test_deactivated_user_with_live_session_rejected() -> None:
@@ -342,10 +342,10 @@ def test_deactivated_user_with_live_session_rejected() -> None:
     # passes the whole suite (mutation-verified during the B2 review).
     uid = create_user()
     client = session_client(uid)
-    assert client.get("/settings").status_code == 200
+    assert client.get("/watch/latest").status_code == 200
     with session_scope() as s:
         row = s.get(User, uid)
         assert row is not None
         row.is_active = False
         s.add(row)
-    assert client.get("/settings").status_code == 401
+    assert client.get("/watch/latest").status_code == 401
