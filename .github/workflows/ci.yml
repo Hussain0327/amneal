@@ -74,7 +74,7 @@ jobs:
       # restores the latest compatible cache, and mypy re-checks changed files
       # regardless, so a stale cache cannot produce a wrong result.
       - name: cache mypy
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .mypy_cache
           key: mypy-${{ matrix.python-version }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-${{ github.run_id }}
@@ -199,7 +199,7 @@ jobs:
       # and restores the most recent one, so the cached DB is at most one run
       # stale; Trivy still refreshes it when its own metadata says it is past TTL.
       - name: cache trivy DB
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/trivy
           key: trivy-db-${{ github.run_id }}
