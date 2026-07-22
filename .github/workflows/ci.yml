@@ -63,10 +63,10 @@ jobs:
         run: uv sync --extra dev --extra llm --extra local-embeddings
 
       - name: ruff
-        run: uv run ruff check src tests migrations
+        run: uv run ruff check src tests migrations tests_contract
 
       - name: black --check
-        run: uv run black --check src tests migrations
+        run: uv run black --check src tests migrations tests_contract
 
       # Persist mypy's incremental cache between runs (cold mypy is ~60s, warm
       # ~15s). Keyed per Python version and per dependency/config hash so a real
@@ -83,7 +83,7 @@ jobs:
             mypy-${{ matrix.python-version }}-
 
       - name: mypy
-        run: uv run mypy src tests
+        run: uv run mypy src tests tests_contract
 
       - name: lint-imports
         run: uv run lint-imports
@@ -479,3 +479,60 @@ jobs:
             echo "::error::go/internal/store/schema.sql is stale: a migration changed a step-4 table. Regenerate with scripts/gen-store-schema.sh against a fresh init-db database, run 'sqlc generate', and commit both." >&2
             exit 1
           fi
+
+  # R1 cross-service contract lane (PR A of step 5, docs/POLYGLOT_TARGET_2026-07-10.md):
+  # real Go proxy binary + real uvicorn + real Postgres, driven through the Go
+  # edge. Pytest fixtures own both subprocesses; this job only provides the
+  # toolchains, the disposable DB, and the prebuilt proxy binary.
+  cross-service-contract:
+    runs-on: ubuntu-latest
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: install python
+        run: uv python install 3.12
+
+      - name: setup go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+
+      # Same build invocation shape as the shipped image (Dockerfile);
+      # -ldflags "-s -w" omitted so a CI core dump keeps symbols.
+      - name: build proxy binary
+        working-directory: go
+        run: go build -trimpath -o "$RUNNER_TEMP/regwatch-proxy" ./cmd/proxy
+
+      # --extra llm for prod-image parity: the app registers extra
+      # upstream-error handlers only when the LLM SDKs are importable, and the
+      # dead-provider scenarios exercise the real openai SDK.
+      - name: sync deps
+        run: uv sync --extra dev --extra llm
+
+      - name: contract tests (Go edge -> uvicorn -> Postgres)
+        env:
+          REGWATCH_PROXY_BIN: ${{ runner.temp }}/regwatch-proxy
+        run: uv run pytest tests_contract -q

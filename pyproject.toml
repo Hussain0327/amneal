@@ -166,6 +166,7 @@ follow_imports_for_stubs = true
 [[tool.mypy.overrides]]
 module = [
     "tests.*",
+    "tests_contract.*",
     "test_alerts",
     "test_api",
     "test_cross_drug_leak",
@@ -193,4 +194,5 @@ markers = [
     "integration: integration tests (may hit the network)",
     "slow: slow tests",
     "invariants: compliance invariants (INV-1..INV-6)",
+    "contract: cross-service contract tests (Go proxy + uvicorn + Postgres subprocesses)",
 ]
