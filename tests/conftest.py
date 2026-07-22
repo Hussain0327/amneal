@@ -52,12 +52,23 @@ def pytest_configure(config: pytest.Config) -> None:
             "(CI provides one via the pgvector service container; locally use "
             "Postgres.app / docker. The database's contents are DESTROYED.)"
         )
-    host = (make_url(_TEST_DB_URL).host or "").strip("[]").lower()
+    url = make_url(_TEST_DB_URL)
+    host = (url.host or "").strip("[]").lower()
     if host not in _LOCAL_HOSTS:
         raise pytest.UsageError(
             f"TEST_DATABASE_URL host {host!r} is not local ({sorted(_LOCAL_HOSTS)}). "
             "The suite DROPS SCHEMAS and TRUNCATES every table -- refusing to "
             "run against anything that could be a real database."
+        )
+    # libpq/psycopg gives ?host=/?hostaddr= query params precedence over the
+    # netloc, so a crafted local-netloc URL would pass the host check above yet
+    # dial a remote server. Reject those keys outright (same guard, same
+    # reason, in tests_contract/conftest.py -- keep the two in sync).
+    if any(key.lower() in ("host", "hostaddr") for key in url.query):
+        raise pytest.UsageError(
+            "TEST_DATABASE_URL must not carry 'host' or 'hostaddr' query "
+            "parameters: libpq gives them precedence over the URL's netloc, "
+            "which would bypass the local-host guard."
         )
 
 

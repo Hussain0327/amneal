@@ -7,6 +7,7 @@ and uses the protocol below.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -131,9 +132,24 @@ class EchoLLMProvider:
     """For tests. Returns a deterministic string derived from the last user message.
 
     If response_format == 'json', returns valid JSON: {"echo": "<last user msg>"}.
+
+    REGWATCH_ECHO_FORCE_REFUSAL (truthy) flips prose completions to the exact
+    configured refusal sentinel so wire-level suites (tests_contract) can reach
+    the synthesis-time refusal path -- no other test-grade knob can make the
+    synthesizer stream the sentinel. JSON mode is exempt on purpose: it serves
+    the extractor, never the synthesizer, and a non-JSON refusal there would
+    break unrelated callers instead of exercising the sentinel hold. Echo is a
+    test-grade provider already fenced from prod by the
+    REGWATCH_ALLOW_TEST_PROVIDERS boot guard, so this knob can never reach a
+    real deployment either.
     """
 
     name = "echo"
+
+    @staticmethod
+    def _force_refusal() -> bool:
+        value = os.environ.get("REGWATCH_ECHO_FORCE_REFUSAL", "").strip().lower()
+        return value not in ("", "0", "false")
 
     def complete(
         self,
@@ -151,6 +167,8 @@ class EchoLLMProvider:
                 model="echo",
                 usage=usage,
             )
+        if self._force_refusal():
+            return LLMResponse(text=get_settings().refusal_text, model="echo", usage=usage)
         return LLMResponse(text=f"ECHO: {last_user}", model="echo", usage=usage)
 
     def stream(
@@ -162,6 +180,8 @@ class EchoLLMProvider:
     ) -> Iterator[LLMStreamChunk]:
         # Deterministic two-chunk stream of the same text complete() returns, so
         # tests exercise real delta accumulation + the terminal validated chunk.
+        # In forced-refusal mode this streams the sentinel split across two
+        # deltas -- exactly the shape the _stream_synthesis hold must catch.
         resp = self.complete(messages, temperature=temperature, max_tokens=max_tokens)
         mid = len(resp.text) // 2
         for part in (resp.text[:mid], resp.text[mid:]):

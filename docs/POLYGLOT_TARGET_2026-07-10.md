@@ -86,6 +86,8 @@ R1. INV-6 becomes cross-service. Audit-with-defined-failure (the 009cc41
     row" must be reborn as cross-service contract tests (compose: Go +
     Python + Postgres in CI). This is the compliance surface - it gates the
     step-5 cutover.
+    (DONE: the harness landed as tests_contract/ (the S1-S23 matrix) plus
+    the cross-service-contract CI lane - step-5 PR A.)
 R2. Three in-process ask() callers exist today: POST /query, the /assemble
     dossier (nested ask(), bind_session=False), and the whitepaper
     populator. The stateless core must serve all three; their audit
