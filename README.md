@@ -112,6 +112,12 @@ regwatch runs as a **limited internal pilot**, not a generally available product
 - The **API (Fly.io)**, **Postgres + pgvector (Supabase)**, and **frontend
   (Vercel)** are deployed. The structured store and the vectors live in one
   managed Postgres.
+- A **polyglot migration is in progress**
+  ([`docs/POLYGLOT_TARGET_2026-07-10.md`](docs/POLYGLOT_TARGET_2026-07-10.md)): a
+  Go proxy now fronts the app on the public port and owns auth, sessions, and the
+  feedback/settings/product writes; query orchestration and audit persistence
+  move to Go next. Python keeps the stateless RAG core. The SQLite/Chroma
+  dual-mode was deleted (R5) — Postgres + pgvector is the only datastore.
 - It is **not yet externally exposed.** The work between here and an external
   launch — the data-handling / LLM-vendor decision (D1), an SSO + TLS gateway,
   gated deploy-step migrations, least-privilege DB credentials, and a rehearsed
@@ -150,7 +156,9 @@ uv run regwatch create-user analyst@example.com --name "Analyst"
 # (e.g. `docker compose up -d db`, then the URL below; its contents are wiped)
 TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres uv run pytest -q
 
-# API  ->  http://localhost:8000
+# API (RAG core)  ->  http://localhost:8000
+# In production the Go proxy (go/) fronts this and serves auth/sessions/feedback/
+# settings/products; run it in front for the full surface (see docs/DEPLOY.md).
 uv run uvicorn regwatch.api.main:app --reload
 
 # UI (separate terminal)  ->  http://localhost:3000
@@ -168,7 +176,8 @@ proxies `/api/*` to the backend, so only one origin is exposed.
 
 | Layer | Choice |
 |---|---|
-| Backend | Python 3.11+ (managed by `uv`), FastAPI |
+| Edge / control plane | **Go** proxy (`go/`, module `github.com/Hussain0327/amneal/go`) holds the public port. Since the step-4 polyglot cutover it serves auth, sessions, feedback, settings, and product CRUD natively (sqlc over the same Postgres), applies rate limiting + `Fly-Client-IP` handling, and relays everything else to Python. Part of the in-progress migration in [`docs/POLYGLOT_TARGET_2026-07-10.md`](docs/POLYGLOT_TARGET_2026-07-10.md) |
+| Backend (RAG core) | Python 3.11+ (managed by `uv`), FastAPI — the stateless retrieval / synthesis / refusal core behind the proxy: Ask, Assemble, White Paper, Watch, and query orchestration |
 | Frontend | Next.js 16 (App Router, TypeScript) + React 18 in `regwatch/frontend/`. All four surfaces render in one `(shell)` route group — one sidebar, one product-scope bar. Talks to the API through a same-origin `/api` proxy |
 | LLM | OpenAI via the Responses API (`OPENAI_API_MODE=responses`). Role-specific models: router `gpt-5-nano`, synthesizer + extractor `gpt-5.4-nano` (each falling back to `LLM_MODEL`). Pluggable behind `LLMProvider` — `anthropic` and a test-only `echo` are also supported |
 | Embeddings | Pluggable. Prod AND Compose default: OpenAI `text-embedding-3-small` (1536-dim, matching the pgvector column). Local `BAAI/bge-small-en-v1.5` (384-dim) remains for offline tooling only -- the K6 dim assert refuses it against the app datastore |
@@ -176,8 +185,8 @@ proxies `/api/*` to the backend, so only one origin is exposed.
 | Structured store | **Postgres** via SQLModel (Supabase in prod); `DATABASE_URL` is mandatory and the app refuses to boot without it. Schema changes ship as Alembic migrations |
 | Retrieval | Two-stage. Stage 1: vector top-k 50 (`VECTOR_TOP_K`). Stage 2: rerank to top-k 8 (`RERANK_TOP_K`); reranker off by default |
 | Ingest | `httpx` + `selectolax`; `pdfplumber` (with `pypdf` fallback); heading- and page-aware chunking (~1000 tokens, ~150 overlap) |
-| Deploy | API on Fly.io, DB + vectors on Supabase, frontend on Vercel; daily Watch via GitHub Actions cron |
-| Tooling | ruff, black, mypy (strict on `src/`), pytest, import-linter layering contracts |
+| Deploy | One Fly.io app, **two process groups**: the Go proxy on the public port, uvicorn on an internal port behind it. DB + vectors on Supabase, frontend on Vercel; daily Watch via GitHub Actions cron. Alembic (run by the Fly release command) stays the single schema authority |
+| Tooling | Python: ruff, black, mypy (strict on `src/`), pytest, import-linter layering contracts. Go: gofmt, go vet, golangci-lint, sqlc (generated store + `sqlc vet` against a real schema). A cross-service contract suite (`tests_contract/`) boots the real Go proxy + uvicorn + Postgres to prove the wire contract across the boundary |
 
 The LLM provider, model, reranker, and embedding provider all sit behind
 interfaces; nothing is hard-coded in business logic.
@@ -204,6 +213,12 @@ Every product/data endpoint requires a login. `GET /health`, `GET /ready`, and
 `GET /metrics` are operational endpoints outside the auth router; `/metrics` is
 open by default and bearer-gated when `METRICS_TOKEN` is set. Full
 request/response shapes are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+Since the step-4 cutover the **Go proxy serves `/auth/*`, `/sessions`,
+`/feedback`, `/settings`, and `/products` natively** at the public edge; the RAG
+and structured-source endpoints below relay to Python. The public wire contract
+is identical either way — the [`tests_contract/`](tests_contract/) suite proves
+it across the boundary.
 
 ```
 POST   /auth/login        {email, password} -> {user} + HttpOnly session cookie
@@ -308,8 +323,10 @@ src/regwatch/
   api/                    FastAPI surface
   auth/                   passwords (bcrypt), cookie sessions, require_user
   common/                 logging, audit, citations, text_normalize, conversation, ratelimit
+go/                       Go proxy: public edge + native auth/sessions/feedback/settings/products (sqlc store)
 regwatch/frontend/        Next.js (App Router, TS) UI — one (shell) for all four surfaces
 tests/                    smoke, invariants, eval gate, per-module
+tests_contract/           cross-service contract suite: real Go proxy + uvicorn + Postgres
 ```
 
 ## Docs
@@ -322,8 +339,9 @@ points:
   regulatory readers.
 - [Production readiness](docs/PROD_READINESS.md) — the POC-to-production path.
 - [Decisions](docs/DECISIONS.md) — append-only log of what was chosen and why.
-- [CI/CD pipeline](docs/CI_CD.md) - the five-job gate and a pre-push checklist;
-  read before pushing so you do not fail CI.
+- [CI/CD pipeline](docs/CI_CD.md) - the CI gate (Python lint/type/test, audit,
+  docker build, frontend, Go proxy, schema-drift, and the cross-service contract
+  lane) and a pre-push checklist; read before pushing so you do not fail CI.
 
 ## Docker
 
