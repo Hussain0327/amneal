@@ -29,6 +29,20 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # Owner decision 2026-07-08 (reaffirmed 2026-07-22): the app stays on
+    # React 18. Comment-level "@dependabot ignore this major version" cannot
+    # express majors-only on grouped multi-dependency PRs, so the ignore lives
+    # here instead: majors for the React 4-pack are suppressed while 18.x
+    # minor/patch updates keep flowing.
+    ignore:
+      - dependency-name: react
+        update-types: ["version-update:semver-major"]
+      - dependency-name: react-dom
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react-dom"
+        update-types: ["version-update:semver-major"]
     groups:
       npm-minor-patch:
         update-types:
