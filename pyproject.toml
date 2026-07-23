@@ -39,8 +39,8 @@ local-embeddings = [
     "transformers<6",
 ]
 llm = [
-    "openai>=2.46.0",
-    "anthropic>=0.117.1",
+    "openai>=2.47.0",
+    "anthropic>=0.118.0",
 ]
 dev = [
     "pytest>=9.1.1",
