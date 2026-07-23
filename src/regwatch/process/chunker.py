@@ -22,6 +22,7 @@ from typing import Any
 CHARS_PER_TOKEN = 4
 TARGET_TOKENS = 1000
 OVERLAP_TOKENS = 150
+CHUNKING_VERSION = "page-section-window-1000-overlap-150-v1"
 
 _HEADER_RE = re.compile(r"^\s*([IVX]+\.|[A-Z]\.|\d+\.)\s+(.{2,120})$", re.MULTILINE)
 

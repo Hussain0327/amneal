@@ -21,6 +21,7 @@ path since R5 -- the non-transactional SQLite/Chroma dev mode is gone).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,14 +36,21 @@ from regwatch.ingest.pdf_parser import ParsedPdf, parse_pdf
 from regwatch.ingest.psg_crawler import PsgListing, download_pdf
 from regwatch.process.change_detector import summarize_change
 from regwatch.process.chunker import Chunk, chunk_pdf
-from regwatch.process.embedder import get_embedding_provider
+from regwatch.process.embedder import (
+    embed_documents,
+    get_embedding_provider,
+    get_embedding_provider_for_profile,
+)
 from regwatch.process.extractor import ExtractionResult, extract_be
 from regwatch.store.db import init_db, session_scope
+from regwatch.store.embedding_profiles import content_hash as embedding_content_hash
 from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
 from regwatch.store.vector_store import (
     add_chunks,
     chunks_exist,
     delete_chunks_for_doc_except_version,
+    get_embedding_profile,
+    upsert_profile_embeddings,
 )
 
 log = get_logger(__name__)
@@ -55,6 +63,105 @@ class IngestStats:
     revised: int = 0
     unchanged: int = 0
     errors: int = 0
+
+
+@dataclass(frozen=True)
+class _ProfileEmbeddingBatch:
+    profile_id: str
+    embeddings: list[list[float]]
+    content_hashes: list[str]
+    required: bool
+
+
+def _legacy_document_embeddings(texts: list[str]) -> Sequence[list[float] | None]:
+    """Embed the rollback space, or leave it NULL after a Qwen-only cutover."""
+    if not texts:
+        return []
+    provider = get_embedding_provider()
+    active_profile_id = (get_settings().active_embedding_profile or "legacy").strip()
+    if active_profile_id != "legacy" and getattr(provider, "name", "") == "qwen3":
+        # A Qwen vector in the unversioned legacy column would silently mix
+        # geometries with the historical OpenAI corpus.  The named profile is
+        # the source of truth after cutover; NULL keeps that boundary honest.
+        return [None] * len(texts)
+    return embed_documents(provider, texts)
+
+
+def _profile_document_embeddings(texts: list[str]) -> list[_ProfileEmbeddingBatch]:
+    """Precompute active/shadow profile vectors before opening a DB transaction."""
+    if not texts:
+        return []
+    settings = get_settings()
+    active_profile_id = (settings.active_embedding_profile or "legacy").strip()
+    shadow_profile_id = (settings.embedding_shadow_profile or "").strip()
+    targets: list[tuple[str, bool]] = []
+    if active_profile_id != "legacy":
+        targets.append((active_profile_id, True))
+    if shadow_profile_id and shadow_profile_id != active_profile_id:
+        targets.append((shadow_profile_id, False))
+
+    hashes = [embedding_content_hash(text) for text in texts]
+    batches: list[_ProfileEmbeddingBatch] = []
+    for profile_id, required in targets:
+        try:
+            profile = get_embedding_profile(profile_id)
+            provider = get_embedding_provider_for_profile(profile)
+            embeddings = embed_documents(provider, texts)
+        except Exception as exc:
+            if required:
+                raise
+            # Shadow traffic must never take down the FDA ingest path.  The
+            # durable pending-chunk query makes the missed batch resumable.
+            log.warning(
+                "shadow_embedding_skipped",
+                profile_id=profile_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            continue
+        batches.append(
+            _ProfileEmbeddingBatch(
+                profile_id=profile_id,
+                embeddings=embeddings,
+                content_hashes=list(hashes),
+                required=required,
+            )
+        )
+    return batches
+
+
+def _write_profile_batches(
+    session: Session,
+    chunk_ids: list[str],
+    batches: list[_ProfileEmbeddingBatch],
+) -> None:
+    """Persist required profiles atomically; isolate best-effort shadow writes."""
+    for batch in batches:
+        if batch.required:
+            upsert_profile_embeddings(
+                batch.profile_id,
+                chunk_ids,
+                batch.embeddings,
+                batch.content_hashes,
+                conn=session.connection(),
+            )
+            continue
+        try:
+            with session.begin_nested():
+                upsert_profile_embeddings(
+                    batch.profile_id,
+                    chunk_ids,
+                    batch.embeddings,
+                    batch.content_hashes,
+                    conn=session.connection(),
+                )
+        except Exception as exc:
+            log.warning(
+                "shadow_embedding_write_skipped",
+                profile_id=batch.profile_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
 
 
 def _apply_content_fields(
@@ -246,16 +353,24 @@ def _commit_version_and_doc(
     pdf_path: str,
     parsed_text_path: str | None,
     diff_summary: str | None,
-    chunk_payload: tuple[list[Chunk], list[list[float]]] | None = None,
+    chunk_payload: (
+        tuple[
+            list[Chunk],
+            Sequence[list[float] | None],
+            list[_ProfileEmbeddingBatch],
+        ]
+        | None
+    ) = None,
     extraction: ExtractionResult | None = None,
 ) -> int | None:
     """Insert the new version AND the doc row's content fields in ONE transaction.
 
     Postgres mode additionally threads the version's chunk rows and (when
     extraction succeeded) its be_requirement row through the SAME transaction:
-    `chunk_payload` carries chunks embedded BEFORE this call (no network call
-    may run while the transaction is open -- the 2026-06-18 idle-in-transaction
-    incident class), and the chunk upsert runs on this session's connection.
+    `chunk_payload` carries legacy and named-profile vectors embedded BEFORE
+    this call (no network call may run while the transaction is open -- the
+    2026-06-18 idle-in-transaction incident class), and every vector upsert runs
+    on this session's connection.
     Either everything for the revision lands or nothing does, so a crash can
     never leave a version row without its chunks. Passing neither payload is
     the legacy non-atomic calling convention: the caller
@@ -302,7 +417,7 @@ def _commit_version_and_doc(
             if v.id is None:
                 raise RuntimeError("psg_version insert did not produce an id")
             if chunk_payload is not None:
-                chunks, embeddings = chunk_payload
+                chunks, embeddings, profile_batches = chunk_payload
                 if chunks:
                     ids, metas, texts = _index_rows(psg_document_id, v.id, chunks)
                     add_chunks(
@@ -312,6 +427,7 @@ def _commit_version_and_doc(
                         metadatas=metas,
                         conn=s.connection(),
                     )
+                    _write_profile_batches(s, ids, profile_batches)
                     log.info("chunks_added", doc_id=psg_document_id, version_id=v.id, n=len(ids))
             if extraction is not None:
                 s.add(
@@ -509,10 +625,21 @@ def _regenerate_chunks(
     chunks = chunk_pdf(parsed.pages, base_metadata=_chunk_metadata_base(doc_id, listing))
     if not chunks:
         return
-    embedder = get_embedding_provider()
     ids, metas, texts = _index_rows(doc_id, version_id, chunks)
-    embeddings = embedder.embed(texts)
-    add_chunks(ids=ids, embeddings=embeddings, documents=texts, metadatas=metas)
+    embeddings = _legacy_document_embeddings(texts)
+    profile_batches = _profile_document_embeddings(texts)
+    if profile_batches:
+        with session_scope() as s:
+            add_chunks(
+                ids=ids,
+                embeddings=embeddings,
+                documents=texts,
+                metadatas=metas,
+                conn=s.connection(),
+            )
+            _write_profile_batches(s, ids, profile_batches)
+    else:
+        add_chunks(ids=ids, embeddings=embeddings, documents=texts, metadatas=metas)
     log.info("chunks_added", doc_id=doc_id, version_id=version_id, n=len(chunks))
     _cleanup_stale_chunks(doc_id, version_id)
 
@@ -579,8 +706,10 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
         # ingest path since R5 removed the non-transactional SQLite/Chroma
         # dev mode.
         chunks = chunk_pdf(parsed.pages, base_metadata=_chunk_metadata_base(doc_id, listing))
-        embeddings = get_embedding_provider().embed([c.text for c in chunks]) if chunks else []
-        chunk_payload = (chunks, embeddings)
+        texts = [c.text for c in chunks]
+        embeddings = _legacy_document_embeddings(texts)
+        profile_batches = _profile_document_embeddings(texts)
+        chunk_payload = (chunks, embeddings, profile_batches)
         extraction: ExtractionResult | None = None
         if extract:
             extraction = _extract_be_for_commit(parsed.pages, listing.appl_no)

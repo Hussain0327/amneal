@@ -303,6 +303,83 @@ def _ensure_postgres_objects(engine: Engine) -> None:
             # _enable_row_level_security) instead of crashing the process.
             log.warning("ensure_postgres_objects_skipped", error=str(getattr(exc, "orig", exc)))
             break
+    # Profile tables are registered in SQLModel.metadata for fresh create_all
+    # and created by migration 0015 on upgrades.  Their trigger functions are
+    # outside metadata, so converge both bootstrap routes here.  The helper
+    # first checks catalog state and takes no table lock on a healthy boot.
+    _ensure_embedding_profile_objects(engine)
+
+
+def _ensure_embedding_profile_objects(engine: Engine) -> None:
+    """Install migration 0015's immutable/dimension/invalidation triggers.
+
+    Like the 0011 event-trigger convergence helper, the canonical DDL stays in
+    its migration.  Fresh Postgres is create_all + stamp-head and never replays
+    0015, so it needs the trigger objects installed explicitly.  A migrated or
+    steady-state database returns after catalog checks without re-taking locks.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.connect() as conn:
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                text(
+                    "SELECT tablename FROM pg_tables "
+                    "WHERE schemaname = 'public' "
+                    "AND tablename IN ('chunk', 'embedding_profile', 'chunk_embedding')"
+                )
+            )
+        }
+        trigger_names = {
+            str(row[0])
+            for row in conn.execute(
+                text(
+                    "SELECT tgname FROM pg_trigger "
+                    "WHERE NOT tgisinternal AND tgname IN ("
+                    "'embedding_profile_immutable', "
+                    "'chunk_embedding_profile_dimension', "
+                    "'chunk_text_invalidates_profile_embeddings')"
+                )
+            )
+        }
+        vector_schema = conn.execute(
+            text(
+                "SELECT n.nspname FROM pg_extension e "
+                "JOIN pg_namespace n ON n.oid = e.extnamespace "
+                "WHERE e.extname = 'vector'"
+            )
+        ).scalar()
+    if tables != {"chunk", "embedding_profile", "chunk_embedding"}:
+        return
+    expected_triggers = {
+        "embedding_profile_immutable",
+        "chunk_embedding_profile_dimension",
+        "chunk_text_invalidates_profile_embeddings",
+    }
+    if trigger_names == expected_triggers:
+        return
+
+    path = _repo_root() / "migrations" / "versions" / "0015_embedding_profiles.py"
+    spec = importlib.util.spec_from_file_location("migration_0015", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise RuntimeError(f"cannot load migration 0015 from {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    if vector_schema is None:  # pragma: no cover - chunk requires the extension
+        raise RuntimeError("pgvector extension is not installed")
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("SET LOCAL lock_timeout = '3s'"))
+            for statement in mod.embedding_profile_support_sql(str(vector_schema)):
+                conn.execute(text(statement))
+    except OperationalError as exc:
+        # The chunk text trigger requires a lock on the hot chunk table.  Match
+        # the rest of boot: skip under contention and retry on a later boot.
+        log.warning(
+            "embedding_profile_objects_skipped",
+            error=str(getattr(exc, "orig", exc)),
+        )
 
 
 def _enable_row_level_security(engine: Engine) -> None:
@@ -384,7 +461,10 @@ def _init_postgres(engine: Engine) -> None:
     """
     from alembic import command
 
-    from regwatch.store import models  # noqa: F401  (registers tables)
+    # Register both ORM tables and the additive profile/core tables before the
+    # fresh-Postgres create_all + stamp-head path.  pgvector_store registers
+    # ``chunk`` itself, which chunk_embedding's foreign key references.
+    from regwatch.store import embedding_profiles, models, pgvector_store  # noqa: F401
 
     cfg = _alembic_config()
     head = _head_revision(cfg)
@@ -484,3 +564,6 @@ def reset_for_tests() -> None:
         _engine.dispose()
     _engine = None
     _initialized = False
+    from regwatch.store import embedding_profiles
+
+    embedding_profiles.reset_for_tests()

@@ -1,4 +1,4 @@
-"""LLMProvider interface + concrete providers (openai, anthropic, echo).
+"""LLMProvider interface + concrete providers (openai, databricks, anthropic, echo).
 
 Business logic NEVER hard-codes a model name. It calls `get_llm_provider()`
 and uses the protocol below.
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -416,6 +417,322 @@ class OpenAIProvider:
         )
 
 
+# ---------- Databricks Gemma provider ----------
+_GEMMA_THOUGHT_START = re.compile(r"<\|channel>thought(?:\r?\n)?", re.IGNORECASE)
+_GEMMA_XML_THOUGHT_START = re.compile(r"<think>", re.IGNORECASE)
+
+
+def _drop_private_block(text: str, start: re.Pattern[str], end: str) -> str:
+    """Drop every complete or unterminated private block.
+
+    Unterminated thought output is discarded from its opening delimiter to the
+    end. Returning a shorter/empty answer is safer than exposing chain of
+    thought when a serving engine truncates before Gemma's closing token.
+    """
+    visible: list[str] = []
+    cursor = 0
+    while match := start.search(text, cursor):
+        visible.append(text[cursor : match.start()])
+        close = text.find(end, match.end())
+        if close < 0:
+            return "".join(visible)
+        cursor = close + len(end)
+    visible.append(text[cursor:])
+    return "".join(visible)
+
+
+def _visible_gemma_text(text: str) -> str:
+    """Return only Gemma's final-answer channel.
+
+    Gemma 4 can emit its thought channel inline even when thinking is disabled,
+    and some OpenAI-compatible servers expose reasoning in ``content`` instead
+    of a separate field. Handle both Gemma's native delimiters and the common
+    ``<think>`` compatibility form. A stray closing delimiter is treated
+    conservatively: everything before it may have been private reasoning.
+    """
+    cleaned = _drop_private_block(text, _GEMMA_THOUGHT_START, "<channel|>")
+    if "<channel|>" in cleaned:
+        cleaned = cleaned.rsplit("<channel|>", 1)[-1]
+    cleaned = _drop_private_block(cleaned, _GEMMA_XML_THOUGHT_START, "</think>")
+    lower = cleaned.lower()
+    if "</think>" in lower:
+        cleaned = cleaned[lower.rfind("</think>") + len("</think>") :]
+    return cleaned.replace("<|think|>", "").strip()
+
+
+def _chat_content_text(content: Any) -> str:
+    """Extract visible candidate text without accepting reasoning content parts."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, dict):
+            item_type = item.get("type")
+            value = item.get("text")
+        else:
+            item_type = getattr(item, "type", None)
+            value = getattr(item, "text", None)
+        if item_type in ("reasoning", "reasoning_content", "thinking", "analysis"):
+            continue
+        if item_type not in (None, "text", "output_text") or not isinstance(value, str):
+            continue
+        parts.append(value)
+    return "".join(parts)
+
+
+def _safe_chat_raw(resp: Any, *, finish_reason: Any = None) -> dict[str, Any]:
+    """Allow-list non-content response metadata for audit/debugging.
+
+    Deliberately do not call ``model_dump()``: OpenAI-compatible runtimes may
+    place private reasoning in extension fields such as ``reasoning_content``,
+    ``reasoning`` or ``thinking``. An allow-list makes new extension fields
+    private by default.
+    """
+    raw: dict[str, Any] = {}
+    for key in ("id", "object", "created", "model", "system_fingerprint", "service_tier"):
+        value = getattr(resp, key, None)
+        if value is not None and isinstance(value, (str, int, float, bool)):
+            raw[key] = value
+    if isinstance(finish_reason, str):
+        raw["finish_reason"] = finish_reason
+    return raw
+
+
+class DatabricksProvider:
+    """Gemma over a Databricks OpenAI-compatible Chat Completions endpoint.
+
+    The client and all connection inputs are injectable for deterministic
+    tests. Thinking is opt-in *and* synthesizer-only. Generated thought content
+    is never returned in ``text`` or ``raw``.
+    """
+
+    name = "databricks"
+
+    def __init__(
+        self,
+        model: str,
+        base_url: str,
+        token: str,
+        *,
+        role: str = "default",
+        thinking_enabled: bool = False,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        client: Any = None,
+    ) -> None:
+        self.model = model
+        self.base_url = base_url
+        self.token = token
+        self.role = role
+        self.thinking_enabled = bool(thinking_enabled and role == "synthesizer")
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self._client = client
+
+    def _client_or_create(self) -> Any:
+        if self._client is None:
+            from regwatch.common.llm_clients import shared_databricks_openai_client
+
+            s = get_settings()
+            timeout = self.timeout if self.timeout is not None else s.llm_timeout_s
+            max_retries = self.max_retries if self.max_retries is not None else s.llm_max_retries
+            self._client = shared_databricks_openai_client(
+                self.base_url,
+                self.token,
+                timeout=timeout,
+                max_retries=max_retries,
+            )
+        return self._client
+
+    def _request_messages(
+        self,
+        messages: list[LLMMessage],
+        *,
+        allow_thinking: bool,
+    ) -> list[dict[str, str]]:
+        # Gemma expects one consolidated system turn. Always remove a caller's
+        # accidental control token first; this is what makes router/extractor
+        # thinking definitively off rather than prompt-dependent.
+        system = "\n\n".join(
+            message.content.replace("<|think|>", "")
+            for message in messages
+            if message.role == "system"
+        ).strip()
+        if allow_thinking:
+            system = f"<|think|>\n{system}" if system else "<|think|>"
+
+        request: list[dict[str, str]] = []
+        if system:
+            request.append({"role": "system", "content": system})
+        for message in messages:
+            if message.role == "system":
+                continue
+            content = message.content
+            # Do not feed a prior assistant thought channel back into a later
+            # turn. User text is left byte-for-byte intact.
+            if message.role == "assistant":
+                content = _visible_gemma_text(content)
+            request.append({"role": message.role, "content": content})
+        return request
+
+    def _request_kwargs(
+        self,
+        messages: list[LLMMessage],
+        *,
+        temperature: float,
+        max_tokens: int,
+        response_format: str | None = None,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        # JSON is used by extraction/routing and must never spend or expose a
+        # thought channel, even if a synthesizer provider is reused manually.
+        allow_thinking = self.thinking_enabled and response_format != "json"
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": self._request_messages(messages, allow_thinking=allow_thinking),
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if response_format == "json":
+            kwargs["response_format"] = {"type": "json_object"}
+        if stream:
+            kwargs["stream"] = True
+            kwargs["stream_options"] = {"include_usage": True}
+        return kwargs
+
+    @staticmethod
+    def _first_choice(resp: Any) -> Any:
+        choices = getattr(resp, "choices", None)
+        if not choices:
+            raise RuntimeError("databricks chat completion returned no choices")
+        return choices[0]
+
+    @staticmethod
+    def _raise_for_finish_reason(finish_reason: Any) -> None:
+        if finish_reason in ("length", "content_filter"):
+            raise RuntimeError(
+                f"databricks chat completion terminated with finish_reason={finish_reason}"
+            )
+
+    def complete(
+        self,
+        messages: list[LLMMessage],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+        response_format: str | None = None,
+    ) -> LLMResponse:
+        client = self._client_or_create()
+        kwargs = self._request_kwargs(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+        )
+        resp = client.chat.completions.create(**kwargs)
+        choice = self._first_choice(resp)
+        finish_reason = getattr(choice, "finish_reason", None)
+        self._raise_for_finish_reason(finish_reason)
+        message = getattr(choice, "message", None)
+        text = _visible_gemma_text(_chat_content_text(getattr(message, "content", None)))
+        model = getattr(resp, "model", None) or self.model
+        return LLMResponse(
+            text=text,
+            model=model,
+            raw=_safe_chat_raw(resp, finish_reason=finish_reason),
+            usage=_usage_from(resp, "prompt_tokens", "completion_tokens"),
+        )
+
+    def _complete_stream(
+        self,
+        messages: list[LLMMessage],
+        *,
+        temperature: float,
+        max_tokens: int,
+    ) -> LLMResponse:
+        """Consume a stream into a private buffer, then expose only final-answer text.
+
+        Buffering is intentional: Gemma's opening/closing thought delimiters can
+        be split across arbitrary SSE chunks. Emitting candidate content before
+        seeing the closing delimiter could leak reasoning that cannot be
+        retracted.
+        """
+        client = self._client_or_create()
+        events = client.chat.completions.create(
+            **self._request_kwargs(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+        )
+        parts: list[str] = []
+        usage = LLMUsage()
+        finish_reason: Any = None
+        last_event: Any = None
+        model = self.model
+        saw_choice = False
+        for event in events:
+            last_event = event
+            model = getattr(event, "model", None) or model
+            event_usage = _usage_from(event, "prompt_tokens", "completion_tokens")
+            if event_usage.input_tokens is not None:
+                usage.input_tokens = event_usage.input_tokens
+            if event_usage.output_tokens is not None:
+                usage.output_tokens = event_usage.output_tokens
+            choices = getattr(event, "choices", None) or []
+            if not choices:
+                continue
+            saw_choice = True
+            choice = choices[0]
+            candidate_finish = getattr(choice, "finish_reason", None)
+            if candidate_finish is not None:
+                finish_reason = candidate_finish
+            delta = getattr(choice, "delta", None)
+            # Deliberately ignore delta.reasoning_content / reasoning / thinking.
+            parts.append(_chat_content_text(getattr(delta, "content", None)))
+
+        if not saw_choice:
+            raise RuntimeError("databricks chat stream returned no choices")
+        self._raise_for_finish_reason(finish_reason)
+        return LLMResponse(
+            text=_visible_gemma_text("".join(parts)),
+            model=model,
+            raw=_safe_chat_raw(last_event, finish_reason=finish_reason),
+            usage=usage,
+        )
+
+    def stream(
+        self,
+        messages: list[LLMMessage],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> Iterator[LLMStreamChunk]:
+        try:
+            resp = self._complete_stream(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception:
+            # Some custom Databricks endpoints do not implement SSE or
+            # stream_options. Since no candidate text has been yielded yet, a
+            # normal completion is a safe, duplicate-free user-visible fallback.
+            yield from _buffered_stream(
+                self,
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return
+        if resp.text:
+            yield LLMStreamChunk(delta=resp.text)
+        yield LLMStreamChunk(done=True, response=resp)
+
+
 # ---------- anthropic provider ----------
 class AnthropicProvider:
     name = "anthropic"
@@ -499,6 +816,33 @@ def get_llm_provider(name: str | None = None, *, role: str = "default") -> LLMPr
     name = (name or s.llm_provider).lower()
     if name == "echo":
         return EchoLLMProvider()
+    if name == "databricks":
+        base_url = getattr(s, "databricks_llm_base_url", None)
+        token = getattr(s, "databricks_llm_token", None)
+        databricks_model = getattr(s, "databricks_llm_model", None)
+        missing = [
+            env_name
+            for env_name, value in (
+                ("DATABRICKS_LLM_BASE_URL", base_url),
+                ("DATABRICKS_LLM_TOKEN", token),
+                ("DATABRICKS_LLM_MODEL", databricks_model),
+            )
+            if not isinstance(value, str) or not value.strip()
+        ]
+        if missing:
+            raise RuntimeError(f"{', '.join(missing)} not set; configure Databricks LLM serving")
+        assert isinstance(base_url, str)
+        assert isinstance(token, str)
+        assert isinstance(databricks_model, str)
+        return DatabricksProvider(
+            model=databricks_model,
+            base_url=base_url,
+            token=token,
+            role=role,
+            thinking_enabled=bool(getattr(s, "gemma_thinking_enabled", False)),
+            timeout=s.llm_timeout_s,
+            max_retries=s.llm_max_retries,
+        )
     model = _model_for_role(s, role)
     if name == "openai":
         if not s.openai_api_key:
@@ -513,6 +857,9 @@ def get_llm_provider(name: str | None = None, *, role: str = "default") -> LLMPr
 
 def current_model_name(role: str = "default") -> str:
     s = get_settings()
-    if s.llm_provider == "echo":
+    provider = s.llm_provider.lower()
+    if provider == "echo":
         return "echo"
+    if provider == "databricks":
+        return getattr(s, "databricks_llm_model", None) or _model_for_role(s, role)
     return _model_for_role(s, role)

@@ -14,11 +14,20 @@ dispatch is gone, but keeping the facade means callers never changed.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # typing-only import to avoid a cycle with pgvector_store
     from sqlalchemy.engine import Connection
+
+    from regwatch.store.embedding_profiles import (
+        EmbeddingProfile,
+        EmbeddingProfileSpec,
+        PendingProfileChunk,
+        ProfileEmbeddingCoverage,
+        ProfileIndexSpec,
+    )
 
 
 @dataclass
@@ -37,7 +46,7 @@ def reset_for_tests() -> None:
 
 def add_chunks(
     ids: list[str],
-    embeddings: list[list[float]],
+    embeddings: Sequence[list[float] | None],
     documents: list[str],
     metadatas: list[dict[str, Any]],
     *,
@@ -105,3 +114,106 @@ def distinct_metadata_values(key: str) -> set[str]:
     from regwatch.store import pgvector_store
 
     return pgvector_store.distinct_metadata_values(key)
+
+
+# Additive embedding-profile seam.  None of these functions is used by the
+# legacy active path above; callers must name one immutable profile explicitly,
+# which prevents accidental cross-space writes or retrieval.
+def register_embedding_profile(spec: EmbeddingProfileSpec) -> EmbeddingProfile:
+    from regwatch.store import embedding_profiles
+
+    return embedding_profiles.register_embedding_profile(spec)
+
+
+def get_embedding_profile(profile_id: str) -> EmbeddingProfile:
+    from regwatch.store import embedding_profiles
+
+    return embedding_profiles.get_embedding_profile(profile_id)
+
+
+def list_embedding_profiles() -> list[EmbeddingProfile]:
+    from regwatch.store import embedding_profiles
+
+    return embedding_profiles.list_embedding_profiles()
+
+
+def pending_profile_chunks(
+    profile_id: str,
+    *,
+    limit: int = 256,
+    after_chunk_id: str | None = None,
+) -> list[PendingProfileChunk]:
+    from regwatch.store import embedding_profiles
+
+    return embedding_profiles.pending_profile_chunks(
+        profile_id,
+        limit=limit,
+        after_chunk_id=after_chunk_id,
+    )
+
+
+def upsert_profile_embeddings(
+    profile_id: str,
+    chunk_ids: list[str],
+    embeddings: list[list[float]],
+    content_hashes: list[str],
+    *,
+    conn: Connection | None = None,
+) -> None:
+    from regwatch.store import embedding_profiles
+
+    embedding_profiles.upsert_profile_embeddings(
+        profile_id,
+        chunk_ids,
+        embeddings,
+        content_hashes,
+        conn=conn,
+    )
+
+
+def profile_embedding_coverage(profile_id: str) -> ProfileEmbeddingCoverage:
+    from regwatch.store import embedding_profiles
+
+    return embedding_profiles.profile_embedding_coverage(profile_id)
+
+
+def ensure_profile_hnsw_index(
+    profile_id: str,
+    *,
+    concurrently: bool = True,
+) -> ProfileIndexSpec:
+    from regwatch.store import embedding_profiles
+
+    return embedding_profiles.ensure_profile_hnsw_index(
+        profile_id,
+        concurrently=concurrently,
+    )
+
+
+def profile_hnsw_index_ready(profile_id: str) -> bool:
+    from regwatch.store import embedding_profiles
+
+    return embedding_profiles.profile_hnsw_index_ready(profile_id)
+
+
+def assert_profile_ready_for_activation(profile_id: str) -> EmbeddingProfile:
+    from regwatch.store import embedding_profiles
+
+    return embedding_profiles.assert_profile_ready_for_activation(profile_id)
+
+
+def similarity_search_profile(
+    profile_id: str,
+    query_embedding: list[float],
+    *,
+    k: int = 8,
+    where: dict[str, Any] | None = None,
+) -> list[Hit]:
+    from regwatch.store import embedding_profiles
+
+    return embedding_profiles.similarity_search_profile(
+        profile_id,
+        query_embedding,
+        k=k,
+        where=where,
+    )

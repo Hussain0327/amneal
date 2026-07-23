@@ -197,6 +197,8 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     # pgvector chunk column, so ingest/query tests embed for real.
     monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
     monkeypatch.setenv("LLM_PROVIDER", "echo")
+    monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", "legacy")
+    monkeypatch.setenv("EMBEDDING_SHADOW_PROFILE", "")
     # Rate limiting off by default; rate-limit tests opt in explicitly.
     monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "0")
     # The API fail-fast guard rejects echo providers over a non-empty corpus;
@@ -207,6 +209,10 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     monkeypatch.setenv("OPENAI_API_KEY", "")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setenv("OPENFDA_API_KEY", "")
+    monkeypatch.setenv("QWEN_EMBEDDING_BASE_URL", "")
+    monkeypatch.setenv("QWEN_EMBEDDING_TOKEN", "")
+    monkeypatch.setenv("DATABRICKS_LLM_BASE_URL", "")
+    monkeypatch.setenv("DATABRICKS_LLM_TOKEN", "")
     # Sentry stays OFF in tests even if the host .env carries a DSN, and pinned
     # to the default environment so a host .env (SENTRY_ENVIRONMENT=development/
     # production) can't leak into the "default off" assertions.
