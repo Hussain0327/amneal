@@ -79,8 +79,9 @@ def test_every_json_route_declares_a_response_model() -> None:
     missing: list[tuple[str, str]] = []
     for route in routes:
         for method in sorted((route.methods or set()) - {"HEAD", "OPTIONS"}):
-            seen.add((method, route.path))
-            if (method, route.path) in NO_JSON_BODY_ROUTES or (method, route.path) in INTERNAL_ROUTES:
+            key = (method, route.path)
+            seen.add(key)
+            if key in NO_JSON_BODY_ROUTES or key in INTERNAL_ROUTES:
                 continue
             # A concrete pydantic model only: FastAPI silently infers
             # response_model from a `-> dict[str, Any]` return annotation, and
@@ -88,7 +89,7 @@ def test_every_json_route_declares_a_response_model() -> None:
             # would wave those through.
             model = route.response_model
             if model is None or not (isinstance(model, type) and issubclass(model, BaseModel)):
-                missing.append((method, route.path))
+                missing.append(key)
     assert (
         not missing
     ), f"routes without a pydantic response_model (unfrozen wire contract): {sorted(missing)}"
