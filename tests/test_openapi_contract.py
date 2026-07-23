@@ -40,6 +40,15 @@ NO_JSON_BODY_ROUTES = {
     ("GET", "/metrics"),
 }
 
+# Internal-only routes: NOT part of the public wire contract (include_in_schema
+# False, and blocked at the Go edge -- see routes.go /internal/ 404). The
+# step-5 compute endpoint passes {response, persist} through as an opaque dict
+# by design; a pydantic model would freeze an internal Go<->Python seam the
+# frontend never sees. Still required to EXIST so a rename can't hide a gap.
+INTERNAL_ROUTES = {
+    ("POST", "/internal/query/compute"),
+}
+
 
 def _api_routes(routes: Any) -> list[APIRoute]:
     """Every APIRoute reachable from ``routes``, recursing through included
@@ -70,8 +79,9 @@ def test_every_json_route_declares_a_response_model() -> None:
     missing: list[tuple[str, str]] = []
     for route in routes:
         for method in sorted((route.methods or set()) - {"HEAD", "OPTIONS"}):
-            seen.add((method, route.path))
-            if (method, route.path) in NO_JSON_BODY_ROUTES:
+            key = (method, route.path)
+            seen.add(key)
+            if key in NO_JSON_BODY_ROUTES or key in INTERNAL_ROUTES:
                 continue
             # A concrete pydantic model only: FastAPI silently infers
             # response_model from a `-> dict[str, Any]` return annotation, and
@@ -79,7 +89,7 @@ def test_every_json_route_declares_a_response_model() -> None:
             # would wave those through.
             model = route.response_model
             if model is None or not (isinstance(model, type) and issubclass(model, BaseModel)):
-                missing.append((method, route.path))
+                missing.append(key)
     assert (
         not missing
     ), f"routes without a pydantic response_model (unfrozen wire contract): {sorted(missing)}"
@@ -88,3 +98,4 @@ def test_every_json_route_declares_a_response_model() -> None:
     # would otherwise leave a stale exemption masking a future gap).
     assert {("POST", "/query"), ("GET", "/watch/latest"), ("GET", "/health")} <= seen
     assert seen >= NO_JSON_BODY_ROUTES
+    assert seen >= INTERNAL_ROUTES

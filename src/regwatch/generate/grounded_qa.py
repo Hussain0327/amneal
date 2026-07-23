@@ -19,6 +19,7 @@ write. Callers see the unchanged ``ask()`` / ``QAResult`` surface.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -90,6 +91,23 @@ from regwatch.watch.alerts import latest_digest_records
 from regwatch.watch.watchlist import list_watchlist
 
 log = get_logger(__name__)
+
+
+def _maybe_inject_fault(stage: str) -> None:
+    """Prod-fenced fault injection for the R1 contract suite (S24).
+
+    Forces an UNEXPECTED raise in the named pipeline stage so the harness can
+    prove the step-5 CompleteQuery audited-error boundary (``compute_turn``)
+    turns a retrieve/resolver crash into exactly one status="error" audit row
+    instead of the naked unaudited 500 ``ask()`` used to leak. Gated by the
+    SAME ``allow_test_providers`` boot guard as the echo/forced-refusal
+    providers, so it is inert in production regardless of the env var.
+    """
+    if os.environ.get("REGWATCH_FAULT_INJECT", "").strip() != stage:
+        return
+    if not get_settings().allow_test_providers:
+        return
+    raise RuntimeError(f"injected {stage} fault (REGWATCH_FAULT_INJECT={stage})")
 
 
 @dataclass
@@ -1384,6 +1402,7 @@ def ask_core(
         response_mode=response_mode,
     )
     _emit("Searching the FDA guidance corpus…")
+    _maybe_inject_fault("retrieve")
     passages = retrieve(question, k=k, filters=active_filters)
     # Stage 2: optional rerank, then trim to RERANK_TOP_K.
     passages = rerank_passages(question, passages)
@@ -1731,3 +1750,87 @@ def ask(
         on_token=on_token,
     )
     return _persist_turn(outcome, audit, patch)
+
+
+def _pipeline_error(
+    question: str,
+    *,
+    session_id: str,
+    turn_id: str,
+    user_id: str | None,
+    filters: dict[str, Any] | None,
+) -> tuple[RagOutcome, AuditPayload, SessionPatch]:
+    """The DEFINED result of an unexpected pipeline crash: a fixed-copy
+    status="error" refusal turn, skip-audited (allow_skip stays the AuditPayload
+    default). Closes the INV-6 gap ``ask()`` left open -- a raise in
+    retrieve()/rerank/resolve now yields a row to write, never a naked 500. Reuses
+    ``_refuse`` + ``_build_patch`` so the audit/result/patch stay single-source.
+    """
+    active_filters = dict(filters or {})
+    route_json = _route_json(
+        filters=active_filters,
+        reason="pipeline_error",
+        context_applied=False,
+        response_mode="refused",
+    )
+    outcome, audit = _refuse(
+        question=question,
+        passages=[],
+        reason="pipeline_error",
+        model_name=current_model_name(role="synthesizer"),
+        session_id=session_id,
+        turn_id=turn_id,
+        user_id=user_id,
+        route_json=route_json,
+        status="error",
+        answer_text=_SERVICE_UNAVAILABLE_TEXT,
+    )
+    return outcome, audit, _build_patch(outcome, filters=active_filters, route_json=route_json)
+
+
+def compute_turn(
+    question: str,
+    *,
+    filters: dict[str, Any] | None = None,
+    k: int | None = None,
+    session_id: str,
+    turn_id: str,
+    user_id: str | None = None,
+) -> tuple[RagOutcome, AuditPayload, SessionPatch]:
+    """The stateless COMPUTE half of a turn, for the step-5 Go control plane.
+
+    Runs ``ask_core`` behind the shell-owned session-context loaders -- the same
+    call ``ask()`` makes -- but performs NO writes and adds the AUDITED-ERROR
+    BOUNDARY: any unexpected raise in the pipeline (the retrieve/resolver gap
+    ``ask()`` left unaudited) is caught here and turned into a DEFINED
+    status="error"/pipeline_error outcome, so the caller (the Go CompleteQuery
+    handler over POST /internal/query/compute) always receives a row to persist.
+    Buffered path only; streaming stays in ``ask()`` (R3), so no on_progress/
+    on_token sinks. ``session_id``/``turn_id`` are the caller's already-minted
+    ids; reads (retrieval, resolver, session context) are allowed.
+    """
+    get_settings()
+    current_model_name(role="synthesizer")
+    try:
+        return ask_core(
+            question,
+            session_id=session_id,
+            turn_id=turn_id,
+            filters=filters,
+            k=k,
+            user_id=user_id,
+            load_session_filters=lambda: get_session_filters(session_id),
+            load_recent_turns=lambda: get_recent_turns(
+                session_id, limit=3, exclude_turn_id=turn_id
+            ),
+        )
+    except Exception as exc:
+        log.warning("qa_pipeline_error", error=str(exc), error_type=type(exc).__name__)
+        capture_exception(exc)
+        return _pipeline_error(
+            question,
+            session_id=session_id,
+            turn_id=turn_id,
+            user_id=user_id,
+            filters=filters,
+        )

@@ -39,7 +39,7 @@ from typing import Any, Literal
 
 import anyio.to_thread
 from config.settings import Settings, get_settings
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -55,7 +55,8 @@ from regwatch.common.conversation import SESSION_FILTER_KEYS, SessionOwnershipEr
 from regwatch.common.logging import configure_logging, get_logger
 from regwatch.common.observability import capture_exception, init_sentry
 from regwatch.common.ratelimit import query_limiter
-from regwatch.generate.grounded_qa import QAResult, QueryStatusLiteral, ask
+from regwatch.generate.grounded_qa import QAResult, QueryStatusLiteral, ask, compute_turn
+from regwatch.generate.rag_contract import AuditPayload, RagOutcome, SessionPatch
 from regwatch.process.embedder import assert_embedding_runtime_available
 from regwatch.sources.router import search_sources
 from regwatch.sources.types import SourceKind, SourceQuery
@@ -884,6 +885,113 @@ def query_stream(req: QueryRequest, user: User = Depends(require_user)) -> Strea
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ---------- /internal/query/compute (step-5 CompleteQuery) ----------
+class InternalComputeRequest(BaseModel):
+    """The Go control plane's compute request. Ids are minted by the caller;
+    filters are already whitelisted at the Go edge (SESSION_FILTER_KEYS), so this
+    internal, token-guarded endpoint trusts them."""
+
+    question: str
+    filters: dict[str, Any] | None = None
+    k: int | None = None
+    session_id: str
+    turn_id: str
+    user_id: str | None = None
+
+
+def _require_internal_token(token: str | None) -> None:
+    """Fail-closed guard: an unset INTERNAL_RAG_TOKEN disables the endpoint
+    entirely (404, never confirming it exists); a set token must match exactly."""
+    expected = get_settings().internal_rag_token
+    if not expected or token != expected:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _outcome_response_dict(outcome: RagOutcome) -> dict[str, Any]:
+    """The wire QueryResponse for a computed outcome, MINUS audit_id.
+
+    Built via the SAME _build_query_response the buffered/streaming paths use
+    (so the shape can never drift), with the placeholder audit_id dropped -- the
+    control plane owns the audit row and splices its real id onto the wire.
+    """
+    result = QAResult(
+        answer=outcome.answer,
+        citations=outcome.citations,
+        refused=outcome.refused,
+        model_name=outcome.model_name,
+        audit_id=0,
+        retrieved=outcome.retrieved,
+        status=outcome.status,
+        reason=outcome.reason,
+        interpretation=outcome.interpretation,
+        clarify=outcome.clarify,
+        related=outcome.related,
+        session_id=outcome.session_id,
+        turn_id=outcome.turn_id,
+    )
+    body = _build_query_response(result).model_dump(mode="json")
+    body.pop("audit_id", None)
+    return body
+
+
+def _persist_dict(audit: AuditPayload, patch: SessionPatch) -> dict[str, Any]:
+    """The write instructions for the control plane: the query_log kwargs, the
+    branch's audit failure semantics (allow_skip), the chat SessionPatch, and --
+    for the strict answer path -- the fixed-copy fallback to write if the audit
+    write fails (recursively serialized; its own fallback is always None)."""
+    out: dict[str, Any] = {
+        "audit_log_kwargs": audit.log_kwargs(),
+        "allow_skip": audit.allow_skip,
+        "patch": asdict(patch),
+        "fallback": None,
+    }
+    if audit.failure_fallback is not None:
+        fb_outcome, fb_audit, fb_patch = audit.failure_fallback
+        out["fallback"] = {
+            "response": _outcome_response_dict(fb_outcome),
+            "audit_log_kwargs": fb_audit.log_kwargs(),
+            "allow_skip": fb_audit.allow_skip,
+            "patch": asdict(fb_patch),
+        }
+    return out
+
+
+def _compute_payload(req: InternalComputeRequest) -> dict[str, Any]:
+    """Runs the stateless core and serializes {response, persist}. All DB I/O
+    (retrieval, resolver, the read-only citation-recency enrichment inside
+    _build_query_response) happens here so it stays OFF the event loop."""
+    outcome, audit, patch = compute_turn(
+        req.question,
+        filters=req.filters,
+        k=req.k,
+        session_id=req.session_id,
+        turn_id=req.turn_id,
+        user_id=req.user_id,
+    )
+    return {
+        "response": _outcome_response_dict(outcome),
+        "persist": _persist_dict(audit, patch),
+    }
+
+
+@app.post("/internal/query/compute", include_in_schema=False)
+async def internal_query_compute(
+    req: InternalComputeRequest,
+    x_internal_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Internal RAG compute for the Go control plane (step-5 CompleteQuery).
+
+    Runs the STATELESS RAG core and returns {response, persist}; writes NOTHING
+    (the caller owns the audit + chat-history writes, so INV-6 lives in one
+    place). Token-guarded and fail-closed; never exposed at the public edge (the
+    Go proxy 404s the /internal/ subtree). Compute runs OFF the event loop under
+    the shared _ASK_LIMITER so a slow turn cannot starve the loop that still
+    serves the relayed /query/stream and /healthz in the flag-gated phase.
+    """
+    _require_internal_token(x_internal_token)
+    return await anyio.to_thread.run_sync(partial(_compute_payload, req), limiter=_ASK_LIMITER)
 
 
 # ---------- /sources/search ----------

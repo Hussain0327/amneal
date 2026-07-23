@@ -85,6 +85,13 @@ type Server struct {
 	limiter *RateLimiter
 	errLog  *log.Logger
 
+	// queryLimiter is the per-user window for POST /query and /query/stream,
+	// distinct from the login limiter above (disjoint keys, same mechanics).
+	// Since the step-5 cutover Go is the single rate-limit authority.
+	queryLimiter *RateLimiter
+	// rag calls the internal Python RAG compute endpoint for handleCompleteQuery.
+	rag *ragClient
+
 	now           func() time.Time
 	checkPassword func(hash, password string) bool
 	perIPLimit    int
@@ -99,6 +106,8 @@ func NewServer(pool *pgxpool.Pool, cfg Config, errLog *log.Logger) *Server {
 		pool:          pool,
 		cfg:           cfg,
 		limiter:       NewRateLimiter(),
+		queryLimiter:  NewRateLimiter(),
+		rag:           newRAGClient(cfg.InternalRAGURL, cfg.InternalRAGToken, cfg.RAGTimeout),
 		errLog:        errLog,
 		now:           func() time.Time { return time.Now().UTC() },
 		checkPassword: verifyPassword,

@@ -46,6 +46,31 @@ type Config struct {
 	RetrievalTopK         *int // env unset => null on the wire, key present
 	RefusalScoreThreshold float64
 	CompanyName           string
+
+	// -- step-5 CompleteQuery (PR B) --
+	// Per-user requests/minute on POST /query and /query/stream, keyed
+	// "user:{id}". Mirrors config/settings.py::rate_limit_per_minute (default
+	// 30); <=0 disables (RateLimiter.Allow contract). Since the cutover Go is
+	// the SINGLE rate-limit authority across both routes.
+	RateLimitPerMinute int
+	// The internal Python RAG compute endpoint (POST /internal/query/compute)
+	// the CompleteQuery handler calls. Defaults to INTERNAL_RAG_URL, then the
+	// proxy's UPSTREAM_URL, then loopback -- it is the SAME uvicorn the relay
+	// fronts, reached directly (not through this proxy's own mux).
+	InternalRAGURL string
+	// Shared secret for that endpoint (X-Internal-Token). Empty is only valid
+	// with native query OFF; the endpoint fail-closes (404) without it.
+	InternalRAGToken string
+	// FINITE overall deadline for the Go->Python compute call. NOT the SSE
+	// "no timeout" -- this is a buffered JSON hop, so an accept-then-hang
+	// upstream (or an embedding/retrieval stall llm_timeout_s does not cover)
+	// must convert to a synthesized upstream_error audit row, never a leaked
+	// request. Default 240s = llm_timeout_s(60) x (max_retries(2)+1) + margin.
+	RAGTimeout time.Duration
+	// Flag-gated cutover: false (default) relays POST /query to Python exactly
+	// as today; true serves it natively via handleCompleteQuery. Flip is an
+	// env change + restart, instantly reversible.
+	GONativeQuery bool
 }
 
 // envBool mirrors pydantic's bool coercion for the subset of spellings that
@@ -137,6 +162,35 @@ func ConfigFromEnv() (Config, error) {
 		}
 		cfg.RefusalScoreThreshold = f
 	}
+
+	// -- step-5 CompleteQuery (PR B) --
+	cfg.RateLimitPerMinute = 30
+	if v := strings.TrimSpace(os.Getenv("RATE_LIMIT_PER_MINUTE")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("env RATE_LIMIT_PER_MINUTE: %q is not an integer", v)
+		}
+		cfg.RateLimitPerMinute = n
+	}
+	cfg.InternalRAGURL = envOrDefault("INTERNAL_RAG_URL", "")
+	if cfg.InternalRAGURL == "" {
+		cfg.InternalRAGURL = envOrDefault("UPSTREAM_URL", "http://127.0.0.1:8000")
+	}
+	cfg.InternalRAGToken = os.Getenv("INTERNAL_RAG_TOKEN")
+	cfg.RAGTimeout = 240 * time.Second
+	if v := strings.TrimSpace(os.Getenv("RAG_TIMEOUT_S")); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || !(f > 0.0) {
+			return Config{}, fmt.Errorf("env RAG_TIMEOUT_S must be a positive number of seconds, got %q", v)
+		}
+		cfg.RAGTimeout = time.Duration(f * float64(time.Second))
+	}
+	nativeQuery, err := envBool("GO_NATIVE_QUERY", false)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.GONativeQuery = nativeQuery
+
 	return cfg, nil
 }
 

@@ -33,6 +33,11 @@ func (s *Server) Routes() map[string]http.Handler {
 		"POST /products":                http.HandlerFunc(s.handleCreateProduct),
 		"DELETE /products/{product_id}": http.HandlerFunc(s.handleDeleteProduct),
 	}
+	if s.cfg.GONativeQuery {
+		// Step-5 cutover: serve POST /query natively. OFF (default) leaves
+		// /query (and /query/stream) relayed to Python exactly as today.
+		routes["POST /query"] = http.HandlerFunc(s.handleCompleteQuery)
+	}
 	out := make(map[string]http.Handler, len(routes)*2)
 	seenPaths := map[string]bool{}
 	for pattern, h := range routes {
@@ -57,7 +62,7 @@ func (s *Server) Routes() map[string]http.Handler {
 	// deleted (2026-07-21): PUT/GET /feedback -> POST; POST/DELETE /settings
 	// -> GET; PUT/PATCH /products -> GET; GET/POST/PATCH /products/{id} ->
 	// DELETE.
-	for path, allow := range map[string]string{
+	allow405 := map[string]string{
 		"/auth/login":    "POST",
 		"/auth/logout":   "POST",
 		"/auth/me":       "GET",
@@ -68,9 +73,25 @@ func (s *Server) Routes() map[string]http.Handler {
 		"/settings":              "GET",
 		"/products":              "GET",
 		"/products/{product_id}": "DELETE",
-	} {
+	}
+	if s.cfg.GONativeQuery {
+		// Only when Go owns POST /query: other methods on it 405. With the flag
+		// off, /query has no native handler, so every method must relay.
+		allow405["/query"] = "POST"
+	}
+	for path, allow := range allow405 {
 		out[path] = s.corsSimple(methodNotAllowed(allow))
 	}
+
+	// The internal RAG compute endpoint lives on the Python app and Go reaches
+	// it DIRECTLY (ragclient), never through this public proxy. Block the whole
+	// /internal/ subtree with a 404, UNCONDITIONALLY (independent of
+	// GO_NATIVE_QUERY) so it is never publicly relayable the moment Python ships
+	// the endpoint. The subtree pattern outranks the "/" relay catch-all.
+	out["/internal/"] = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeDetail(w, http.StatusNotFound, "Not Found")
+	})
+
 	return out
 }
 
