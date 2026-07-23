@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from config.settings import get_settings
@@ -32,7 +33,11 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlmodel import Field, SQLModel
 
 from regwatch.common.logging import get_logger
-from regwatch.process.embedder import get_embedding_provider
+from regwatch.process.embedder import (
+    Qwen3EmbeddingProvider,
+    get_embedding_provider,
+    get_embedding_provider_for_profile,
+)
 
 log = get_logger(__name__)
 
@@ -244,14 +249,38 @@ def _enable_chunk_rls(engine: Engine) -> None:
 
 
 def assert_embedding_provider_dim() -> None:
-    """K6 fail-fast: provider dim must match the chunk table's vector(1536)."""
+    """Fail closed on mixed legacy geometry or an unsafe profile promotion."""
+    settings = get_settings()
+    active_profile_id = (settings.active_embedding_profile or "legacy").strip()
     provider = get_embedding_provider()
-    if int(provider.dim) != EMBEDDING_DIM:
+    if active_profile_id == "legacy" and isinstance(provider, Qwen3EmbeddingProvider):
+        raise RuntimeError(
+            "Qwen3 cannot write directly into the unversioned legacy vector space. "
+            "Register/backfill a named embedding profile, then set "
+            "ACTIVE_EMBEDDING_PROFILE to that profile ID."
+        )
+    # A legacy provider remains useful during a profile rollout because it
+    # keeps rollback vectors current.  Once Qwen is the global provider and a
+    # named profile is active, ingest stores NULL in the legacy vector column
+    # instead of mixing Qwen vectors into the old space.
+    if not isinstance(provider, Qwen3EmbeddingProvider) and int(provider.dim) != EMBEDDING_DIM:
         raise RuntimeError(
             f"EMBEDDING_PROVIDER={provider.name!r} produces {provider.dim}-dim vectors, "
             f"but the Postgres chunk table stores vector({EMBEDDING_DIM}). "
             "Set EMBEDDING_PROVIDER=openai (text-embedding-3-small) in Postgres mode."
         )
+    if active_profile_id != "legacy":
+        from regwatch.store.embedding_profiles import assert_profile_ready_for_activation
+
+        profile = assert_profile_ready_for_activation(active_profile_id)
+        get_embedding_provider_for_profile(profile)
+
+    shadow_profile_id = (settings.embedding_shadow_profile or "").strip()
+    if shadow_profile_id and shadow_profile_id != active_profile_id:
+        from regwatch.store.embedding_profiles import get_embedding_profile
+
+        shadow_profile = get_embedding_profile(shadow_profile_id)
+        get_embedding_provider_for_profile(shadow_profile)
 
 
 def _ensure_ready() -> None:
@@ -273,6 +302,11 @@ def reset_for_tests() -> None:
     _engine = None
     _schema_ready = False
     _metadata_values_cache.clear()
+    # The additive profile store shares this engine/schema lifecycle but keeps
+    # its own lazy-ready bit to avoid import cycles at module load.
+    from regwatch.store import embedding_profiles
+
+    embedding_profiles.reset_for_tests()
 
 
 def _validate_embedding(embedding: list[float]) -> None:
@@ -328,7 +362,7 @@ def _short_name(meta: dict[str, Any]) -> str:
 
 def add_chunks(
     ids: list[str],
-    embeddings: list[list[float]],
+    embeddings: Sequence[list[float] | None],
     documents: list[str],
     metadatas: list[dict[str, Any]],
     *,
@@ -354,7 +388,8 @@ def add_chunks(
     for chunk_id, embedding, document, meta in zip(
         ids, embeddings, documents, metadatas, strict=True
     ):
-        _validate_embedding(embedding)
+        if embedding is not None:
+            _validate_embedding(embedding)
         meta = meta or {}
         rows.append(
             {
@@ -371,7 +406,7 @@ def add_chunks(
                 "appl_no": _as_text(meta.get("appl_no")),
                 "short_name": _short_name(meta),
                 "text": document,
-                "embedding": _vector_literal(embedding),
+                "embedding": _vector_literal(embedding) if embedding is not None else None,
             }
         )
     _ensure_ready()
@@ -411,10 +446,18 @@ def delete_chunks_for_doc_except_version(doc_id: int, keep_version_id: int) -> i
 
 
 def _append_condition(
-    column: str, value: object, conditions: list[str], params: dict[str, Any]
+    column: str,
+    value: object,
+    conditions: list[str],
+    params: dict[str, Any],
+    *,
+    table_alias: str = "",
 ) -> None:
     if column not in _FILTERABLE_COLUMNS:
         raise ValueError(f"unsupported chunk filter field: {column!r}")
+    if table_alias not in {"", "c"}:
+        raise ValueError(f"unsupported chunk table alias: {table_alias!r}")
+    sql_column = f"{table_alias}.{column}" if table_alias else column
 
     def coerce(v: object) -> object:
         # Match the bound value to the column's declared type, mirroring the
@@ -427,7 +470,7 @@ def _append_condition(
         ops = set(value)
         if ops == {"$eq"}:
             param = f"p{len(params)}"
-            conditions.append(f"{column} = :{param}")
+            conditions.append(f"{sql_column} = :{param}")
             params[param] = coerce(value["$eq"])
             return
         if ops == {"$in"}:
@@ -438,16 +481,22 @@ def _append_condition(
                 conditions.append("FALSE")
                 return
             param = f"p{len(params)}"
-            conditions.append(f"{column} = ANY(:{param})")
+            conditions.append(f"{sql_column} = ANY(:{param})")
             params[param] = [coerce(x) for x in seq]
             return
         raise ValueError(f"unsupported filter operator(s) {ops!r} for {column!r}")
     param = f"p{len(params)}"
-    conditions.append(f"{column} = :{param}")
+    conditions.append(f"{sql_column} = :{param}")
     params[param] = coerce(value)
 
 
-def _parse_where(node: dict[str, Any], conditions: list[str], params: dict[str, Any]) -> None:
+def _parse_where(
+    node: dict[str, Any],
+    conditions: list[str],
+    params: dict[str, Any],
+    *,
+    table_alias: str = "",
+) -> None:
     for key, value in node.items():
         if key == "$and":
             if not isinstance(value, list):
@@ -455,19 +504,23 @@ def _parse_where(node: dict[str, Any], conditions: list[str], params: dict[str, 
             for sub in value:
                 if not isinstance(sub, dict):
                     raise ValueError("$and clauses must be dicts")
-                _parse_where(sub, conditions, params)
+                _parse_where(sub, conditions, params, table_alias=table_alias)
         elif key.startswith("$"):
             raise ValueError(f"unsupported where operator: {key!r}")
         else:
-            _append_condition(key, value, conditions, params)
+            _append_condition(key, value, conditions, params, table_alias=table_alias)
 
 
-def _where_clause(where: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
+def _where_clause(
+    where: dict[str, Any] | None,
+    *,
+    table_alias: str = "",
+) -> tuple[str, dict[str, Any]]:
     """Chroma-style `where` ({field: {"$eq"/"$in": ...}}, "$and") → SQL."""
     conditions: list[str] = []
     params: dict[str, Any] = {}
     if where:
-        _parse_where(where, conditions, params)
+        _parse_where(where, conditions, params, table_alias=table_alias)
     if not conditions:
         return "", params
     return " WHERE " + " AND ".join(conditions), params
@@ -489,6 +542,8 @@ def similarity_search(
     _ensure_ready()
 
     clause, params = _where_clause(where)
+    filtered = bool(clause)
+    clause = f"{clause} AND embedding IS NOT NULL" if clause else " WHERE embedding IS NOT NULL"
     params["qvec"] = _vector_literal(query_embedding)
     params["k"] = int(k)
     select_cols = ", ".join(("id", "text", *_METADATA_COLUMNS))
@@ -498,7 +553,7 @@ def similarity_search(
         "ORDER BY embedding <=> CAST(:qvec AS vector) LIMIT :k"
     )
     with get_engine().begin() as conn:
-        if clause:
+        if filtered:
             # K5 filtered mode: exact scan over the WHERE-narrowed set. The
             # HNSW index applies metadata filters *after* the approximate
             # scan and can silently drop matches, so disable index scans

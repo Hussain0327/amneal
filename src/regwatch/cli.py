@@ -146,8 +146,13 @@ def cmd_status() -> None:
     rprint(
         {
             "embedding_provider": s.embedding_provider,
+            "active_embedding_profile": s.active_embedding_profile,
+            "embedding_shadow_profile": s.embedding_shadow_profile,
+            "qwen_embedding_model": s.qwen_embedding_model,
+            "qwen_embedding_dimension": s.qwen_embedding_dimension,
             "llm_provider": s.llm_provider,
             "llm_model": s.llm_model,
+            "databricks_llm_model": s.databricks_llm_model,
             "data_dir": str(s.data_dir),
             "database": "postgres" if s.database_url else "UNSET (refuses to boot)",
             "retrieval_top_k": s.retrieval_top_k,
@@ -155,6 +160,176 @@ def cmd_status() -> None:
             "company_name": s.company_name,
         }
     )
+
+
+@app.command("embedding-profile-register")
+def cmd_embedding_profile_register(
+    serving_runtime_version: str = typer.Option(
+        ...,
+        "--serving-runtime-version",
+        help="Immutable serving runtime/deployment version, e.g. vllm-0.10.2.",
+    ),
+    provider: str = typer.Option("qwen3", "--provider"),
+    model: str = typer.Option("", "--model", help="Defaults to QWEN_EMBEDDING_MODEL."),
+    revision: str = typer.Option("", "--revision", help="Defaults to QWEN_EMBEDDING_REVISION."),
+    dimension: int = typer.Option(
+        0,
+        "--dimension",
+        help="Defaults to QWEN_EMBEDDING_DIMENSION.",
+    ),
+    dtype: str = typer.Option("float32", "--dtype"),
+    normalization: str = typer.Option("l2", "--normalization"),
+    preprocessing_version: str = typer.Option("", "--preprocessing-version"),
+    chunking_version: str = typer.Option("", "--chunking-version"),
+) -> None:
+    """Register one immutable Qwen embedding profile and print its ID."""
+    from dataclasses import asdict
+
+    from regwatch.process.chunker import CHUNKING_VERSION
+    from regwatch.process.embedder import QWEN3_DOCUMENT_PREPROCESSING_VERSION
+    from regwatch.store.embedding_profiles import EmbeddingProfileSpec
+    from regwatch.store.vector_store import register_embedding_profile
+
+    settings = get_settings()
+    spec = EmbeddingProfileSpec(
+        provider=provider,
+        model=model or settings.qwen_embedding_model,
+        revision=revision or settings.qwen_embedding_revision,
+        dimension=dimension or settings.qwen_embedding_dimension,
+        dtype=dtype,
+        normalization=normalization,
+        query_instruction_version=settings.qwen_embedding_query_instruction_version,
+        preprocessing_version=(preprocessing_version or QWEN3_DOCUMENT_PREPROCESSING_VERSION),
+        chunking_version=chunking_version or CHUNKING_VERSION,
+        serving_runtime_version=serving_runtime_version,
+    )
+    init_db()
+    profile = register_embedding_profile(spec)
+    rprint({"profile": asdict(profile)})
+
+
+@app.command("embedding-profile-list")
+def cmd_embedding_profile_list() -> None:
+    """List immutable embedding profiles."""
+    from dataclasses import asdict
+
+    from regwatch.store.vector_store import list_embedding_profiles
+
+    init_db()
+    profiles = [asdict(profile) for profile in list_embedding_profiles()]
+    rprint({"count": len(profiles), "profiles": profiles})
+
+
+@app.command("embedding-profile-coverage")
+def cmd_embedding_profile_coverage(profile_id: str = typer.Argument(...)) -> None:
+    """Show durable backfill coverage for one profile."""
+    from dataclasses import asdict
+
+    from regwatch.store.vector_store import (
+        profile_embedding_coverage,
+        profile_hnsw_index_ready,
+    )
+
+    init_db()
+    coverage = profile_embedding_coverage(profile_id)
+    rprint(
+        {
+            **asdict(coverage),
+            "pending_chunks": coverage.pending_chunks,
+            "complete": coverage.complete,
+            "index_ready": profile_hnsw_index_ready(profile_id),
+        }
+    )
+
+
+@app.command("embedding-profile-backfill")
+def cmd_embedding_profile_backfill(
+    profile_id: str = typer.Argument(...),
+    batch_size: int = typer.Option(
+        128,
+        "--batch-size",
+        min=1,
+        max=512,
+        help="Chunks per durable checkpoint.",
+    ),
+    limit: int = typer.Option(
+        0,
+        "--limit",
+        min=0,
+        help="Maximum chunks this run; 0 means all pending chunks.",
+    ),
+) -> None:
+    """Backfill pending chunks with durable, resumable checkpoints."""
+    from dataclasses import asdict
+
+    from regwatch.process.embedder import (
+        embed_documents,
+        get_embedding_provider_for_profile,
+    )
+    from regwatch.store.vector_store import (
+        get_embedding_profile,
+        pending_profile_chunks,
+        profile_embedding_coverage,
+        upsert_profile_embeddings,
+    )
+
+    init_db()
+    profile = get_embedding_profile(profile_id)
+    provider = get_embedding_provider_for_profile(profile)
+    processed = 0
+    while limit == 0 or processed < limit:
+        page_size = batch_size if limit == 0 else min(batch_size, limit - processed)
+        pending = pending_profile_chunks(profile_id, limit=page_size)
+        if not pending:
+            break
+        embeddings = embed_documents(provider, [chunk.text for chunk in pending])
+        upsert_profile_embeddings(
+            profile_id,
+            [chunk.chunk_id for chunk in pending],
+            embeddings,
+            [chunk.content_hash for chunk in pending],
+        )
+        processed += len(pending)
+        rprint({"profile_id": profile_id, "embedded_this_run": processed})
+
+    coverage = profile_embedding_coverage(profile_id)
+    rprint(
+        {
+            "processed": processed,
+            "coverage": asdict(coverage),
+            "pending_chunks": coverage.pending_chunks,
+            "complete": coverage.complete,
+        }
+    )
+
+
+@app.command("embedding-profile-index")
+def cmd_embedding_profile_index(
+    profile_id: str = typer.Argument(...),
+    concurrently: bool = typer.Option(
+        True,
+        "--concurrently/--no-concurrently",
+        help="Use a lock-safe concurrent production index build.",
+    ),
+) -> None:
+    """Build or verify the profile-specific HNSW index."""
+    from dataclasses import asdict
+
+    from regwatch.store.vector_store import (
+        ensure_profile_hnsw_index,
+        profile_embedding_coverage,
+    )
+
+    init_db()
+    coverage = profile_embedding_coverage(profile_id)
+    if not coverage.complete:
+        rprint(
+            f"[yellow]warning[/yellow] profile is incomplete "
+            f"({coverage.embedded_chunks}/{coverage.total_chunks}); "
+            "it cannot be activated yet"
+        )
+    index = ensure_profile_hnsw_index(profile_id, concurrently=concurrently)
+    rprint({"index": asdict(index)})
 
 
 def _prompt_password() -> str:

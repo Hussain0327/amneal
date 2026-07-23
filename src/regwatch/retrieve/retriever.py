@@ -16,10 +16,20 @@ from config.settings import get_settings
 from sqlalchemy import desc, func, inspect
 from sqlmodel import col, select
 
-from regwatch.process.embedder import get_embedding_provider
+from regwatch.process.embedder import (
+    embed_query,
+    get_embedding_provider,
+    get_embedding_provider_for_profile,
+)
 from regwatch.store.db import get_engine, session_scope
 from regwatch.store.models import PsgDocument, PsgVersion
-from regwatch.store.vector_store import Hit, distinct_metadata_values, similarity_search
+from regwatch.store.vector_store import (
+    Hit,
+    distinct_metadata_values,
+    get_embedding_profile,
+    similarity_search,
+    similarity_search_profile,
+)
 
 
 @dataclass
@@ -193,8 +203,13 @@ def retrieve(
     k = k if k is not None else s.vector_top_k
     if k <= 0:
         return []
-    embedder = get_embedding_provider()
-    qv = embedder.embed([query])[0]
+    profile_id = (s.active_embedding_profile or "legacy").strip()
+    if profile_id == "legacy":
+        embedder = get_embedding_provider()
+    else:
+        profile = get_embedding_profile(profile_id)
+        embedder = get_embedding_provider_for_profile(profile)
+    qv = embed_query(embedder, query)
     filters = _fold_filter_casing(filters)
     where = _build_where(filters)
     # An explicit version_id filter (internal callers only -- the API whitelists
@@ -206,7 +221,10 @@ def retrieve(
             if not current_version_ids:
                 return []
             where = _and_where(where, {"version_id": {"$in": current_version_ids}})
-    hits: list[Hit] = similarity_search(qv, k=k, where=where)
+    if profile_id == "legacy":
+        hits: list[Hit] = similarity_search(qv, k=k, where=where)
+    else:
+        hits = similarity_search_profile(profile_id, qv, k=k, where=where)
 
     passages: list[RetrievedPassage] = []
     for h in hits:

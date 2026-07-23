@@ -263,6 +263,10 @@ def _llm_key_present(s: Settings) -> bool:
         return bool(s.openai_api_key)
     if s.llm_provider == "anthropic":
         return bool(s.anthropic_api_key)
+    if s.llm_provider == "databricks":
+        # Both values are required to construct the private OpenAI-compatible
+        # client. Do not expose either value; health reports only this boolean.
+        return bool(s.databricks_llm_base_url and s.databricks_llm_token)
     return True  # echo needs no key
 
 

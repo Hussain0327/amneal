@@ -34,6 +34,37 @@ class Settings(BaseSettings):
     # ---------- Providers ----------
     embedding_provider: str = "local-bge-small"
     llm_provider: str = "openai"
+    # Private Qwen3 embedding endpoint. This is deliberately a separate
+    # OpenAI-compatible client from the LLM client: pointing the shared OpenAI
+    # base URL at Databricks would also misroute generation requests.
+    qwen_embedding_base_url: str | None = None
+    qwen_embedding_token: str | None = None
+    qwen_embedding_model: str = "Qwen/Qwen3-Embedding-4B"
+    # Qwen3-Embedding-4B is natively 2560-dimensional. Regwatch starts with an
+    # explicit 1536-dimensional Matryoshka profile so it can be evaluated
+    # against the existing pgvector shape; this is not the model's default.
+    qwen_embedding_dimension: int = 1536
+    qwen_embedding_batch_size: int = 128
+    qwen_embedding_query_instruction: str = (
+        "Given a pharmaceutical regulatory question, retrieve FDA "
+        "product-specific guidance passages containing the evidence needed to answer it."
+    )
+    qwen_embedding_query_instruction_version: str = "regwatch-regulatory-retrieval-v1"
+    qwen_embedding_revision: str = "5cf2132abc99cad020ac570b19d031efec650f2b"
+    # "legacy" keeps the existing chunk.embedding path. A non-legacy profile
+    # must already have complete coverage and a compatible index before it can
+    # be selected. The optional shadow profile is dual-written/backfilled but
+    # never serves user retrieval until explicitly promoted.
+    active_embedding_profile: str = "legacy"
+    embedding_shadow_profile: str | None = None
+
+    # Private Databricks Chat Completions endpoint serving Gemma. Thinking is a
+    # runtime mode, not a different checkpoint. The provider enforces that it is
+    # eligible only for the synthesizer role and strips reasoning from outputs.
+    databricks_llm_base_url: str | None = None
+    databricks_llm_token: str | None = None
+    databricks_llm_model: str = "google/gemma-4-31B-it"
+    gemma_thinking_enabled: bool = False
     # OpenAI call surface: "responses" (default, GPT-5.x native) or "chat" (legacy
     # Chat Completions). The LLMProvider.complete() interface is identical either way.
     openai_api_mode: str = "responses"
@@ -58,6 +89,36 @@ class Settings(BaseSettings):
     allow_test_providers: bool = Field(
         default=False, validation_alias="REGWATCH_ALLOW_TEST_PROVIDERS"
     )
+
+    @field_validator(
+        "qwen_embedding_base_url",
+        "qwen_embedding_token",
+        "databricks_llm_base_url",
+        "databricks_llm_token",
+        "embedding_shadow_profile",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_optional_provider_value(cls, v: object) -> str | None:
+        """Whitespace-only endpoint settings are equivalent to unset."""
+        if v is None:
+            return None
+        value = str(v).strip()
+        return value or None
+
+    @field_validator("qwen_embedding_dimension")
+    @classmethod
+    def _check_qwen_embedding_dimension(cls, v: int) -> int:
+        if not 32 <= v <= 2560:
+            raise ValueError("QWEN_EMBEDDING_DIMENSION must be in [32, 2560]")
+        return v
+
+    @field_validator("qwen_embedding_batch_size")
+    @classmethod
+    def _check_qwen_embedding_batch_size(cls, v: int) -> int:
+        if not 1 <= v <= 512:
+            raise ValueError("QWEN_EMBEDDING_BATCH_SIZE must be in [1, 512]")
+        return v
 
     # ---------- LLM pricing (H3) ----------
     # USD per 1M tokens, keyed by model name. Env-overridable as JSON, e.g.
