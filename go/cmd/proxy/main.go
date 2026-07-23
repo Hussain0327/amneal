@@ -23,12 +23,12 @@ func main() {
 	if err != nil {
 		logger.Fatal(err)
 	}
-	native, err := nativeRoutes(logger)
+	native, preRelay, err := nativeRoutes(logger)
 	if err != nil {
 		logger.Fatal(err)
 	}
 	logger.Printf("listening on %s, upstream %s, native routes: %d", cfg.Addr, cfg.Upstream, len(native))
-	if err := proxy.Serve(cfg.Addr, proxy.NewHandlerWithNative(cfg.Upstream, logger, native), logger); err != nil {
+	if err := proxy.Serve(cfg.Addr, proxy.NewHandlerWithPreRelay(cfg.Upstream, logger, native, preRelay), logger); err != nil {
 		logger.Fatal(err)
 	}
 }
@@ -41,22 +41,22 @@ func main() {
 // app already honors: fail loudly when required (prod sets "true" app-wide,
 // fly.toml [env]), otherwise WARN and serve relay-only so a local relay-only
 // proxy still runs.
-func nativeRoutes(logger *log.Logger) (map[string]http.Handler, error) {
+func nativeRoutes(logger *log.Logger) (map[string]http.Handler, func(http.ResponseWriter, *http.Request) bool, error) {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		required, err := api.EnvBool("REQUIRE_DATABASE_URL", false)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if required {
-			return nil, errors.New("REQUIRE_DATABASE_URL is set but DATABASE_URL is empty; refusing to serve auth without a session store")
+			return nil, nil, errors.New("REQUIRE_DATABASE_URL is set but DATABASE_URL is empty; refusing to serve auth without a session store")
 		}
 		logger.Printf("WARNING: DATABASE_URL unset -- native auth/session routes DISABLED, relaying everything upstream")
-		return nil, nil
+		return nil, nil, nil
 	}
 	apiCfg, err := api.ConfigFromEnv()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if apiCfg.Insecure {
 		// Python parity: the app group WARNS and serves on this misconfig;
@@ -66,7 +66,15 @@ func nativeRoutes(logger *log.Logger) (map[string]http.Handler, error) {
 	}
 	pool, err := store.NewPool(context.Background(), dbURL)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return api.NewServer(pool, apiCfg, logger).Routes(), nil
+	server := api.NewServer(pool, apiCfg, logger)
+	// The step-5 StreamGate runs only when Go owns the query path: it gates
+	// POST /query/stream (401/429) before relaying. With the flag off, both
+	// /query and /query/stream relay to Python exactly as today.
+	var preRelay func(http.ResponseWriter, *http.Request) bool
+	if apiCfg.GONativeQuery {
+		preRelay = server.StreamGate
+	}
+	return server.Routes(), preRelay, nil
 }

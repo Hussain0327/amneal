@@ -1,16 +1,22 @@
-"""S14-S16: the R1 headline -- failure still leaves a DEFINED audit trail.
+"""S14-S16 + S24-S26: the R1 headline -- failure still leaves a DEFINED audit
+trail, now across the Go/Python CompleteQuery boundary (step-5 PR B).
 
 S14 kills the provider (real openai SDK against a reserved closed port),
 S15 fails only the strict answer-path audit write (conditional Postgres
-trigger), S16 takes the audit store fully down (unconditional trigger). In
-every case the wire response is a 200 with a defined payload -- never a
-naked 500 -- and the query_log state is exactly what the contract defines.
+trigger), S16 takes the audit store fully down on a skip-tolerant branch
+(unconditional trigger). In every case the wire response is a 200 with a
+defined payload -- never a naked 500 -- and the query_log state is exactly
+what the contract defines.
 
-Deliberately NOT tested in PR A: the known INV-6 gap where an UNEXPECTED
-raise in retrieve()/resolver escapes ask() as an unaudited 500
-(docs/REFACTOR_BACKLOG_2026-07-09.md item 17). Pinning today's buggy
-behavior would make the fix look like a regression; PR B's CompleteQuery
-closes the gap and this suite gains the scenario then.
+PR B adds the three paths the cutover introduces or finally closes:
+S24 forces an UNEXPECTED raise inside retrieve() -- the INV-6 gap that used
+to escape ask() as an unaudited 500 (docs/REFACTOR_BACKLOG_2026-07-09.md
+item 17); compute_turn's audited-error boundary now yields one pipeline_error
+row. S25 makes the Go control plane unable to reach the Python core at all
+(ragclient dial refused) -- Go synthesizes one upstream_error row. S26 is the
+answer path (allow_skip=False) under a TOTAL audit outage: the strict write
+AND its fixed-copy fallback both fail, degrading to the audit_id=-1 sentinel
+with the answer withheld -- the path the single-txn draft left undefined.
 """
 
 from __future__ import annotations
@@ -141,4 +147,115 @@ def test_s16_audit_fully_down_degrades_to_sentinel_not_500(
     # the best-effort assistant message commits carrying the -1 sentinel.
     messages = chat_messages_for_turn(payload["turn_id"])
     assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert messages[1]["audit_id"] == -1
+
+
+def test_s24_pipeline_error_is_audited_not_a_naked_500(
+    fault_retrieve_stack: Stack, edge_login: Callable[..., EdgeClient]
+) -> None:
+    """The INV-6 gap PR B closes: an UNEXPECTED raise inside retrieve() (after
+    the product resolves) used to escape ask() as an unaudited 500. compute_turn
+    now catches it and returns a defined status="error"/pipeline_error turn, so
+    the control plane writes exactly one audit row -- with EMPTY retrieval (the
+    crash preceded any evidence) and NULL tokens (no LLM call)."""
+    seed_answerable_corpus()  # resolution must succeed so retrieve() is reached
+    client = edge_login(fault_retrieve_stack)
+
+    response = client.http.post("/query", json={"question": ANSWERABLE_QUESTION})
+    assert response.status_code == 200, "a pipeline crash must never surface as a 500"
+    payload = response.json()
+    assert payload["status"] == "error"
+    assert payload["refused"] is True
+    assert payload["reason"] == "pipeline_error"
+    assert payload["answer"] == SERVICE_UNAVAILABLE_TEXT
+    assert payload["citations"] == []
+    # No exception/internal text may leak into the wire body.
+    assert "RuntimeError" not in response.text
+    assert "REGWATCH_FAULT_INJECT" not in response.text
+
+    assert query_log_count() == 1
+    row = latest_query_log_row()
+    assert row["id"] == payload["audit_id"]
+    assert row["status"] == "error"
+    assert row["refused"] is True
+    assert row["route_json"]["reason"] == "pipeline_error"
+    assert row["retrieved_json"] == [], "the crash preceded retrieval; no evidence audited"
+    assert row["input_tokens"] is None
+    assert row["output_tokens"] is None
+
+    messages = chat_messages_for_turn(payload["turn_id"])
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert messages[1]["status"] == "error"
+    assert messages[1]["audit_id"] == payload["audit_id"]
+
+
+def test_s25_dead_internal_core_synthesizes_upstream_error(
+    dead_internal_stack: Stack, edge_login: Callable[..., EdgeClient]
+) -> None:
+    """The Go control plane cannot reach the Python RAG core at all (ragclient
+    dial refused on the reserved closed port). Rather than 502, Go SYNTHESIZES a
+    defined upstream_error turn and audits it: one row, empty retrieval, NULL
+    tokens, the SERVICE_UNAVAILABLE answer -- INV-6 holds even when the core is
+    down."""
+    client = edge_login(dead_internal_stack)
+
+    response = client.http.post("/query", json={"question": ANSWERABLE_QUESTION})
+    assert response.status_code == 200, "a dead core must never surface as a 502/500"
+    payload = response.json()
+    assert payload["status"] == "error"
+    assert payload["refused"] is True
+    assert payload["reason"] == "upstream_error"
+    assert payload["answer"] == SERVICE_UNAVAILABLE_TEXT
+    assert payload["citations"] == []
+    assert payload["audit_id"] > 0, "the skip-tolerant synthesized row is a REAL committed row"
+
+    assert query_log_count() == 1
+    row = latest_query_log_row()
+    assert row["id"] == payload["audit_id"]
+    assert row["status"] == "error"
+    assert row["refused"] is True
+    assert row["route_json"]["reason"] == "upstream_error"
+    assert row["retrieved_json"] == []
+    assert row["input_tokens"] is None
+    assert row["output_tokens"] is None
+
+    messages = chat_messages_for_turn(payload["turn_id"])
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert messages[1]["status"] == "error"
+    assert messages[1]["audit_id"] == payload["audit_id"]
+
+
+def test_s26_answer_path_total_audit_outage_withholds_and_sentinels(
+    base_stack: Stack, edge_login: Callable[..., EdgeClient]
+) -> None:
+    """The answer path (allow_skip=False) under a TOTAL audit outage: the strict
+    write fails AND its fixed-copy fallback write ALSO fails (unconditional
+    trigger). The paid answer is withheld, the failure degrades to the
+    audit_id=-1 sentinel writing NOTHING -- never a naked 500, never an
+    unaudited answer. This is the path the single-transaction draft left
+    undefined; audit-first isolated writes make the chat rows survive anyway."""
+    seed_answerable_corpus()
+    client = edge_login(base_stack)
+
+    with audit_boom_trigger():  # UNCONDITIONAL: both the strict AND fallback writes fail
+        response = client.http.post("/query", json={"question": ANSWERABLE_QUESTION})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "error"
+    assert payload["refused"] is True
+    assert payload["reason"] == "audit_error"
+    assert payload["answer"] == SERVICE_UNAVAILABLE_TEXT
+    assert payload["citations"] == []
+    # The validated answer and its citations must never leak when unaudited.
+    assert "ECHO:" not in response.text
+    assert "PSG_020503" not in payload["answer"]
+    assert payload["audit_id"] == -1, "both writes failed -> the sentinel, answer withheld"
+    assert query_log_count() == 0, "the defined failure: no row, not a half-row"
+
+    # The audit-first isolated writes keep the chat rows even though query_log is
+    # fully down: T1 (user) and T3 (assistant, -1) both commit on their own conns.
+    messages = chat_messages_for_turn(payload["turn_id"])
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert messages[1]["status"] == "error"
     assert messages[1]["audit_id"] == -1

@@ -82,6 +82,12 @@ SERVICE_UNAVAILABLE_TEXT = (
     "not answered \u2014 please try again in a moment."
 )
 
+# Shared secret the harness sets on BOTH the uvicorn app (the compute endpoint's
+# X-Internal-Token guard) and the Go proxy (the ragclient), so the native
+# /query -> POST /internal/query/compute call authenticates. Any fixed value
+# works; the endpoint fail-closes (404) when it is unset/mismatched.
+_INTERNAL_RAG_TOKEN = "contract-internal-rag-token"  # test-only, not a real secret
+
 # Shape pins (key SETS, not just parse-ability) -- a dropped or renamed key in
 # the Go rewrite would pass any status-code test and break clients silently.
 QUERY_RESPONSE_KEYS = frozenset(
@@ -519,6 +525,14 @@ _FLAVOR_OVERRIDES: dict[str, dict[str, str]] = {
     # (S23). Fenced from prod by the REGWATCH_ALLOW_TEST_PROVIDERS boot guard
     # like echo itself.
     "forced_refusal": {"REGWATCH_ECHO_FORCE_REFUSAL": "1"},
+    # S24: force an UNEXPECTED raise inside retrieve() (fenced by the same
+    # allow-test-providers guard) so the step-5 compute_turn audited-error
+    # boundary must turn it into exactly one status="error"/pipeline_error row.
+    "fault_retrieve": {"REGWATCH_FAULT_INJECT": "retrieve"},
+    # S25: uvicorn is a healthy base, but the proxy's INTERNAL_RAG_URL is
+    # pointed at the reserved closed port (in _boot), so native /query cannot
+    # reach the compute endpoint and Go synthesizes an upstream_error row.
+    "dead_internal": {},
 }
 
 # The relay has NO response timeout by design (a hung upstream would hang an
@@ -634,6 +648,10 @@ class Harness:
                 "REGWATCH_ALLOW_TEST_PROVIDERS": "1",
                 "RATE_LIMIT_PER_MINUTE": "0",
                 "REFUSAL_SCORE_THRESHOLD": "0.30",
+                # The compute endpoint's token guard -- must match the proxy's
+                # ragclient token (set on proxy_env in _boot) or every native
+                # /query would 404 into a synthesized upstream_error.
+                "INTERNAL_RAG_TOKEN": _INTERNAL_RAG_TOKEN,
                 # The app process caches the resolver's distinct-product set;
                 # this suite seeds from a SEPARATE process, so a near-zero TTL
                 # keeps the app reading fresh state each request.
@@ -682,12 +700,16 @@ class Harness:
 
     # -- stacks -------------------------------------------------------------
 
-    def stack(self, flavor: str) -> Stack:
-        if flavor not in self._stacks:
-            self._stacks[flavor] = self._boot(flavor)
-        return self._stacks[flavor]
+    def stack(self, flavor: str, *, native: bool = True) -> Stack:
+        # native=True (default) makes the proxy serve POST /query itself (the
+        # step-5 cutover under test); native=False relays it to Python (the
+        # Phase-0 / rollback path). Cached per (flavor, native) so both can boot.
+        key = f"{flavor}:native" if native else f"{flavor}:relay"
+        if key not in self._stacks:
+            self._stacks[key] = self._boot(flavor, native=native)
+        return self._stacks[key]
 
-    def _boot(self, flavor: str) -> Stack:
+    def _boot(self, flavor: str, *, native: bool = True) -> Stack:
         overrides = dict(_FLAVOR_OVERRIDES[flavor])
         if flavor == "dead_provider":
             # Connection-refused on a reserved closed port: deterministic,
@@ -718,8 +740,21 @@ class Harness:
                 # mirror -- keep the two runtimes agreeing per flavor.
                 "EMBEDDING_PROVIDER": uv_env["EMBEDDING_PROVIDER"],
                 "LLM_PROVIDER": uv_env["LLM_PROVIDER"],
+                # -- step-5 CompleteQuery --
+                # Native /query cutover flag (the thing under test).
+                "GO_NATIVE_QUERY": "true" if native else "false",
+                # ragclient token: MUST match the uvicorn INTERNAL_RAG_TOKEN, or
+                # the compute endpoint 404s and every turn upstream_errors.
+                "INTERNAL_RAG_TOKEN": _INTERNAL_RAG_TOKEN,
+                # Go is now the single rate-limit authority; mirror the flavor's
+                # uvicorn value (base default 0 = unlimited, rate_limited = 1).
+                "RATE_LIMIT_PER_MINUTE": overrides.get("RATE_LIMIT_PER_MINUTE", "0"),
             }
         )
+        if flavor == "dead_internal":
+            # Point the ragclient at the reserved CLOSED port: the compute call
+            # is refused, so native /query synthesizes an upstream_error (S25).
+            proxy_env["INTERNAL_RAG_URL"] = f"http://127.0.0.1:{self.closed_port}"
 
         # Everything from the FIRST resource on is inside one BaseException
         # guard: a raise anywhere in the boot window (the second log open, a
@@ -919,6 +954,24 @@ def rate_limited_stack(harness: Harness) -> Stack:
 @pytest.fixture
 def forced_refusal_stack(harness: Harness) -> Stack:
     return harness.stack("forced_refusal")
+
+
+@pytest.fixture
+def fault_retrieve_stack(harness: Harness) -> Stack:
+    return harness.stack("fault_retrieve")
+
+
+@pytest.fixture
+def dead_internal_stack(harness: Harness) -> Stack:
+    return harness.stack("dead_internal")
+
+
+@pytest.fixture
+def base_relay_stack(harness: Harness) -> Stack:
+    # The Phase-0 / rollback path: /query relayed to Python (GO_NATIVE_QUERY
+    # off). Proves the flag-off default still serves the query surface while the
+    # native path (every other stack) proves the cutover.
+    return harness.stack("base", native=False)
 
 
 @pytest.fixture(autouse=True)

@@ -11,6 +11,28 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const adoptNullOwnerSession = `-- name: AdoptNullOwnerSession :execrows
+UPDATE public.chat_session
+SET user_id = $2
+WHERE id = $1 AND user_id IS NULL
+`
+
+type AdoptNullOwnerSessionParams struct {
+	ID     string
+	UserID pgtype.Text
+}
+
+// AdoptNullOwnerSession claims a legacy unowned session for the caller in a
+// single conditional UPDATE: two requests racing on the same NULL-owner row
+// cannot both win (the loser affects 0 rows and re-reads the committed owner).
+func (q *Queries) AdoptNullOwnerSession(ctx context.Context, arg AdoptNullOwnerSessionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, adoptNullOwnerSession, arg.ID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const countChatMessagesForUser = `-- name: CountChatMessagesForUser :many
 SELECT cm.session_id,
        COUNT(*)::bigint AS message_count
@@ -73,6 +95,35 @@ func (q *Queries) DeleteChatSession(ctx context.Context, id string) (int64, erro
 	return result.RowsAffected(), nil
 }
 
+const getChatSessionByID = `-- name: GetChatSessionByID :one
+
+SELECT id, user_id, title, active_filters_json, created_at, updated_at FROM public.chat_session
+WHERE id = $1
+`
+
+// ---------------------------------------------------------------------------
+// Write surface for the step-5 Go CompleteQuery cutover (PR B). Ports the
+// persistence half of grounded_qa.ask()/_persist_turn/_apply_session_patch:
+// the user message (T1, pre-RAG), and the assistant message + filter carry-
+// over (T3, post-audit). Session upsert mirrors conversation.ensure_session.
+// ---------------------------------------------------------------------------
+// GetChatSessionByID reads a session row by id WITHOUT scoping to an owner, so
+// the CompleteQuery handler can reproduce _authorize_session_access: missing ->
+// proceed (create bound to caller); NULL owner -> adopt; foreign -> 404.
+func (q *Queries) GetChatSessionByID(ctx context.Context, id string) (ChatSession, error) {
+	row := q.db.QueryRow(ctx, getChatSessionByID, id)
+	var i ChatSession
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Title,
+		&i.ActiveFiltersJson,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getChatSessionOwned = `-- name: GetChatSessionOwned :one
 SELECT id, user_id, title, active_filters_json, created_at, updated_at FROM public.chat_session
 WHERE id = $1 AND user_id = $2
@@ -97,12 +148,86 @@ func (q *Queries) GetChatSessionOwned(ctx context.Context, arg GetChatSessionOwn
 	return i, err
 }
 
+const insertChatMessage = `-- name: InsertChatMessage :exec
+INSERT INTO public.chat_message (
+    id,
+    session_id,
+    turn_id,
+    role,
+    content,
+    status,
+    model_name,
+    audit_id,
+    reason,
+    interpretation,
+    filters_json,
+    citations_json,
+    clarify_json,
+    related_json,
+    metadata_json,
+    created_at
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+)
+`
+
+type InsertChatMessageParams struct {
+	ID             string
+	SessionID      string
+	TurnID         string
+	Role           string
+	Content        string
+	Status         pgtype.Text
+	ModelName      pgtype.Text
+	AuditID        pgtype.Int4
+	Reason         pgtype.Text
+	Interpretation pgtype.Text
+	FiltersJson    []byte
+	CitationsJson  []byte
+	ClarifyJson    []byte
+	RelatedJson    []byte
+	MetadataJson   []byte
+	CreatedAt      pgtype.Timestamp
+}
+
+// InsertChatMessage ports conversation.record_message: one user or assistant
+// turn. jsonb payloads (filters/citations/clarify/related/metadata) are written
+// VERBATIM as opaque bytes, exactly as the RAG core / request supplied them.
+func (q *Queries) InsertChatMessage(ctx context.Context, arg InsertChatMessageParams) error {
+	_, err := q.db.Exec(ctx, insertChatMessage,
+		arg.ID,
+		arg.SessionID,
+		arg.TurnID,
+		arg.Role,
+		arg.Content,
+		arg.Status,
+		arg.ModelName,
+		arg.AuditID,
+		arg.Reason,
+		arg.Interpretation,
+		arg.FiltersJson,
+		arg.CitationsJson,
+		arg.ClarifyJson,
+		arg.RelatedJson,
+		arg.MetadataJson,
+		arg.CreatedAt,
+	)
+	return err
+}
+
 const listChatMessages = `-- name: ListChatMessages :many
 SELECT id, session_id, turn_id, role, content, status, model_name, audit_id, reason, interpretation, filters_json, citations_json, clarify_json, related_json, metadata_json, created_at FROM public.chat_message
 WHERE session_id = $1
-ORDER BY created_at ASC
+ORDER BY created_at ASC, role DESC
 `
 
+// ORDER BY created_at ASC, role DESC: created_at is the primary key of turn
+// order. The role DESC secondary is a DEFENSIVE tiebreaker for the step-5 Go
+// CompleteQuery writer, where the user (pre-RAG) and assistant (post-RAG)
+// messages of one turn are stamped by the same control plane and could, on a
+// clock that does not advance a microsecond across the RAG round-trip, share a
+// created_at. 'user' > 'assistant' lexically, so DESC keeps the question ahead
+// of its answer for equal timestamps (S17). Distinct timestamps are unaffected.
 func (q *Queries) ListChatMessages(ctx context.Context, sessionID string) ([]ChatMessage, error) {
 	rows, err := q.db.Query(ctx, listChatMessages, sessionID)
 	if err != nil {
@@ -208,4 +333,53 @@ func (q *Queries) ListChatSessionsForUser(ctx context.Context, userID pgtype.Tex
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateChatSessionFilters = `-- name: UpdateChatSessionFilters :exec
+UPDATE public.chat_session
+SET active_filters_json = $2, updated_at = $3
+WHERE id = $1
+`
+
+type UpdateChatSessionFiltersParams struct {
+	ID                string
+	ActiveFiltersJson []byte
+	UpdatedAt         pgtype.Timestamp
+}
+
+// UpdateChatSessionFilters ports conversation.update_session_filters: the
+// best-effort carry-over write applied only when the turn pinned a product
+// (SessionPatch.update_filters). Never touches owner or created_at.
+func (q *Queries) UpdateChatSessionFilters(ctx context.Context, arg UpdateChatSessionFiltersParams) error {
+	_, err := q.db.Exec(ctx, updateChatSessionFilters, arg.ID, arg.ActiveFiltersJson, arg.UpdatedAt)
+	return err
+}
+
+const upsertChatSession = `-- name: UpsertChatSession :exec
+INSERT INTO public.chat_session (id, user_id, active_filters_json, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (id) DO UPDATE SET updated_at = EXCLUDED.updated_at
+`
+
+type UpsertChatSessionParams struct {
+	ID                string
+	UserID            pgtype.Text
+	ActiveFiltersJson []byte
+	CreatedAt         pgtype.Timestamp
+	UpdatedAt         pgtype.Timestamp
+}
+
+// UpsertChatSession ports conversation.ensure_session: create the session bound
+// to the caller on first sight, or bump updated_at on an existing one. The
+// owner and the initial active_filters_json are NEVER overwritten on conflict
+// (only the shell's explicit filter carry-over, below, mutates filters).
+func (q *Queries) UpsertChatSession(ctx context.Context, arg UpsertChatSessionParams) error {
+	_, err := q.db.Exec(ctx, upsertChatSession,
+		arg.ID,
+		arg.UserID,
+		arg.ActiveFiltersJson,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+	)
+	return err
 }

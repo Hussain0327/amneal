@@ -335,6 +335,15 @@ class Settings(BaseSettings):
         token = str(v).strip()
         return token or None
 
+    # Shared secret gating the internal RAG compute endpoint (POST
+    # /internal/query/compute), which the Go control plane calls to run the
+    # stateless RAG core (step-5 CompleteQuery). FAIL-CLOSED: unset ("") makes
+    # the endpoint 404 unconditionally, so it is inert until an operator sets
+    # INTERNAL_RAG_TOKEN on both runtimes (a Fly app-wide secret in prod). The
+    # endpoint is never exposed at the public edge (the Go proxy 404s /internal/
+    # subtree); this token is the second layer, not the sole one.
+    internal_rag_token: str = ""
+
     # Comma-separated CORS allowlist for the Next.js UI in regwatch/frontend/.
     # Defaults to the Next.js dev server. With allow_credentials=True on the
     # API, this allowlist is what stops other origins from riding the HttpOnly

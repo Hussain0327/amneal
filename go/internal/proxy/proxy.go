@@ -73,6 +73,15 @@ func NewHandler(upstream *url.URL, errLog *log.Logger) http.Handler {
 // ("POST /auth/login"); most-specific-pattern-wins makes registration order
 // irrelevant, and an empty/nil map degrades to exactly the old handler.
 func NewHandlerWithNative(upstream *url.URL, errLog *log.Logger, native map[string]http.Handler) http.Handler {
+	return NewHandlerWithPreRelay(upstream, errLog, native, nil)
+}
+
+// NewHandlerWithPreRelay is NewHandlerWithNative plus an optional preRelay hook
+// run BEFORE mux dispatch on EVERY request. It returns true when it has fully
+// handled the request (the step-5 StreamGate writing a 401/429 for POST
+// /query/stream), else false to let the native routes + relay catch-all run
+// exactly as before. A nil preRelay degrades to the old handler byte-for-byte.
+func NewHandlerWithPreRelay(upstream *url.URL, errLog *log.Logger, native map[string]http.Handler, preRelay func(http.ResponseWriter, *http.Request) bool) http.Handler {
 	if errLog == nil {
 		errLog = log.Default()
 	}
@@ -181,7 +190,15 @@ func NewHandlerWithNative(upstream *url.URL, errLog *log.Logger, native map[stri
 		mux.Handle(pattern, h)
 	}
 	mux.Handle("/", rp)
-	return mux
+	if preRelay == nil {
+		return mux
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if preRelay(w, r) {
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 // Run serves the relay-only handler on cfg.Addr -- see Serve for the
