@@ -1,4 +1,4 @@
-"""S14-S16 + S24-S26: the R1 headline -- failure still leaves a DEFINED audit
+"""S14-S16 + S24-S27: the R1 headline -- failure still leaves a DEFINED audit
 trail, now across the Go/Python CompleteQuery boundary (step-5 PR B).
 
 S14 kills the provider (real openai SDK against a reserved closed port),
@@ -16,7 +16,10 @@ row. S25 makes the Go control plane unable to reach the Python core at all
 (ragclient dial refused) -- Go synthesizes one upstream_error row. S26 is the
 answer path (allow_skip=False) under a TOTAL audit outage: the strict write
 AND its fixed-copy fallback both fail, degrading to the audit_id=-1 sentinel
-with the answer withheld -- the path the single-txn draft left undefined.
+with the answer withheld -- the path the single-txn draft left undefined. S27 (PR C)
+saturates the ask() worker pool (fault seam): both the native and relay paths
+must shed the SAME defined 503 busy contract, never degrade into Go-deadline
+timeouts and synthesized upstream_error rows.
 """
 
 from __future__ import annotations
@@ -32,10 +35,12 @@ from tests_contract.conftest import (
     REFUSAL_TEXT,
     SERVICE_UNAVAILABLE_TEXT,
     EdgeClient,
+    Harness,
     Stack,
     audit_boom_trigger,
     chat_messages_for_turn,
     latest_query_log_row,
+    pg_conn,
     query_log_count,
     seed_answerable_corpus,
 )
@@ -259,3 +264,42 @@ def test_s26_answer_path_total_audit_outage_withholds_and_sentinels(
     assert [m["role"] for m in messages] == ["user", "assistant"]
     assert messages[1]["status"] == "error"
     assert messages[1]["audit_id"] == -1
+
+
+def _all_chat_roles() -> list[str]:
+    with pg_conn() as conn:
+        rows = conn.execute("SELECT role FROM public.chat_message ORDER BY created_at").fetchall()
+    return [r[0] for r in rows]
+
+
+def test_s27_saturated_ask_pool_sheds_the_same_503_on_both_paths(
+    harness: Harness, edge_login: Callable[..., EdgeClient]
+) -> None:
+    """ask()-pool saturation (forced via the prod-fenced "saturate" fault) is a
+    DEFINED shed, not a slow failure: the native path's compute call comes back
+    503 and Go relays FastAPI's exact busy body -- byte-identical to what the
+    flag-off relay serves for the same condition -- with no audit row and no
+    assistant message. ACCEPTED, pinned divergence: the native path has already
+    committed the T1 user message when the shed arrives (Go writes it before
+    the compute call), where Python's shed precedes every write."""
+    busy = b'{"detail":"server is busy, retry shortly"}'
+
+    native = harness.stack("saturate")
+    client = edge_login(native)
+    response = client.http.post("/query", json={"question": ANSWERABLE_QUESTION})
+    assert response.status_code == 503
+    assert response.content == busy, "must be byte-identical to FastAPI's busy body"
+    assert response.headers["content-type"] == "application/json"
+    assert query_log_count() == 0, "a shed turn never ran; nothing to audit"
+    assert _all_chat_roles() == ["user"], "exactly the orphaned T1 user turn"
+
+    # Relay comparison: the flag-off path sheds the identical bytes, and
+    # Python's pre-write shed adds NO rows (the count stays at the native
+    # turn's single orphaned user message).
+    relay = harness.stack("saturate", native=False)
+    relay_client = edge_login(relay)
+    relay_response = relay_client.http.post("/query", json={"question": ANSWERABLE_QUESTION})
+    assert relay_response.status_code == 503
+    assert relay_response.content == busy
+    assert query_log_count() == 0
+    assert _all_chat_roles() == ["user"]

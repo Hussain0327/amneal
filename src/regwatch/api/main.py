@@ -723,18 +723,40 @@ def _build_query_response(result: QAResult) -> QueryResponse:
 _ASK_LIMITER = anyio.CapacityLimiter(16)
 
 
+def _shed_if_ask_pool_saturated() -> None:
+    """Raise the defined 503 shed when the ask() worker pool is saturated.
+
+    ONE helper shared by _dispatch_ask (public /query family) and the internal
+    compute endpoint, so the flag-on Go control plane meets the same overload
+    contract as flag-off clients -- without it, saturation degrades to Go-side
+    240s deadline timeouts and synthesized upstream_error rows while the
+    non-abandoning Python threads keep queueing. The saturation check is
+    read-then-acquire: a request racing past it queues briefly instead of
+    shedding, which only softens the bound -- steady-state saturation still
+    returns the defined 503.
+
+    The REGWATCH_FAULT_INJECT="saturate" seam forces the shed path for the
+    contract suite (S27); same allow_test_providers boot fence as
+    grounded_qa._maybe_inject_fault, so it is inert in production regardless
+    of the env var.
+    """
+    forced = (
+        os.environ.get("REGWATCH_FAULT_INJECT", "").strip() == "saturate"
+        and get_settings().allow_test_providers
+    )
+    limiter = _ASK_LIMITER
+    if forced or limiter.statistics().borrowed_tokens >= limiter.total_tokens:
+        raise HTTPException(status_code=503, detail="server is busy, retry shortly")
+
+
 async def _dispatch_ask(**kwargs: Any) -> QAResult:
     """Run ask() on its dedicated bounded worker pool; 503 when saturated.
 
-    The saturation check is read-then-acquire: a request racing past it queues
-    briefly instead of shedding, which only softens the bound — steady-state
-    saturation still returns the defined 503. Like run_in_threadpool, the
-    dispatched thread is non-abandoning on cancellation.
+    Like run_in_threadpool, the dispatched thread is non-abandoning on
+    cancellation.
     """
-    limiter = _ASK_LIMITER
-    if limiter.statistics().borrowed_tokens >= limiter.total_tokens:
-        raise HTTPException(status_code=503, detail="server is busy, retry shortly")
-    return await anyio.to_thread.run_sync(partial(ask, **kwargs), limiter=limiter)
+    _shed_if_ask_pool_saturated()
+    return await anyio.to_thread.run_sync(partial(ask, **kwargs), limiter=_ASK_LIMITER)
 
 
 @protected.post("/query", response_model=QueryResponse)
@@ -995,6 +1017,10 @@ async def internal_query_compute(
     serves the relayed /query/stream and /healthz in the flag-gated phase.
     """
     _require_internal_token(x_internal_token)
+    # Shed BEFORE queueing on the shared limiter (same 503 contract as
+    # _dispatch_ask): without this, flag-on overload degrades to Go-side
+    # deadline timeouts instead of the defined busy signal.
+    _shed_if_ask_pool_saturated()
     return await anyio.to_thread.run_sync(partial(_compute_payload, req), limiter=_ASK_LIMITER)
 
 

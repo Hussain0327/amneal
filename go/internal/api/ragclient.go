@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -50,9 +51,21 @@ func newRAGClient(baseURL, token string, timeout time.Duration) *ragClient {
 }
 
 // errUpstream marks every dead/slow/misbehaving-upstream outcome: dial refused,
-// deadline exceeded, or a non-200 status. The handler converts it to the
+// deadline exceeded, or a non-200/503 status. The handler converts it to the
 // synthesized upstream_error audit row (INV-6 holds even when Python is down).
 var errUpstream = errors.New("internal rag upstream error")
+
+// errSaturated marks a compute-endpoint 503: the Python ask() pool shed load
+// (main.py _shed_if_ask_pool_saturated). Distinct from errUpstream on purpose:
+// a shed turn NEVER ran, so the handler must relay the defined 503 overload
+// contract instead of auditing a synthesized upstream_error row. The hop is
+// direct (no intermediary 503s), but the SAME app registers a provider-outage
+// 503 handler with a DIFFERENT body (main.py _handle_upstream_error) -- today
+// unreachable from compute_turn, yet classification must not depend on that
+// staying true, so compute() also requires the byte-fixed shed body (pinned by
+// contract S27) before classifying; any other 503 stays on the audited
+// errUpstream path.
+var errSaturated = errors.New("internal rag saturated")
 
 // computeRequest is the compute endpoint's request body. Filters are the
 // already-whitelisted request filters, forwarded verbatim (opaque to Go).
@@ -148,6 +161,15 @@ func (c *ragClient) compute(ctx context.Context, req computeRequest) (*computePa
 		return nil, fmt.Errorf("%w: %v", errUpstream, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		// Shed only if the body is the byte-fixed busy contract (see the
+		// errSaturated comment); a non-shed 503 must be AUDITED, not relayed.
+		b, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if readErr == nil && string(b) == saturatedDetailJSON {
+			return nil, fmt.Errorf("%w: status %d", errSaturated, resp.StatusCode)
+		}
+		return nil, fmt.Errorf("%w: status %d (non-shed 503 body)", errUpstream, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%w: status %d", errUpstream, resp.StatusCode)
 	}
