@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/Hussain0327/amneal/go/internal/store"
@@ -24,31 +26,45 @@ import (
 // per turn for every outcome (or -1, an out-of-band sentinel, when the audit
 // store is fully down and the row genuinely could not be written).
 
+// errSessionOwnershipLost is conversation.SessionOwnershipError's Go twin:
+// the T1 upsert found the session already bound to a DIFFERENT user (a create
+// race lost after authorizeSession's pre-check). Nothing has been written at
+// that point, so the turn aborts with the same unaudited 404 the pre-check
+// produces (main.py, the except-SessionOwnershipError branch of /query)
+// instead of degrading to a detached turn.
+var errSessionOwnershipLost = errors.New("chat session owned by another user")
+
 // persistUserTurn is T1: upsert the session, then write the user message. Both
-// best-effort. On ANY failure the session_id degrades to the fresh turn_id
-// (never the requested id, which may belong to another user after a lost bind
-// race), exactly as ask() does -- so later writes never target a foreign
-// session. Returns the (possibly degraded) session_id the turn proceeds with.
+// best-effort EXCEPT the ownership guard: a session row bound to another user
+// (the upsert's guarded conflict update returns no row) yields
+// errSessionOwnershipLost with NOTHING written -- Python's ensure_session
+// raises SessionOwnershipError in exactly this case. On any OTHER failure the
+// session_id degrades to the fresh turn_id (never the requested id), exactly
+// as ask() does -- so later writes never target a foreign session. Returns
+// the (possibly degraded) session_id the turn proceeds with.
 func (s *Server) persistUserTurn(
 	ctx context.Context,
 	sessionID, turnID, userID, question string,
 	filtersObj []byte,
 	t0 time.Time,
-) string {
-	if err := s.q.UpsertChatSession(ctx, store.UpsertChatSessionParams{
+) (string, error) {
+	if _, err := s.q.UpsertChatSession(ctx, store.UpsertChatSessionParams{
 		ID:                sessionID,
 		UserID:            text(userID),
 		ActiveFiltersJson: []byte("{}"),
 		CreatedAt:         ts(t0),
 		UpdatedAt:         ts(t0),
 	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", errSessionOwnershipLost
+		}
 		s.errLog.Printf("qa_session_setup_failed: %v", err)
-		return turnID
+		return turnID, nil
 	}
 	msgID, err := newUUID4()
 	if err != nil {
 		s.errLog.Printf("qa_user_uuid_failed: %v", err)
-		return turnID
+		return turnID, nil
 	}
 	if err := s.q.InsertChatMessage(ctx, store.InsertChatMessageParams{
 		ID:            msgID,
@@ -65,14 +81,24 @@ func (s *Server) persistUserTurn(
 		// status / model_name / audit_id / reason / interpretation stay NULL.
 	}); err != nil {
 		s.errLog.Printf("qa_user_record_failed: %v", err)
-		return turnID
+		return turnID, nil
 	}
-	return sessionID
+	return sessionID, nil
 }
 
+// errAnswerUnaudited is _persist_turn's defensive re-raise ("if
+// audit.failure_fallback is None: raise"): a strict validated answer whose
+// authoritative audit write failed with NO core-supplied fallback to degrade
+// to. INV-6 (no-audit-no-answer) forces the caller to WITHHOLD the answer and
+// 500 -- returning it would leak a paid, citation-bearing answer with no
+// audit row. Unreachable while Python always serializes a fallback for strict
+// payloads, exactly like the Python branch it mirrors.
+var errAnswerUnaudited = errors.New("strict answer audit failed with no fallback")
+
 // persistTurn runs T2 (authoritative audit) then T3 (best-effort assistant) and
-// returns the wire body with audit_id spliced in, plus the audit id.
-func (s *Server) persistTurn(ctx context.Context, payload *computePayload, t0 time.Time) (json.RawMessage, int32) {
+// returns the wire body with audit_id spliced in, plus the audit id. The only
+// non-nil error is errAnswerUnaudited (nothing written, T3 skipped).
+func (s *Server) persistTurn(ctx context.Context, payload *computePayload, t0 time.Time) (json.RawMessage, int32, error) {
 	spec := payload.Persist
 	response := payload.Response
 	patch := spec.Patch
@@ -91,12 +117,11 @@ func (s *Server) persistTurn(ctx context.Context, payload *computePayload, t0 ti
 		if err != nil {
 			s.errLog.Printf("qa_answer_audit_write_failed: %v", err)
 			if spec.Fallback == nil {
-				auditID = -1 // defensive: strict payloads always carry a fallback
-			} else {
-				response = spec.Fallback.Response
-				patch = spec.Fallback.Patch
-				auditID = s.auditSkipTolerant(ctx, spec.Fallback.AuditLogKwargs)
+				return nil, 0, errAnswerUnaudited
 			}
+			response = spec.Fallback.Response
+			patch = spec.Fallback.Patch
+			auditID = s.auditSkipTolerant(ctx, spec.Fallback.AuditLogKwargs)
 		} else {
 			auditID = id
 		}
@@ -111,9 +136,9 @@ func (s *Server) persistTurn(ctx context.Context, payload *computePayload, t0 ti
 		// Unreachable for these shapes (response is always valid JSON). Never
 		// 500 an already-persisted turn on a serialization glitch.
 		s.errLog.Printf("qa_wire_splice_failed: %v", err)
-		return response, auditID
+		return response, auditID, nil
 	}
-	return wire, auditID
+	return wire, auditID, nil
 }
 
 // auditSkipTolerant writes the audit row, returning -1 (a sentinel that never

@@ -85,14 +85,23 @@ UPDATE public.chat_session
 SET user_id = $2
 WHERE id = $1 AND user_id IS NULL;
 
--- UpsertChatSession ports conversation.ensure_session: create the session bound
--- to the caller on first sight, or bump updated_at on an existing one. The
--- owner and the initial active_filters_json are NEVER overwritten on conflict
+-- UpsertChatSession ports conversation.ensure_session INCLUDING its last-line
+-- ownership defense: create the session bound to the caller on first sight;
+-- on conflict, adopt a NULL owner (legacy rows, like ensure_session's
+-- row.user_id-is-None branch) or bump updated_at on the caller's own row --
+-- but a row already bound to a DIFFERENT user makes the WHERE fail, so the
+-- statement returns no row (pgx.ErrNoRows), the write-time signal for
+-- Python's SessionOwnershipError (a lost create race after the API-level
+-- ownership pre-check). active_filters_json is NEVER overwritten on conflict
 -- (only the shell's explicit filter carry-over, below, mutates filters).
--- name: UpsertChatSession :exec
+-- name: UpsertChatSession :one
 INSERT INTO public.chat_session (id, user_id, active_filters_json, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (id) DO UPDATE SET updated_at = EXCLUDED.updated_at;
+ON CONFLICT (id) DO UPDATE
+SET user_id = EXCLUDED.user_id,
+    updated_at = EXCLUDED.updated_at
+WHERE chat_session.user_id IS NULL OR chat_session.user_id = EXCLUDED.user_id
+RETURNING id;
 
 -- InsertChatMessage ports conversation.record_message: one user or assistant
 -- turn. jsonb payloads (filters/citations/clarify/related/metadata) are written

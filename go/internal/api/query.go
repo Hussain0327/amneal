@@ -118,9 +118,16 @@ func (s *Server) handleCompleteQuery(w http.ResponseWriter, r *http.Request) {
 	// abort an in-flight turn that still needs auditing (INV-6).
 	baseCtx := context.WithoutCancel(r.Context())
 
-	// T1: user message, pre-RAG, best-effort (may degrade session_id).
+	// T1: user message, pre-RAG, best-effort (may degrade session_id) -- except
+	// a lost create race on the session id, which aborts unaudited BEFORE the
+	// RAG call with the exact 404 authorizeSession produces (the pre-check
+	// cannot see a row created after it ran; ensure_session parity).
 	t0 := s.now().Truncate(time.Microsecond)
-	sessionID = s.persistUserTurn(baseCtx, sessionID, turnID, userID, *body.Question, filtersObj, t0)
+	sessionID, t1err := s.persistUserTurn(baseCtx, sessionID, turnID, userID, *body.Question, filtersObj, t0)
+	if errors.Is(t1err, errSessionOwnershipLost) {
+		writeDetail(w, http.StatusNotFound, "session not found")
+		return
+	}
 
 	// RAG compute over a FINITE deadline. Dead/slow upstream -> synthesized
 	// upstream_error turn (still audited).
@@ -135,6 +142,17 @@ func (s *Server) handleCompleteQuery(w http.ResponseWriter, r *http.Request) {
 		UserID:    &uid,
 	})
 	cancel()
+	if errors.Is(ragErr, errSaturated) {
+		// The Python ask() pool shed load (503): relay the SAME defined
+		// overload contract flag-on clients would see flag-off, with no audit
+		// row and no T3 -- the turn never ran, so there is nothing to audit
+		// (Python's shed is pre-dispatch for the same reason). ACCEPTED
+		// divergence: T1 above already committed the user message, where
+		// Python's shed writes nothing (its check precedes every write);
+		// pinned in contract S27.
+		writeSaturated(w)
+		return
+	}
 	if ragErr != nil {
 		s.errLog.Printf("qa_upstream_error: %v", ragErr)
 		payload = s.synthesizeUpstreamError(*body.Question, sessionID, turnID, userID, filtersObj)
@@ -144,9 +162,31 @@ func (s *Server) handleCompleteQuery(w http.ResponseWriter, r *http.Request) {
 	// bounded context independent of the RAG deadline.
 	persistCtx, pcancel := context.WithTimeout(baseCtx, 30*time.Second)
 	defer pcancel()
-	wire, _ := s.persistTurn(persistCtx, payload, t0)
+	wire, _, persistErr := s.persistTurn(persistCtx, payload, t0)
+	if persistErr != nil {
+		// errAnswerUnaudited: withhold the validated answer (INV-6). Python's
+		// counterpart re-raise surfaces as Starlette's default text/plain
+		// "Internal Server Error" 500; status matches exactly, the body keeps
+		// this server's established JSON {"detail":...} shape for the same
+		// words (the documented internalError divergence).
+		writeDetail(w, http.StatusInternalServerError, "Internal Server Error")
+		return
+	}
 
 	writeJSON(w, http.StatusOK, wire)
+}
+
+// saturatedDetailJSON is FastAPI's exact rendering of
+// HTTPException(503, "server is busy, retry shortly") -- json.dumps with
+// (",", ":") separators and no trailing newline -- so flag-on and flag-off
+// clients see byte-identical overload bodies (writeDetail would append the
+// json.Encoder newline).
+const saturatedDetailJSON = `{"detail":"server is busy, retry shortly"}`
+
+func writeSaturated(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte(saturatedDetailJSON))
 }
 
 // authorizeSession ports main.py::_authorize_session_access: missing -> proceed

@@ -533,6 +533,11 @@ _FLAVOR_OVERRIDES: dict[str, dict[str, str]] = {
     # pointed at the reserved closed port (in _boot), so native /query cannot
     # reach the compute endpoint and Go synthesizes an upstream_error row.
     "dead_internal": {},
+    # S27: force the ask-pool saturation shed (main.py
+    # _shed_if_ask_pool_saturated, fenced by allow-test-providers like the
+    # other fault stages) so both the native and relay paths must serve the
+    # defined 503 busy contract instead of queueing.
+    "saturate": {"REGWATCH_FAULT_INJECT": "saturate"},
 }
 
 # The relay has NO response timeout by design (a hung upstream would hang an
