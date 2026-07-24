@@ -32,7 +32,12 @@ from threading import Lock
 import httpx
 from config.settings import get_settings
 from selectolax.parser import HTMLParser, Node
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from regwatch.common.logging import get_logger
 from regwatch.common.text_normalize import canonical_name as norm_name
@@ -279,9 +284,13 @@ def parse_listings(html: str) -> list[PsgListing]:
                 dosage_form=dosage_form,
                 rld_or_rs_numbers=rld_rs,
                 recommended_date=recommended_date,
-                pdf_url=(
-                    href if href.startswith("http") else PDF_URL_TEMPLATE.format(appl_no=appl_no)
-                ),
+                # Always derive from the appl_no the PSG_(\d+).pdf regex validated,
+                # never from the page-supplied href: pdf_url is persisted as
+                # document.source_url and rendered to analysts as the official-FDA
+                # citation link, so remote content must not choose where it points.
+                # Behavior-preserving for genuine rows -- the rendered FDA href and
+                # this template are byte-identical (see the fixture parity test).
+                pdf_url=PDF_URL_TEMPLATE.format(appl_no=appl_no),
                 source_url=PSG_INDEX_URL,
             )
         )
