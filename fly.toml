@@ -71,6 +71,14 @@ kill_timeout = 30
   # The Python side no longer reads it -- since R5 there is no SQLite fallback
   # and store/db.py refuses an empty DATABASE_URL unconditionally.
   REQUIRE_DATABASE_URL = "true"
+  # Step-5 cutover pin (docs/GO_NATIVE_QUERY_ROLLOUT.md): the Go proxy serves
+  # POST /query natively (buffered CompleteQuery). Flipped via a Fly secret on
+  # Jul 24 2026 and proven live; pinned here so the flag state is versioned.
+  # The secret of the same name is unset once this line deploys (secrets take
+  # precedence over [env], so the overlap window is safe/identical). Revert =
+  # delete this line + deploy, or re-set the secret to "false" for instant
+  # rollback without a CI cycle.
+  GO_NATIVE_QUERY = "true"
   # B4: SENTRY_DSN is a Fly secret (`fly secrets set SENTRY_DSN=...`). Without
   # it the app boots but logs a loud warning -- errors would otherwise vanish.
   #
