@@ -605,6 +605,17 @@
             "title": "Llm",
             "type": "boolean"
           },
+          "rls": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rls"
+          },
           "vector_store": {
             "title": "Vector Store",
             "type": "boolean"
@@ -640,7 +651,8 @@
                 "enum": [
                   "db",
                   "vector_store",
-                  "llm"
+                  "llm",
+                  "rls"
                 ],
                 "type": "string"
               },
@@ -1783,7 +1795,7 @@
     },
     "/ready": {
       "get": {
-        "description": "Readiness probe: 200 only when the DB + vector store are reachable AND the\nLLM client is constructable (key present). Distinct from /health's liveness:\na load balancer routes traffic on this. No paid LLM call is made - only the\ncheap reachability checks. Both are timeout-bounded by the per-connection\nconnect/statement timeouts on the shared engine (the vector-store probe is a\n`SELECT count(*)` in pgvector mode, so a degraded DB is capped by\nDB_STATEMENT_TIMEOUT rather than hanging the probe). 503 names the FIRST\nfailed check so an operator sees what to fix.",
+        "description": "Readiness probe: 200 only when the DB + vector store are reachable AND the\nLLM client is constructable (key present). Distinct from /health's liveness:\na load balancer routes traffic on this. No paid LLM call is made - only the\ncheap reachability checks. Both are timeout-bounded by the per-connection\nconnect/statement timeouts on the shared engine (the vector-store probe is a\n`SELECT count(*)` in pgvector mode, so a degraded DB is capped by\nDB_STATEMENT_TIMEOUT rather than hanging the probe). 503 names the FIRST\nfailed check so an operator sees what to fix.\n\nAlso fails CLOSED on row level security: boot deliberately tolerates a\nlock-contended `ALTER ... ENABLE ROW LEVEL SECURITY` (the 2026-06-18\nincident design), so this is where a still-unprotected public table -- which\non Supabase is anon-readable over the Data API -- stops being SILENT. No\nextra DB round trip: the set is what the boot sweep recorded.",
         "operationId": "ready_ready_get",
         "responses": {
           "200": {

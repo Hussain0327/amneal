@@ -375,13 +375,17 @@ class ReadyChecks(BaseModel):
     db: bool
     vector_store: bool
     llm: bool
+    # Present ONLY when the boot RLS sweep left a public table unprotected (the
+    # same conditional-key contract as /health): a healthy body keeps its exact
+    # three-key shape, so existing probes are unaffected.
+    rls: bool | None = None
 
 
 class ReadyResponse(BaseModel):
     status: Literal["ready", "not_ready"]
     checks: ReadyChecks
     # Present only in the not_ready body (see the exclude_none note on /health).
-    failed: Literal["db", "vector_store", "llm"] | None = None
+    failed: Literal["db", "vector_store", "llm", "rls"] | None = None
     detail: str | None = None
 
 
@@ -395,20 +399,56 @@ def ready(response: Response) -> dict[str, Any]:
     `SELECT count(*)` in pgvector mode, so a degraded DB is capped by
     DB_STATEMENT_TIMEOUT rather than hanging the probe). 503 names the FIRST
     failed check so an operator sees what to fix.
+
+    Also fails CLOSED on row level security: boot deliberately tolerates a
+    lock-contended `ALTER ... ENABLE ROW LEVEL SECURITY` (the 2026-06-18
+    incident design), so this is where a still-unprotected public table -- which
+    on Supabase is anon-readable over the Data API -- stops being SILENT. No
+    extra DB round trip: the set is what the boot sweep recorded.
     """
+    # Scope of the RLS gate, kept OUT of the docstring because docstrings are
+    # exported verbatim into the public OpenAPI description (openapi.json):
+    # fly.toml health-checks /health, both in [[http_service.checks]] and
+    # [checks.app_health] -- NOT /ready. So this 503 does not pull the machine
+    # from Fly rotation today. The load-bearing alert is the Sentry capture in
+    # store.db._record_unprotected_tables; /ready is the machine-level signal an
+    # operator or a future gateway check reads.
+    #
+    # Function-local: a module-level import down here trips ruff E402, and this
+    # readiness-only dependency does not belong in the module header.
+    from regwatch.store.db import unprotected_public_tables
+
     db = _db_component()
     vector_store = _vector_store_component()
     llm_ok, llm_reason = _llm_ready(get_settings())
-    checks = {"db": db["ok"], "vector_store": vector_store["ok"], "llm": llm_ok}
+    checks: dict[str, bool] = {
+        "db": db["ok"],
+        "vector_store": vector_store["ok"],
+        "llm": llm_ok,
+    }
+    unprotected = unprotected_public_tables()
+    if unprotected:
+        # Added only on failure: the healthy body must stay byte-identical to
+        # what probes already parse (see the ReadyChecks.rls note).
+        checks["rls"] = False
     if all(checks.values()):
         return {"status": "ready", "checks": checks}
     failed = next(name for name, ok in checks.items() if not ok)
+    if failed == "llm":
+        detail = llm_reason
+    elif failed == "rls":
+        # Count only. /ready is anonymous-reachable, so naming the unprotected
+        # tables would hand an anon-key holder the exact targets; the names go
+        # to the log + Sentry (store.db._record_unprotected_tables).
+        detail = f"{len(unprotected)} public table(s) missing row level security"
+    else:
+        detail = f"{failed} is unreachable"
     response.status_code = 503
     return {
         "status": "not_ready",
         "checks": checks,
         "failed": failed,
-        "detail": llm_reason if failed == "llm" else f"{failed} is unreachable",
+        "detail": detail,
     }
 
 

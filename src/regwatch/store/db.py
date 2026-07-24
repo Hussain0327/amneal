@@ -37,6 +37,12 @@ _engine_lock = Lock()
 # _engine_lock, so reusing it here would deadlock (Lock is not reentrant).
 _init_lock = Lock()
 _initialized = False
+# Public tables observed WITHOUT row level security after the last RLS sweep.
+# Boot deliberately TOLERATES a skipped ALTER (see _enable_row_level_security),
+# so this is how that skip stops being silent: /ready fails closed while this is
+# non-empty. Written only by _record_unprotected_tables; read via
+# unprotected_public_tables().
+_unprotected_tables: tuple[str, ...] = ()
 
 # K4: the pgvector chunk store. The embedding column is raw DDL (the `vector`
 # type comes from the pgvector extension); everything else mirrors the Chroma
@@ -399,10 +405,38 @@ def _enable_row_level_security(engine: Engine) -> None:
       * if a table can't be locked right now, log and move on rather than crash
         the boot — an already-running instance keeps serving and the next boot
         re-attempts once the contended lock is free.
+
+    A tolerant boot is NOT a silent one: the sweep re-checks itself and publishes
+    whatever it failed to protect (_record_unprotected_tables), which is what
+    /ready gates on.
+    """
+    pending = _public_tables_without_rls(engine)
+    for name in pending:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("SET LOCAL lock_timeout = '3s'"))
+                conn.execute(text(f'ALTER TABLE public."{name}" ENABLE ROW LEVEL SECURITY'))
+        except OperationalError as exc:
+            # lock_timeout -> LockNotAvailable: leave it for a later boot.
+            log.warning("rls_enable_skipped", table=name, error=str(getattr(exc, "orig", exc)))
+    _record_unprotected_tables(engine)
+
+
+def _public_tables_without_rls(engine: Engine) -> list[str]:
+    """Tables the RLS sweep targets that currently have RLS OFF.
+
+    ONE definition shared by the sweep (its pending list) and the post-sweep
+    verification, so the readiness gate can never disagree with what boot tried
+    to fix. The criteria mirror what Supabase actually exposes over PostgREST:
+    schema ``public`` + ``relkind = 'r'`` (ordinary tables; views, partitioned
+    parents and foreign tables are out of scope for both). Bookkeeping tables
+    are NOT exempt -- ``alembic_version`` is a plain public table, so the sweep
+    already RLSes it and it is a true positive here rather than noise.
     """
     with engine.connect() as conn:
-        pending = (
-            conn.execute(
+        return [
+            str(name)
+            for name in conn.execute(
                 text(
                     "SELECT c.relname FROM pg_class c "
                     "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -412,15 +446,57 @@ def _enable_row_level_security(engine: Engine) -> None:
             )
             .scalars()
             .all()
+        ]
+
+
+def _record_unprotected_tables(engine: Engine) -> None:
+    """Publish the still-unprotected set for /ready and report it to Sentry.
+
+    WHY this instead of raising on a skipped ALTER: the swallow above is the
+    DELIBERATE post-incident design from 2026-06-18 -- crash-looping boot on a
+    contended lock is exactly what wedged prod. So boot stays tolerant and
+    READINESS goes strict: a machine still carrying an anon-readable public
+    table reports /ready not_ready until a later boot's ALTER lands, and an
+    operator hears about it through the same explicit capture point the stamp
+    guard uses -- instead of the previous only-detection, a manual Supabase
+    Advisors check in the deploy smoke list. Note fly.toml checks /health, not
+    /ready, so the Sentry capture below is the alerting path; /ready is the
+    machine-level signal, not a Fly routing gate.
+    """
+    global _unprotected_tables
+    try:
+        remaining = tuple(sorted(_public_tables_without_rls(engine)))
+    except Exception as exc:
+        # The verification query itself failed (DB gone mid-boot). Do NOT clear a
+        # previously recorded bad set on an unreadable catalog -- that would hand
+        # out a clean bill of health we never confirmed. /ready's db check owns
+        # the unreachable case.
+        log.warning("rls_verify_failed", error=str(exc))
+        return
+    _unprotected_tables = remaining
+    if not remaining:
+        return
+    log.error("rls_unprotected_tables", tables=list(remaining))
+    from regwatch.common.observability import capture_exception
+
+    capture_exception(
+        RuntimeError(
+            "public tables without row level security after the boot sweep: "
+            + ", ".join(remaining)
+            + " -- readable by an anon-key holder over the Supabase Data API. "
+            "This machine reports /ready not_ready until a later boot's ALTER "
+            "succeeds."
         )
-    for name in pending:
-        try:
-            with engine.begin() as conn:
-                conn.execute(text("SET LOCAL lock_timeout = '3s'"))
-                conn.execute(text(f'ALTER TABLE public."{name}" ENABLE ROW LEVEL SECURITY'))
-        except OperationalError as exc:
-            # lock_timeout -> LockNotAvailable: leave it for a later boot.
-            log.warning("rls_enable_skipped", table=name, error=str(getattr(exc, "orig", exc)))
+    )
+
+
+def unprotected_public_tables() -> tuple[str, ...]:
+    """Public tables the last RLS sweep left unprotected (empty = all protected).
+
+    Also empty when no sweep has run in this process yet: the readiness gate
+    reports only what it has actually observed, never a guess.
+    """
+    return _unprotected_tables
 
 
 def _ensure_rls_event_trigger(engine: Engine) -> None:
@@ -559,11 +635,14 @@ def session_scope() -> Iterator[Session]:
 
 def reset_for_tests() -> None:
     """Tests use this to swap in a temp DB. Resets the cached engine."""
-    global _engine, _initialized
+    global _engine, _initialized, _unprotected_tables
     if _engine is not None:
         _engine.dispose()
     _engine = None
     _initialized = False
+    # The recorded set belongs to the database being swapped out; carrying it
+    # into the next one would gate /ready on a finding from a different DB.
+    _unprotected_tables = ()
     from regwatch.store import embedding_profiles
 
     embedding_profiles.reset_for_tests()
