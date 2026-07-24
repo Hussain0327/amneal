@@ -1,6 +1,7 @@
-"""S6-S13: every /query outcome branch returns 200 and writes EXACTLY one
-audit row, with the column-level shapes the Go CompleteQuery cutover must
-reproduce.
+"""S6-S13 + S30: every /query outcome branch returns 200 and writes EXACTLY
+one audit row, with the column-level shapes the Go CompleteQuery cutover must
+reproduce. S30 (GAP-3) proves the INV-5 filters whitelist runs at the edge,
+via the audit row's route_json.
 
 Status-code-only tests would silently un-pin: the reason strings, the
 retrieved_json empty-vs-populated distinction, the token/cost NULL
@@ -280,3 +281,36 @@ def test_s13_meta_answer(base_stack: Stack, edge_login: Callable[..., EdgeClient
     assert row["input_tokens"] is None
     assert row["output_tokens"] is None
     assert row["cost_usd"] is None
+
+
+def test_s30_filters_whitelist_holds_at_the_edge(
+    base_stack: Stack, edge_login: Callable[..., EdgeClient]
+) -> None:
+    """GAP-3, INV-5 at the wire: a poisoned filters object -- a version_id
+    that would defeat current-version scoping, a legacy source_url, an unknown
+    key, and a non-scalar value on a whitelisted key -- is silently REDUCED to
+    the whitelisted scalars (never a 422: old clarify echoes must keep
+    working), and the audit row's route_json proves the whitelist ran BEFORE
+    compute (/internal/query/compute TRUSTS its filters)."""
+    seed_answerable_corpus()
+    client = edge_login(base_stack)
+
+    response = client.http.post(
+        "/query",
+        json={
+            "question": ANSWERABLE_QUESTION,
+            "filters": {
+                "normalized_name": "albuterol sulfate",  # whitelisted scalar: kept
+                "version_id": 17,  # not whitelisted: dropped
+                "source_url": "http://x",  # legacy key: dropped
+                "page": 3,  # unknown key: dropped
+                "dosage_form": ["Gel", "Cream"],  # whitelisted key, non-scalar: dropped
+            },
+        },
+    )
+    assert response.status_code == 200, "poisoned filters are dropped, never 422'd"
+    payload = response.json()
+    assert payload["status"] == "answer", "the surviving filter still scopes to the seed"
+
+    row = _one_new_row(payload, client)
+    assert row["route_json"]["filters"] == {"normalized_name": "albuterol sulfate"}

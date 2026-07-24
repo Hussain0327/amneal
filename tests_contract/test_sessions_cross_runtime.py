@@ -1,4 +1,4 @@
-"""S17 / S18: the session contract across the runtimes.
+"""S17 / S18 / S29: the session contract across the runtimes.
 
 S17 is the strongest cross-runtime pin in the matrix: Python writes the
 chat rows during /query turns, and GET /sessions/{id} -- Go-NATIVE since the
@@ -6,11 +6,15 @@ step-4 cutover -- serves them back verbatim. One assertion closes the
 shared-schema loop in both directions.
 
 S18 proves the rate limit is a real pre-work 429 (nothing audited) on both
-query routes.
+query routes, and (GAP-5) that a second user gets its own fresh budget.
+
+S29 (GAP-2) proves a NULL-owner legacy session is adopted by the first
+authenticated /query caller through the edge.
 """
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
 
 import pytest
@@ -20,6 +24,7 @@ from tests_contract.conftest import (
     ANSWERABLE_QUESTION,
     EdgeClient,
     Stack,
+    latest_query_log_row,
     pg_conn,
     query_log_count,
     seed_answerable_corpus,
@@ -104,3 +109,60 @@ def test_s18_rate_limit_is_a_real_pre_work_429_on_both_routes(
     assert stream.json() == {"detail": "rate limit exceeded"}
 
     assert query_log_count() == 1, "rate-limited requests never reach ask(), so nothing is audited"
+
+    # GAP-5: the queryLimiter keys on "user:{id}" -- a SECOND freshly-logged-in
+    # user must get a fresh budget, not share the exhausted one, and its turn
+    # is audited under its own id.
+    other = edge_login(rate_limited_stack)
+    fresh = other.http.post("/query", json={"question": ABSENT_DRUG_QUESTION})
+    assert fresh.status_code == 200, "a second user is a fresh budget, never a shared bucket"
+    assert query_log_count() == 2, "the fresh-budget turn was audited"
+    assert latest_query_log_row()["user_id"] == str(other.user_id)
+
+
+def test_s29_null_owner_legacy_session_adopted_via_query(
+    base_stack: Stack, edge_login: Callable[..., EdgeClient]
+) -> None:
+    """GAP-2: a pre-auth demo row (user_id NULL) is ADOPTED by the first
+    authenticated /query caller: 200 with the sid echoed, the owner column
+    flips to the caller (authorizeSession's conditional-UPDATE + re-read
+    path), the turn is attributed to the adopter, and the session becomes
+    visible on the Go-native GET /sessions/{id}."""
+    legacy_sid = str(uuid.uuid4())
+    with pg_conn() as conn:
+        # The legacy demo-row shape: pre-auth sessions carried no owner.
+        conn.execute(
+            "INSERT INTO public.chat_session "
+            "(id, user_id, title, active_filters_json, created_at, updated_at) "
+            "VALUES (%s, NULL, 'Legacy demo', '{}', now(), now())",
+            (legacy_sid,),
+        )
+        conn.commit()
+
+    client = edge_login(base_stack)
+    # Empty corpus on purpose: refusal turns adopt too (adoption is pre-work).
+    response = client.http.post(
+        "/query", json={"question": ABSENT_DRUG_QUESTION, "session_id": legacy_sid}
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session_id"] == legacy_sid, "the adopted session id is echoed back"
+
+    with pg_conn() as conn:
+        row = conn.execute(
+            "SELECT user_id FROM public.chat_session WHERE id = %s", (legacy_sid,)
+        ).fetchone()
+    assert row is not None
+    assert row[0] == str(client.user_id), "the NULL owner column flipped to the caller"
+
+    # INV-6 attribution on the adopted turn (the _one_new_row invariants).
+    assert query_log_count() == 1
+    log_row = latest_query_log_row()
+    assert log_row["id"] == payload["audit_id"]
+    assert log_row["user_id"] == str(client.user_id)
+    assert log_row["session_id"] == legacy_sid
+
+    # Adoption makes the legacy session readable cross-runtime.
+    detail = client.http.get(f"/sessions/{legacy_sid}")
+    assert detail.status_code == 200
+    assert detail.json()["session"]["id"] == legacy_sid

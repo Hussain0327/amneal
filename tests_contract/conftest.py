@@ -8,6 +8,20 @@ wire responses AND the direct-Postgres state (query_log / chat_message /
 auth_session), because these are the INV-6 compliance pins that must survive
 the step-5 CompleteQuery cutover (docs/POLYGLOT_TARGET_2026-07-10.md, R1).
 
+Scenario matrix (SNN test names):
+  S1-S2, S21b      test_edge_proof.py             edge-proof + login mint
+  S3-S5, S28       test_query_auth.py             pre-work 401/404/422, unaudited
+  S6-S13, S30      test_query_outcomes.py         outcome golden rows; S30 = INV-5
+                                                  filters whitelist at the edge
+  S14-S16, S24-S27 test_query_failure_audit.py    failure -> defined audit trail
+  S17-S18, S29     test_sessions_cross_runtime.py session contract; S29 = NULL-owner
+                                                  legacy-session adoption via /query
+  S19-S21a, S23    test_query_stream.py           /query/stream frame grammar
+  (relay parity)   test_query_relay_parity.py     GO_NATIVE_QUERY=false smoke
+Deletion-PR hardenings (docs/STEP5_INV_TEST_MAPPING.md gap list): S5 also pins
+owner-preservation on a hijack (GAP-4) and S18 the second-user fresh rate-limit
+budget (GAP-5).
+
 Five stack flavors exist because the scenario matrix needs boot-time env
 differences (settings are lru_cached in the app): base, low_score
 (REFUSAL_SCORE_THRESHOLD=1.0), dead_provider (real openai SDK pointed at a
