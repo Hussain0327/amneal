@@ -1,11 +1,18 @@
 # GO_NATIVE_QUERY rollout (strangler Step 5): the query-cutover runbook
 
-Status 2026-07-24: PROD IS FLAG-OFF. PR B (the Go CompleteQuery cutover,
-merged #124) and the open-model work (#125) are both deployed since
-2026-07-23, but GO_NATIVE_QUERY and INTERNAL_RAG_TOKEN are BOTH unset in
-prod -- fly.toml sets neither, and there is no Fly secret for either. Every
-POST /query still relays through the Go proxy to Python's buffered route,
-exactly the pre-step-5 topology. This runbook is the flip.
+Status 2026-07-24: PROD IS FLAG-ON. The flip went live on 2026-07-24 via
+`fly secrets set GO_NATIVE_QUERY=true -a amneal`; GO_NATIVE_QUERY and
+INTERNAL_RAG_TOKEN are BOTH Deployed Fly secrets and prod serves POST /query
+natively from the Go edge. PR B (the Go CompleteQuery cutover, merged #124)
+and the open-model work (#125) are deployed since 2026-07-23.
+
+THE PIN HAS NOT DEPLOYED YET. `GO_NATIVE_QUERY = "true"` exists in fly.toml
+[env] (line 81) only on the unmerged branch go/step5-d-pin-and-inv-gaps;
+origin/main is still d582b82, which pins nothing. So in the RUNNING app the
+SECRET is the only authority for this flag, and that is what decides which
+revert command actually works -- read "Monitoring window and rollback" before
+typing one. Phases 0 and 1 below are HISTORICAL (already executed on
+2026-07-24); they are kept as the record of what was run, not as a to-do.
 
 What the flip changes (and only this): with GO_NATIVE_QUERY=true, the Go
 edge serves POST /query natively (go/internal/api/query.go
@@ -72,7 +79,13 @@ UPSTREAM_URL=http://app.process.amneal.internal:8000), and RAG_TIMEOUT_S
    docker-build, go lane, full python gate, fly config validate) plus a
    low-traffic window with `fly logs`, `fly status`, and this runbook open.
 
-## Phase 0 -- stage the secret (safe while the flag is off)
+## Phase 0 (HISTORICAL, executed 2026-07-24) -- stage the secret
+
+ALREADY DONE. INTERNAL_RAG_TOKEN is a Deployed secret. Do not re-run any of
+this during an incident: rotating the token mid-flight 404s every compute
+call. Its exit criteria below are PRE-FLIP expectations (row 2 in particular
+asserts `GO_NATIVE_QUERY absent`, which is deliberately false today) and are
+retained as the record of the state phase 0 left behind.
 
 Generate and set the shared internal token:
 
@@ -97,7 +110,8 @@ Facts to hold in mind while running that:
   /internal/ subtree UNCONDITIONALLY -- so staging the secret first is a
   zero-behavior-change deploy, which is why it is its own phase.
 
-Phase 0 exit criteria (all read-only):
+Phase 0 exit criteria (all read-only) -- PRE-FLIP snapshot, satisfied on
+2026-07-24 before phase 1 ran:
 
 | # | command | pass looks like |
 | - | ------- | --------------- |
@@ -107,22 +121,25 @@ Phase 0 exit criteria (all read-only):
 | 4 | `curl -s -o /dev/null -w '%{http_code}' -X POST https://amneal.fly.dev/internal/query/compute` | 404 -- the edge still walls off /internal/ |
 | 5 | an authed POST /query via the frontend | normal answer/refusal -- still the relay path, proving the restart changed nothing |
 
-## Phase 1 -- the flip
+## Phase 1 (HISTORICAL, executed 2026-07-24) -- the flip
 
-Recommended mechanism: flip by SECRET, then pin by PR once proven.
+ALREADY DONE. Mechanism used: flip by SECRET, then pin by PR once proven.
 
     fly secrets set GO_NATIVE_QUERY=true -a amneal
 
 - On Fly, secrets take precedence over fly.toml [env], so this wins even
-  after the pin lands; instant revert is
-  `fly secrets unset GO_NATIVE_QUERY -a amneal` (another rolling restart,
-  no git round-trip, no CI wait).
+  after the pin lands. That precedence is also what makes the revert command
+  state-dependent -- the ONE authoritative account of reverting lives in
+  "Monitoring window and rollback" below. Do not reconstruct it from memory.
 - Once the smoke checklist and monitoring window below are clean, land a
   follow-up PR that pins `GO_NATIVE_QUERY = "true"` in fly.toml [env] so
   the state is versioned (the step-3 precedent), and after THAT deploy is
   green, `fly secrets unset GO_NATIVE_QUERY -a amneal` so the versioned
   value is the only authority. Leaving the secret set forever would make
-  fly.toml lie about who controls the flag.
+  fly.toml lie about who controls the flag. NOTE: that unset CHANGES THE
+  REVERT COMMAND (state B below); re-read the rollback section the moment it
+  is run. Status today: pin written on this branch, NOT deployed, secret
+  still set (state A).
 
 Alternative considered: fly.toml-first (flip in a PR, the step-3
 GO_PROXY_ROLLOUT.md precedent -- versioned, reviewed, CI-gated). Rejected
@@ -184,13 +201,45 @@ watch-daily run:
   `qa_assistant_record_failed` log lines (best-effort write failures --
   degradation signal, not by themselves a trigger).
 
-The exact revert:
+### The exact revert -- IT DEPENDS ON THE CURRENT STATE. CHECK FIRST.
+
+There is no single revert command. Fly secrets take precedence over fly.toml
+[env], so `fly secrets unset` reverts the flag ONLY while a secret is what
+holds it on; once the fly.toml pin is the authority, an unset is a NO-OP and
+the machines come back STILL FLAG-ON. At 02:00 mid-incident, run this first
+and let the answer pick your command:
+
+    fly secrets list -a amneal | grep GO_NATIVE_QUERY
+
+State A -- GO_NATIVE_QUERY IS LISTED as a secret (TRUE TODAY, 2026-07-24):
 
     fly secrets unset GO_NATIVE_QUERY -a amneal
 
-Rolling restart back to the relay path; the token can stay set (it goes
-back to being inert). No schema, data, or fly.toml change is involved in
-either direction. The relay path does not rot while flag-on is live: the
+Removes the only authority; the deployed fly.toml on origin/main pins
+nothing, so the machines boot flag-off. If the pin PR has ALSO deployed by
+then, this unset drops back to the pinned "true" and does NOT revert -- in
+that case use state B instead.
+
+State B -- NO secret listed, the fly.toml [env] pin is the only authority
+(this becomes true the moment "After the flip is proven" step 1 unsets the
+secret):
+
+    fly secrets set GO_NATIVE_QUERY=false -a amneal
+
+A secret OVERRIDES the [env] pin, and the Go loader parses "false" to boolean
+false (envBool, go/internal/api/config.go:86), so this is a genuine
+one-command revert with no git round-trip. `fly secrets unset` here does
+NOTHING except roll the machines back onto the same pin.
+
+Permanent revert (either state, when the flag should stay off): delete the
+`GO_NATIVE_QUERY = "true"` line from fly.toml [env] and deploy. This is a
+merge + CI + deploy cycle (~15-20 min), so it is the follow-up to a secret
+revert, not the incident action. If a secret is set, it still overrides the
+absent pin -- clear the secret too, or the deploy changes nothing.
+
+Every form above is a rolling restart back to the relay path; the token can
+stay set (it goes back to being inert). No schema or data change is involved
+in any direction. The relay path does not rot while flag-on is live: the
 contract suite's base_relay_stack rows (tests_contract/conftest.py,
 tests_contract/test_query_relay_parity.py) run flag-off on every CI run,
 so the rollback target stays continuously proven.
@@ -217,7 +266,10 @@ them as flip regressions.
 In order, each its own PR:
 
 1. The pin PR (fly.toml [env] GO_NATIVE_QUERY = "true"), then unset the
-   secret -- see Phase 1.
+   secret -- see Phase 1. The unset moves the rollback from state A to
+   state B: after it, `fly secrets unset` no longer reverts anything and
+   the incident command becomes `fly secrets set GO_NATIVE_QUERY=false`.
+   Announce that switch wherever the on-call reads, not just here.
 2. REQUIRED FIRST, before any deletion: the tests/ -> tests_contract
    INV-mapping audit. Walk every INV-tagged and query-path test in tests/
    that exercises Python's buffered query() route and record, per test,
