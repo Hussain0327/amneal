@@ -249,7 +249,8 @@ class OpenAIEmbeddingProvider:
             except Exception as exc:
                 if attempt >= self._max_attempts or not self._is_retryable(exc):
                     raise
-                time.sleep(delay + random.uniform(0, delay / 2))
+                # Retry jitter, not a cryptographic draw.
+                time.sleep(delay + random.uniform(0, delay / 2))  # noqa: S311
                 delay = min(delay * 2, self._backoff_cap_s)
         raise RuntimeError("unreachable")  # pragma: no cover
 
@@ -413,7 +414,8 @@ class Qwen3EmbeddingProvider:
             except Exception as exc:
                 if attempt >= self._max_attempts or not self._is_retryable(exc):
                     raise
-                time.sleep(delay + random.uniform(0, delay / 2))
+                # Retry jitter, not a cryptographic draw.
+                time.sleep(delay + random.uniform(0, delay / 2))  # noqa: S311
                 delay = min(delay * 2, self._backoff_cap_s)
         raise RuntimeError("unreachable")  # pragma: no cover
 

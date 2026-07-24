@@ -80,11 +80,29 @@ select = [
     "B",   # bugbear
     "SIM", # simplify
     "RUF", # ruff
+    "S",   # flake8-bandit (Python SAST)
 ]
 ignore = ["E501", "B008"]  # E501: line length handled by black; B008: typer.Option in defaults
 
 [tool.ruff.lint.per-file-ignores]
 "scripts/*" = ["E402"]  # intentional sys.path bootstrap before imports
+# flake8-bandit assumes production code. In tests `assert` IS the oracle,
+# "password"/"token" literals are fixtures, subprocess spawns our own binaries
+# with literal argv, and 0.0.0.0 / /tmp / sha1 appear as ASSERTED values pinning
+# production behavior rather than as runtime configuration. Listed rule-by-rule
+# on purpose: everything unlisted (pickle, eval, shell=True, verify=False, ...)
+# still fails the build inside tests.
+"tests/**" = ["S101", "S104", "S105", "S106", "S108", "S324", "S603", "S607"]
+"tests_contract/**" = ["S101", "S105", "S603", "S607", "S608"]
+# Alembic DDL/DML interpolates only module-level constants and a pgvector schema
+# name validated against a two-element allowlist. No request data reaches these.
+"migrations/versions/*" = ["S608"]
+# S110: the only try/except/pass here guards optional LLM SDK imports, so the
+# API still boots in echo-only environments; there is no exception to log.
+"src/regwatch/api/main.py" = ["S110"]
+# S104: "0.0.0.0" is a member of the trusted-host allowlist used to decide
+# sslmode, i.e. a host being matched, not an address being bound.
+"src/regwatch/store/db.py" = ["S104"]
 
 [tool.black]
 line-length = 100

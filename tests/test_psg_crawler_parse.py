@@ -25,6 +25,22 @@ CHALLENGE_HTML = (
     "<body><h1>Please verify you are a human</h1></body></html>"
 )
 
+# The FDA-served anchor href is remote-controlled content. pdf_url is persisted
+# as document.source_url and rendered to analysts as the "official FDA source"
+# citation link, so a row whose href points off-host must never dictate where
+# that citation goes.
+HOSTILE_HREF_HTML = (
+    "<html><body><table>"
+    '<tr class="drugData">'
+    '<td><a href="http://127.0.0.1:6379/PSG_020503.pdf" title="Albuterol Sulfate">'
+    "Albuterol Sulfate</a></td>"
+    "<td>http://127.0.0.1:6379/PSG_020503.pdf</td>"
+    "<td>Draft</td><td>Inhalation</td><td>Aerosol, Metered</td>"
+    '<td><span><a href="#" title="020503">020503</a></span></td>'
+    '<td data-sort="2026/05">05/21/2026</td>'
+    "</tr></table></body></html>"
+)
+
 # A legitimately-empty letter page, mirroring the live letter-J route: the
 # results-table shell renders ("0 record(s) found") with an empty tbody.
 EMPTY_LETTER_HTML = (
@@ -81,6 +97,28 @@ def test_filter_does_not_match_unrelated() -> None:
     seeds = filter_listings(rows, normalized_names=["albuterol", "beclomethasone", "romidepsin"])
     names = {r.normalized_name for r in seeds}
     assert "sodium chloride" not in names
+
+
+def test_pdf_url_is_derived_from_appl_no_not_the_href() -> None:
+    """A remote-supplied absolute href must not become the citation URL.
+
+    pdf_url is stored as document.source_url and shown to analysts as the
+    official FDA source link, so it is derived from the application number the
+    PSG_(\\d+).pdf regex validated, never from whatever the page served.
+    """
+    rows = parse_listings(HOSTILE_HREF_HTML)
+    assert len(rows) == 1
+    assert rows[0].appl_no == "020503"
+    assert rows[0].pdf_url == ("https://www.accessdata.fda.gov/drugsatfda_docs/psg/PSG_020503.pdf")
+
+
+def test_pdf_url_matches_the_real_fda_href_for_every_fixture_row() -> None:
+    # Deriving from appl_no is behavior-preserving for genuine FDA rows: the
+    # rendered href and the derived URL are byte-identical, so no real PSG 404s.
+    for row in _load():
+        assert row.pdf_url == (
+            f"https://www.accessdata.fda.gov/drugsatfda_docs/psg/PSG_{row.appl_no}.pdf"
+        )
 
 
 def test_markup_check_accepts_page_with_drug_rows() -> None:

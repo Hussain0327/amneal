@@ -43,7 +43,7 @@ def _root() -> None:
 # would silently become a no-op: the dead API_HOST this commit deletes was
 # pinned to "0.0.0.0", which binds IPv4-only, passes every IPv4 gate we have,
 # and would only surface at the phase-3 flip.
-_DUAL_STACK_HOSTS = ["0.0.0.0", "::"]
+_DUAL_STACK_HOSTS = ["0.0.0.0", "::"]  # noqa: S104 - container bind, see above
 _REQUIRED_FAMILIES = frozenset({socket.AF_INET, socket.AF_INET6})
 
 

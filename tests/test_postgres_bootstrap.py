@@ -192,6 +192,61 @@ def test_rls_enable_degrades_gracefully_on_contended_lock(pg_db: ModuleType) -> 
     assert probe_rls is False
 
 
+def test_ready_fails_closed_when_rls_sweep_left_a_table_unprotected(
+    pg_db: ModuleType,
+) -> None:
+    """Boot tolerates a skipped ALTER (the test above); READINESS must not.
+
+    Same contended-lock construction: the table stays un-RLSed, which on
+    Supabase means an anon-key holder can read it over the Data API. The
+    machine must therefore report not_ready and stay out of rotation until a
+    later boot's ALTER lands. Before this gate the skip was invisible to
+    everything except a manual Supabase Advisors check.
+    """
+    from fastapi import Response
+
+    from regwatch.api import main
+
+    pg_db.init_db()
+    engine = pg_db.get_engine()
+    # CREATE then DISABLE for the same reason as the test above: 0011's
+    # `ensure_rls` event trigger auto-RLSes new tables, and ALTER ... DISABLE is
+    # not one of its tags, so it does not re-fire.
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE ready_probe (id int)"))
+        conn.execute(text("ALTER TABLE ready_probe DISABLE ROW LEVEL SECURITY"))
+
+    holder = engine.connect()
+    trans = holder.begin()
+    holder.execute(text("SELECT * FROM ready_probe"))  # blocks the ALTER's lock
+    try:
+        pg_db._enable_row_level_security(engine)  # skips + records, never raises
+    finally:
+        trans.rollback()
+        holder.close()
+
+    assert "ready_probe" in pg_db.unprotected_public_tables()
+    response = Response()
+    body = main.ready(response)
+    assert response.status_code == 503
+    assert body["status"] == "not_ready"
+    assert body["checks"]["rls"] is False
+    assert body["failed"] == "rls"
+    # The anonymous body must never name the unprotected table -- that would
+    # hand an anon-key holder the target. Names go to the log + Sentry.
+    assert "ready_probe" not in body["detail"]
+
+    # A later, uncontended sweep clears it: the machine returns to rotation and
+    # the healthy body keeps its original three-key shape (no `rls` key).
+    pg_db._enable_row_level_security(engine)
+    assert pg_db.unprotected_public_tables() == ()
+    response = Response()
+    body = main.ready(response)
+    assert response.status_code == 200
+    assert body["status"] == "ready"
+    assert body["checks"] == {"db": True, "vector_store": True, "llm": True}
+
+
 def test_ensure_postgres_objects_degrades_gracefully_on_contended_lock(
     pg_db: ModuleType,
 ) -> None:

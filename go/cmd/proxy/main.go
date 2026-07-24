@@ -10,14 +10,27 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/Hussain0327/amneal/go/internal/api"
+	"github.com/Hussain0327/amneal/go/internal/obs"
 	"github.com/Hussain0327/amneal/go/internal/proxy"
 	"github.com/Hussain0327/amneal/go/internal/store"
 )
 
+// sentryFlushTimeout bounds the post-drain flush. The budget: Fly's
+// kill_timeout is 30s (fly.toml) and proxy.shutdownGrace already spends up to
+// 20s draining in-flight requests, so the flush must fit in what is left --
+// with margin, since a SIGKILL here would drop exactly the deploy-time errors
+// the flush exists to deliver.
+const sentryFlushTimeout = 5 * time.Second
+
 func main() {
 	logger := log.New(os.Stderr, "proxy: ", log.LstdFlags|log.LUTC)
+
+	// Error reporting first, so everything below can report. OFF (silently)
+	// unless SENTRY_DSN is set, and never fatal -- see internal/obs.
+	obs.InitFromEnv(logger)
 
 	cfg, err := proxy.ConfigFromEnv()
 	if err != nil {
@@ -28,8 +41,16 @@ func main() {
 		logger.Fatal(err)
 	}
 	logger.Printf("listening on %s, upstream %s, native routes: %d", cfg.Addr, cfg.Upstream, len(native))
-	if err := proxy.Serve(cfg.Addr, proxy.NewHandlerWithPreRelay(cfg.Upstream, logger, native, preRelay), logger); err != nil {
-		logger.Fatal(err)
+	serveErr := proxy.Serve(cfg.Addr, proxy.NewHandlerWithPreRelay(cfg.Upstream, logger, native, preRelay), logger)
+	// Serve returns only after the drain finishes (or the listener died), so
+	// this is the last point where buffered events can still be shipped: the
+	// Sentry transport is asynchronous, and a process that exits here without
+	// flushing loses whatever the final seconds captured.
+	if !obs.Flush(sentryFlushTimeout) {
+		logger.Printf("WARNING: sentry_flush_timeout after %s -- some error events were not delivered", sentryFlushTimeout)
+	}
+	if serveErr != nil {
+		logger.Fatal(serveErr)
 	}
 }
 

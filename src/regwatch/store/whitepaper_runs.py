@@ -242,7 +242,8 @@ def create_run(*, user_id: int, rld_name_input: str, result: dict[str, Any]) -> 
         s.expire_on_commit = False
         s.add(run)
         s.flush()
-        assert run.id is not None
+        # Narrowing for mypy only; flush() has just assigned the PK.
+        assert run.id is not None  # noqa: S101
         return run.id
 
 
@@ -364,7 +365,7 @@ def get_run(run_id: int) -> RunDetail | None:
             )
             for inp, author_name in input_rows
         ]
-        assert run.id is not None
+        assert run.id is not None  # noqa: S101 - narrowing; row was loaded by PK
         return RunDetail(
             id=run.id,
             rld_name_input=run.rld_name_input,

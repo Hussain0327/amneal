@@ -479,7 +479,7 @@ def _safe_fromstring(xml_text: str) -> ET.Element:
     head = xml_text[:4096].upper()
     if "<!DOCTYPE" in head or "<!ENTITY" in head:
         raise ValueError("refusing to parse SPL XML with a DTD/entity declaration")
-    return ET.fromstring(xml_text)
+    return ET.fromstring(xml_text)  # noqa: S314 - DTD/entity refused above
 
 
 def _section_code(section: ET.Element) -> str | None:

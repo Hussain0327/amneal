@@ -69,7 +69,7 @@ def password_breach_count(password: str, *, client: httpx.Client | None = None) 
     outage. The only external call here carries an explicit short timeout.
     """
     # SHA-1 is HIBP's required k-anonymity hash, not a security primitive here.
-    digest = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+    digest = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()  # noqa: S324
     prefix, suffix = digest[:5], digest[5:]
     owns_client = client is None
     active = client or httpx.Client(timeout=_HIBP_TIMEOUT_S)

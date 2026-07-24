@@ -134,6 +134,12 @@ export interface paths {
          *     `SELECT count(*)` in pgvector mode, so a degraded DB is capped by
          *     DB_STATEMENT_TIMEOUT rather than hanging the probe). 503 names the FIRST
          *     failed check so an operator sees what to fix.
+         *
+         *     Also fails CLOSED on row level security: boot deliberately tolerates a
+         *     lock-contended `ALTER ... ENABLE ROW LEVEL SECURITY` (the 2026-06-18
+         *     incident design), so this is where a still-unprotected public table -- which
+         *     on Supabase is anon-readable over the Data API -- stops being SILENT. No
+         *     extra DB round trip: the set is what the boot sweep recorded.
          */
         get: operations["ready_ready_get"];
         put?: never;
@@ -588,6 +594,8 @@ export interface components {
             db: boolean;
             /** Llm */
             llm: boolean;
+            /** Rls */
+            rls?: boolean | null;
             /** Vector Store */
             vector_store: boolean;
         };
@@ -597,7 +605,7 @@ export interface components {
             /** Detail */
             detail?: string | null;
             /** Failed */
-            failed?: ("db" | "vector_store" | "llm") | null;
+            failed?: ("db" | "vector_store" | "llm" | "rls") | null;
             /**
              * Status
              * @enum {string}

@@ -323,8 +323,10 @@ def register_embedding_profile(spec: EmbeddingProfileSpec) -> EmbeddingProfile:
         "chunking_version",
         "serving_runtime_version",
     )
+    # S608: `columns` is the module-level tuple literal above; the values are
+    # all bound parameters named after it.
     insert_sql = (
-        f"INSERT INTO embedding_profile ({', '.join(columns)}) "
+        f"INSERT INTO embedding_profile ({', '.join(columns)}) "  # noqa: S608
         f"VALUES ({', '.join(f':{column}' for column in columns)}) "
         "ON CONFLICT (profile_id) DO NOTHING"
     )
@@ -416,8 +418,10 @@ def pending_profile_chunks(
     with _engine().connect() as conn:
         rows = (
             conn.execute(
+                # `cursor_clause` is one of two literals set above; the cursor
+                # value itself rides in :after_chunk_id.
                 sa_text(
-                    "SELECT c.id, c.text FROM chunk c "
+                    "SELECT c.id, c.text FROM chunk c "  # noqa: S608
                     "LEFT JOIN chunk_embedding ce "
                     "ON ce.chunk_id = c.id AND ce.profile_id = :profile_id "
                     "WHERE ce.chunk_id IS NULL AND c.text IS NOT NULL "
@@ -726,10 +730,18 @@ def similarity_search_profile(
             "k": int(k),
         }
     )
-    # The profile ID has already passed a strict lowercase-hex validator.
-    # Keeping it literal lets Postgres prove that this query implies the
-    # profile-specific partial-index predicate even after psycopg switches to a
-    # generic prepared plan.
+    # Keeping the ID literal (not bound) lets Postgres prove that this query
+    # implies the profile-specific partial-index predicate even after psycopg
+    # switches to a generic prepared plan -- so this interpolation is load
+    # bearing and cannot simply become a bind parameter.
+    #
+    # Re-assert the validator HERE rather than relying on get_embedding_profile
+    # above having run it. That guarantee is non-local: it holds only because
+    # line 721 happens to precede this line in this function today. A future
+    # caller that resolves the profile differently, caches it, or reorders these
+    # statements would silently turn an unescaped f-string into SQL injection.
+    # The check is a compiled-regex fullmatch on a short string, i.e. free.
+    _validate_profile_id(profile_id)
     profile_predicate = f"ce.profile_id = '{profile_id}'"
     select_cols = ", ".join(
         f"c.{column}" for column in ("id", "text", *pgvector_store._METADATA_COLUMNS)
@@ -745,7 +757,7 @@ def similarity_search_profile(
         # Exact search over a metadata-narrowed set preserves the existing
         # cross-drug/current-version safety behavior.
         sql = (
-            f"SELECT {select_cols}, {full_distance} AS distance "
+            f"SELECT {select_cols}, {full_distance} AS distance "  # noqa: S608
             "FROM chunk_embedding ce JOIN chunk c ON c.id = ce.chunk_id "
             f"WHERE {profile_predicate} AND {clause.removeprefix(' WHERE ')} "
             f"ORDER BY {full_distance} LIMIT :k"
@@ -764,7 +776,7 @@ def similarity_search_profile(
         )
         params["candidate_k"] = max(int(k) * 4, 50)
         sql = (
-            "WITH candidates AS MATERIALIZED ("
+            "WITH candidates AS MATERIALIZED ("  # noqa: S608
             "SELECT ce.chunk_id FROM chunk_embedding ce "
             f"WHERE {profile_predicate} "
             f"ORDER BY {candidate_distance} LIMIT :candidate_k"
@@ -787,7 +799,7 @@ def similarity_search_profile(
             alias="ce",
         )
         sql = (
-            f"SELECT {select_cols}, {distance} AS distance "
+            f"SELECT {select_cols}, {distance} AS distance "  # noqa: S608
             "FROM chunk_embedding ce JOIN chunk c ON c.id = ce.chunk_id "
             f"WHERE {profile_predicate} "
             f"ORDER BY {distance} LIMIT :k"

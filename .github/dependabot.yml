@@ -1,12 +1,13 @@
 # Automated dependency updates. Once merged, Dependabot starts opening update
 # PRs on the weekly schedule below — review and merge them like any other PR.
 #
-# Three ecosystems mirror what CI actually builds (.github/workflows/ci.yml):
+# Four ecosystems mirror what CI actually builds (.github/workflows/ci.yml):
 #   - uv:             root pyproject.toml + uv.lock (backend deps). The `uv`
 #                     ecosystem updates BOTH pyproject and the lockfile, so the
 #                     CI `uv export --frozen` check stays green (a `pip`-ecosystem
 #                     bump would leave uv.lock stale and fail --frozen).
 #   - npm:            regwatch/frontend (Next.js app)
+#   - gomod:          go/go.mod + go.sum (the proxy binary on the public edge)
 #   - github-actions: the action pins used by the workflows in this repo
 #
 # Minor/patch bumps are grouped into one PR per ecosystem to cut review churn;
@@ -45,6 +46,20 @@ updates:
         update-types: ["version-update:semver-major"]
     groups:
       npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: gomod
+    directory: /go
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # go/go.sum is a single lockfile, so ungrouped bumps land as mutually
+    # conflicting PRs (same failure mode the uv.lock batches hit). Group the
+    # minor/patch flow into one PR; majors stay separate for their own review.
+    groups:
+      go-minor-patch:
         update-types:
           - minor
           - patch
