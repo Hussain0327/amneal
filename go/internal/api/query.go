@@ -83,6 +83,11 @@ func (s *Server) handleCompleteQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Rate limit (429): Go the single authority across /query + /query/stream.
 	if !s.queryLimiter.Allow("user:"+userID, s.cfg.RateLimitPerMinute) {
+		// Logged because this rejection is otherwise INVISIBLE: no query_log
+		// row (nothing ran), no metric, and no log line -- a 429 storm left no
+		// trace in any surface the team has. No turn exists yet (both ids are
+		// minted below), so the user id is the only correlation key there is.
+		s.errLog.Printf("qa_rate_limited user_id=%s", userID)
 		writeDetail(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
 	}
@@ -150,11 +155,17 @@ func (s *Server) handleCompleteQuery(w http.ResponseWriter, r *http.Request) {
 		// divergence: T1 above already committed the user message, where
 		// Python's shed writes nothing (its check precedes every write);
 		// pinned in contract S27.
+		//
+		// Logged for the same reason as the 429 above: a shed turn writes no
+		// audit row by design, so without this line load-shedding is invisible
+		// -- and the ids ARE in scope here, which ties the shed 503 to the T1
+		// user message it already committed.
+		s.qaLog("qa_shed_saturated", turnID, sessionID, ragErr)
 		writeSaturated(w)
 		return
 	}
 	if ragErr != nil {
-		s.errLog.Printf("qa_upstream_error: %v", ragErr)
+		s.qaLog("qa_upstream_error", turnID, sessionID, ragErr)
 		payload = s.synthesizeUpstreamError(*body.Question, sessionID, turnID, userID, filtersObj)
 	}
 

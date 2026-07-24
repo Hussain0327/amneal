@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -58,12 +59,12 @@ func (s *Server) persistUserTurn(
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", errSessionOwnershipLost
 		}
-		s.errLog.Printf("qa_session_setup_failed: %v", err)
+		s.qaLog("qa_session_setup_failed", turnID, sessionID, err)
 		return turnID, nil
 	}
 	msgID, err := newUUID4()
 	if err != nil {
-		s.errLog.Printf("qa_user_uuid_failed: %v", err)
+		s.qaLog("qa_user_uuid_failed", turnID, sessionID, err)
 		return turnID, nil
 	}
 	if err := s.q.InsertChatMessage(ctx, store.InsertChatMessageParams{
@@ -80,7 +81,7 @@ func (s *Server) persistUserTurn(
 		CreatedAt:     ts(t0),
 		// status / model_name / audit_id / reason / interpretation stay NULL.
 	}); err != nil {
-		s.errLog.Printf("qa_user_record_failed: %v", err)
+		s.qaLog("qa_user_record_failed", turnID, sessionID, err)
 		return turnID, nil
 	}
 	return sessionID, nil
@@ -103,6 +104,7 @@ func (s *Server) persistTurn(ctx context.Context, payload *computePayload, t0 ti
 	response := payload.Response
 	patch := spec.Patch
 	var auditID int32
+	turnID, sessionID := correlationIDs(spec)
 
 	if spec.AllowSkip {
 		// Skip-tolerant paths (refuse/clarify/meta/scope/summary + synthesized
@@ -115,8 +117,15 @@ func (s *Server) persistTurn(ctx context.Context, payload *computePayload, t0 ti
 		// DEFINED, not a naked 500 the stream-fallback client would re-run.
 		id, err := s.q.InsertQueryLog(ctx, auditParams(spec.AuditLogKwargs, s.now()))
 		if err != nil {
-			s.errLog.Printf("qa_answer_audit_write_failed: %v", err)
+			s.qaCapture("qa_answer_audit_write_failed", turnID, sessionID, err)
 			if spec.Fallback == nil {
+				// INV-6 enforced the hard way: a validated answer is about to
+				// be withheld and 500'd. Captured SEPARATELY from the write
+				// failure above -- that one says "the audit store hiccuped",
+				// this one says "a user lost a paid answer", and the runbook
+				// treats a single confirmed miss as a rollback trigger.
+				s.qaCapture("qa_answer_unaudited", turnID, sessionID,
+					fmt.Errorf("%w: %v", errAnswerUnaudited, err))
 				return nil, 0, errAnswerUnaudited
 			}
 			response = spec.Fallback.Response
@@ -135,10 +144,27 @@ func (s *Server) persistTurn(ctx context.Context, payload *computePayload, t0 ti
 	if err != nil {
 		// Unreachable for these shapes (response is always valid JSON). Never
 		// 500 an already-persisted turn on a serialization glitch.
-		s.errLog.Printf("qa_wire_splice_failed: %v", err)
+		s.qaLog("qa_wire_splice_failed", turnID, sessionID, err)
 		return response, auditID, nil
 	}
 	return wire, auditID, nil
+}
+
+// correlationIDs picks the turn/session ids this turn's log lines and Sentry
+// events are tagged with. The audit kwargs carry them for every payload the
+// core produces (and for the Go-synthesized upstream_error turn); the session
+// patch is the fallback, so a payload that somehow omits them still logs a
+// correlatable line instead of a bare error.
+func correlationIDs(spec persistSpec) (string, string) {
+	turnID := derefStr(spec.AuditLogKwargs.TurnID)
+	if turnID == "" {
+		turnID = spec.Patch.TurnID
+	}
+	sessionID := derefStr(spec.AuditLogKwargs.SessionID)
+	if sessionID == "" {
+		sessionID = spec.Patch.SessionID
+	}
+	return turnID, sessionID
 }
 
 // auditSkipTolerant writes the audit row, returning -1 (a sentinel that never
@@ -147,7 +173,10 @@ func (s *Server) persistTurn(ctx context.Context, payload *computePayload, t0 ti
 func (s *Server) auditSkipTolerant(ctx context.Context, k auditKwargs) int32 {
 	id, err := s.q.InsertQueryLog(ctx, auditParams(k, s.now()))
 	if err != nil {
-		s.errLog.Printf("qa_audit_write_failed: %v", err)
+		// Captured, not just logged: a -1 audit_id IS a missing query_log row
+		// for a turn that answered, which is the INV-6 miss the runbook calls
+		// a rollback trigger.
+		s.qaCapture("qa_audit_write_failed", derefStr(k.TurnID), derefStr(k.SessionID), err)
 		return -1
 	}
 	return id
@@ -162,7 +191,7 @@ func (s *Server) insertAssistant(ctx context.Context, patch sessionPatch, auditI
 	}
 	msgID, err := newUUID4()
 	if err != nil {
-		s.errLog.Printf("qa_assistant_uuid_failed: %v", err)
+		s.qaLog("qa_assistant_uuid_failed", patch.TurnID, patch.SessionID, err)
 		return
 	}
 	// created_at strictly AFTER the user message: T1 and T3 straddle the RAG
@@ -191,7 +220,7 @@ func (s *Server) insertAssistant(ctx context.Context, patch sessionPatch, auditI
 		MetadataJson:   jsonbOr(patch.Metadata, "{}"),
 		CreatedAt:      ts(ta),
 	}); err != nil {
-		s.errLog.Printf("qa_assistant_record_failed: %v", err)
+		s.qaLog("qa_assistant_record_failed", patch.TurnID, patch.SessionID, err)
 		return
 	}
 	if patch.UpdateFilters {
@@ -200,7 +229,7 @@ func (s *Server) insertAssistant(ctx context.Context, patch sessionPatch, auditI
 			ActiveFiltersJson: jsonbOr(patch.Filters, "{}"),
 			UpdatedAt:         ts(s.now()),
 		}); err != nil {
-			s.errLog.Printf("qa_update_session_filters_failed: %v", err)
+			s.qaLog("qa_update_session_filters_failed", patch.TurnID, patch.SessionID, err)
 		}
 	}
 }
