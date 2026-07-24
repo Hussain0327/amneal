@@ -547,8 +547,11 @@ def similarity_search(
     params["qvec"] = _vector_literal(query_embedding)
     params["k"] = int(k)
     select_cols = ", ".join(("id", "text", *_METADATA_COLUMNS))
+    # S608: the only interpolated identifiers are _METADATA_COLUMNS (a module
+    # constant) and `clause`, whose column names _append_condition validates
+    # against _FILTERABLE_COLUMNS. Every caller value is a bound parameter.
     sql = (
-        f"SELECT {select_cols}, embedding <=> CAST(:qvec AS vector) AS distance "
+        f"SELECT {select_cols}, embedding <=> CAST(:qvec AS vector) AS distance "  # noqa: S608
         f"FROM chunk{clause} "
         "ORDER BY embedding <=> CAST(:qvec AS vector) LIMIT :k"
     )
@@ -618,7 +621,10 @@ def distinct_metadata_values(key: str) -> set[str]:
     _ensure_ready()
     with get_engine().connect() as conn:
         rows = conn.execute(
-            sa_text(f"SELECT DISTINCT {key} FROM chunk WHERE {key} IS NOT NULL AND {key} != ''")
+            # `key` is rejected above unless it is in _TEXT_METADATA_COLUMNS.
+            sa_text(
+                f"SELECT DISTINCT {key} FROM chunk WHERE {key} IS NOT NULL AND {key} != ''"  # noqa: S608
+            )
         ).scalars()
         out = {str(v) for v in rows}
     _metadata_values_cache[key] = (time.monotonic(), frozenset(out))

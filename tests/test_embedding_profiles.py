@@ -269,6 +269,39 @@ def test_profile_search_never_mixes_vector_spaces(pg_profile_store: Any) -> None
     assert [hit.chunk_id for hit in filtered] == ["chunk-a"]
 
 
+def test_profile_search_revalidates_profile_id_at_the_sql_boundary(
+    pg_profile_store: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SQL boundary must not trust a NON-LOCAL validation.
+
+    profile_id is interpolated into a SQL string literal rather than bound,
+    deliberately: binding loses the partial-index plan match. Today it is safe
+    only because get_embedding_profile() validates a few statements earlier in
+    the same function -- an ordering accident, not an enforced contract.
+
+    This pins the boundary itself. It simulates exactly the refactor that would
+    remove the guarantee (a resolver that returns a profile without validating
+    the caller's id) and asserts the search still refuses. Without the
+    re-assert, the quote in the injected id closes the literal and reaches
+    Postgres as query text.
+    """
+    from regwatch.store import embedding_profiles
+
+    _seed_two_chunks(pg_profile_store)
+    profile = pg_profile_store.register_embedding_profile(_spec(model="model-a"))
+
+    # similarity_search_profile resolves this name from its OWN module globals,
+    # so patch it there -- the fixture hands back the vector_store re-export.
+    monkeypatch.setattr(embedding_profiles, "get_embedding_profile", lambda _profile_id: profile)
+
+    with pytest.raises(ValueError, match="profile_id"):
+        embedding_profiles.similarity_search_profile(
+            "ep_' OR '1'='1",
+            [1.0, 0.0, 0.0],
+            k=1,
+        )
+
+
 def test_profile_indexes_use_vector_1536_and_halfvec_2560(
     pg_profile_store: Any,
 ) -> None:

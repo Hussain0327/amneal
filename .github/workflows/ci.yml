@@ -62,8 +62,12 @@ jobs:
       - name: sync deps
         run: uv sync --extra dev --extra llm --extra local-embeddings
 
+      # scripts/ is included so the flake8-bandit ("S") rules added to
+      # pyproject actually cover it -- the export/codegen helpers there run in
+      # CI and locally, and an unscanned directory is exactly where a
+      # subprocess or credential smell would hide. It passes clean today.
       - name: ruff
-        run: uv run ruff check src tests migrations tests_contract
+        run: uv run ruff check src tests migrations tests_contract scripts
 
       - name: black --check
         run: uv run black --check src tests migrations tests_contract

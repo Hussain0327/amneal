@@ -1624,7 +1624,7 @@ def _ext_spl_section(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     section = ctx.spl_sections.get(loinc)
     if section is None or not section.text:
         return _analyst(spec, [], f"SPL has no LOINC {loinc} section text.")
-    assert ctx.setid is not None
+    assert ctx.setid is not None  # noqa: S101 - narrowing; _spl_guard already gated setid
     token = spl_token(ctx.setid, loinc)
     valid, _ = validate_structured_citations([token], ctx.known_tokens)
     if not valid:
@@ -1727,7 +1727,7 @@ def _ext_pllr_format(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     if guard is not None:
         return guard
     present = [c for c in _PLLR_LOINCS if c in ctx.spl_section_codes]
-    assert ctx.setid is not None
+    assert ctx.setid is not None  # noqa: S101 - narrowing; _spl_guard already gated setid
     ev: list[dict[str, Any]] = []
     for loinc in present:
         token = spl_token(ctx.setid, loinc)
@@ -1767,7 +1767,7 @@ def _ext_pregnancy_registry(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     section = ctx.spl_sections.get(LOINC_PREGNANCY)
     if section is None:
         return _analyst(spec, [], "No Pregnancy subsection (LOINC 42228-7) in the SPL.")
-    assert ctx.setid is not None
+    assert ctx.setid is not None  # noqa: S101 - narrowing; _spl_guard already gated setid
     token = spl_token(ctx.setid, LOINC_PREGNANCY)
     valid, _ = validate_structured_citations([token], ctx.known_tokens)
     locator = token if valid else f"setid={ctx.setid}#{LOINC_PREGNANCY}"

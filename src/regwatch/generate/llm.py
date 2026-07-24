@@ -831,9 +831,10 @@ def get_llm_provider(name: str | None = None, *, role: str = "default") -> LLMPr
         ]
         if missing:
             raise RuntimeError(f"{', '.join(missing)} not set; configure Databricks LLM serving")
-        assert isinstance(base_url, str)
-        assert isinstance(token, str)
-        assert isinstance(databricks_model, str)
+        # Narrowing for mypy only; the `missing` check above is the real gate.
+        assert isinstance(base_url, str)  # noqa: S101
+        assert isinstance(token, str)  # noqa: S101
+        assert isinstance(databricks_model, str)  # noqa: S101
         return DatabricksProvider(
             model=databricks_model,
             base_url=base_url,
