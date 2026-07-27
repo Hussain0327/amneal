@@ -1417,12 +1417,43 @@ def _stored_corruption_500(run_id: int, event: str) -> HTTPException:
 
 def _run_application_number(run_id: int) -> str:
     """The run's stored application number for audit rows -- one light column
-    select, never the JSON payloads. Empty when the run vanished mid-request."""
-    with session_scope() as s:
-        appl_no = s.execute(
-            sa_select(col(WhitepaperRun.application_number)).where(col(WhitepaperRun.id) == run_id)
-        ).scalar_one_or_none()
+    select, never the JSON payloads. Empty when the run vanished mid-request.
+
+    DEFINED failure: this label only decorates the audit row, so a fault on this
+    extra round-trip must not cost the row itself -- degrade to empty and let
+    the INV-6 write proceed.
+    """
+    try:
+        with session_scope() as s:
+            appl_no = s.execute(
+                sa_select(col(WhitepaperRun.application_number)).where(
+                    col(WhitepaperRun.id) == run_id
+                )
+            ).scalar_one_or_none()
+    except Exception as exc:
+        log.warning(
+            "whitepaper_run_appl_no_lookup_failed", run_id=run_id, error_type=type(exc).__name__
+        )
+        capture_exception(exc)
+        return ""
     return appl_no or ""
+
+
+def _log_query_safe(**kwargs: Any) -> None:
+    """``log_query`` with a DEFINED failure: never raise.
+
+    Mirrors ``assemble.dossier._log_query_safe`` / ``whitepaper.populator.
+    _log_query_safe``. The finalize/reopen callers run this AFTER the store has
+    COMMITTED the state transition, so a raising audit write would answer 500
+    for a change the DB durably holds -- and the retry hits RunFinalizedError /
+    RunNotFinalError -> 409, so no later request could write the row either.
+    Log + Sentry-capture and return: a loud missing row, never a lying response.
+    """
+    try:
+        log_query(**kwargs)
+    except Exception as exc:
+        log.warning("whitepaper_workflow_audit_write_failed", error_type=type(exc).__name__)
+        capture_exception(exc)
 
 
 def _log_run_workflow(user: User, run_id: int, *, status: str) -> None:
@@ -1430,7 +1461,7 @@ def _log_run_workflow(user: User, run_id: int, *, status: str) -> None:
     trail docx_rendered rides on. model_name is a non-LLM marker (no model ran),
     consistent with "(docx-render)"."""
     appl_no = _run_application_number(run_id)
-    log_query(
+    _log_query_safe(
         mode="whitepaper",
         query_text=f"whitepaper run {status} run_id={run_id} application_number={appl_no!r}",
         retrieved=[],

@@ -55,6 +55,12 @@ def _whitepaper_audit_rows() -> list[dict[str, Any]]:
         ]
 
 
+def _boom(*args: Any, **kwargs: Any) -> NoReturn:
+    """Simulated DB outage on an audit-side round-trip (tests/test_grounded_qa_citations
+    uses the same idiom for the QA path)."""
+    raise RuntimeError("simulated audit db outage")
+
+
 def _forbid_repopulate(monkeypatch: pytest.MonkeyPatch) -> None:
     """The saved-run endpoints must never re-populate: no fetches, no LLM."""
 
@@ -322,6 +328,67 @@ def test_finalize_freezes_reopen_unfreezes_and_audits(
         assert row["route_json"]["application_number"] == APPL_NO
     assert rows[1]["route_json"]["reason"] == "finalized"
     assert rows[2]["route_json"]["reason"] == "reopened"
+
+
+def test_finalize_audit_write_failure_keeps_the_run_final_and_does_not_500(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """INV-6/INV-4: the audit write runs AFTER finalize_run committed, so it must
+    have a DEFINED failure. A naked 500 here would tell the analyst the finalize
+    failed while the DB holds ``final`` -- and the retry 409s, so no later request
+    could ever write the row either."""
+    install_fake_sources(monkeypatch)
+    run_id = _populate(auth_client)["run_id"]
+    monkeypatch.setattr(api_main, "log_query", _boom)
+
+    r = auth_client.post(f"/whitepaper/runs/{run_id}/finalize")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"run_id": run_id, "status": "final"}
+    # The response told the truth about the committed state transition.
+    assert auth_client.get(f"/whitepaper/runs/{run_id}").json()["status"] == "final"
+    # Pin the LOUD degrade: the row is missing (logged + Sentry-captured), not
+    # silently invented.
+    assert [row["status"] for row in _whitepaper_audit_rows()] == ["populated"]
+
+
+def test_reopen_audit_write_failure_keeps_the_run_draft_and_does_not_500(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reopen twin of the finalize case: reopen_run has already committed
+    draft, and the retry 409s on RunNotFinalError."""
+    install_fake_sources(monkeypatch)
+    run_id = _populate(auth_client)["run_id"]
+    assert auth_client.post(f"/whitepaper/runs/{run_id}/finalize").status_code == 200
+    monkeypatch.setattr(api_main, "log_query", _boom)
+
+    r = auth_client.post(f"/whitepaper/runs/{run_id}/reopen")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"run_id": run_id, "status": "draft"}
+    assert auth_client.get(f"/whitepaper/runs/{run_id}").json()["status"] == "draft"
+    assert [row["status"] for row in _whitepaper_audit_rows()] == ["populated", "finalized"]
+
+
+def test_finalize_appl_no_lookup_failure_still_writes_the_audit_row(
+    auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blip on the cosmetic application_number round-trip must not cost the
+    audit row: the label degrades to empty, the row still lands.
+
+    Only main's ``session_scope`` name is rebound, so the audit insert (which
+    goes through ``regwatch.common.audit``'s own import) still succeeds -- that
+    is the transient-fault shape this recovers.
+    """
+    install_fake_sources(monkeypatch)
+    run_id = _populate(auth_client)["run_id"]
+    monkeypatch.setattr(api_main, "session_scope", _boom)
+
+    r = auth_client.post(f"/whitepaper/runs/{run_id}/finalize")
+    assert r.status_code == 200, r.text
+    rows = _whitepaper_audit_rows()
+    assert [row["status"] for row in rows] == ["populated", "finalized"]
+    assert rows[1]["route_json"]["run_id"] == run_id
+    assert rows[1]["route_json"]["application_number"] == ""
+    assert rows[1]["route_json"]["reason"] == "finalized"
 
 
 def test_reopen_draft_is_409(auth_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
