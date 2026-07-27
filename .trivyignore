@@ -19,6 +19,29 @@ GHSA-5xrq-8626-4rwp
 CVE-2026-53571
 GHSA-fx2h-pf6j-xcff
 
+# --- web image: brace-expansion DoS (unbounded expansion -> OOM) -------------
+# The PRODUCTION chain is FIXED, not suppressed: regwatch/frontend/package.json
+# overrides `brace-expansion@^5.0.0` to ^5.0.8, moving the only prod path
+# (@sentry/nextjs -> @sentry/bundler-plugin-core -> glob -> minimatch) off the
+# vulnerable range. `npm audit --omit=dev --audit-level=high` is clean.
+#
+# What remains in the image cannot be fixed HERE, and is dev-tooling only:
+#   * node_modules/brace-expansion@1.1.16 and
+#     @redocly/openapi-core/node_modules/brace-expansion@2.1.2 -- their consumers
+#     `require('brace-expansion')` and CALL the result. In 5.x that require
+#     returns {expand}, NOT a callable (verified against 5.0.8), so forcing them
+#     onto the fixed line is a guaranteed TypeError at runtime. Only an upstream
+#     bump of those consumers fixes it -- which is why the override above is
+#     scoped to ^5.0.0 rather than applied blanket.
+#   * usr/local/lib/node_modules/npm/node_modules/brace-expansion -- npm's OWN
+#     bundled copy from `npm install -g npm@11.18.0` in the Dockerfile. No
+#     lockfile change reaches it; it moves when npm ships a rebuilt release.
+# The image serves Next.js; none of these three sit on a request path, and the
+# advisory needs attacker-controlled brace input to the expander. Drop entries
+# as those consumers and npm ship fixed releases.
+CVE-2026-14257
+GHSA-mh99-v99m-4gvg
+
 # --- web image: Go stdlib CVEs inside esbuild's bundled Go binary ------------
 # esbuild ships as a pre-compiled Go binary (@esbuild/<platform>/bin/esbuild),
 # pulled in transitively by vite/vitest as a dev/build dependency. Trivy flags
