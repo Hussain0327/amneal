@@ -1737,18 +1737,35 @@ def ask(
     # tests that monkeypatch them on this module keep working; a future HTTP
     # shell passes constants over pre-loaded request data instead.
     sid, tid = session_id, turn_id
-    outcome, audit, patch = ask_core(
-        question,
-        session_id=sid,
-        turn_id=tid,
-        filters=filters,
-        k=k,
-        user_id=user_id,
-        load_session_filters=lambda: get_session_filters(sid),
-        load_recent_turns=lambda: get_recent_turns(sid, limit=3, exclude_turn_id=tid),
-        on_progress=on_progress,
-        on_token=on_token,
-    )
+    try:
+        outcome, audit, patch = ask_core(
+            question,
+            session_id=sid,
+            turn_id=tid,
+            filters=filters,
+            k=k,
+            user_id=user_id,
+            load_session_filters=lambda: get_session_filters(sid),
+            load_recent_turns=lambda: get_recent_turns(sid, limit=3, exclude_turn_id=tid),
+            on_progress=on_progress,
+            on_token=on_token,
+        )
+    except Exception as exc:
+        # The SAME audited-error boundary compute_turn owns for the Go control
+        # plane. The surfaces that reach ask() -- POST /query/stream (never
+        # served natively) and POST /query whenever GO_NATIVE_QUERY is false
+        # (the code default and the rollback path) -- must fail IDENTICALLY to
+        # the native one: a raise in retrieve()/rerank/resolve otherwise leaves
+        # the user turn recorded above with no audit row at all (INV-6).
+        log.warning("qa_pipeline_error", error=str(exc), error_type=type(exc).__name__)
+        capture_exception(exc)
+        outcome, audit, patch = _pipeline_error(
+            question,
+            session_id=sid,
+            turn_id=tid,
+            user_id=user_id,
+            filters=filters,
+        )
     return _persist_turn(outcome, audit, patch)
 
 
