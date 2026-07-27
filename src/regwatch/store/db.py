@@ -22,7 +22,7 @@ from alembic.runtime.migration import MigrationContext
 from config.settings import Settings, get_settings
 from sqlalchemy import Engine, inspect, text
 from sqlalchemy.engine import URL, make_url
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DBAPIError
 from sqlmodel import Session, SQLModel, create_engine
 
 from regwatch.common.logging import get_logger
@@ -84,6 +84,48 @@ _CHUNK_INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS ix_chunk_version_id ON chunk (version_id)",
     "CREATE INDEX IF NOT EXISTS ix_chunk_appl_no ON chunk (appl_no)",
 )
+
+# SQLSTATEs where the ENVIRONMENT refused a runtime DDL statement rather than the
+# statement itself being wrong:
+#   55P03 lock_not_available     - the contended lock of the 2026-06-18 incident;
+#   42501 insufficient_privilege - a role without CREATE on the schema / without
+#                                  ownership of `chunk` (the least-privilege DB
+#                                  creds this app is moving to), or any
+#                                  non-superuser hitting CREATE EVENT TRIGGER;
+#   25006 read_only_transaction  - a read-only role or a replica in recovery
+#                                  (docs/POLYGLOT_TARGET_2026-07-10.md:158 makes
+#                                  a read-only Python role the end state).
+# All three are operator-fixable or transient and every runtime DDL statement is
+# idempotent (IF NOT EXISTS / CREATE OR REPLACE / skip-if-already-on), so the
+# object is re-attempted on the next boot or first use. Any OTHER SQLSTATE
+# (42601 syntax_error, 42P01 undefined_table, 42703 undefined_column, ...) means
+# OUR DDL is wrong: those must still crash rather than boot a half-built schema.
+_DEGRADABLE_DDL_SQLSTATES = {
+    "55P03": "lock_not_available",
+    "42501": "insufficient_privilege",
+    "25006": "read_only_transaction",
+    # 57014 is here to preserve the pre-existing `except OperationalError`
+    # behavior, NOT as a new tolerance: psycopg maps class-57 QueryCanceled to
+    # OperationalError, so the old guards already swallowed it. Boot DDL runs on
+    # the APP engine, which applies statement_timeout (get_engine -> ...
+    # _pg_connect_args; default 30s), unlike the migration engine that
+    # deliberately omits it so a long index build can finish. So a re-attempted
+    # HNSW build on a populated `chunk` table times out at 30s -- exactly the
+    # state this design creates by skipping objects -- and without this entry
+    # that would crash-loop boot: the failure class this guard exists to remove.
+    "57014": "query_canceled",
+}
+
+
+def ddl_degrade_reason(exc: DBAPIError) -> str | None:
+    """Name the environmental reason this DDL failure may be skipped, else None.
+
+    Shared with ``pgvector_store`` so the boot-time and lazy-first-use DDL paths
+    can never drift apart on what counts as skippable. A driver error with no
+    SQLSTATE (a dead connection) is deliberately NOT degradable.
+    """
+    sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+    return _DEGRADABLE_DDL_SQLSTATES.get(str(sqlstate or ""))
 
 
 def _repo_root() -> Path:
@@ -256,7 +298,22 @@ def _ensure_vector_extension(engine: Engine) -> None:
     'CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions' is a no-op
     there. A local docker Postgres has no ``extensions`` schema — the plain
     form installs the extension into ``public`` instead.
+
+    Unlike every other DDL site this one has NO degrade guard, by design: a
+    genuinely absent extension must stay a hard boot refusal (``create_all``
+    cannot build the ``vector`` column without it). So it must not ASK when the
+    answer cannot change anything - Postgres checks read-only status and
+    privilege BEFORE the IF NOT EXISTS existence check, so the un-probed
+    statement raises (25006 on a read-only role/replica, 42501 for a
+    non-owner) even though there is nothing to do. Mirrors the same probe in
+    ``pgvector_store._ensure_extension``.
     """
+    with engine.connect() as conn:
+        installed = conn.execute(
+            text("SELECT 1 FROM pg_extension WHERE extname = 'vector'")
+        ).scalar()
+    if installed is not None:
+        return
     with engine.begin() as conn:
         has_extensions_schema = (
             conn.execute(text("SELECT 1 FROM pg_namespace WHERE nspname = 'extensions'")).scalar()
@@ -303,11 +360,21 @@ def _ensure_postgres_objects(engine: Engine) -> None:
             with engine.begin() as conn:
                 conn.execute(text("SET LOCAL lock_timeout = '3s'"))
                 conn.execute(text(ddl))
-        except OperationalError as exc:
-            # lock_timeout -> LockNotAvailable on the contended chunk lock: leave
-            # the remaining IF NOT EXISTS objects for a later boot (mirrors
-            # _enable_row_level_security) instead of crashing the process.
-            log.warning("ensure_postgres_objects_skipped", error=str(getattr(exc, "orig", exc)))
+        except DBAPIError as exc:
+            # The environment refused the statement (contended chunk lock, a role
+            # without DDL privilege, a read-only session): leave the remaining
+            # IF NOT EXISTS objects for a later boot (mirrors
+            # _enable_row_level_security) instead of crashing the process. A
+            # broken statement of ours still raises. `reason` keeps a transient
+            # lock distinguishable from a permanent privilege gap in the logs.
+            reason = ddl_degrade_reason(exc)
+            if reason is None:
+                raise
+            log.warning(
+                "ensure_postgres_objects_skipped",
+                reason=reason,
+                error=str(getattr(exc, "orig", exc)),
+            )
             break
     # Profile tables are registered in SQLModel.metadata for fresh create_all
     # and created by migration 0015 on upgrades.  Their trigger functions are
@@ -379,11 +446,16 @@ def _ensure_embedding_profile_objects(engine: Engine) -> None:
             conn.execute(text("SET LOCAL lock_timeout = '3s'"))
             for statement in mod.embedding_profile_support_sql(str(vector_schema)):
                 conn.execute(text(statement))
-    except OperationalError as exc:
-        # The chunk text trigger requires a lock on the hot chunk table.  Match
-        # the rest of boot: skip under contention and retry on a later boot.
+    except DBAPIError as exc:
+        # The chunk text trigger requires a lock on the hot chunk table, and the
+        # CREATE FUNCTION/TRIGGER needs DDL privilege.  Match the rest of boot:
+        # skip when the environment refuses it and retry on a later boot.
+        reason = ddl_degrade_reason(exc)
+        if reason is None:
+            raise
         log.warning(
             "embedding_profile_objects_skipped",
+            reason=reason,
             error=str(getattr(exc, "orig", exc)),
         )
 
@@ -416,9 +488,21 @@ def _enable_row_level_security(engine: Engine) -> None:
             with engine.begin() as conn:
                 conn.execute(text("SET LOCAL lock_timeout = '3s'"))
                 conn.execute(text(f'ALTER TABLE public."{name}" ENABLE ROW LEVEL SECURITY'))
-        except OperationalError as exc:
-            # lock_timeout -> LockNotAvailable: leave it for a later boot.
-            log.warning("rls_enable_skipped", table=name, error=str(getattr(exc, "orig", exc)))
+        except DBAPIError as exc:
+            # Contended lock, no privilege to ALTER, read-only session: leave it
+            # for a later boot. Swallowing here is ONLY safe because
+            # _record_unprotected_tables below still runs and publishes the
+            # table to /ready -- an escaping exception would skip that and hand
+            # out a clean bill of health over an anon-readable table.
+            reason = ddl_degrade_reason(exc)
+            if reason is None:
+                raise
+            log.warning(
+                "rls_enable_skipped",
+                table=name,
+                reason=reason,
+                error=str(getattr(exc, "orig", exc)),
+            )
     _record_unprotected_tables(engine)
 
 
@@ -514,6 +598,13 @@ def _ensure_rls_event_trigger(engine: Engine) -> None:
     Lock-free + idempotent (CREATE OR REPLACE FUNCTION / DROP-then-CREATE
     trigger, neither takes a table lock), so re-asserting it on the same-revision
     boot path is a safe no-op and needs no lock_timeout dance. No-op off Postgres.
+
+    PRIVILEGE is the failure mode here, not locks: CREATE EVENT TRIGGER requires
+    superuser, so any lesser role is refused (42501) on EVERY boot. That must
+    not crash-loop the machine, but unlike a contended lock it never self-heals,
+    so the degrade is loud (log.error + Sentry) and the accepted cost is
+    explicit: without the trigger a table created AFTER boot can stay un-RLSed
+    until the next boot's sweep sees it and /ready fails closed.
     """
     if engine.dialect.name != "postgresql":
         return
@@ -523,9 +614,25 @@ def _ensure_rls_event_trigger(engine: Engine) -> None:
         raise RuntimeError(f"cannot load migration 0011 from {path}")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    with engine.begin() as conn:
-        for stmt in mod.rls_event_trigger_sql():
-            conn.execute(text(stmt))
+    try:
+        with engine.begin() as conn:
+            for stmt in mod.rls_event_trigger_sql():
+                conn.execute(text(stmt))
+    except DBAPIError as exc:
+        reason = ddl_degrade_reason(exc)
+        if reason is None:
+            raise
+        log.error(
+            "rls_event_trigger_skipped",
+            reason=reason,
+            error=str(getattr(exc, "orig", exc)),
+        )
+        from regwatch.common.observability import capture_exception
+
+        # Capture the driver error itself: its SQLSTATE and message are what an
+        # operator needs to decide between granting the privilege and accepting
+        # the gap (same explicit capture-point style as the stamp guard below).
+        capture_exception(exc)
 
 
 def _init_postgres(engine: Engine) -> None:

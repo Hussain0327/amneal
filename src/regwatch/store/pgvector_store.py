@@ -29,7 +29,7 @@ from config.settings import get_settings
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, Connection, Engine
 from sqlalchemy import text as sa_text
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.exc import DBAPIError, ProgrammingError
 from sqlmodel import Field, SQLModel
 
 from regwatch.common.logging import get_logger
@@ -38,6 +38,7 @@ from regwatch.process.embedder import (
     get_embedding_provider,
     get_embedding_provider_for_profile,
 )
+from regwatch.store.db import ddl_degrade_reason
 
 log = get_logger(__name__)
 
@@ -216,8 +217,20 @@ def ensure_schema(engine: Engine) -> None:
             with engine.begin() as conn:
                 conn.execute(sa_text("SET LOCAL lock_timeout = '3s'"))
                 conn.execute(sa_text(ddl))
-        except OperationalError as exc:
-            log.warning("ensure_schema_index_skipped", error=str(getattr(exc, "orig", exc)))
+        except DBAPIError as exc:
+            # Same allowlist as boot (db.ddl_degrade_reason): a contended lock, a
+            # role without ownership of `chunk`, or a read-only session are all
+            # environment refusals this lazy path must survive -- it runs on a
+            # SERVING process's first query, where an escape is a naked
+            # unaudited 500. A broken statement of ours still raises.
+            reason = ddl_degrade_reason(exc)
+            if reason is None:
+                raise
+            log.warning(
+                "ensure_schema_index_skipped",
+                reason=reason,
+                error=str(getattr(exc, "orig", exc)),
+            )
             break
     # Deny-all for Supabase's auto-exposed Data API roles; the app's `postgres`
     # role bypasses RLS. Mandatory per the K2 contract — but enabled OUT of the
@@ -243,9 +256,18 @@ def _enable_chunk_rls(engine: Engine) -> None:
         with engine.begin() as conn:
             conn.execute(sa_text("SET LOCAL lock_timeout = '3s'"))
             conn.execute(sa_text("ALTER TABLE chunk ENABLE ROW LEVEL SECURITY"))
-    except OperationalError as exc:
-        # Contended ACCESS EXCLUSIVE lock: never let it wedge the first query.
-        log.warning("chunk_rls_enable_skipped", error=str(getattr(exc, "orig", exc)))
+    except DBAPIError as exc:
+        # Contended ACCESS EXCLUSIVE lock, no ownership of `chunk`, or a
+        # read-only session: never let it wedge the first query. db.py's sweep
+        # publishes an unprotected `chunk` to /ready, so this stays detected.
+        reason = ddl_degrade_reason(exc)
+        if reason is None:
+            raise
+        log.warning(
+            "chunk_rls_enable_skipped",
+            reason=reason,
+            error=str(getattr(exc, "orig", exc)),
+        )
 
 
 def assert_embedding_provider_dim() -> None:

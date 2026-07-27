@@ -16,13 +16,36 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from types import ModuleType
 
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import Engine, create_engine, event, inspect, text
+from sqlalchemy.exc import DBAPIError, ProgrammingError
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
+
+# A prod-shaped least-privilege role: USAGE on schema public + DML on the tables
+# that already exist, NO create privilege, and it owns nothing -- so every
+# runtime DDL statement comes back 42501 (insufficient_privilege). This is the
+# role docs/POLYGLOT_TARGET_2026-07-10.md step 7 moves Python to. Literal SQL
+# (no interpolation) keeps the role name out of any f-string.
+_CREATE_LOW_PRIV_ROLE_SQL = """
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'regwatch_lowpriv_test') THEN
+        CREATE ROLE regwatch_lowpriv_test LOGIN PASSWORD 'lowpriv-test-pw';
+    END IF;
+END $$
+"""
+_GRANT_LOW_PRIV_SQL = (
+    "GRANT USAGE ON SCHEMA public TO regwatch_lowpriv_test",
+    "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public "
+    "TO regwatch_lowpriv_test",
+)
+_DROP_LOW_PRIV_ROLE_SQL = (
+    "DROP OWNED BY regwatch_lowpriv_test",
+    "DROP ROLE IF EXISTS regwatch_lowpriv_test",
+)
 
 
 @pytest.fixture()
@@ -47,6 +70,41 @@ def pg_db(monkeypatch: pytest.MonkeyPatch) -> Iterator[ModuleType]:
         conn.execute(text("CREATE SCHEMA public"))
     yield db_module
     db_module.reset_for_tests()
+
+
+@pytest.fixture()
+def low_priv_engine(pg_db: ModuleType) -> Iterator[Callable[..., Engine]]:
+    """Factory for engines connected as the DML-only role (see the SQL above).
+
+    Grants are applied on every call because ``GRANT ... ON ALL TABLES`` only
+    covers tables that already exist -- callers create the schema as the
+    superuser first, then ask for a low-privilege engine.
+    """
+    admin = pg_db.get_engine()
+    with admin.begin() as conn:
+        conn.execute(text(_CREATE_LOW_PRIV_ROLE_SQL))
+    built: list[Engine] = []
+
+    def _make(*, read_only: bool = False) -> Engine:
+        with admin.begin() as conn:
+            for statement in _GRANT_LOW_PRIV_SQL:
+                conn.execute(text(statement))
+        # Derive from the app engine's URL so the psycopg-v3 driver form that
+        # config.settings normalizes to is carried over verbatim.
+        url = admin.url.set(username="regwatch_lowpriv_test", password="lowpriv-test-pw")
+        # read_only models the same role on a replica / with the read-only GUC
+        # set (SQLSTATE 25006 instead of 42501) -- POLYGLOT step 7's end state.
+        connect_args = {"options": "-c default_transaction_read_only=on"} if read_only else {}
+        engine = create_engine(url, connect_args=connect_args)
+        built.append(engine)
+        return engine
+
+    yield _make
+    for engine in built:
+        engine.dispose()
+    with admin.begin() as conn:
+        for statement in _DROP_LOW_PRIV_ROLE_SQL:
+            conn.execute(text(statement))
 
 
 def _stamped_revision(db_module: ModuleType) -> str | None:
@@ -301,6 +359,194 @@ def test_ensure_schema_degrades_gracefully_on_contended_lock(pg_db: ModuleType) 
         holder.close()
     # Bounded: one 3s lock_timeout then break, not 3s per every index.
     assert elapsed < 6.0, "first-use chunk DDL did not bound its lock wait"
+
+
+def test_boot_ddl_degrades_on_insufficient_privilege(
+    pg_db: ModuleType, low_priv_engine: Callable[..., Engine]
+) -> None:
+    """A role with DML but no DDL privilege must NOT crash the process.
+
+    Every runtime-DDL site guarded only lock contention (OperationalError /
+    55P03). A least-privilege role is refused with 42501, which arrives as a
+    DIFFERENT exception class and escaped every guard. Boot funnels through
+    init_db (api/main.py lifespan, the CLI entry points, ingest/pipeline.py), so
+    that crash-looped the machine; pgvector_store.ensure_schema additionally
+    runs LAZILY on a booted process's first query, where the same escape is a
+    naked, unaudited 500 (INV-6).
+    """
+    from regwatch.store import pgvector_store
+
+    pg_db.init_db()
+    admin = pg_db.get_engine()
+    low = low_priv_engine()
+    # Push each site past its "already converged" early return so the DDL is
+    # genuinely attempted (and genuinely denied) instead of skipped.
+    with admin.begin() as conn:
+        conn.execute(text("DROP TRIGGER embedding_profile_immutable ON embedding_profile"))
+        conn.execute(text("DROP EVENT TRIGGER ensure_rls"))
+        conn.execute(text("ALTER TABLE chunk DISABLE ROW LEVEL SECURITY"))
+    try:
+        pg_db._ensure_postgres_objects(low)  # chunk DDL loop + 0015 trigger DDL
+        pg_db._ensure_rls_event_trigger(low)  # no try/except at all today
+        pgvector_store.ensure_schema(low)  # lazy first-query twin + chunk RLS
+        with admin.connect() as conn:
+            profile_trigger = conn.execute(
+                text(
+                    "SELECT 1 FROM pg_trigger WHERE NOT tgisinternal "
+                    "AND tgname = 'embedding_profile_immutable'"
+                )
+            ).scalar()
+            event_triggers = {
+                row[0] for row in conn.execute(text("SELECT evtname FROM pg_event_trigger"))
+            }
+            chunk_rls = conn.execute(
+                text("SELECT relrowsecurity FROM pg_class WHERE relname = 'chunk'")
+            ).scalar()
+        # Non-vacuous: the statements really were refused. If the role ever
+        # gained DDL rights these would flip and the test would stop proving
+        # anything, so assert the denial, not just the absence of a raise.
+        assert profile_trigger is None
+        assert "ensure_rls" not in event_triggers
+        assert chunk_rls is False
+    finally:
+        # The per-test reset only TRUNCATEs, so hand the schema back intact.
+        with admin.begin() as conn:
+            conn.execute(text("ALTER TABLE chunk ENABLE ROW LEVEL SECURITY"))
+        pg_db._ensure_postgres_objects(admin)
+        pg_db._ensure_rls_event_trigger(admin)
+
+
+def test_boot_ddl_degrades_on_read_only_transaction(
+    pg_db: ModuleType, low_priv_engine: Callable[..., Engine]
+) -> None:
+    """Same sites, SQLSTATE 25006: a read-only role/replica must not crash boot.
+
+    docs/POLYGLOT_TARGET_2026-07-10.md:158 makes a read-only Python role the
+    target end state, and a hot standby answers every DDL the same way today.
+    _ensure_vector_extension is the first statement boot runs and has no
+    degrade guard by design (a genuinely absent extension must stay a hard
+    refusal), so it has to STOP ASKING when the extension is already installed.
+    """
+    from regwatch.store import pgvector_store
+
+    pg_db.init_db()
+    low_ro = low_priv_engine(read_only=True)
+    pg_db._ensure_vector_extension(low_ro)
+    pg_db._ensure_postgres_objects(low_ro)
+    pg_db._ensure_rls_event_trigger(low_ro)
+    pgvector_store.ensure_schema(low_ro)
+
+
+def test_rls_sweep_still_fails_closed_on_insufficient_privilege(
+    pg_db: ModuleType, low_priv_engine: Callable[..., Engine]
+) -> None:
+    """The compliance case: a denied ALTER must not blind the /ready RLS gate.
+
+    Boot deliberately TOLERATES an ALTER it could not run, and the only thing
+    that keeps that from being silent is _record_unprotected_tables running
+    afterwards. A 42501 propagating out of the ALTER skipped it entirely, so
+    unprotected_public_tables() stayed empty and /ready answered "ready" over a
+    public table any anon-key holder can read through the Supabase Data API.
+    """
+    from fastapi import Response
+
+    from regwatch.api import main
+
+    pg_db.init_db()
+    admin = pg_db.get_engine()
+    low = low_priv_engine()
+    with admin.begin() as conn:
+        conn.execute(text("ALTER TABLE query_log DISABLE ROW LEVEL SECURITY"))
+    try:
+        pg_db._enable_row_level_security(low)  # denied ALTER must not escape ...
+        with admin.connect() as conn:
+            query_log_rls = conn.execute(
+                text("SELECT relrowsecurity FROM pg_class WHERE relname = 'query_log'")
+            ).scalar()
+        assert query_log_rls is False  # ... the table IS still unprotected ...
+        assert "query_log" in pg_db.unprotected_public_tables()  # ... and it is published
+        response = Response()
+        body = main.ready(response)
+        assert response.status_code == 503
+        assert body["status"] == "not_ready"
+        assert body["failed"] == "rls"
+    finally:
+        with admin.begin() as conn:
+            conn.execute(text("ALTER TABLE query_log ENABLE ROW LEVEL SECURITY"))
+        pg_db._enable_row_level_security(admin)  # clears the recorded set
+
+
+def test_non_degradable_ddl_error_still_raises(
+    pg_db: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control on the widened guard: only ENVIRONMENTAL refusals degrade.
+
+    A SQLSTATE outside the allowlist means our own DDL is wrong, and booting
+    into a silently half-built schema is worse than refusing to boot.
+    """
+    pg_db.init_db()
+    monkeypatch.setattr(
+        pg_db,
+        "_CHUNK_INDEX_DDL",
+        ("CREATE INDEX IF NOT EXISTS ix_chunk_bogus ON chunk (no_such_column)",),
+    )
+    with pytest.raises(ProgrammingError):
+        pg_db._ensure_postgres_objects(pg_db.get_engine())
+
+
+def test_ensure_vector_extension_skips_create_when_already_installed(pg_db: ModuleType) -> None:
+    """No CREATE EXTENSION once pgvector is installed.
+
+    Postgres checks read-only/privilege BEFORE the IF NOT EXISTS existence
+    check, so the un-probed statement fails on a read-only role even though
+    there is nothing to do (verified: 25006 in a read-only transaction).
+    """
+    pg_db.init_db()
+    engine = pg_db.get_engine()
+    seen: list[str] = []
+
+    def _record(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        seen.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _record)
+    try:
+        pg_db._ensure_vector_extension(engine)
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+    assert [s for s in seen if "CREATE EXTENSION" in s.upper()] == []
+
+
+def test_ddl_degrade_reason_classifies_only_environmental_sqlstates() -> None:
+    """Unit guard on the allowlist itself (no DB round trip)."""
+    from regwatch.store.db import ddl_degrade_reason
+
+    class _PgError(Exception):
+        def __init__(self, sqlstate: str | None) -> None:
+            super().__init__("boom")
+            self.sqlstate = sqlstate
+
+    def _wrap(sqlstate: str | None) -> DBAPIError:
+        return DBAPIError("SELECT 1", {}, _PgError(sqlstate))
+
+    assert ddl_degrade_reason(_wrap("55P03")) == "lock_not_available"
+    assert ddl_degrade_reason(_wrap("42501")) == "insufficient_privilege"
+    assert ddl_degrade_reason(_wrap("25006")) == "read_only_transaction"
+    # 57014 must stay degradable: psycopg maps it to OperationalError, so the
+    # guards this allowlist replaced already swallowed it. Dropping it would
+    # crash-loop boot when a re-attempted HNSW build hits statement_timeout.
+    assert ddl_degrade_reason(_wrap("57014")) == "query_canceled"
+    # Our DDL being wrong (syntax error, undefined table/column) is a bug.
+    assert ddl_degrade_reason(_wrap("42601")) is None
+    assert ddl_degrade_reason(_wrap("42P01")) is None
+    # A dead connection carries no SQLSTATE -- not something boot may skip past.
+    assert ddl_degrade_reason(_wrap(None)) is None
 
 
 def test_bootstrap_creates_chunk_table_and_indexes(pg_db: ModuleType) -> None:
