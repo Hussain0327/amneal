@@ -2514,6 +2514,16 @@ def _log_query_safe(**kwargs: Any) -> None:
         capture_exception(exc)
 
 
+# Fixed copy for the status="error" audit row of an unexpected build failure.
+# One literal so the row and the tests that assert on it stay in sync, mirroring
+# grounded_qa._SERVICE_UNAVAILABLE_TEXT. The caller still gets the exception --
+# this text never reaches a client, it only makes the audit row readable.
+_BUILD_FAILED_TEXT = (
+    "This white paper could not be built because of a temporary error while "
+    "reaching the FDA sources or the audit store. No content was invented."
+)
+
+
 def build_whitepaper(
     rld_name: str,
     application_number: str,
@@ -2525,9 +2535,15 @@ def build_whitepaper(
     Writes exactly one ``log_query`` audit row (mode="whitepaper") on success
     AND on resolution failure (re-raising ``SpineResolutionError`` after the
     audit row) AND on a build-deadline breach (re-raising
-    ``WhitepaperBuildTimeoutError``, its own route_json reason). The
-    PSG-Requirements cell's scoped ``ask()`` writes its own audit row (like
-    the dossier's inner Q&A).
+    ``WhitepaperBuildTimeoutError``, its own route_json reason) AND on any other
+    failure anywhere in the build (status="error", reason="build_error", then
+    re-raised). The PSG-Requirements cell's scoped ``ask()`` writes its own
+    audit row (like the dossier's inner Q&A).
+
+    INV-6: the whole body runs inside the 009cc41 error boundary, so a crash in
+    ``_build_sections`` or a DB blip on the audit write itself cannot land as a
+    naked 500 with no mode="whitepaper" row -- which would leave the inner
+    ``ask()``'s mode="qa" row as an orphan turn with no owning operation.
     """
     model_name = current_model_name(role="synthesizer")
     query_text = f"whitepaper rld_name={rld_name!r} application_number={application_number!r}"
@@ -2538,8 +2554,46 @@ def build_whitepaper(
     }
     try:
         ctx = _build_context(rld_name, application_number, user_id=user_id)
+        sections = _build_sections(ctx)
+        counts = _status_counts(sections)
+        spine = _spine_from_ctx(ctx)
+        answer_text = (
+            f"White paper for {ctx.application_type} {ctx.appl_no} ({ctx.ingredient or 'n/a'}): "
+            f"{counts['populated']} populated, {counts['analyst_input_required']} analyst-input, "
+            f"{counts['verified_absent']} verified-absent."
+        )
+        sections_sha256 = result_fingerprint(sections)
+        # Deliberately the RAW, throwing log_query: no-audit-no-answer. A
+        # failure-safe write returns no id, so the response and the durable run
+        # would carry a source_audit_id referencing no row. Failing here falls
+        # into the boundary below, which audits the failure and re-raises.
+        audit_id = log_query(
+            mode="whitepaper",
+            query_text=query_text,
+            retrieved=[],
+            answer_text=answer_text,
+            citations=[],
+            refused=False,
+            model_name=model_name,
+            user_id=user_id,
+            status="populated",
+            route_json={
+                **route_json,
+                "reason": "populated",
+                **counts,
+                "sections_sha256": sections_sha256,
+            },
+        )
+        return {
+            "spine": spine,
+            "sections": sections,
+            "warnings": ctx.warnings,
+            "audit_id": audit_id,
+        }
     except SpineResolutionError as exc:
-        log_query(
+        # Failure-safe: a down DB here must not replace the typed resolution
+        # error with its own, which would cost the route its 422 (and the row).
+        _log_query_safe(
             mode="whitepaper",
             query_text=query_text,
             retrieved=[],
@@ -2573,39 +2627,36 @@ def build_whitepaper(
             },
         )
         raise
+    except Exception as exc:
+        # INV-6 catch-all: an unexpected failure anywhere in the build (or in
+        # the success-path audit write) must still leave a mode="whitepaper"
+        # row before the API 500s. Shaped like the deadline clause above --
+        # audit, then re-raise -- rather than build_dossier's degrade-to-refusal
+        # because a white paper has no refusal form: an empty paper would be
+        # persisted as a finalizable, docx-renderable run (INV-3/INV-4). A
+        # `raise` from a sibling except clause is not caught here, so the typed
+        # paths above keep their own single row.
+        log.warning("whitepaper_build_failed", error_type=type(exc).__name__)
+        from regwatch.common.observability import capture_exception
 
-    sections = _build_sections(ctx)
-    counts = _status_counts(sections)
-    spine = _spine_from_ctx(ctx)
-    answer_text = (
-        f"White paper for {ctx.application_type} {ctx.appl_no} ({ctx.ingredient or 'n/a'}): "
-        f"{counts['populated']} populated, {counts['analyst_input_required']} analyst-input, "
-        f"{counts['verified_absent']} verified-absent."
-    )
-    sections_sha256 = result_fingerprint(sections)
-    audit_id = log_query(
-        mode="whitepaper",
-        query_text=query_text,
-        retrieved=[],
-        answer_text=answer_text,
-        citations=[],
-        refused=False,
-        model_name=model_name,
-        user_id=user_id,
-        status="populated",
-        route_json={
-            **route_json,
-            "reason": "populated",
-            **counts,
-            "sections_sha256": sections_sha256,
-        },
-    )
-    return {
-        "spine": spine,
-        "sections": sections,
-        "warnings": ctx.warnings,
-        "audit_id": audit_id,
-    }
+        capture_exception(exc)
+        _log_query_safe(
+            mode="whitepaper",
+            query_text=query_text,
+            retrieved=[],
+            answer_text=_BUILD_FAILED_TEXT,
+            citations=[],
+            refused=True,
+            model_name=model_name,
+            user_id=user_id,
+            status="error",
+            route_json={
+                **route_json,
+                "reason": "build_error",
+                "error_type": type(exc).__name__,
+            },
+        )
+        raise
 
 
 # Re-exports used by tests / the docx writer.
