@@ -87,6 +87,7 @@ type QueryLog struct {
 	InputTokens   pgtype.Int4
 	OutputTokens  pgtype.Int4
 	CostUsd       pgtype.Float8
+	LatencyMs     pgtype.Int4
 }
 
 type User struct {

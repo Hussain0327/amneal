@@ -165,6 +165,53 @@ def test_scrub_event_truncates_sqlalchemy_statement_echo() -> None:
     assert value == "(sqlite3.IntegrityError) UNIQUE constraint failed [SQL: scrubbed]"
 
 
+def test_scrub_event_truncates_provider_error_body() -> None:
+    """The OpenAI-compatible client renders APIStatusError as
+    ``Error code: <status> - <response body>``. A provider that echoes any part
+    of the offending request back would otherwise put the analyst question and
+    the retrieved passages into the event value — a third egress on the same
+    hot path as the two the D1 work is closing."""
+    event: Any = {
+        "exception": {
+            "values": [
+                {
+                    "type": "BadRequestError",
+                    "value": (
+                        "Error code: 400 - {'error': {'message': \"invalid input: "
+                        "'what dissolution method does the ALBUTEROL PSG require'\"}}"
+                    ),
+                }
+            ]
+        }
+    }
+    scrubbed = obs._scrub_event(event, {})
+    value = scrubbed["exception"]["values"][0]["value"]
+    assert "ALBUTEROL" not in value
+    assert "dissolution" not in value
+    assert value == "Error code: scrubbed"
+
+
+def test_scrub_event_cuts_both_markers_in_one_value() -> None:
+    """A driver echo nested inside a provider error must lose both payloads."""
+    event: Any = {
+        "exception": {
+            "values": [
+                {
+                    "type": "RuntimeError",
+                    "value": (
+                        "wrapped\nError code: 400 - {'echo': 'ALBUTEROL'}\n"
+                        "[SQL: INSERT INTO query_log (query_text) VALUES (?)]"
+                    ),
+                }
+            ]
+        }
+    }
+    value = obs._scrub_event(event, {})["exception"]["values"][0]["value"]
+    assert "INSERT INTO" not in value
+    assert "ALBUTEROL" not in value
+    assert value == "wrapped Error code: scrubbed"
+
+
 def test_scrub_event_leaves_non_sql_values_untouched() -> None:
     event: Any = {"exception": {"values": [{"type": "RuntimeError", "value": "boom"}]}}
     assert obs._scrub_event(event, {}) == event

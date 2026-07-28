@@ -111,7 +111,8 @@ CREATE TABLE public.query_log (
     model_name character varying NOT NULL,
     input_tokens integer,
     output_tokens integer,
-    cost_usd double precision
+    cost_usd double precision,
+    latency_ms integer
 );
 
 CREATE SEQUENCE public.query_log_id_seq

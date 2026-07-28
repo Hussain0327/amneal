@@ -158,6 +158,11 @@ class QueryLog(SQLModel, table=True):
     input_tokens: int | None = None
     output_tokens: int | None = None
     cost_usd: float | None = None
+    # Wall time from turn start to this audit write, stamped by whichever
+    # control plane owns the turn (Go persistTurn natively, Python ask() on the
+    # relay/stream path). NULL = pre-migration row, or a writer that does not
+    # measure — never 0, which a percentile would read as an instant turn.
+    latency_ms: int | None = None
 
 
 class AnswerFeedback(SQLModel, table=True):

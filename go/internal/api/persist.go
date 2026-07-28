@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -109,13 +110,13 @@ func (s *Server) persistTurn(ctx context.Context, payload *computePayload, t0 ti
 	if spec.AllowSkip {
 		// Skip-tolerant paths (refuse/clarify/meta/scope/summary + synthesized
 		// errors): a failed audit degrades to -1, the answer still returns.
-		auditID = s.auditSkipTolerant(ctx, spec.AuditLogKwargs)
+		auditID = s.auditSkipTolerant(ctx, spec.AuditLogKwargs, t0)
 	} else {
 		// Strict answer path (INV-6): a validated answer with no audit row is
 		// never returned. On a failed write, degrade to the fixed-copy fallback
 		// (a status="error" refusal, itself skip-audited) so the failure is
 		// DEFINED, not a naked 500 the stream-fallback client would re-run.
-		id, err := s.q.InsertQueryLog(ctx, auditParams(spec.AuditLogKwargs, s.now()))
+		id, err := s.q.InsertQueryLog(ctx, auditParams(spec.AuditLogKwargs, s.now(), t0))
 		if err != nil {
 			s.qaCapture("qa_answer_audit_write_failed", turnID, sessionID, err)
 			if spec.Fallback == nil {
@@ -130,7 +131,7 @@ func (s *Server) persistTurn(ctx context.Context, payload *computePayload, t0 ti
 			}
 			response = spec.Fallback.Response
 			patch = spec.Fallback.Patch
-			auditID = s.auditSkipTolerant(ctx, spec.Fallback.AuditLogKwargs)
+			auditID = s.auditSkipTolerant(ctx, spec.Fallback.AuditLogKwargs, t0)
 		} else {
 			auditID = id
 		}
@@ -170,8 +171,8 @@ func correlationIDs(spec persistSpec) (string, string) {
 // auditSkipTolerant writes the audit row, returning -1 (a sentinel that never
 // collides with a real id) on failure -- the defined-failure wrapper Python's
 // _log_query_or_skip provides.
-func (s *Server) auditSkipTolerant(ctx context.Context, k auditKwargs) int32 {
-	id, err := s.q.InsertQueryLog(ctx, auditParams(k, s.now()))
+func (s *Server) auditSkipTolerant(ctx context.Context, k auditKwargs, t0 time.Time) int32 {
+	id, err := s.q.InsertQueryLog(ctx, auditParams(k, s.now(), t0))
 	if err != nil {
 		// Captured, not just logged: a -1 audit_id IS a missing query_log row
 		// for a turn that answered, which is the INV-6 miss the runbook calls
@@ -236,7 +237,12 @@ func (s *Server) insertAssistant(ctx context.Context, patch sessionPatch, auditI
 
 // auditParams maps the endpoint's audit kwargs onto InsertQueryLogParams. jsonb
 // columns are written VERBATIM; token/cost pointers preserve null vs 0.
-func auditParams(k auditKwargs, at time.Time) store.InsertQueryLogParams {
+//
+// latency_ms is the one column NOT sourced from the kwargs: the stateless core
+// cannot see transport time, so the control plane derives it from the turn
+// clock (t0, stamped in the handler before the compute call) and the audit
+// clock (at). Both come from s.now(), so an injected test clock controls it.
+func auditParams(k auditKwargs, at, t0 time.Time) store.InsertQueryLogParams {
 	return store.InsertQueryLogParams{
 		Ts:            ts(at),
 		SessionID:     textOrNull(k.SessionID),
@@ -254,7 +260,29 @@ func auditParams(k auditKwargs, at time.Time) store.InsertQueryLogParams {
 		InputTokens:   int4OrNull(k.InputTokens),
 		OutputTokens:  int4OrNull(k.OutputTokens),
 		CostUsd:       float8OrNull(k.CostUsd),
+		LatencyMs:     latencyMs(t0, at),
 	}
+}
+
+// latencyMs is whole-millisecond turn wall time, or NULL. NULL -- never 0 --
+// whenever the number would be a lie: no start stamp, or a clock that moved
+// backwards between the two reads. A percentile computed over a column where
+// "unknown" and "instantaneous" are both 0 understates every gate that reads
+// it, which is exactly what the provider-cutover gates must not do. The int32
+// clamp is a column-width guard, not an expected path: a turn cannot outlive
+// the request timeout, let alone 24 days.
+func latencyMs(t0, at time.Time) pgtype.Int4 {
+	if t0.IsZero() {
+		return pgtype.Int4{}
+	}
+	ms := at.Sub(t0).Milliseconds()
+	if ms < 0 {
+		return pgtype.Int4{}
+	}
+	if ms > math.MaxInt32 {
+		ms = math.MaxInt32
+	}
+	return pgtype.Int4{Int32: int32(ms), Valid: true}
 }
 
 // spliceAuditID adds audit_id to the endpoint/synthesized wire body without

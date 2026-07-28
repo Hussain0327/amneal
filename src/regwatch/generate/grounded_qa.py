@@ -23,6 +23,7 @@ import os
 import re
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
+from time import perf_counter
 from typing import Any
 
 from config.settings import get_settings
@@ -744,17 +745,40 @@ def _log_query_or_skip(**kwargs: Any) -> int:
         return -1
 
 
-def _persist_turn(outcome: RagOutcome, audit: AuditPayload, patch: SessionPatch) -> QAResult:
+def _latency_ms(t0: float | None) -> int | None:
+    """Whole-millisecond turn wall time, or None — Go's ``latencyMs`` twin.
+
+    ``perf_counter`` is monotonic, so only a missing start stamp yields None.
+    None, never 0: a percentile over a column where "unknown" and "instant"
+    both read 0 understates the provider-cutover gates that consume it. The
+    clamp is a column-width guard (int4), not a reachable path.
+    """
+    if t0 is None:
+        return None
+    return min(int((perf_counter() - t0) * 1000), 2**31 - 1)
+
+
+def _persist_turn(
+    outcome: RagOutcome,
+    audit: AuditPayload,
+    patch: SessionPatch,
+    t0: float | None = None,
+) -> QAResult:
     """The shell's write half of a turn: audit row FIRST, then the chat history.
 
     Everything user-visible is decided by the (pure) core; this function only
     performs the writes the core described and injects the audit_id they share.
+
+    ``t0`` is the shell's turn clock. Latency is stamped HERE rather than
+    supplied by the core because the core is stateless and cannot see transport
+    time — the same split Go's ``auditParams`` makes.
     """
+    log_kwargs = {**audit.log_kwargs(), "latency_ms": _latency_ms(t0)}
     if audit.allow_skip:
-        audit_id = _log_query_or_skip(**audit.log_kwargs())
+        audit_id = _log_query_or_skip(**log_kwargs)
     else:
         try:
-            audit_id = log_query(**audit.log_kwargs())
+            audit_id = log_query(**log_kwargs)
         except Exception as exc:
             # No-audit-no-answer (INV-6): a validated answer with no audit row
             # is never returned -- but the failure must be DEFINED, not a naked
@@ -769,7 +793,9 @@ def _persist_turn(outcome: RagOutcome, audit: AuditPayload, patch: SessionPatch)
             if audit.failure_fallback is None:  # defensive: strict payloads carry one
                 raise
             fb_outcome, fb_audit, fb_patch = audit.failure_fallback
-            return _persist_turn(fb_outcome, fb_audit, fb_patch)
+            # Same t0: the fallback row records how long THIS turn took, not
+            # how long the retry after a failed audit write took.
+            return _persist_turn(fb_outcome, fb_audit, fb_patch, t0)
     # Terminal-decline log lines, emitted after the audit write exactly as the
     # pre-split _refuse/_clarify/_meta did (each status maps to one maker, so
     # the event names cannot drift). The answer/summary path never logged here.
@@ -1704,6 +1730,11 @@ def ask(
     get_settings()
     current_model_name(role="synthesizer")
 
+    # Turn clock. Stamped before the user-message write, matching Go's t0
+    # (query.go, before persistUserTurn) so relay-path and native-path
+    # latency_ms measure the same interval and are comparable in one percentile.
+    t0 = perf_counter()
+
     # Session bookkeeping is best-effort: a DB hiccup here must never stop the query
     # from being processed and audited (INV-6). Degrade to a fresh id on failure.
     # The user-message write stays HERE, before compute, so a core exception still
@@ -1766,7 +1797,7 @@ def ask(
             user_id=user_id,
             filters=filters,
         )
-    return _persist_turn(outcome, audit, patch)
+    return _persist_turn(outcome, audit, patch, t0)
 
 
 def _pipeline_error(

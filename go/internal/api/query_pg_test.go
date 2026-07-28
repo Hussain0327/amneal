@@ -354,12 +354,20 @@ func assertSingleErrorAudit(t *testing.T, h *harness) {
 	}
 	var refused bool
 	var status string
+	var latencyMs *int32
 	if err := h.pool.QueryRow(t.Context(),
-		`SELECT refused, status FROM public.query_log`).Scan(&refused, &status); err != nil {
+		`SELECT refused, status, latency_ms FROM public.query_log`,
+	).Scan(&refused, &status, &latencyMs); err != nil {
 		t.Fatalf("read query_log row: %v", err)
 	}
 	if !refused || status != "error" {
 		t.Fatalf("audit row refused=%v status=%q, want a refused error row", refused, status)
+	}
+	// The skip-tolerant audit path must stamp the turn clock too. A NULL here
+	// means the p95 gates the provider cutover depends on would silently see
+	// only the strict-answer path, i.e. exactly the failing turns are missing.
+	if latencyMs == nil {
+		t.Fatal("latency_ms is NULL on a synthesized error turn; the turn clock was not threaded")
 	}
 	if roles := h.chatMessageRoles(t); len(roles) != 2 || roles[0] != "user" || roles[1] != "assistant" {
 		t.Fatalf("want the T1 user + T3 assistant pair, got %v", roles)
