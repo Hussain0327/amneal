@@ -10,7 +10,7 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # OpenAI dated-snapshot suffix: what follows "<alias>-" in the server-reported
@@ -21,6 +21,13 @@ _SNAPSHOT_SUFFIX_RE = re.compile(r"\d[\d-]*")
 # Default final-k after optional reranking. Used to detect whether RERANK_TOP_K
 # was set explicitly (vs. the legacy RETRIEVAL_TOP_K) in effective_rerank_top_k.
 _DEFAULT_RERANK_TOP_K = 8
+
+# Databricks serving-endpoint name prefixes for PARTNER-hosted model families.
+# Databricks brands these alongside its open-weight endpoints and they are
+# indistinguishable at the call site, but they carry the partner's retention
+# terms — which is precisely the exposure D1 exists to remove. Matched
+# case-insensitively as a prefix; see the _check_d1_enforcement validator.
+_D1_PARTNER_MODEL_PREFIXES = ("databricks-gpt", "databricks-claude", "databricks-gemini")
 
 
 class Settings(BaseSettings):
@@ -63,7 +70,14 @@ class Settings(BaseSettings):
     # eligible only for the synthesizer role and strips reasoning from outputs.
     databricks_llm_base_url: str | None = None
     databricks_llm_token: str | None = None
-    databricks_llm_model: str = "google/gemma-4-31B-it"
+    # No default: this is a Databricks SERVING ENDPOINT NAME, which only the
+    # operator who deployed the endpoint knows. The previous default was a
+    # HuggingFace repo id ("google/gemma-4-31B-it"), which no endpoint answers
+    # to — a half-configured deploy would 404 every synthesis, and llm.py's
+    # provider-error boundary would convert each one into an audited refusal.
+    # The app would look alive while refusing every question. Unset instead, so
+    # get_llm_provider's `missing` check fails the turn loudly.
+    databricks_llm_model: str | None = None
     gemma_thinking_enabled: bool = False
     # OpenAI call surface: "responses" (default, GPT-5.x native) or "chat" (legacy
     # Chat Completions). The LLMProvider.complete() interface is identical either way.
@@ -106,6 +120,27 @@ class Settings(BaseSettings):
         value = str(v).strip()
         return value or None
 
+    @field_validator("qwen_embedding_base_url", "databricks_llm_base_url")
+    @classmethod
+    def _require_https_endpoint(cls, v: str | None) -> str | None:
+        """Private inference endpoints must be TLS.
+
+        These two URLs carry the confidential analyst QUESTION off the box —
+        the query embedding and the synthesis prompt. A typo'd ``http://``
+        would ship it in plaintext and nothing downstream would notice: the
+        OpenAI-compatible client honors whatever scheme it is given. Refusing
+        at Settings construction makes the mistake a boot failure instead of a
+        silent, per-request disclosure.
+        """
+        if v is None:
+            return None
+        if not v.lower().startswith("https://"):
+            raise ValueError(
+                "provider endpoint URLs must use https:// — these carry the "
+                f"analyst question off-host; got {v.split(':', 1)[0]}://"
+            )
+        return v
+
     @field_validator("qwen_embedding_dimension")
     @classmethod
     def _check_qwen_embedding_dimension(cls, v: int) -> int:
@@ -119,6 +154,70 @@ class Settings(BaseSettings):
         if not 1 <= v <= 512:
             raise ValueError("QWEN_EMBEDDING_BATCH_SIZE must be in [1, 512]")
         return v
+
+    # ---------- D1 residency tripwires ----------
+    # Inert until an operator arms D1_ENFORCED. It exists because, once
+    # LLM_PROVIDER=databricks, the two ways to silently break the residency
+    # claim are both a one-string edit away and neither fails on its own:
+    #
+    #   1. Pointing DATABRICKS_LLM_MODEL at a partner-brand serving endpoint.
+    #      Byte-identical at the call site (llm.py passes `model` verbatim), but
+    #      partner-hosted models carry their own documented retention regimes —
+    #      the question reaches the provider D1 exists to keep it away from.
+    #   2. A half-flip: generation on Databricks while retrieval still embeds
+    #      the query on OpenAI, or the inverse. The question still leaves to
+    #      OpenAI, while a status page would read "migrated".
+    #
+    # Fail-closed by construction: arming with no declared allowlist refuses,
+    # rather than trusting whatever endpoint name happens to be configured.
+    d1_enforced: bool = False
+    # Deliberately EMPTY by default. No model name is hard-coded here: the
+    # operator declares which serving endpoints they have verified as
+    # open-weight and in-perimeter, which makes the claim auditable instead of
+    # inherited from a guess in this file.
+    d1_allowed_llm_models: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_d1_enforcement(self) -> Settings:
+        if not self.d1_enforced:
+            return self
+        provider = (self.llm_provider or "").strip().lower()
+        on_databricks_llm = provider == "databricks"
+        # "legacy" is the unversioned OpenAI vector space; any other value is a
+        # registered profile, which selects its own (private) query embedder.
+        on_profile_embedding = (self.active_embedding_profile or "").strip().lower() != "legacy"
+        if on_databricks_llm != on_profile_embedding:
+            raise ValueError(
+                "D1_ENFORCED: generation and query embedding must move together. "
+                f"LLM_PROVIDER={provider!r} with "
+                f"ACTIVE_EMBEDDING_PROFILE={self.active_embedding_profile!r} leaves "
+                "one half of every question going to OpenAI."
+            )
+        if not on_databricks_llm:
+            return self
+        model = (self.databricks_llm_model or "").strip()
+        allowed = {m.strip() for m in self.d1_allowed_llm_models if m.strip()}
+        if not allowed:
+            raise ValueError(
+                "D1_ENFORCED requires D1_ALLOWED_LLM_MODELS to list the serving "
+                "endpoints verified as open-weight and in-perimeter."
+            )
+        if model not in allowed:
+            raise ValueError(
+                f"D1_ENFORCED: DATABRICKS_LLM_MODEL={model!r} is not in " "D1_ALLOWED_LLM_MODELS."
+            )
+        # Checked even for an allowlisted name: an allowlist is typed by a
+        # human, and these prefixes are exactly the ones that look native while
+        # carrying a partner retention path.
+        lowered = model.lower()
+        for prefix in _D1_PARTNER_MODEL_PREFIXES:
+            if lowered.startswith(prefix):
+                raise ValueError(
+                    f"D1_ENFORCED: DATABRICKS_LLM_MODEL={model!r} names a "
+                    f"partner-hosted model family ({prefix!r}); these carry "
+                    "their own retention terms regardless of allowlisting."
+                )
+        return self
 
     # ---------- LLM pricing (H3) ----------
     # USD per 1M tokens, keyed by model name. Env-overridable as JSON, e.g.

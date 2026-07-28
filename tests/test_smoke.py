@@ -117,7 +117,7 @@ def test_db_boots_and_round_trips() -> None:
     with get_engine().connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0015_embedding_profiles"
+            == "0016_query_log_latency"
         )
     with session_scope() as s:
         s.add(

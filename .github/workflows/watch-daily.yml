@@ -69,6 +69,29 @@ jobs:
       DATABASE_URL: ${{ secrets.WATCH_DATABASE_URL }}
       REQUIRE_DATABASE_URL: "true"
       EMBEDDING_PROVIDER: "openai"
+      # Embedding-profile parity with prod. Ingest builds its profile shadow/
+      # backfill targets from ITS OWN process env, so a promoted prod profile
+      # that is absent HERE means a change-day run commits chunk rows carrying
+      # no profile embedding. Coverage goes incomplete, and the next app boot
+      # refuses inside assert_profile_ready_for_activation (docker/
+      # entrypoint.sh runs init-db), crash-looping every Python machine while
+      # the Go proxy -- which skips init-db by design -- keeps holding the
+      # public port and relaying into a dead upstream. It presents as edge
+      # 502s, not as machines that fail to start, and it only fires on the
+      # first FDA revision after promotion, i.e. weeks later at a random
+      # deploy. All five are unset today (prod is still ACTIVE_EMBEDDING_
+      # PROFILE=legacy), which makes this block inert until the secrets exist.
+      #
+      # Any drift from the prod values is ALSO fatal, and deliberately so: the
+      # profile fingerprint is immutable and covers model, dimension, revision,
+      # instruction version, preprocessing version, dtype and normalization, so
+      # a mismatched value here fails closed rather than writing vectors from a
+      # different space into a profile that claims otherwise.
+      ACTIVE_EMBEDDING_PROFILE: ${{ secrets.WATCH_ACTIVE_EMBEDDING_PROFILE }}
+      QWEN_EMBEDDING_BASE_URL: ${{ secrets.WATCH_QWEN_EMBEDDING_BASE_URL }}
+      QWEN_EMBEDDING_TOKEN: ${{ secrets.WATCH_QWEN_EMBEDDING_TOKEN }}
+      QWEN_EMBEDDING_MODEL: ${{ secrets.WATCH_QWEN_EMBEDDING_MODEL }}
+      QWEN_EMBEDDING_REVISION: ${{ secrets.WATCH_QWEN_EMBEDDING_REVISION }}
       # Watch-scoped OpenAI key, NOT the repo-wide OPENAI_API_KEY: ci.yml gates its
       # live-eval step on OPENAI_API_KEY and that gate currently fails (live
       # refusal_accuracy 0.917 < 0.95), so a repo-wide OPENAI_API_KEY would turn CI
@@ -99,6 +122,23 @@ jobs:
         run: |
           if [ -z "${OPENAI_API_KEY}" ]; then
             echo "::error::WATCH_OPENAI_API_KEY secret is unset/empty. Ingest embeds via OpenAI on change days, so the run would first fail on the day a real FDA change lands. Restore the secret."
+            exit 1
+          fi
+
+      # Same fail-fast reasoning as the OpenAI key, for the profile credentials:
+      # once a profile is active, ingest must write ITS vectors too, and a
+      # missing endpoint/token would first surface on the one run that mattered
+      # -- as an incomplete profile that then refuses the next app boot.
+      # Skipped entirely while ACTIVE_EMBEDDING_PROFILE is unset or legacy.
+      - name: preflight embedding-profile credentials
+        if: env.DATABASE_URL != '' && env.ACTIVE_EMBEDDING_PROFILE != '' && env.ACTIVE_EMBEDDING_PROFILE != 'legacy'
+        run: |
+          missing=""
+          [ -z "${QWEN_EMBEDDING_BASE_URL}" ] && missing="${missing} WATCH_QWEN_EMBEDDING_BASE_URL"
+          [ -z "${QWEN_EMBEDDING_TOKEN}" ] && missing="${missing} WATCH_QWEN_EMBEDDING_TOKEN"
+          [ -z "${QWEN_EMBEDDING_MODEL}" ] && missing="${missing} WATCH_QWEN_EMBEDDING_MODEL"
+          if [ -n "${missing}" ]; then
+            echo "::error::ACTIVE_EMBEDDING_PROFILE is set but these secrets are unset/empty:${missing}. A change-day run would commit chunks with no profile embedding, leaving coverage incomplete and refusing the next app boot."
             exit 1
           fi
 
@@ -138,6 +178,35 @@ jobs:
       - name: regwatch watch
         if: env.DATABASE_URL != ''
         run: uv run regwatch watch
+
+      # The assertion that closes the loop: after ingest, the active profile
+      # must still cover every chunk. Without this a partial write is invisible
+      # until the next deploy boots, refuses, and takes the fleet down. Runs
+      # even when the pipeline step failed part-way (always()), because that is
+      # exactly when coverage is most likely to be broken. Queries the store
+      # directly rather than parsing the CLI's rich-formatted dict.
+      - name: verify embedding-profile coverage
+        if: always() && env.DATABASE_URL != '' && env.ACTIVE_EMBEDDING_PROFILE != '' && env.ACTIVE_EMBEDDING_PROFILE != 'legacy'
+        run: |
+          uv run python - <<'PY'
+          import os
+          import sys
+
+          from regwatch.store.db import init_db
+          from regwatch.store.vector_store import profile_embedding_coverage
+
+          profile_id = os.environ["ACTIVE_EMBEDDING_PROFILE"]
+          init_db()
+          coverage = profile_embedding_coverage(profile_id)
+          if coverage.pending_chunks:
+              print(
+                  f"::error::profile {profile_id} has {coverage.pending_chunks} chunk(s) "
+                  "with no embedding. The next app boot will refuse to activate it. "
+                  f"Run: regwatch embedding-profile-backfill {profile_id}"
+              )
+              sys.exit(1)
+          print(f"profile {profile_id}: coverage complete")
+          PY
 
       # ---- Success digest to Slack (delivery, NOT paging) ---------------------
       # Durable alerts land in the DB, but until now an analyst only learned of

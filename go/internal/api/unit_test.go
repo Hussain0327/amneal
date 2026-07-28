@@ -6,6 +6,7 @@ package api
 // isoformat/truncation behavior).
 
 import (
+	"math"
 	"net/http/httptest"
 	"os"
 	"testing"
@@ -241,5 +242,46 @@ func TestConfigFromEnvPublicSettings(t *testing.T) {
 	cfg, err = ConfigFromEnv()
 	if err != nil || cfg.RefusalScoreThreshold != 0.45 {
 		t.Fatalf("threshold override: %+v err=%v", cfg, err)
+	}
+}
+
+// TestLatencyMs pins query_log.latency_ms's NULL-not-zero rule. The column
+// feeds the provider-cutover p95 gates (docs/DATABRICKS_ADOPTION_2026-07-28.md
+// steps 2 and 7); a percentile where "unknown" and "instantaneous" both read 0
+// understates exactly the regression those gates exist to catch.
+func TestLatencyMs(t *testing.T) {
+	t0 := time.Unix(1000, 0)
+
+	if got := latencyMs(time.Time{}, t0.Add(time.Second)); got.Valid {
+		t.Fatalf("no start stamp must be NULL, got %d", got.Int32)
+	}
+	// A clock that moved backwards is unknown, not negative and not zero.
+	if got := latencyMs(t0, t0.Add(-time.Second)); got.Valid {
+		t.Fatalf("backwards clock must be NULL, got %d", got.Int32)
+	}
+	got := latencyMs(t0, t0.Add(1500*time.Millisecond))
+	if !got.Valid || got.Int32 != 1500 {
+		t.Fatalf("want 1500ms, got %+v", got)
+	}
+	// A same-instant turn is a real measurement of 0, not an absent one.
+	if got := latencyMs(t0, t0); !got.Valid || got.Int32 != 0 {
+		t.Fatalf("zero-duration turn must be a VALID 0, got %+v", got)
+	}
+	// Column-width guard: int4, never a wrapped negative.
+	if got := latencyMs(t0, t0.Add(400*24*time.Hour)); !got.Valid || got.Int32 != math.MaxInt32 {
+		t.Fatalf("want int4 clamp, got %+v", got)
+	}
+}
+
+// TestAuditParamsStampsLatencyFromTheTurnClock proves the column is derived
+// from the control plane's clocks and NOT from the stateless core's kwargs --
+// the core cannot see transport time, so a value arriving over the wire would
+// be measuring the wrong thing.
+func TestAuditParamsStampsLatencyFromTheTurnClock(t *testing.T) {
+	t0 := time.Unix(2000, 0)
+	p := auditParams(auditKwargs{Mode: "qa", QueryText: "q", AnswerText: "a"},
+		t0.Add(750*time.Millisecond), t0)
+	if !p.LatencyMs.Valid || p.LatencyMs.Int32 != 750 {
+		t.Fatalf("want 750ms stamped, got %+v", p.LatencyMs)
 	}
 }

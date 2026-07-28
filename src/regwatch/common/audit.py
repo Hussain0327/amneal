@@ -26,11 +26,17 @@ def log_query(
     input_tokens: int | None = None,
     output_tokens: int | None = None,
     cost_usd: float | None = None,
+    latency_ms: int | None = None,
 ) -> int:
     """Persist a query record and return its id.
 
     Token/cost fields (H3) default to NULL: no LLM call, unreported usage, or
     an unpriced model all stay NULL — the audit log never guesses a cost.
+
+    ``latency_ms`` is measured by the CALLER (the transport that owns the turn
+    clock), not derived here: this writer runs after the work it would time,
+    and a duration computed from its own entry would report the audit INSERT
+    rather than the turn. NULL when the caller does not measure.
     """
     with session_scope() as s:
         row = QueryLog(
@@ -50,6 +56,7 @@ def log_query(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cost_usd=cost_usd,
+            latency_ms=latency_ms,
         )
         s.add(row)
         s.flush()
