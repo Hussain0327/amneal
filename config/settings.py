@@ -7,6 +7,7 @@ demos, environments, or experiments lives here.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
 
@@ -28,6 +29,37 @@ _DEFAULT_RERANK_TOP_K = 8
 # terms — which is precisely the exposure D1 exists to remove. Matched
 # case-insensitively as a prefix; see the _check_d1_enforcement validator.
 _D1_PARTNER_MODEL_PREFIXES = ("databricks-gpt", "databricks-claude", "databricks-gemini")
+
+# OpenAI-compatible reasoning budget levels accepted by the Databricks AI
+# Gateway. Unset (None) means "do not send the parameter at all", which is the
+# only way to keep an endpoint that does not understand it from 400-ing.
+_REASONING_EFFORTS = ("low", "medium", "high")
+
+
+def d1_model_rejection(model: str, allowed: Iterable[str]) -> str | None:
+    """Why this model is outside the D1 perimeter, or None when it is eligible.
+
+    Extracted so the BOOT check (on DATABRICKS_LLM_MODEL, below) and the
+    RUNTIME check (on the model the endpoint reports it actually served, in
+    generate/llm.py) can never drift into two different definitions of
+    "in-perimeter". Returns a clause, not a sentence: each caller prefixes it
+    with the name of the thing it inspected, since those differ (a Unity
+    Catalog serving-endpoint alias vs. a served model id).
+    """
+    name = model.strip()
+    if name not in {m.strip() for m in allowed if m.strip()}:
+        return "is not in D1_ALLOWED_LLM_MODELS."
+    # Checked even for an allowlisted name: an allowlist is typed by a human,
+    # and these prefixes are exactly the ones that look native while carrying a
+    # partner retention path.
+    lowered = name.lower()
+    for prefix in _D1_PARTNER_MODEL_PREFIXES:
+        if lowered.startswith(prefix):
+            return (
+                f"names a partner-hosted model family ({prefix!r}); these "
+                "carry their own retention terms regardless of allowlisting."
+            )
+    return None
 
 
 class Settings(BaseSettings):
@@ -79,6 +111,16 @@ class Settings(BaseSettings):
     # get_llm_provider's `missing` check fails the turn loudly.
     databricks_llm_model: str | None = None
     gemma_thinking_enabled: bool = False
+    # Bound what a reasoning model spends THINKING before it answers. Open-weight
+    # reasoning models (gpt-oss-20b) draw thought and answer from the SAME
+    # max_tokens budget, so an unbounded effort level burns the whole synthesis
+    # budget on reasoning, returns finish_reason="length", and llm.py raises --
+    # which grounded_qa degrades into an audited refusal. Measured against the
+    # live endpoint at a 900-token cap: "low" finished (272 completion tokens,
+    # visible answer); default/medium/high all hit the cap and raised. "low" is
+    # therefore the default, not a tuning preference. Unset ("") sends no
+    # parameter, for endpoints that reject it.
+    databricks_reasoning_effort: str | None = "low"
     # OpenAI call surface: "responses" (default, GPT-5.x native) or "chat" (legacy
     # Chat Completions). The LLMProvider.complete() interface is identical either way.
     openai_api_mode: str = "responses"
@@ -89,6 +131,14 @@ class Settings(BaseSettings):
     router_model: str = "gpt-5-nano"
     synthesizer_model: str = "gpt-5.4-nano"
     extractor_model: str = "gpt-5.4-nano"
+    # Output cap for the SYNTHESIZER role only (both the buffered and the
+    # streaming twin; see generate/grounded_qa.py). A setting rather than a
+    # constant because a reasoning model needs headroom the gpt-5.4-nano tuning
+    # never did, and an operator must be able to give it that during an incident
+    # without a deploy. The default is deliberately the historical constant:
+    # LLM_PROVIDER=openai is the live rollback path and its answer length,
+    # eval baselines, dossier and white-paper output must stay byte-identical.
+    synthesizer_max_tokens: int = 900
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     # ---------- LLM client transport (B3) ----------
@@ -109,6 +159,7 @@ class Settings(BaseSettings):
         "qwen_embedding_token",
         "databricks_llm_base_url",
         "databricks_llm_token",
+        "databricks_reasoning_effort",
         "embedding_shadow_profile",
         mode="before",
     )
@@ -155,6 +206,30 @@ class Settings(BaseSettings):
             raise ValueError("QWEN_EMBEDDING_BATCH_SIZE must be in [1, 512]")
         return v
 
+    @field_validator("databricks_reasoning_effort")
+    @classmethod
+    def _check_databricks_reasoning_effort(cls, v: str | None) -> str | None:
+        """Reject a typo at boot rather than 400-ing every synthesis at runtime."""
+        if v is None:
+            return None
+        effort = v.strip().lower()
+        if effort not in _REASONING_EFFORTS:
+            raise ValueError(
+                "DATABRICKS_REASONING_EFFORT must be one of "
+                f"{', '.join(_REASONING_EFFORTS)} (or empty to send no parameter)"
+            )
+        return effort
+
+    @field_validator("synthesizer_max_tokens")
+    @classmethod
+    def _check_synthesizer_max_tokens(cls, v: int) -> int:
+        # A zero/negative cap would truncate every completion to nothing and
+        # degrade every turn to the empty_completion refusal -- the app would
+        # look alive while answering nothing.
+        if not 1 <= v <= 32768:
+            raise ValueError("SYNTHESIZER_MAX_TOKENS must be in [1, 32768]")
+        return v
+
     # ---------- D1 residency tripwires ----------
     # Inert until an operator arms D1_ENFORCED. It exists because, once
     # LLM_PROVIDER=databricks, the two ways to silently break the residency
@@ -175,6 +250,13 @@ class Settings(BaseSettings):
     # operator declares which serving endpoints they have verified as
     # open-weight and in-perimeter, which makes the claim auditable instead of
     # inherited from a guess in this file.
+    #
+    # This list is checked TWICE against two different strings, so it must
+    # contain both: the configured DATABRICKS_LLM_MODEL (checked at boot below)
+    # and the model id the endpoint reports in its responses (checked per
+    # response in generate/llm.py). Those differ whenever DATABRICKS_LLM_MODEL
+    # names a Unity Catalog alias, which is repointable with no deploy -- the
+    # exact move the boot check structurally cannot see.
     d1_allowed_llm_models: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -202,21 +284,13 @@ class Settings(BaseSettings):
                 "D1_ENFORCED requires D1_ALLOWED_LLM_MODELS to list the serving "
                 "endpoints verified as open-weight and in-perimeter."
             )
-        if model not in allowed:
-            raise ValueError(
-                f"D1_ENFORCED: DATABRICKS_LLM_MODEL={model!r} is not in " "D1_ALLOWED_LLM_MODELS."
-            )
-        # Checked even for an allowlisted name: an allowlist is typed by a
-        # human, and these prefixes are exactly the ones that look native while
-        # carrying a partner retention path.
-        lowered = model.lower()
-        for prefix in _D1_PARTNER_MODEL_PREFIXES:
-            if lowered.startswith(prefix):
-                raise ValueError(
-                    f"D1_ENFORCED: DATABRICKS_LLM_MODEL={model!r} names a "
-                    f"partner-hosted model family ({prefix!r}); these carry "
-                    "their own retention terms regardless of allowlisting."
-                )
+        # Boot-time half of the perimeter check. It can only ever see the
+        # CONFIGURED name, which for a Unity Catalog alias says nothing about
+        # what is actually serving -- generate/llm.py runs the same predicate
+        # against the model the endpoint reports on each response.
+        why = d1_model_rejection(model, allowed)
+        if why is not None:
+            raise ValueError(f"D1_ENFORCED: DATABRICKS_LLM_MODEL={model!r} {why}")
         return self
 
     # ---------- LLM pricing (H3) ----------

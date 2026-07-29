@@ -213,6 +213,11 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     monkeypatch.setenv("QWEN_EMBEDDING_TOKEN", "")
     monkeypatch.setenv("DATABRICKS_LLM_BASE_URL", "")
     monkeypatch.setenv("DATABRICKS_LLM_TOKEN", "")
+    # Operator tuning knobs with default-value assertions in the suite. A dev
+    # who exports these mid-incident (exactly what .env.example suggests) must
+    # not see local-only failures CI can't reproduce.
+    monkeypatch.delenv("DATABRICKS_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("SYNTHESIZER_MAX_TOKENS", raising=False)
     # Sentry stays OFF in tests even if the host .env carries a DSN, and pinned
     # to the default environment so a host .env (SENTRY_ENVIRONMENT=development/
     # production) can't leak into the "default off" assertions.
