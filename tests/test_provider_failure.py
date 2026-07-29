@@ -10,12 +10,13 @@ query_log, mirroring the deterministic refusal paths.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from regwatch.generate import grounded_qa as qa_mod
-from regwatch.generate.llm import LLMStreamChunk
+from regwatch.generate.llm import DatabricksProvider, LLMStreamChunk
 from regwatch.process.embedder import get_embedding_provider
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import QueryLog
@@ -115,6 +116,65 @@ def test_streaming_provider_error_mid_stream_degrades_to_audited_refusal(
     assert "temporarily unavailable" in result.answer
 
     # INV-6: the failed turn is still audited.
+    assert result.audit_id is not None
+    with session_scope() as s:
+        row = s.get(QueryLog, result.audit_id)
+        assert row is not None
+        assert row.status == "error"
+        assert row.refused is True
+
+
+def _d1_armed_provider() -> DatabricksProvider:
+    """A real DatabricksProvider whose endpoint reports an off-perimeter model.
+
+    The configured name is allowlisted (as the boot validator demands), so only
+    the runtime served-model check can catch this.
+    """
+    response = SimpleNamespace(
+        id="db-response",
+        object="chat.completion",
+        created=1,
+        model="databricks-claude-sonnet-5",
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="An answer [PSG_020503, p.3]."),
+                finish_reason="stop",
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kw: response))
+    )
+    return DatabricksProvider(
+        model="workspace.default.regwatch",
+        base_url="https://workspace.example/serving-endpoints",
+        token="token",
+        role="synthesizer",
+        d1_enforced=True,
+        d1_allowed_models=("workspace.default.regwatch",),
+        client=client,
+    )
+
+
+def test_d1_violation_degrades_to_an_audited_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A residency failure must land in the SAME audited boundary as a transport
+    failure: refuse the answer, keep the turn on the record (INV-6), and never
+    leak the exception text (which names models, not prompts) to the user."""
+    _seed_corpus()
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _d1_armed_provider())
+
+    result = qa_mod.ask("What study design is recommended?")
+
+    assert result.refused is True
+    assert result.status == "error"
+    assert result.citations == []
+    assert "temporarily unavailable" in result.answer
+    # The off-perimeter answer is never served, and the guard's own message
+    # (which names the served model) never reaches the analyst.
+    assert "PSG_020503" not in result.answer
+    assert "databricks-claude-sonnet-5" not in result.answer
+
     assert result.audit_id is not None
     with session_scope() as s:
         row = s.get(QueryLog, result.audit_id)

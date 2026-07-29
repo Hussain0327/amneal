@@ -10,6 +10,7 @@ import pytest
 import regwatch.generate.llm as llm_mod
 from regwatch.common import llm_clients
 from regwatch.generate.llm import (
+    D1ResidencyError,
     DatabricksProvider,
     LLMMessage,
     LLMUsage,
@@ -36,12 +37,13 @@ def _response(
     finish_reason: str | None = "stop",
     prompt_tokens: int = 11,
     completion_tokens: int = 7,
+    model: str | None = "served-gemma-revision",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         id="db-response",
         object="chat.completion",
         created=123,
-        model="served-gemma-revision",
+        model=model,
         choices=[_choice(content, finish_reason=finish_reason)],
         usage=SimpleNamespace(
             prompt_tokens=prompt_tokens,
@@ -85,14 +87,64 @@ def _provider(
     *,
     role: str = "synthesizer",
     thinking_enabled: bool = True,
+    reasoning_effort: str | None = None,
+    d1_enforced: bool = False,
+    d1_allowed_models: tuple[str, ...] = (),
 ) -> DatabricksProvider:
+    # The new params default UNARMED so every pre-existing case is unchanged:
+    # _response() reports "served-gemma-revision", which is in no allowlist, so
+    # a default-armed guard would fail nearly every test in this file.
     return DatabricksProvider(
         model="gemma-endpoint",
         base_url="https://workspace.example/serving-endpoints",
         token="token",
         role=role,
         thinking_enabled=thinking_enabled,
+        reasoning_effort=reasoning_effort,
+        d1_enforced=d1_enforced,
+        d1_allowed_models=d1_allowed_models,
         client=_client(completions),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _reset_served_model_log() -> Any:
+    """The served-model notice is an lru_cache keyed on (endpoint, served).
+
+    Without clearing it, whether a line is emitted depends on which test ran
+    first in the process -- the log-once assertions below would be order
+    dependent.
+    """
+    llm_mod._log_served_model_once.cache_clear()
+    yield
+    llm_mod._log_served_model_once.cache_clear()
+
+
+class _LogRecorder:
+    """Captures structlog-style calls on the llm module logger."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, Any]]] = []
+
+    def info(self, event: str, **kw: Any) -> None:
+        self.events.append((event, kw))
+
+    def warning(self, event: str, **kw: Any) -> None:
+        self.events.append((event, kw))
+
+
+def _stream_event(
+    content: str,
+    *,
+    finish_reason: str | None = None,
+    model: str | None = "served-gemma-revision",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id="db-stream",
+        object="chat.completion.chunk",
+        model=model,
+        choices=[_choice(content, finish_reason=finish_reason, delta=True)],
+        usage=None,
     )
 
 
@@ -287,6 +339,255 @@ def test_complete_rejects_truncated_output() -> None:
         _provider(completions).complete([LLMMessage("user", "question")])
 
 
+def test_stream_rejects_truncated_output() -> None:
+    """The streaming twin of the truncation guard.
+
+    A reasoning model that spends the whole budget thinking finishes with
+    finish_reason=length on the SSE path too, and that must raise rather than
+    ship a silently truncated answer for citation validation.
+    """
+    completions = _Completions(
+        _response("partial", finish_reason="length"),
+        stream_events=[_stream_event("partial", finish_reason="length")],
+    )
+
+    with pytest.raises(RuntimeError, match="finish_reason=length"):
+        list(_provider(completions).stream([LLMMessage("user", "question")]))
+
+    # Known, pre-existing cost, pinned so it is visible: stream()'s SSE-fallback
+    # cannot tell truncation from "endpoint has no SSE", so a truncated turn
+    # pays for a SECOND full completion before the caller sees the refusal.
+    assert [call.get("stream", False) for call in completions.calls] == [True, False]
+
+
+# ---------- reasoning budget (DATABRICKS_REASONING_EFFORT) ----------
+
+
+def test_reasoning_effort_is_sent_on_both_the_buffered_and_streaming_request() -> None:
+    """Thought and answer share one max_tokens budget on a reasoning model.
+
+    Without a bound, the model spends the budget thinking, finishes with
+    finish_reason=length and the provider raises -- every substantive Ask
+    degrades to an audited refusal. The streaming request needs it just as much
+    as the buffered one: streaming is the default UI path.
+    """
+    completions = _Completions(
+        _response("answer"),
+        stream_events=[_stream_event("answer", finish_reason="stop")],
+    )
+    provider = _provider(completions, reasoning_effort="low")
+
+    provider.complete([LLMMessage("user", "question")])
+    list(provider.stream([LLMMessage("user", "question")]))
+
+    buffered, streamed = completions.calls
+    assert buffered["reasoning_effort"] == "low"
+    assert streamed["stream"] is True
+    assert streamed["reasoning_effort"] == "low"
+
+
+def test_reasoning_effort_is_omitted_entirely_when_unset() -> None:
+    """Absent key, never a null: an endpoint that does not know the parameter
+    must not be handed `reasoning_effort: None` and 400 every synthesis."""
+    completions = _Completions(_response("answer"))
+
+    _provider(completions, reasoning_effort=None).complete([LLMMessage("user", "question")])
+
+    assert "reasoning_effort" not in completions.calls[-1]
+
+
+@pytest.mark.parametrize("role", ["router", "extractor", "default", "synthesizer"])
+def test_reasoning_effort_survives_json_mode_and_every_role(role: str) -> None:
+    """Unlike thinking, the effort bound is NOT synthesizer-only.
+
+    The JSON callers (extractor at 1500 tokens, change detector at 400) are
+    exactly where an unbounded thinking spend overruns the budget, and JSON mode
+    gives no answer-quality reason to think longer.
+    """
+    completions = _Completions(_response('{"ok": true}'))
+    provider = _provider(completions, role=role, reasoning_effort="medium")
+
+    provider.complete([LLMMessage("user", "question")], response_format="json")
+
+    assert completions.calls[-1]["reasoning_effort"] == "medium"
+    assert completions.calls[-1]["response_format"] == {"type": "json_object"}
+
+
+# ---------- D1 served-model runtime check ----------
+
+_ALIAS_ONLY = ("gemma-endpoint",)
+
+
+def test_served_model_outside_the_allowlist_is_refused_when_enforced() -> None:
+    """The hole the Settings boot check structurally cannot see.
+
+    DATABRICKS_LLM_MODEL is a Unity Catalog alias and IS allowlisted; the
+    endpoint behind it was repointed at a different model with no deploy. Only
+    the response names what actually answered.
+    """
+    completions = _Completions(_response("answer", model="gpt-oss-20b-080525"))
+
+    with pytest.raises(RuntimeError, match="gpt-oss-20b-080525"):
+        _provider(completions, d1_enforced=True, d1_allowed_models=_ALIAS_ONLY).complete(
+            [LLMMessage("user", "question")]
+        )
+
+
+def test_unreported_served_model_fails_closed_when_enforced() -> None:
+    """An endpoint that reports no model cannot be verified, so it is refused.
+
+    This is the test that fails if anyone re-collapses the served name to
+    self.model before the check: the alias is allowlisted by construction (the
+    boot validator requires it), so the collapsed value would always pass.
+    """
+    completions = _Completions(_response("answer", model=None))
+
+    with pytest.raises(RuntimeError, match="reported no served model"):
+        _provider(completions, d1_enforced=True, d1_allowed_models=_ALIAS_ONLY).complete(
+            [LLMMessage("user", "question")]
+        )
+
+
+def test_partner_served_model_is_refused_even_when_a_human_allowlisted_it() -> None:
+    """Runtime mirror of the boot-time partner-family guard: an allowlist is
+    typed by a human, and partner brands look native at the call site."""
+    served = "databricks-claude-sonnet-5"
+    completions = _Completions(_response("answer", model=served))
+
+    with pytest.raises(RuntimeError, match="partner-hosted"):
+        _provider(
+            completions, d1_enforced=True, d1_allowed_models=("gemma-endpoint", served)
+        ).complete([LLMMessage("user", "question")])
+
+
+def test_compliant_served_model_is_served_unchanged_when_enforced() -> None:
+    """The guard must not break the deployment it exists to protect."""
+    completions = _Completions(_response("Grounded answer.", model="open-weight-served"))
+
+    result = _provider(
+        completions,
+        d1_enforced=True,
+        d1_allowed_models=("gemma-endpoint", "open-weight-served"),
+    ).complete([LLMMessage("user", "question")])
+
+    assert result.text == "Grounded answer."
+    assert result.model == "open-weight-served"
+
+
+@pytest.mark.parametrize("served", ["databricks-claude-sonnet-5", None])
+def test_unarmed_provider_never_refuses_on_the_served_model(served: str | None) -> None:
+    """Today's prod posture (D1_ENFORCED unset) and the OpenAI rollback path:
+    the tripwire is inert, it only makes the served model visible."""
+    completions = _Completions(_response("Grounded answer.", model=served))
+
+    result = _provider(completions).complete([LLMMessage("user", "question")])
+
+    assert result.text == "Grounded answer."
+
+
+def test_streaming_violation_refuses_without_re_sending_the_question() -> None:
+    """The stream path is the default UI route, so it needs the same guard --
+    raised as D1ResidencyError, which stream()'s SSE fallback re-raises. A
+    plain exception there reads as "endpoint has no SSE" and re-sends the
+    analyst question to the very endpoint D1 fences off."""
+    completions = _Completions(
+        _response("answer", model="gpt-oss-20b-080525"),
+        stream_events=[_stream_event("answer", finish_reason="stop", model="gpt-oss-20b-080525")],
+    )
+    provider = _provider(completions, d1_enforced=True, d1_allowed_models=_ALIAS_ONLY)
+
+    chunks = provider.stream([LLMMessage("user", "question")])
+    with pytest.raises(RuntimeError, match="gpt-oss-20b-080525"):
+        next(chunks)
+
+    # Exactly one upstream call (the stream), and nothing painted before it.
+    assert [call.get("stream", False) for call in completions.calls] == [True]
+
+
+def test_armed_truncating_off_perimeter_completion_raises_the_d1_error() -> None:
+    """Residency BEFORE the truncation check, pinned.
+
+    The exact deployment the guard targets -- an alias repointed to a reasoning
+    model -- truncates on EVERY turn (thought and answer share one budget). If
+    the finish_reason check ran first, that deployment would be misdiagnosed as
+    a truncation bug and the llm_served_model ops line would never fire.
+    """
+    completions = _Completions(
+        _response("partial", finish_reason="length", model="gpt-oss-20b-080525")
+    )
+
+    with pytest.raises(D1ResidencyError, match="gpt-oss-20b-080525"):
+        _provider(completions, d1_enforced=True, d1_allowed_models=_ALIAS_ONLY).complete(
+            [LLMMessage("user", "question")]
+        )
+
+
+def test_armed_streaming_violation_with_truncation_never_falls_back() -> None:
+    """The 2026-07-28 shape end to end: off-perimeter AND finish_reason=length.
+
+    The truncation raise must not reach the SSE fallback first -- the fallback
+    would re-send the analyst question to the fenced-off endpoint (the exact
+    double disclosure test_stream_rejects_truncated_output pins as acceptable
+    only UNARMED). Residency is checked before the finish-reason raise and
+    D1ResidencyError is excluded from the fallback, so: one upstream call.
+    """
+    completions = _Completions(
+        _response("partial", finish_reason="length", model="gpt-oss-20b-080525"),
+        stream_events=[
+            _stream_event("partial", finish_reason="length", model="gpt-oss-20b-080525")
+        ],
+    )
+    provider = _provider(completions, d1_enforced=True, d1_allowed_models=_ALIAS_ONLY)
+
+    with pytest.raises(D1ResidencyError, match="gpt-oss-20b-080525"):
+        list(provider.stream([LLMMessage("user", "question")]))
+
+    assert [call.get("stream", False) for call in completions.calls] == [True]
+
+
+def test_streaming_served_model_is_not_laundered_by_the_endpoint_fallback() -> None:
+    """A stream whose events carry no `model` is unverifiable, not compliant.
+
+    _complete_stream seeds its response model with the configured alias, so the
+    raw reported value has to travel out separately or this fails open.
+    """
+    completions = _Completions(
+        _response("answer", model=None),
+        stream_events=[_stream_event("answer", finish_reason="stop", model=None)],
+    )
+    provider = _provider(completions, d1_enforced=True, d1_allowed_models=_ALIAS_ONLY)
+
+    with pytest.raises(RuntimeError, match="reported no served model"):
+        list(provider.stream([LLMMessage("user", "question")]))
+
+
+def test_served_model_is_logged_once_per_distinct_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ops must be able to see what is actually answering, without one log line
+    per Ask on a long-lived process -- and a mid-process repoint must still
+    surface rather than be swallowed by an already-logged flag."""
+    recorder = _LogRecorder()
+    monkeypatch.setattr(llm_mod, "log", recorder)
+    first = _Completions(_response("answer", model="gpt-oss-20b-080525"))
+    provider = _provider(first)
+
+    provider.complete([LLMMessage("user", "question")])
+    provider.complete([LLMMessage("user", "question again")])
+
+    assert recorder.events == [
+        ("llm_served_model", {"endpoint": "gemma-endpoint", "served": "gpt-oss-20b-080525"})
+    ]
+
+    repointed = _Completions(_response("answer", model="some-other-model"))
+    _provider(repointed).complete([LLMMessage("user", "question")])
+
+    assert [kw["served"] for _, kw in recorder.events] == [
+        "gpt-oss-20b-080525",
+        "some-other-model",
+    ]
+
+
 def test_factory_builds_role_aware_databricks_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -296,8 +597,11 @@ def test_factory_builds_role_aware_databricks_provider(
         databricks_llm_token="token",
         databricks_llm_model="gemma-endpoint",
         gemma_thinking_enabled=True,
+        databricks_reasoning_effort="low",
         llm_timeout_s=31.0,
         llm_max_retries=1,
+        d1_enforced=True,
+        d1_allowed_llm_models=["gemma-endpoint"],
     )
     monkeypatch.setattr(llm_mod, "get_settings", lambda: settings)
 
@@ -308,9 +612,38 @@ def test_factory_builds_role_aware_databricks_provider(
     assert synthesizer.thinking_enabled is True
     assert synthesizer.timeout == 31.0
     assert synthesizer.max_retries == 1
+    # Dead config otherwise: the settings would exist and never reach the wire.
+    assert synthesizer.reasoning_effort == "low"
+    assert synthesizer.d1_enforced is True
+    assert synthesizer.d1_allowed_models == ("gemma-endpoint",)
     assert isinstance(extractor, DatabricksProvider)
     assert extractor.thinking_enabled is False
+    assert extractor.reasoning_effort == "low"
     assert current_model_name(role="extractor") == "gemma-endpoint"
+
+
+def test_factory_defaults_the_new_knobs_when_settings_predate_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A settings object without the reasoning/D1 fields must still build an
+    INERT provider, not AttributeError at provider-construction time."""
+    settings = SimpleNamespace(
+        llm_provider="databricks",
+        databricks_llm_base_url="https://workspace.example/serving-endpoints",
+        databricks_llm_token="token",
+        databricks_llm_model="gemma-endpoint",
+        gemma_thinking_enabled=False,
+        llm_timeout_s=31.0,
+        llm_max_retries=1,
+    )
+    monkeypatch.setattr(llm_mod, "get_settings", lambda: settings)
+
+    provider = get_llm_provider(role="synthesizer")
+
+    assert isinstance(provider, DatabricksProvider)
+    assert provider.reasoning_effort is None
+    assert provider.d1_enforced is False
+    assert provider.d1_allowed_models == ()
 
 
 @pytest.mark.parametrize(

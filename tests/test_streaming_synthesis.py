@@ -74,6 +74,7 @@ def test_stream_synthesis_holds_the_refusal_sentinel() -> None:
         [LLMMessage(role="user", content="q")],
         on_emit=emitted.append,
         refusal_text=refusal,
+        max_tokens=900,
     )
     assert emitted == []
     assert resp.text == refusal
@@ -94,6 +95,7 @@ def test_stream_synthesis_holds_whitespace_prefixed_refusal() -> None:
         [LLMMessage(role="user", content="q")],
         on_emit=emitted.append,
         refusal_text=refusal,
+        max_tokens=900,
     )
     assert emitted == []  # nothing painted -- not the refusal, not the trailing prose
     # The raw text still reaches the caller, whose .strip() sentinel check refuses.
@@ -112,6 +114,7 @@ def test_stream_synthesis_streams_a_real_answer() -> None:
         [LLMMessage(role="user", content="q")],
         on_emit=emitted.append,
         refusal_text=get_settings().refusal_text,
+        max_tokens=900,
     )
     assert "".join(emitted) == answer
     assert resp.text == answer
@@ -145,6 +148,7 @@ def test_stream_synthesis_survives_missing_terminal_chunk() -> None:
         [LLMMessage(role="user", content="q")],
         on_emit=emitted.append,
         refusal_text=get_settings().refusal_text,
+        max_tokens=900,
     )
     assert resp.text == "".join(parts)
     assert "".join(emitted) == "".join(parts)
@@ -160,6 +164,7 @@ def test_stream_synthesis_survives_null_terminal_response() -> None:
         [LLMMessage(role="user", content="q")],
         on_emit=emitted.append,
         refusal_text=get_settings().refusal_text,
+        max_tokens=900,
     )
     assert resp.text == "".join(parts)
     assert "".join(emitted) == "".join(parts)

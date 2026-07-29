@@ -248,12 +248,15 @@ _META_PHRASES = (
     "whats new",
 )
 
-# Synthesis decoding parameters, shared by the buffered and streaming twin
-# paths (provider.complete in ask() / provider.stream in _stream_synthesis).
-# One source so a tuning bump can never make answer length or determinism
-# depend on whether the client streamed.
+# Synthesis temperature, shared by the buffered and streaming twin paths
+# (provider.complete in ask() / provider.stream in _stream_synthesis). One
+# source so a tuning bump can never make determinism depend on whether the
+# client streamed. It stays a constant, not a setting: determinism is an
+# invariant here, not an operator knob. The output cap moved to
+# SYNTHESIZER_MAX_TOKENS (a reasoning model needs headroom gpt-5.4-nano never
+# did) and ask_core reads it ONCE per turn, then hands the same number to both
+# twins, which is what keeps them from diverging.
 _SYNTH_TEMPERATURE = 0.0
-_SYNTH_MAX_TOKENS = 900
 
 
 def _looks_like_follow_up(question: str) -> bool:
@@ -612,19 +615,22 @@ def _stream_synthesis(
     *,
     on_emit: Callable[[str], None],
     refusal_text: str,
+    max_tokens: int,
 ) -> LLMResponse:
     """Drive ``provider.stream()``, releasing provisional answer tokens to
     ``on_emit`` UNLESS the output is (the start of) the refusal sentinel — a
     refusal must never be painted as a streaming answer (it would read grounded
     for a beat, then vanish). Tokens are cosmetic; the returned LLMResponse is the
     fully-assembled text, on which the caller runs the UNCHANGED INV-1 pipeline.
+
+    ``max_tokens`` is required, not defaulted: a default here would be a second
+    source of truth for the output cap, and the two synthesis twins could then
+    silently disagree about answer length.
     """
     buffer = ""  # the FULL accumulated answer text (drives the guard + the fallback)
     released = False
     response: LLMResponse | None = None
-    for chunk in provider.stream(
-        messages, temperature=_SYNTH_TEMPERATURE, max_tokens=_SYNTH_MAX_TOKENS
-    ):
+    for chunk in provider.stream(messages, temperature=_SYNTH_TEMPERATURE, max_tokens=max_tokens):
         if chunk.done:
             response = chunk.response
             break
@@ -1534,11 +1540,17 @@ def ask_core(
             # recorded answer. The refusal sentinel is never streamed (guard in
             # _stream_synthesis).
             response = _stream_synthesis(
-                provider, synth_messages, on_emit=_emit_token, refusal_text=s.refusal_text
+                provider,
+                synth_messages,
+                on_emit=_emit_token,
+                refusal_text=s.refusal_text,
+                max_tokens=s.synthesizer_max_tokens,
             )
         else:
             response = provider.complete(
-                synth_messages, temperature=_SYNTH_TEMPERATURE, max_tokens=_SYNTH_MAX_TOKENS
+                synth_messages,
+                temperature=_SYNTH_TEMPERATURE,
+                max_tokens=s.synthesizer_max_tokens,
             )
     except Exception as exc:  # provider transport error (timeout / 429 / 5xx)
         # B2: a synthesizer failure must NOT return a naked 500 with no audit

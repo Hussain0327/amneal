@@ -11,9 +11,14 @@ import os
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Protocol
 
-from config.settings import get_settings
+from config.settings import d1_model_rejection, get_settings
+
+from regwatch.common.logging import get_logger
+
+log = get_logger(__name__)
 
 
 @dataclass
@@ -500,6 +505,33 @@ def _safe_chat_raw(resp: Any, *, finish_reason: Any = None) -> dict[str, Any]:
     return raw
 
 
+class D1ResidencyError(RuntimeError):
+    """The model that served a response is outside the D1 perimeter.
+
+    A dedicated type because stream()'s SSE fallback catches Exception and
+    re-sends the request as a buffered completion -- correct for "endpoint has
+    no SSE", catastrophic for a residency violation, where the re-send would
+    hand the analyst question to the very endpoint the guard fences off. The
+    fallback re-raises this type instead.
+    """
+
+
+@lru_cache(maxsize=8)
+def _log_served_model_once(endpoint: str, served: str) -> None:
+    """Announce which model actually answered, once per (endpoint, served) pair.
+
+    The configured endpoint name can be a Unity Catalog alias, so without this
+    line nothing in the logs says what is really serving: the audit row records
+    the alias (grounded_qa stamps current_model_name), and query_log.model_name
+    only carries the served id on turns that produce an answer. Cached rather
+    than logged per call because the API process is long-lived and this would
+    otherwise be one line per Ask. Keyed on the PAIR so a mid-process alias
+    repoint -- the event this exists to surface -- logs again instead of being
+    swallowed by a "already logged" flag.
+    """
+    log.info("llm_served_model", endpoint=endpoint, served=served)
+
+
 class DatabricksProvider:
     """Gemma over a Databricks OpenAI-compatible Chat Completions endpoint.
 
@@ -518,8 +550,11 @@ class DatabricksProvider:
         *,
         role: str = "default",
         thinking_enabled: bool = False,
+        reasoning_effort: str | None = None,
         timeout: float | None = None,
         max_retries: int | None = None,
+        d1_enforced: bool = False,
+        d1_allowed_models: tuple[str, ...] = (),
         client: Any = None,
     ) -> None:
         self.model = model
@@ -527,8 +562,15 @@ class DatabricksProvider:
         self.token = token
         self.role = role
         self.thinking_enabled = bool(thinking_enabled and role == "synthesizer")
+        self.reasoning_effort = reasoning_effort
         self.timeout = timeout
         self.max_retries = max_retries
+        # Injected, not read from get_settings() at request time: this provider
+        # is 100% constructor-injected so the offline tests never touch a
+        # developer's .env or the get_settings lru_cache. Defaults are INERT so
+        # an unarmed deployment (today's prod) behaves exactly as before.
+        self.d1_enforced = d1_enforced
+        self.d1_allowed_models = d1_allowed_models
         self._client = client
 
     def _client_or_create(self) -> Any:
@@ -595,12 +637,56 @@ class DatabricksProvider:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if self.reasoning_effort is not None:
+            # Deliberately NOT gated the way `allow_thinking` is. A reasoning
+            # model draws thought and answer from one max_tokens budget on every
+            # role, so the JSON callers (extractor at 1500, change detector at
+            # 400) are exactly where an unbounded thinking spend turns into
+            # finish_reason="length" -- and JSON mode gives no answer-quality
+            # reason to think longer. Absent key, never a null: an endpoint that
+            # does not know the parameter must see no parameter.
+            kwargs["reasoning_effort"] = self.reasoning_effort
         if response_format == "json":
             kwargs["response_format"] = {"type": "json_object"}
         if stream:
             kwargs["stream"] = True
             kwargs["stream_options"] = {"include_usage": True}
         return kwargs
+
+    def _check_served_model(self, served: str | None) -> None:
+        """Fail closed when the model that ANSWERED is outside the D1 perimeter.
+
+        DATABRICKS_LLM_MODEL can be a Unity Catalog alias, repointable with no
+        deploy, so the Settings boot check inspects a name that says nothing
+        about what is serving. The response is the only place the truth appears.
+        Detective, not preventive: the question has already been disclosed by
+        the time this runs. What it buys is that the ANSWER is never served and
+        that every subsequent turn fails loudly instead of quietly migrating the
+        corpus off-perimeter.
+
+        Takes the RAW reported value, before any `or self.model` substitution:
+        the alias is necessarily allowlisted (the boot check requires it), so
+        checking the collapsed value would let an endpoint that reports no model
+        launder itself through the guard.
+        """
+        name = (served or "").strip()
+        _log_served_model_once(self.model, name or "<unreported>")
+        if not self.d1_enforced:
+            return
+        if not name:
+            raise D1ResidencyError(
+                f"D1_ENFORCED: endpoint {self.model!r} reported no served model; "
+                "residency cannot be verified"
+            )
+        why = d1_model_rejection(name, self.d1_allowed_models)
+        if why is not None:
+            # The served name belongs in the message: it is the only per-turn
+            # record of who answered (the audit row stamps the alias), and it
+            # reaches qa_provider_error and Sentry from grounded_qa's boundary.
+            # Model names only -- that log line must never carry prompt content.
+            raise D1ResidencyError(
+                f"D1_ENFORCED: served model {name!r} behind endpoint {self.model!r} {why}"
+            )
 
     @staticmethod
     def _first_choice(resp: Any) -> Any:
@@ -632,12 +718,18 @@ class DatabricksProvider:
             response_format=response_format,
         )
         resp = client.chat.completions.create(**kwargs)
+        # Residency first, before the shape/truncation checks: a truncated
+        # answer from an off-perimeter model is still an off-perimeter
+        # disclosure, and if this ran second, a deployment where EVERY response
+        # truncates would never emit the served-model line ops needs to see.
+        served = getattr(resp, "model", None)
+        self._check_served_model(served)
         choice = self._first_choice(resp)
         finish_reason = getattr(choice, "finish_reason", None)
         self._raise_for_finish_reason(finish_reason)
         message = getattr(choice, "message", None)
         text = _visible_gemma_text(_chat_content_text(getattr(message, "content", None)))
-        model = getattr(resp, "model", None) or self.model
+        model = served or self.model
         return LLMResponse(
             text=text,
             model=model,
@@ -658,6 +750,15 @@ class DatabricksProvider:
         be split across arbitrary SSE chunks. Emitting candidate content before
         seeing the closing delimiter could leak reasoning that cannot be
         retracted.
+
+        The D1 residency check runs HERE, on the raw reported value BEFORE the
+        `or self.model` substitution (the alias is allowlisted by construction,
+        so the collapsed value would launder a no-report stream) and BEFORE the
+        shape/truncation raises, mirroring complete(): a truncated answer from
+        an off-perimeter model is still an off-perimeter disclosure, and the
+        exact deployment this guard targets -- an alias repointed to a reasoning
+        model -- truncates on EVERY turn, so a check placed after the
+        finish_reason raise would never fire for it.
         """
         client = self._client_or_create()
         events = client.chat.completions.create(
@@ -672,11 +773,11 @@ class DatabricksProvider:
         usage = LLMUsage()
         finish_reason: Any = None
         last_event: Any = None
-        model = self.model
+        served: str | None = None
         saw_choice = False
         for event in events:
             last_event = event
-            model = getattr(event, "model", None) or model
+            served = getattr(event, "model", None) or served
             event_usage = _usage_from(event, "prompt_tokens", "completion_tokens")
             if event_usage.input_tokens is not None:
                 usage.input_tokens = event_usage.input_tokens
@@ -694,12 +795,13 @@ class DatabricksProvider:
             # Deliberately ignore delta.reasoning_content / reasoning / thinking.
             parts.append(_chat_content_text(getattr(delta, "content", None)))
 
+        self._check_served_model(served)
         if not saw_choice:
             raise RuntimeError("databricks chat stream returned no choices")
         self._raise_for_finish_reason(finish_reason)
         return LLMResponse(
             text=_visible_gemma_text("".join(parts)),
-            model=model,
+            model=served or self.model,
             raw=_safe_chat_raw(last_event, finish_reason=finish_reason),
             usage=usage,
         )
@@ -717,10 +819,18 @@ class DatabricksProvider:
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
+        except D1ResidencyError:
+            # Never falls back: the fallback below would re-send the analyst
+            # question to the very endpoint the guard exists to fence off.
+            # Nothing has been yielded yet, so nothing is painted then
+            # retracted -- the raise reaches grounded_qa's audited boundary.
+            raise
         except Exception:
             # Some custom Databricks endpoints do not implement SSE or
             # stream_options. Since no candidate text has been yielded yet, a
             # normal completion is a safe, duplicate-free user-visible fallback.
+            # complete() runs the same residency check, so falling back never
+            # skips the guard.
             yield from _buffered_stream(
                 self,
                 messages,
@@ -841,8 +951,14 @@ def get_llm_provider(name: str | None = None, *, role: str = "default") -> LLMPr
             token=token,
             role=role,
             thinking_enabled=bool(getattr(s, "gemma_thinking_enabled", False)),
+            # getattr with defaults throughout: tests construct settings as a
+            # SimpleNamespace with a fixed field list, and a bare attribute read
+            # would turn a new knob into an AttributeError at provider build.
+            reasoning_effort=getattr(s, "databricks_reasoning_effort", None),
             timeout=s.llm_timeout_s,
             max_retries=s.llm_max_retries,
+            d1_enforced=bool(getattr(s, "d1_enforced", False)),
+            d1_allowed_models=tuple(getattr(s, "d1_allowed_llm_models", ()) or ()),
         )
     model = _model_for_role(s, role)
     if name == "openai":

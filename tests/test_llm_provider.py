@@ -148,6 +148,23 @@ def test_stream_temperature_retry_uses_structured_param_not_message() -> None:
     assert len(fake.responses.calls) == 1
 
 
+def test_openai_never_sends_the_databricks_reasoning_effort_knob() -> None:
+    """DATABRICKS_REASONING_EFFORT is a Databricks-endpoint parameter.
+
+    LLM_PROVIDER=openai is the live rollback path; an unknown parameter on the
+    Responses API is a 400 on every call, which would make the rollback itself
+    the outage. Asserted on both the buffered and the streaming request.
+    """
+    fake = _FakeClient()
+    provider = _provider(fake)
+
+    provider.complete([LLMMessage("user", "hi")])
+    list(provider.stream([LLMMessage("user", "hi")]))
+
+    assert len(fake.responses.calls) == 2
+    assert all("reasoning_effort" not in call for call in fake.responses.calls)
+
+
 def test_chat_mode_uses_chat_completions() -> None:
     fake = _FakeClient()
     # In chat mode, the responses surface must be untouched; chat.create raises.
