@@ -1,9 +1,13 @@
 # Production Readiness Checklist
 
-Status of `regwatch` against a real production deployment. The codebase today
-is a strong POC: clean Router → Handlers → Synthesizer architecture, compliance
-invariants enforced as tests (INV-1..9), and CI running lint / type / test /
-eval / docker build. This document tracks what stands between that and prod.
+Status of `regwatch` against production. The system IS deployed: the Fly app
+`amneal` runs a Go edge (`go/internal/api` -- auth, sessions, rate limiting,
+and native `POST /query`) in front of the Python RAG core, with Supabase
+Postgres+pgvector as the only datastore and the Next.js UI on Vercel. The
+architecture is Router -> Handlers -> Synthesizer with compliance invariants
+enforced as tests (INV-1..9); CI runs lint / type / test / eval / docker
+build plus the cross-service contract lane (`tests_contract/`, real compiled
+Go proxy + uvicorn + Postgres). This document tracks the remaining gaps.
 
 This is an active readiness checklist. Historical notes and original planning
 docs are archived in `docs/README.md`; when they conflict with this file, use
@@ -18,26 +22,31 @@ Each item notes where it lives in the tree so the work is actionable cold.
 
 ## 🔴 Blocking — must land before any external exposure
 
-### 1. API authentication & authorization 🟡 (app layer landed Jun 10 2026 — gateway/TLS remain)
-- **Where:** [`src/regwatch/api/main.py`](../src/regwatch/api/main.py),
-  [`src/regwatch/auth/`](../src/regwatch/auth/),
-  [`src/regwatch/common/ratelimit.py`](../src/regwatch/common/ratelimit.py)
-- **Now in place:** cookie-session auth on every endpoint except `GET /health`
+### 1. API authentication & authorization 🟡 (app layer + TLS done - OIDC/SSO and distributed rate limiting remain)
+- **Where:** the Go edge now owns these natively since the polyglot step-4
+  cutover -- `go/internal/api/` (`auth.go`, `sessions.go`, `ratelimit.go`);
+  Python retains [`src/regwatch/api/main.py`](../src/regwatch/api/main.py)
+  and [`src/regwatch/auth/`](../src/regwatch/auth/) for the surfaces it still
+  serves.
+- **Now in place:** cookie-session auth on every endpoint except the open
+  probes (`GET /health`, `/ready`, `/metrics` -- the last bearer-gated when
+  `METRICS_TOKEN` is set)
   — DB-backed opaque tokens (sha256 at rest), bcrypt passwords, CLI-provisioned
   users (`regwatch create-user` / `set-password` / `deactivate-user`); per-user
   chat history with ownership enforcement (a foreign `session_id` 404s); audit
   rows carry the caller identity (`query_log.user_id`, INV-6); per-user rate
   limiting on `POST /query` / `POST /assemble` (`RATE_LIMIT_PER_MINUTE`) plus a
   fixed 10/email/minute login brute-force cap; CORS allowlist with credentials.
-- **Remaining gap:** everything below the app layer is environment work — TLS
-  termination (then `AUTH_COOKIE_SECURE=true`), OIDC/SSO against the corporate
-  IdP, and a gateway so the app is never directly reachable. The rate limiter
-  is in-memory/per-process; multi-replica deployments need gateway limiting.
-- **Done when:** the IT gateway terminates TLS + enterprise auth in front of
-  the app (or the cookie-session layer is formally accepted as the pilot
-  boundary), and distributed rate limiting is owned by that gateway.
+  TLS is done: Fly terminates HTTPS (`force_https = true`) and
+  `AUTH_COOKIE_SECURE = "true"` is pinned in `fly.toml`.
+- **Remaining gap:** OIDC/SSO against the corporate IdP, and distributed rate
+  limiting -- the limiter is in-memory/per-process across 2 proxy machines, so
+  the effective fleet ceiling is roughly 2x the configured rate.
+- **Done when:** enterprise auth (OIDC/SSO) fronts the app (or the
+  cookie-session layer is formally accepted as the pilot boundary), and rate
+  limiting is distributed rather than per-process.
 
-### 2. Production-grade datastores 🟡 (Postgres/pgvector path landed — proof remains)
+### 2. Production-grade datastores 🟡 (live on Supabase - restore drill + least-priv creds remain)
 - **Where:** Postgres-only storage in [`config/settings.py`](../config/settings.py),
   Postgres bootstrap in [`src/regwatch/store/db.py`](../src/regwatch/store/db.py),
   pgvector chunks in
@@ -51,27 +60,27 @@ Each item notes where it lives in the tree so the work is actionable cold.
   and a staging restore (currently a manual Supabase-backup restore; a
   scripted PG-native `pg_dump` drill is open work, see #7-adjacent notes in
   `DEPLOY.md` §6.4).
-- **Remaining gap:** the code/runbook are ready, but a real production launch
-  still needs the managed database provisioned, the migration completed from a
-  clean snapshot, backup/restore actually exercised, and least-privilege app
-  database credentials accepted or implemented.
-- **Done when:** production Postgres/pgvector is live, smoke-tested, monitored,
-  and a restore drill against staging has passed.
+- **Remaining gap:** the managed database (Supabase Postgres+pgvector) is
+  provisioned, migrated, smoke-tested, and serving prod. What remains is
+  proof work: a rehearsed restore drill (the scripted
+  `scripts/restore_drill.sh` was deleted in R5 and the drill has never been
+  run) and least-privilege app database credentials accepted or implemented.
+- **Done when:** a restore drill against staging has passed and least-priv
+  credentials are in place (or formally waived).
 
-### 3. Migration discipline 🟡 (verification landed — release gate remains)
-- **Where:** `init_db()` in [`src/regwatch/store/db.py`](../src/regwatch/store/db.py),
-  Docker entrypoint [`docker/entrypoint.sh`](../docker/entrypoint.sh), and
-  schema-release instructions in [`DEPLOY.md`](DEPLOY.md).
-- **Now in place:** Postgres startup verifies the Alembic stamp matches head and
-  refuses to start on mismatch. `DEPLOY.md` requires `alembic upgrade head`
-  before schema-advancing releases.
-- **Remaining gap:** the container entrypoint still runs `regwatch init-db` by
-  default, which is acceptable as a bootstrap/verify guard but not a substitute
-  for a controlled release gate. Multi-replica production needs an explicit
-  deploy step and operator runbook ownership for schema changes.
-- **Done when:** schema-advancing releases run Alembic as a gated deploy step,
-  app boot is treated as verification only, and rollback/roll-forward behavior
-  is rehearsed.
+### 3. Migration discipline 🟢 (release gate landed: fly.toml release_command)
+- **Where:** `release_command = "alembic upgrade head"` in `fly.toml`
+  `[deploy]`; `init_db()` in
+  [`src/regwatch/store/db.py`](../src/regwatch/store/db.py); schema-release
+  instructions in [`DEPLOY.md`](DEPLOY.md).
+- **Now in place:** schema-advancing releases run Alembic as a gated deploy
+  step -- Fly's `[deploy]` `release_command` runs `alembic upgrade head`
+  before the machines roll, so the release fails before any new code serves
+  if the migration fails. Postgres startup still verifies the Alembic stamp
+  matches head and refuses to start on mismatch (boot = verification only).
+- **Residual:** rollback/roll-forward rehearsal is folded into the restore
+  drill in #2; migrations remain required to be backward-compatible and
+  reversible.
 
 ### 4. Production UI deployment + hardening 🟡 (Vercel path landed)
 - **Where:** Next.js App Router UI at [`regwatch/frontend/`](../regwatch/frontend/)
@@ -92,22 +101,31 @@ Each item notes where it lives in the tree so the work is actionable cold.
   documented in [`DEPLOY.md`](DEPLOY.md).
 - **Remaining gap:** production smoke, load testing, approved gateway/SSO path,
   and non-technical product/watchlist management UX are still launch work.
-  `/query/stream` now exists as progress SSE plus one validated terminal result
-  frame; token-by-token answer deltas remain intentionally out of scope until
-  they can preserve INV-1 (no answer text before citation validation).
+  Token-delta streaming is DONE: `/query/stream` emits provisional cosmetic
+  `token` delta frames plus the single validated terminal `result` frame
+  (`_sse_event("token", ...)` in `src/regwatch/api/main.py`); INV-1 holds
+  because the authoritative answer text ships only in the validated terminal
+  frame.
 - **Done when:** the UI is deployed behind the approved auth/gateway path; API
   origin/proxy behavior is verified for that environment; and the analyst flows
   in the deploy smoke checklist pass.
 
-### 5. ⚪ LLM provider + data-handling decision (D1)
-- **Where:** `llm_provider="openai"` default,
-  [`config/settings.py:25`](../config/settings.py); Responses API.
-- **Gap:** Every Q&A sends FDA-related queries to OpenAI. For a regulatory
-  team this needs a deliberate data-handling review (BAA / zero-retention /
-  in-house OpenAI-compatible model) before launch. **This is your call, not
-  a code change.**
-- **Done when:** provider chosen, data-processing terms reviewed, decision
-  logged in [`DECISIONS.md`](DECISIONS.md).
+### 5. 🟡 LLM provider + data-handling decision (D1) - decision MADE 2026-07-28
+- **Where:** `llm_provider` in [`config/settings.py`](../config/settings.py);
+  [`DATA_RESIDENCY_D1.md`](DATA_RESIDENCY_D1.md),
+  [`DATABRICKS_ADOPTION_2026-07-28.md`](DATABRICKS_ADOPTION_2026-07-28.md).
+- **Now in place:** the decision is taken -- Databricks-hosted open-weights
+  inference inside Amneal's tenant, inference plane only. Prod generation
+  runs gpt-oss-20b behind `workspace.default.regwatch` since 2026-07-28
+  (OpenAI is rollback only), and the runtime residency guard (`D1_ENFORCED` /
+  `D1_ALLOWED_LLM_MODELS` / `D1ResidencyError`) is deployed but unarmed.
+- **Remaining gap:** query embeddings still go to OpenAI
+  (`text-embedding-3-small`) -- the last real leak. In order: wire the
+  Qwen3 1024-dim embedding profile, re-embed the corpus, benchmark
+  retrieval, flip `ACTIVE_EMBEDDING_PROFILE`, then arm `D1_ENFORCED` with
+  BOTH the endpoint alias and the served model id in the allowlist. The
+  decision itself is logged in [`DECISIONS.md`](DECISIONS.md).
+- **Done when:** the embedding flip lands and the guard is armed.
 
 ---
 
@@ -121,9 +139,11 @@ Each item notes where it lives in the tree so the work is actionable cold.
   vector-store reachability plus LLM client constructability; and `/metrics`
   Prometheus counters derived from `query_log` (bearer-gated when
   `METRICS_TOKEN` is set).
-- **Gap:** Sentry is optional and a missing production DSN only logs a warning;
-  there are still no exported request-latency histograms, cost gauges, tracing,
-  or live paid LLM reachability probe.
+- **Gap:** Sentry is optional and a missing production DSN only logs a warning.
+  Per-turn latency is now captured (`query_log.latency_ms`, migration 0016,
+  written by both runtimes), but it is not yet exported as histograms; cost
+  gauges, tracing, and a live paid LLM reachability probe are also still
+  missing.
 - **Done when:** latency/cost metrics and tracing are exported; the production
   load balancer/scraper uses `/ready` and `/metrics`; error tracking is
   configured in the production environment; and the team decides whether a paid
@@ -210,10 +230,11 @@ Each item notes where it lives in the tree so the work is actionable cold.
 - Pluggable `EmbeddingProvider` / `LLMProvider` (no hard-coded models in
   business logic).
 - Alembic migration baseline + incremental migrations.
-- CI: ruff, black, mypy strict, pytest, eval thresholds, docker build, on a
-  3.11/3.12 matrix.
-- Frontend CI: `npm ci`, `npm run lint`, and `npm run build` for
-  `regwatch/frontend`.
+- CI: ruff, black, mypy strict, pytest, eval thresholds, docker build, the Go
+  proxy lane, schema-drift checks, and the cross-service contract lane, on
+  Python 3.12 (see [`CI_CD.md`](CI_CD.md)).
+- Frontend CI: `npm ci`, `npm run lint`, `npm run build`, and `npm test`
+  (vitest) for `regwatch/frontend`.
 - Docker baseline (API + ingest services) with persistent `./data` mount; the
   Next.js UI (`regwatch/frontend/`) runs as its own process.
 - Read-only `/settings` endpoint that never leaks secrets.

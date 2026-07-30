@@ -9,9 +9,16 @@ This file mirrors Section 15 of the project spec. **Read this before touching an
 > plus auth, the White Paper populator, and a Next.js App Router frontend
 > (Streamlit is fully retired). The datastore path was originally dual-mode
 > SQLite/Postgres+pgvector; R5 deleted the SQLite/Chroma side, so Postgres +
-> pgvector is now the only datastore. For current state and open work see
-> `README.md`, `docs/ARCHITECTURE.md`, `docs/DEPLOY.md`,
-> `docs/PROD_READINESS.md`, and `docs/ROADMAP.md`.
+> pgvector is now the only datastore. Since then (as of 2026-07-29):
+> production is LIVE (Fly app `amneal` with a Go proxy on the public edge +
+> the Python RAG core, Supabase Postgres+pgvector, Vercel frontend); the
+> polyglot migration is through step 5 (Go serves auth/sessions/feedback/
+> settings/products natively and orchestrates `POST /query`); and prod LLM
+> inference runs on a Databricks-hosted open-weight model inside the company
+> tenant (`gpt-oss-20b`, all roles - see
+> `docs/DATABRICKS_ADOPTION_2026-07-28.md` and `docs/DATA_RESIDENCY_D1.md`).
+> For current state and open work see `README.md`, `docs/ARCHITECTURE.md`,
+> `docs/DEPLOY.md`, `docs/PROD_READINESS.md`, and `docs/ROADMAP.md`.
 
 ## Hard rules
 
@@ -40,8 +47,8 @@ This file mirrors Section 15 of the project spec. **Read this before touching an
 
 ## Defaults you can take without asking
 
-- Embedding provider: pluggable, default `openai` (`text-embedding-3-small`, 1536-dim, matching the pgvector chunk column). Local `BAAI/bge-small-en-v1.5` via `sentence-transformers` remains available for offline/eval tooling only (384-dim; rejected against the app datastore by the dimension assert).
-- LLM provider: pluggable, default `openai` with model from `LLM_MODEL` (an `anthropic` provider also ships). The `echo` provider is for tests.
+- Embedding provider: pluggable, default `openai` (`text-embedding-3-small`, 1536-dim, matching the pgvector chunk column). Local `BAAI/bge-small-en-v1.5` via `sentence-transformers` remains available for offline/eval tooling only (384-dim; rejected against the app datastore by the dimension assert). Named embedding profiles (`ACTIVE_EMBEDDING_PROFILE`, migration 0015) stage the in-flight move to a Databricks-hosted Qwen3 embedder without touching the legacy column.
+- LLM provider: pluggable, code default `openai` with model from `LLM_MODEL` (an `anthropic` provider also ships). PRODUCTION runs `databricks`: one Model Serving endpoint (`DATABRICKS_LLM_MODEL`) serves every role, with OpenAI as the rollback path. The `echo` provider is for tests.
 - Refusal threshold: configurable via `REFUSAL_SCORE_THRESHOLD` (tuned on the gold set).
 - Vector store: pgvector, in the same Postgres database as the structured store. No other vector backend since R5.
 - Structured store: Postgres via `DATABASE_URL` (Supabase in prod; a disposable local/CI Postgres otherwise). `DATABASE_URL` is mandatory — the app refuses to boot without it.

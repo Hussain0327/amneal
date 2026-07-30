@@ -222,3 +222,100 @@ The eval was RED on the real corpus (`recall@8=0.667, citation_precision=0.000, 
 - **`scripts/migrate_to_supabase.py` and `scripts/restore_drill.sh` were deleted** as one-time SQLite/Chroma-to-Supabase migration tooling with no further use once the dual-mode path is gone. A PG-native `pg_dump`/`pg_restore` drill script is the noted open follow-up (`docs/DEPLOY.md` §6.4) — the monthly restore drill is a manual Supabase-backup restore in the meantime.
 - **GitHub Actions cron remains the sole scheduler.** Dagster (`src/regwatch/orchestration/`, already dormant before R5) was deleted entirely as part of this cutover; nothing in that deletion changed the watch-daily cron, which was already the production scheduler.
 - **Docs updated for R5:** `README.md`, `docs/ARCHITECTURE.md`, `docs/DEPLOY.md`, `docs/DOCKER.md`, `docs/CLAUDE.md`, `docs/PROD_READINESS.md`, `docs/POLYGLOT_TARGET_2026-07-10.md`, and `.env.example` all had their SQLite/Chroma/Dagster/migration-script references corrected or annotated `(removed in R5)`; earlier entries in this log are left as the historical record of the pre-R5 design.
+
+## Token-delta streaming for Ask (Jul 2 2026)
+
+- **`POST /query/stream` now emits provisional `token` delta frames** between
+  the progress frames and the terminal frame, so the UI renders a live draft
+  while synthesis runs. The deltas are cosmetic: the ONLY authoritative answer
+  remains the single validated terminal `result` frame (same serializer as
+  blocking `POST /query`), so INV-1 -- no authoritative answer text before
+  citation validation -- holds at the authority boundary, and each turn still
+  writes exactly one audit row. Supersedes the Jun 29 note that token-delta
+  streaming was an open item.
+
+## Polyglot strangler -- Go owns the public edge and /query orchestration (Jul 10-24 2026)
+
+- **Four-runtime target approved (Jul 10):** TS/Go/Python/Rust via a 9-step
+  strangler plan (docs/POLYGLOT_TARGET_2026-07-10.md). Python keeps the
+  stateless RAG core; Go takes the public edge and the control plane.
+- **Steps 0-4 (Jul 10-21):** the Go proxy took the public port (two Fly process
+  groups, with the dual-stack `regwatch serve` listener behind it), then auth
+  and sessions, then feedback/settings/products -- all served natively from a
+  sqlc store over the SAME Postgres; the Python copies were deleted
+  (net -1,594 lines on the auth cutover alone).
+- **Cross-service contract harness (Jul 22, #123):** `tests_contract/` boots
+  the real Go proxy + uvicorn + Postgres and pins the public wire contract
+  (S1-S23) across the runtime boundary, so a cutover cannot silently change
+  the API surface.
+- **Step 5 (Jul 23-24, #124/#126/#127):** Go serves `POST /query` natively --
+  it runs the gates (401/422/429/ownership 404), persists and finalizes the
+  `query_log` audit row, and calls Python's token-gated
+  `POST /internal/query/compute` (INTERNAL_RAG_TOKEN, fail-closed; the
+  /internal/ subtree is never exposed at the edge). Flip proven live Jul 24;
+  `GO_NATIVE_QUERY = "true"` is pinned in fly.toml [env], so instant rollback
+  is `fly secrets set GO_NATIVE_QUERY=false -a amneal` (secrets override
+  [env]). Remaining: the Python legacy-path deletion PR, R3 (stream
+  terminal-frame move), steps 6-9.
+
+## Open-model machinery shipped dormant -- embedding profiles + Databricks providers (Jul 23 2026, #125)
+
+- **Migration 0015 adds profile-keyed chunk embeddings:** `chunk_embedding`
+  rows keyed by an immutable named profile (`vector(d)` up to 2000 dims,
+  `halfvec` above), so adopting a new embedder is a blue/green re-embed into a
+  shadow profile plus an `ACTIVE_EMBEDDING_PROFILE` flip -- never an in-place
+  rewrite of the legacy `vector(1536)` column.
+- **`Qwen3EmbeddingProvider` + `DatabricksProvider` shipped fully dormant:**
+  legacy profile active, OpenAI providers still serving, no endpoints
+  configured. The machinery exists to serve the D1 residency move, not a
+  model preference.
+
+## D1 data residency -- Databricks inference plane adopted; generation flipped to gpt-oss-20b (Jul 28 2026)
+
+- **Verdict: inference plane ONLY.** Databricks Model Serving hosts the models
+  inside the company tenant; Supabase stays the datastore. Lakebase received a
+  full, verified staging snapshot but is NOT live and takes no writes. Full
+  analysis and cost model: docs/DATABRICKS_ADOPTION_2026-07-28.md.
+- **Prod generation flipped the same day:** `LLM_PROVIDER=databricks`; ONE
+  small open-weight model (endpoint alias `workspace.default.regwatch`,
+  served id `gpt-oss-20b-080525`) serves router, synthesizer, and extractor.
+  OpenAI is the rollback path (`fly secrets set LLM_PROVIDER=openai`, ~60s)
+  and still serves embeddings -- the one remaining exfil point, plus the
+  watch cron's OpenAI env.
+- **Same-day truncation incident -> two knobs (merged Jul 29, #138):**
+  gpt-oss-20b spent the whole 900-token budget thinking and returned
+  finish_reason=length on every turn. `DATABRICKS_REASONING_EFFORT` (default
+  `low` -- the only level measured to finish under the cap) and
+  `SYNTHESIZER_MAX_TOKENS` (default 900, pinned so the OpenAI rollback path
+  stays byte-identical).
+
+## D1 runtime served-model guard (Jul 29 2026, #138)
+
+- **The guard checks what the endpoint REPORTS, not what the config says.** A
+  Unity Catalog alias can be repointed with no deploy, so every completion and
+  stream is checked against `D1_ALLOWED_LLM_MODELS` using the served model id
+  in the response; the allowlist must carry BOTH names (alias AND served id)
+  or the first armed boot refuses every turn.
+- **Violations raise a dedicated `D1ResidencyError`** that `stream()`'s SSE
+  fallback re-raises instead of swallowing: the fallback's buffered retry
+  would re-send the analyst question to the very endpoint the guard fences
+  off. The boot guard additionally refuses half-migrated configs (generation
+  moved but query embedding not, or vice versa) once armed.
+- **Shipped LIVE but UNARMED** (auto-deployed Jul 29 14:41 UTC;
+  `D1_ENFORCED` unset). Arming waits for the embedding flip so the
+  both-halves boot rule can pass. Migration 0016 (`query_log.latency_ms`)
+  rode along as the measurement column for the single-model router-latency
+  verdict.
+
+## Qwen3 embedding Model Service created (Jul 29 2026)
+
+- **`workspace.default.regwatch-embed`:** Databricks pay-per-token Model
+  Service running Qwen3-Embedding-0.6B -- 1024-dim native (fits
+  `vector(1024)`, no halfvec needed), served id `qwen3-embedding-0-6b-112025`,
+  verified by a live call. Pay-per-token chosen over provisioned throughput
+  (which this workspace does not enable anyway): zero idle cost and no
+  scale-from-zero cold start on the interactive path.
+- **Not wired into the app yet.** Next: a 1024-dim embedding profile, a
+  resumable corpus re-embed runbook, a retrieval benchmark against the legacy
+  1536 profile, then the `ACTIVE_EMBEDDING_PROFILE` flip -- and only then
+  arming `D1_ENFORCED`.

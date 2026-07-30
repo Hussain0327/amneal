@@ -1,22 +1,28 @@
-# SECRETS_RUNBOOK -- provisioning the missing GitHub Actions secrets
+# SECRETS_RUNBOOK -- the GitHub Actions secret surface
 
-This repo has **zero** GitHub Actions secrets configured (repository scope and all
-three environments report `total_count: 0`). No workflow declares an
-`environment:`, so only **repository** secrets are in play. As a direct
-consequence, three production capabilities are dormant:
+This runbook was written when the repo had **zero** Actions secrets and the
+capabilities below were dormant. That is no longer the state: the secrets ARE
+configured (13 secret names are referenced across the four workflows --
+`ci.yml`, `deploy.yml`, `watch-daily.yml`, `uptime-eval.yml`). No workflow
+declares an `environment:`, so only **repository** secrets are in play. Keep
+this runbook for RE-provisioning (rotation, a fork, a new repo) and as the
+inventory of what each secret gates. Current state:
 
-1. **Daily watch is dormant.** `watch-daily.yml` reads `DATABASE_URL` from
-   `secrets.WATCH_DATABASE_URL`. Unset => every real step is gated `if:
-   env.DATABASE_URL != ''` and is skipped; the job takes its "skipped (secret not
-   configured)" path and goes green in ~5s without crawling FDA, ingesting, or
-   writing durable alerts. Analysts sit on stale guidance.
-2. **CD is broken.** `deploy.yml`'s `flyctl deploy` step reads
-   `secrets.FLY_API_TOKEN`. Unset => `flyctl` has no credential and the step fails
-   loudly (nothing ships). Auto-deploy on green `main` does not happen.
-3. **Alerting is dead.** The Slack failure post (`watch-daily.yml`), the watch
-   dead-man's-switch (`WATCH_HEALTHCHECK_URL`), and the uptime probe
-   (`uptime-eval.yml`'s `PROD_HEALTH_URL`) are all secret-gated. Unset => they
-   no-op. A silent pipeline failure or a prod /health outage pages nobody.
+1. **Daily watch is LIVE.** `watch-daily.yml` (cron 07:17 UTC) runs the real
+   crawl -> match -> ingest -> durable alerts -> digest pipeline against the
+   shared prod DB via `WATCH_DATABASE_URL` + `WATCH_OPENAI_API_KEY`. While
+   `WATCH_DATABASE_URL` is unset the job skips cleanly -- that is the
+   fork/kill-switch behavior (see §5), not the prod state.
+2. **CD is LIVE.** `deploy.yml` fires after every green `ci` run on `main` and
+   ships the exact validated commit (docker build + Trivy re-scan +
+   `scripts/fly-deploy.sh`) using `FLY_API_TOKEN`. As of 2026-07-29 14:41 UTC
+   it auto-deployed `f579030` successfully -- `main` == prod.
+3. **One secret is DELIBERATELY withheld: the repo-wide `OPENAI_API_KEY`.**
+   `ci.yml` gates its live seed + eval steps on it, and that live eval
+   currently FAILS (live `refusal_accuracy` 0.917 < the 0.95 threshold).
+   Setting `OPENAI_API_KEY` un-skips the gate, turns CI red, and thereby
+   BLOCKS CD. The watch cron uses the separately-named `WATCH_OPENAI_API_KEY`
+   precisely to keep it that way.
 
 > **This runbook provisions secrets. It does NOT print, echo, or commit any secret
 > VALUE.** Every command below sets a value from your local environment or a fresh
@@ -46,28 +52,32 @@ consequence, three production capabilities are dormant:
   grep -oE '^[A-Z_]+=' .env | tr -d '='
   ```
 
-- Confirm the starting state is genuinely empty (expect `0`):
+- Confirm the current state (names + updated-at only; `gh` never returns
+  values):
 
   ```bash
-  gh secret list -R Hussain0327/amneal | wc -l
+  gh secret list -R Hussain0327/amneal
   ```
 
 ---
 
 ## 1. Secret -> workflow inventory
 
-Every `${{ secrets.X }}` reference across the three workflows, what it gates, where
-its value comes from, and whether it is required to restore the dormant capability.
+Every `${{ secrets.X }}` reference across the four workflows, what it gates, where
+its value comes from, and whether it is required.
 
 | Secret | Workflow / step it gates | Value source (local key / command) | Req? |
 |---|---|---|---|
 | `WATCH_DATABASE_URL` | `watch-daily.yml` -> `env.DATABASE_URL`; gates ALL real steps (checkout, deps, `regwatch watch`, threshold sweep). Unset => job skips. | `.env` key **`DATABASE_URL`** -- the prod Supabase **session pooler** URI WITH `?sslmode=require` | **Required** (watch) |
-| `OPENAI_API_KEY` | `watch-daily.yml` -> `regwatch watch` ingest embeds every chunk (`EMBEDDING_PROVIDER=openai`); also the advisory threshold sweep. No key => run hard-fails. | `.env` key **`OPENAI_API_KEY`** (the production key) | **Required** (watch) |
-| `FLY_API_TOKEN` | `deploy.yml` -> `flyctl deploy --remote-only`. Unset => deploy step fails; no release. | **`fly tokens create deploy`** (mint fresh; NOT in `.env`) | **Required** (CD) |
+| `WATCH_OPENAI_API_KEY` | `watch-daily.yml` -> mapped to the job's `OPENAI_API_KEY`: `regwatch watch` ingest embeds every chunk (`EMBEDDING_PROVIDER=openai`); also the advisory threshold sweep. The "preflight WATCH_OPENAI_API_KEY" step hard-fails the run when it is unset/empty. | `.env` key **`OPENAI_API_KEY`** (the production key), stored under the WATCH_ name | **Required** (watch) |
+| `OPENAI_API_KEY` (repo-wide) | `ci.yml` -> the live seed + `eval --check-thresholds` gate. **Deliberately UNSET**: live `refusal_accuracy` is 0.917 < 0.95, so setting it turns CI red on every push and blocks CD. | do not set | **Withheld** |
+| `FLY_API_TOKEN` | `deploy.yml` -> the whole release path: docker build, Trivy re-scan, then `bash scripts/fly-deploy.sh` (the retrying flyctl wrapper). Unset => deploy step fails; no release. | **`fly tokens create deploy`** (mint fresh; NOT in `.env`) | **Required** (CD) |
+| `WATCH_ACTIVE_EMBEDDING_PROFILE` | `watch-daily.yml` -> `env.ACTIVE_EMBEDDING_PROFILE`; embedding-profile parity with prod. While prod runs the `legacy` profile this is unset and the profile block is inert. | the promoted profile id (matches prod's `ACTIVE_EMBEDDING_PROFILE`) | Staged |
+| `WATCH_QWEN_EMBEDDING_BASE_URL` / `_TOKEN` / `_MODEL` / `_REVISION` | `watch-daily.yml` -> profile provider credentials. Guarded by "preflight embedding-profile credentials" (hard-fails when the profile is set but BASE_URL/TOKEN/MODEL are missing) and "verify embedding-profile coverage" (post-ingest assertion that the active profile still covers every chunk). | the Databricks/Qwen serving-endpoint credentials, mirroring prod | Staged |
 | `OPENFDA_API_KEY` | `watch-daily.yml` -> `env.OPENFDA_API_KEY`; only raises the openFDA rate limit. | `.env` key **`OPENFDA_API_KEY`** | Optional |
-| `SLACK_WEBHOOK_URL` | `watch-daily.yml` -> "notify slack on failure" (`if: failure() && env.SLACK_WEBHOOK_URL != ''`). Unset => no Slack page on a failed run. | Slack incoming-webhook URL (no `.env` key; provision in Slack) | Optional |
+| `SLACK_WEBHOOK_URL` | `watch-daily.yml` -> "notify slack on failure" AND "slack digest on success" (a successful run posts the day's alert digest; a quiet day posts nothing). Unset => both steps no-op. | Slack incoming-webhook URL (no `.env` key; provision in Slack) | Optional |
 | `WATCH_HEALTHCHECK_URL` | `watch-daily.yml` -> success ping + `/fail` ping (dead-man's-switch for a cron that NEVER starts). Unset => both pings no-op. | healthchecks.io-style ping URL (no `.env` key; provision in healthchecks.io) | Optional |
-| `PROD_HEALTH_URL` | `uptime-eval.yml` -> "probe /health" (`if: env.PROD_HEALTH_URL != ''`). Unset => 30-min uptime probe skips. | `https://<api-host>/health` -- the live `amneal` Fly app health URL | Optional |
+| `PROD_HEALTH_URL` | `uptime-eval.yml` -> "probe /health" (`if: env.PROD_HEALTH_URL != ''`). Unset => 30-min uptime probe skips. | `https://amneal.fly.dev/health` | Optional |
 
 Notes:
 
@@ -76,6 +86,12 @@ Notes:
   provision there.
 - There is **no** `SENTRY_DSN` Actions secret. Sentry is configured as a **Fly**
   secret on the app (see `docs/DEPLOY.md` step 3.2), not in CI. Do not add it here.
+- The GitHub list above is not the whole secret surface. The **Fly** app also
+  carries `LLM_PROVIDER`, `DATABRICKS_LLM_BASE_URL` / `DATABRICKS_LLM_TOKEN` /
+  `DATABRICKS_LLM_MODEL`, `INTERNAL_RAG_TOKEN`, and -- staged, deliberately
+  unset until the embedding flip -- `D1_ENFORCED` / `D1_ALLOWED_LLM_MODELS`.
+  Those are provisioned with `fly secrets set`, never in Actions; see
+  `docs/DEPLOY.md` step 3.2.
 - "Optional" means the workflow no-ops cleanly without it (forks stay green). But
   the three optional **alerting** secrets are what make a silent failure visible --
   provision `SLACK_WEBHOOK_URL` and/or `WATCH_HEALTHCHECK_URL` and `PROD_HEALTH_URL`
@@ -131,13 +147,14 @@ a loud failure, not a silent skip).
 - [ ] **Setting `FLY_API_TOKEN` turns CD back on.** The very next push to `main`
       that goes green in `ci` will trigger `deploy.yml` -> `flyctl deploy` to
       **live prod**.
-- [ ] **Current `main` == live prod**, so enabling now is safe: the first
-      auto-deploy triggered by the next green `main` is a **no-op re-deploy** of the
-      already-running image (release_command `alembic upgrade head` is a no-op when
-      the DB is already at head). Confirm there is no un-deployed migration sitting
-      on `main` before you set this token. If `main` has advanced past prod with a
-      schema change, deploy it manually first (`docs/DEPLOY.md` step 3) so the first
-      automated run is the no-op you expect.
+- [ ] **CD is currently ENABLED and `main` == prod** (as of 2026-07-29 14:41
+      UTC: `deploy.yml` auto-deployed `f579030` successfully, applying
+      migration 0016 `query_log.latency_ms`). The general rule still applies
+      whenever you RE-enable after a gap: confirm whether `main` carries an
+      un-deployed migration before setting the token. The release_command
+      (`alembic upgrade head`) will apply it automatically on the first
+      auto-deploy -- make sure that is what you intend, or deploy manually
+      first (`docs/DEPLOY.md` step 3) so the first automated run is a no-op.
 - [ ] Mint a **deploy-scoped** token (`fly tokens create deploy`), not a full
       org/admin token -- least privilege for CI.
 
@@ -155,9 +172,12 @@ Run from the repo root with `GH_TOKEN` exported (§0). None of these print a sec
 grep -E '^DATABASE_URL=' .env | head -1 | cut -d= -f2- \
   | gh secret set WATCH_DATABASE_URL -R Hussain0327/amneal
 
-# OPENAI_API_KEY <- local OPENAI_API_KEY (production key).
+# WATCH_OPENAI_API_KEY <- local OPENAI_API_KEY (production key), stored under
+# the watch-scoped name. WARNING: do NOT set the repo-wide OPENAI_API_KEY --
+# that un-skips ci.yml's live-eval gate, which currently FAILS
+# (refusal_accuracy 0.917 < 0.95), turning CI red and blocking CD.
 grep -E '^OPENAI_API_KEY=' .env | head -1 | cut -d= -f2- \
-  | gh secret set OPENAI_API_KEY -R Hussain0327/amneal
+  | gh secret set WATCH_OPENAI_API_KEY -R Hussain0327/amneal
 ```
 
 > If your `.env` values are quoted, strip the surrounding quotes before piping
@@ -209,15 +229,44 @@ gh secret set PROD_HEALTH_URL -R Hussain0327/amneal < /path/to/prod_health_url.t
 `uptime-eval.yml`'s "no invented URLs" contract intact and avoids hard-coding a host
 in the workflow.
 
-### 3.4 Confirm what was set (names only -- `gh` never returns values)
+### 3.4 Staged -- embedding-profile secrets (do NOT set until the flip)
+
+When prod's `ACTIVE_EMBEDDING_PROFILE` flips off `legacy` (the Qwen3 move, see
+`docs/OPEN_MODEL_ROLLOUT.md` and `docs/DATA_RESIDENCY_D1.md`), the watch cron
+must flip IN THE SAME CHANGE -- otherwise its ingest writes chunks the prod
+profile does not cover and "verify embedding-profile coverage" fails. Five
+secrets, set together:
+
+```bash
+# The promoted profile id, matching prod's ACTIVE_EMBEDDING_PROFILE exactly:
+printf '%s' '<profile-id>' | gh secret set WATCH_ACTIVE_EMBEDDING_PROFILE -R Hussain0327/amneal
+
+# Provider credentials, mirroring the Fly app's QWEN_EMBEDDING_* secrets.
+# BASE_URL is the endpoint WITHOUT the trailing /embeddings (the provider appends it).
+grep -E '^QWEN_EMBEDDING_BASE_URL=' .env | head -1 | cut -d= -f2- \
+  | gh secret set WATCH_QWEN_EMBEDDING_BASE_URL -R Hussain0327/amneal
+grep -E '^QWEN_EMBEDDING_TOKEN=' .env | head -1 | cut -d= -f2- \
+  | gh secret set WATCH_QWEN_EMBEDDING_TOKEN -R Hussain0327/amneal
+grep -E '^QWEN_EMBEDDING_MODEL=' .env | head -1 | cut -d= -f2- \
+  | gh secret set WATCH_QWEN_EMBEDDING_MODEL -R Hussain0327/amneal
+# Optional; only if prod pins a revision:
+# gh secret set WATCH_QWEN_EMBEDDING_REVISION -R Hussain0327/amneal < /path/to/revision.txt
+```
+
+Until then leave all five unset: the profile block in `watch-daily.yml` is inert
+while `WATCH_ACTIVE_EMBEDDING_PROFILE` is absent, and the cron keeps embedding
+via `WATCH_OPENAI_API_KEY` (the last deliberate D1 residual -- see
+`docs/DATA_RESIDENCY_D1.md`).
+
+### 3.5 Confirm what was set (names only -- `gh` never returns values)
 
 ```bash
 gh secret list -R Hussain0327/amneal
 ```
 
-Expect the required pair (`WATCH_DATABASE_URL`, `OPENAI_API_KEY`), `FLY_API_TOKEN`,
-and whichever optionals you provisioned. The list shows names + updated-at, never
-values.
+Expect the required pair (`WATCH_DATABASE_URL`, `WATCH_OPENAI_API_KEY`),
+`FLY_API_TOKEN`, and whichever optionals you provisioned. The list shows names +
+updated-at, never values.
 
 ---
 
@@ -244,11 +293,21 @@ Success criteria:
 - The **"skipped (secret not configured)"** step did NOT run (its `if:` is now
   false). If you still see "WATCH_DATABASE_URL secret not set", the secret did not
   land -- re-check §3.1.
+- The **"preflight WATCH_OPENAI_API_KEY"** step passed. It hard-fails the run when
+  the key is unset/empty -- a failure here means §3.1's second command did not land.
+- The **"preflight embedding-profile credentials"** and **"verify
+  embedding-profile coverage"** steps passed. While prod runs the `legacy`
+  profile (no `WATCH_ACTIVE_EMBEDDING_PROFILE` set) both are inert; once the
+  profile flips (§3.4) they become real gates -- missing credentials or a chunk
+  the active profile does not cover fails the run loudly.
 - The **"regwatch watch"** step ran and exited 0 (crawl -> match -> ingest -> durable
   alerts -> digest). A stamp-mismatch refusal here means deploy the pending
   migration first (§2.2); it is the guard working, not a secret problem.
 - The advisory **"threshold sweep"** step may fail without failing the job
   (`continue-on-error: true`) -- that is by design and never blocks the crawl.
+- If Slack is set, the **"slack digest on success"** step posts the day's alert
+  digest when there are alerts (a quiet day posts nothing -- that is success, not
+  a wiring failure).
 - If you provisioned `WATCH_HEALTHCHECK_URL`, the success ping fired; if Slack is
   set, no failure post was sent on a clean run. To exercise the failure-alert path
   deliberately, do it OUT OF BAND (e.g. a temporary bad value on a throwaway branch
@@ -286,7 +345,7 @@ gh secret delete FLY_API_TOKEN -R Hussain0327/amneal
 
 # Re-dormant the daily watch (job returns to the clean skip path):
 gh secret delete WATCH_DATABASE_URL -R Hussain0327/amneal
-gh secret delete OPENAI_API_KEY -R Hussain0327/amneal
+gh secret delete WATCH_OPENAI_API_KEY -R Hussain0327/amneal
 
 # Silence alerting / uptime again:
 gh secret delete SLACK_WEBHOOK_URL -R Hussain0327/amneal
@@ -304,9 +363,9 @@ Notes:
   in `docs/DEPLOY.md` §6.1.
 - **Rotation** (compromise or routine): `fly tokens revoke` the old deploy token,
   mint a new one, and re-run §3.2 (`gh secret set` overwrites in place). For
-  `OPENAI_API_KEY` / `WATCH_DATABASE_URL`, rotate the upstream credential, update
-  `.env`, and re-run the matching §3.1 set command -- there is no in-place "edit",
-  setting the same name overwrites.
+  `WATCH_OPENAI_API_KEY` / `WATCH_DATABASE_URL`, rotate the upstream credential,
+  update `.env`, and re-run the matching §3.1 set command -- there is no in-place
+  "edit", setting the same name overwrites.
 
 ---
 

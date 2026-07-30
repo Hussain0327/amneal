@@ -1,6 +1,28 @@
 # Data Residency Decision (D1): Getting Amneal User-Query Text Off Public OpenAI
 
-Status: OPEN decision. Owner: Amneal IT/Legal + regwatch eng. Date drafted: 2026-06-26.
+Status: DECIDED 2026-07-28 (was: OPEN). Owner: Amneal IT/Legal + regwatch eng. Date drafted: 2026-06-26.
+
+> **STATUS 2026-07-29:**
+> - The decision is TAKEN (2026-07-28): Databricks as the inference plane only,
+>   inside Amneal's existing tenant; Supabase stays the datastore. See
+>   [`DATABRICKS_ADOPTION_2026-07-28.md`](DATABRICKS_ADOPTION_2026-07-28.md).
+> - Exfil point B (synthesis) is CLOSED as of 2026-07-28: prod generation runs
+>   gpt-oss-20b behind the Databricks endpoint alias
+>   `workspace.default.regwatch`; OpenAI is rollback only.
+> - Exfil point A (query embedding) is still OPEN and is now the only live leak
+>   of analyst query text (plus the deliberate watch-daily cron residual,
+>   `WATCH_OPENAI_API_KEY`, which embeds public FDA documents, not queries).
+> - The runtime guard (`D1_ENFORCED` / `D1_ALLOWED_LLM_MODELS` /
+>   `D1ResidencyError`) shipped 2026-07-29 and is LIVE in prod, UNARMED.
+>   Arming waits for the embedding flip (generation and query embedding must
+>   move together, enforced by `_check_d1_enforcement` in
+>   `config/settings.py`), and `D1_ALLOWED_LLM_MODELS` must carry BOTH names:
+>   the endpoint alias (`workspace.default.regwatch`) and the served model id
+>   (`gpt-oss-20b-080525`).
+> - The analysis and recommendation below (Sections 3-5) predate the verdict
+>   and are kept as historical record. The option actually taken is managed
+>   in-tenant open-weights inference on Databricks: Option C's residency
+>   outcome without self-managed GPUs, via pay-per-token Model Serving.
 
 This is a decision doc, not a code change. It pins exactly where Amneal user-query
 text leaves to OpenAI today, lays out four options with tradeoffs, recommends one,
@@ -20,69 +42,82 @@ call." This doc is the structured version of that decision.
 ## 1. Where user-query text leaves to OpenAI today (exact exfil points)
 
 regwatch sends the **user's raw query string** to OpenAI at TWO points on the live
-Ask/Q&A path. Both are live in prod: `fly.toml` sets `EMBEDDING_PROVIDER = "openai"`
-and `config/settings.py:36` defaults `llm_provider = "openai"`.
+Ask/Q&A path. Both were live in prod as drafted: `fly.toml` set
+`EMBEDDING_PROVIDER = "openai"` and `llm_provider` in `config/settings.py`
+defaults to `"openai"`. (2026-07-29: point B is closed, point A remains -- see
+the status banner.)
 
 ### Exfil point A -- query EMBEDDING (high volume, every query, cheap)
 
-- Call site: `src/regwatch/retrieve/retriever.py:159-160`
+- Call site: `retrieve()` in `src/regwatch/retrieve/retriever.py`
   ```python
   embedder = get_embedding_provider()
-  qv = embedder.embed([query])[0]
+  qv = embed_query(embedder, query)
   ```
   `query` is the verbatim user question. `retrieve()` is invoked on the Ask path before
-  synthesis.
-- Network egress: `src/regwatch/process/embedder.py:179`
+  synthesis. (Since migration 0015, a non-legacy `ACTIVE_EMBEDDING_PROFILE` routes this
+  call through `get_embedding_provider_for_profile` instead -- e.g. the dormant
+  `Qwen3EmbeddingProvider` -- which is exactly the seam the D1 embedding fix uses.)
+- Network egress: `OpenAIEmbeddingProvider` in `src/regwatch/process/embedder.py`
   ```python
   return client.embeddings.create(model=self.model, input=batch)
   ```
-  where `self.model = "text-embedding-3-small"` (embedder.py:136) and the client is a
-  real `openai.OpenAI` (embedder.py:151-159, via `regwatch.common.llm_clients.shared_openai_client`).
+  where `self.model = "text-embedding-3-small"` (the `OpenAIEmbeddingProvider.model`
+  attribute) and the client is a real `openai.OpenAI`
+  (via `regwatch.common.llm_clients.shared_openai_client`).
 - **What leaves:** the full raw query text, verbatim, as the embedding `input`, to
   `api.openai.com`. Nothing is redacted or hashed before the call (the SHA-256 in
-  embedder.py:70 is only the *local* bge cache key path; the OpenAI path sends plaintext).
+  `LocalBgeSmallProvider` is only the *local* bge cache key path; the OpenAI path
+  sends plaintext).
 - **Volume:** one embedding call per user query. This is the high-frequency, low-cost
   exfil channel.
 
 ### Exfil point B -- SYNTHESIS / answer generation (lower volume, richer payload)
 
-- Prompt assembly: `src/regwatch/generate/grounded_qa.py:1331-1334`
+- Prompt assembly: the `GROUNDED_QA_USER.format(...)` call in
+  `src/regwatch/generate/grounded_qa.py`
   ```python
   user_prompt = GROUNDED_QA_USER.format(
       question=question,
       passages=_format_passages(passages),
   )
   ```
-  `GROUNDED_QA_USER` (`src/regwatch/generate/prompts.py:43-50`) embeds the user's
+  `GROUNDED_QA_USER` (`src/regwatch/generate/prompts.py`) embeds the user's
   `question` literally as `Question: {question}` and appends the retrieved FDA passages.
-- Network egress: `src/regwatch/generate/grounded_qa.py:1338-1347`
+- Network egress: the synthesis call in `src/regwatch/generate/grounded_qa.py`
   ```python
   provider = get_llm_provider(role="synthesizer")
-  response = provider.complete([
-      LLMMessage(role="system", content=system_prompt),
-      LLMMessage(role="user", content=user_prompt),
-  ], temperature=0.0, max_tokens=900)
+  response = provider.complete(
+      synth_messages,
+      temperature=_SYNTH_TEMPERATURE,
+      max_tokens=s.synthesizer_max_tokens,
+  )
   ```
-  which lands in `OpenAIProvider._complete_responses` -> `client.responses.create(...)`
-  (`src/regwatch/generate/llm.py:193`) or the legacy `client.chat.completions.create(...)`
-  (llm.py:226), depending on `OPENAI_API_MODE` (default `"responses"`).
+  (the cap is the `SYNTHESIZER_MAX_TOKENS` knob, default 900). With
+  `LLM_PROVIDER=openai` this lands in `OpenAIProvider._complete_responses` ->
+  `client.responses.create(...)` or the legacy `OpenAIProvider._complete_chat` ->
+  `client.chat.completions.create(...)`, depending on `OPENAI_API_MODE` (default
+  `"responses"`), all in `src/regwatch/generate/llm.py`. (2026-07-28: prod now
+  routes this call through `DatabricksProvider` instead -- see the status banner.)
 - **What leaves:** the user's question (verbatim, inside `user_prompt`) PLUS the retrieved
   FDA guidance passages, to `api.openai.com`. The passages are public FDA text, so they are
   not the residency concern; the **query is**. Note that the same `OpenAIProvider` is also
-  used for the router and the BE extractor (`_model_for_role`, llm.py:289-299), and the
-  whitepaper populator -- any path that sends the user's text shares this channel.
+  used for the router and the BE extractor (`_model_for_role`,
+  `src/regwatch/generate/llm.py`), and the whitepaper populator -- any path that
+  sends the user's text shares this channel.
 - **Volume:** one synthesis call per answered query (router/extractor calls add more, but
   the synthesis call is the one that always carries the user's free-text question).
 
 ### Models in play
 
-- Embeddings: `text-embedding-3-small` (1536-dim), hard-coded in embedder.py:136 and locked
+- Embeddings: `text-embedding-3-small` (1536-dim), hard-coded in
+  `OpenAIEmbeddingProvider` (`src/regwatch/process/embedder.py`) and locked
   to the `vector(1536)` chunk column (asserted at startup; see DECISIONS.md Jun 12 entry).
-- Synthesis/router/extractor default to the `gpt-5-nano` family (`config/settings.py:43-46`:
+- Synthesis/router/extractor default to the `gpt-5-nano` family (`config/settings.py`:
   `llm_model`/`synthesizer_model`/`extractor_model = "gpt-5.4-nano"`, `router_model = "gpt-5-nano"`).
   **UNVERIFIED:** the model actually running in prod may be overridden by a Fly secret
   (`SYNTHESIZER_MODEL` / `LLM_MODEL`); the repo default is the floor, not a guarantee. The
-  price table in `config/settings.py:67-71` ($0.05 in / $0.40 out per 1M tokens) is a
+  price table (`llm_model_prices` / `price_for_model` in `config/settings.py`) is a
   placeholder default and is itself flagged env-overridable -- **treat all cost figures below
   as estimates to confirm against the actual contract and live model.**
 
@@ -185,8 +220,8 @@ under the Microsoft BAA. Same model classes. Add an Azure-OpenAI client behind t
   Amneal's tenant boundary under BAA). Apply for modified abuse monitoring to also kill the
   30-day Azure-side log (Section 3).
 - Eng effort: **low-moderate.** The provider seam already exists
-  (`src/regwatch/generate/llm.py:302` `get_llm_provider`, `src/regwatch/process/embedder.py:242`
-  `get_embedding_provider`; CLAUDE.md hard-rule #5 keeps these sacred). Add an
+  (`get_llm_provider` in `src/regwatch/generate/llm.py`, `get_embedding_provider`
+  in `src/regwatch/process/embedder.py`; CLAUDE.md hard-rule #5 keeps these sacred). Add an
   `AzureOpenAI`-backed branch to each factory + config for endpoint/deployment names/API
   version. The `openai` SDK supports `AzureOpenAI` with the same `embeddings.create` /
   `responses.create` surface, so the call-site code is nearly unchanged. Effort is config,
@@ -210,8 +245,8 @@ under the Microsoft BAA. Same model classes. Add an Azure-OpenAI client behind t
 ### Option C -- Self-host embeddings (BGE/E5) + self-host / in-tenant open LLM for synthesis
 
 Run an open embedding model (e.g. BGE / E5; the code already ships a local BGE provider,
-`LocalBgeSmallProvider`, embedder.py:33) and an open-weights LLM (Llama/Mistral-class) for
-synthesis on Amneal-controlled infra (in-tenant GPU or on-prem).
+`LocalBgeSmallProvider` in `src/regwatch/process/embedder.py`) and an open-weights LLM
+(Llama/Mistral-class) for synthesis on Amneal-controlled infra (in-tenant GPU or on-prem).
 
 - Residency: **strongest.** Query text never leaves Amneal infra. Satisfies (i), (ii), and
   (iii) including true on-prem/air-gap. This is the only option that clears a hard
@@ -324,7 +359,7 @@ Close D1 by answering these in order. Log the outcome in `docs/DECISIONS.md`.
 - [ ] Apply for **Limited Access / modified abuse monitoring** (no content logging) if the
       default 30-day Azure-side abuse log is unacceptable.
 - [ ] Confirm token pricing in-region vs current OpenAI spend (verify the placeholder
-      price table in `config/settings.py:67-71` against reality).
+      price table, `llm_model_prices` in `config/settings.py`, against reality).
 - [ ] Eng: add Azure branch to `get_llm_provider` + `get_embedding_provider`, then re-run the
       eval gate (`tests/test_eval_gate.py`) and threshold sweep
       (`docs/THRESHOLD_VALIDATION_2026-06-25.md`) before cutover.
@@ -349,10 +384,13 @@ Close D1 by answering these in order. Log the outcome in `docs/DECISIONS.md`.
 ### 4C note -- corpus re-embed coupling (applies to B-with-different-embedder, C, D)
 
 The query embedder and the corpus embedder MUST produce vectors in the same space and
-dimension (the chunk table is `vector(1536)` and startup asserts provider-dim == table-dim;
-DECISIONS.md Jun 12). So any option that changes the **query** embedding model away from
-`text-embedding-3-small` requires **re-embedding the entire FDA corpus** with the new model
-(and a migration to the new `vector(N)` dimension). Re-embedding public FDA docs is not a
-residency problem -- it is an eng cost (compute + a migration + re-validating retrieval
-recall on the gold set). Budget for it. Option A (and Option B if it uses the same
-1536-dim embedder) avoids this entirely.
+dimension (the legacy chunk column is `vector(1536)` and startup asserts
+provider-dim == table-dim; DECISIONS.md Jun 12). So any option that changes the **query**
+embedding model away from `text-embedding-3-small` requires **re-embedding the entire FDA
+corpus** with the new model. (2026-07-23 update: the "migration to a new `vector(N)`
+dimension" this note used to require is obsolete -- migration 0015's embedding profiles
+key `chunk_embedding` rows by named profile, each carrying its own dimension, so no
+column migration is needed. The corpus re-embed cost itself remains real.) Re-embedding
+public FDA docs is not a residency problem -- it is an eng cost (compute + re-validating
+retrieval recall on the gold set). Budget for it. Option A (and Option B if it uses the
+same 1536-dim embedder) avoids this entirely.

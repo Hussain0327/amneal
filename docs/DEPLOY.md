@@ -1,29 +1,43 @@
-# DEPLOY — Supabase + Fly.io/Railway + Vercel runbook
+# DEPLOY - Supabase + Fly.io + Vercel runbook
 
 This is the production cutover runbook, written to be executed top-to-bottom.
-Target shape:
+Live shape (Go proxy on the public edge since the 2026-07 phase-3 flip):
 
 ```text
-browser ── https ──> Vercel (Next.js, regwatch/frontend)
-                        │  /api/* rewrite proxy (API_PROXY_TARGET)
-                        ▼
-                     API (FastAPI, slim Docker image, Fly.io or Railway)
-                        │  DATABASE_URL (psycopg v3, session pooler)
-                        ▼
+browser -- https --> Vercel (Next.js, regwatch/frontend, https://amneal.vercel.app)
+                        |  /api/* rewrite proxy (API_PROXY_TARGET)
+                        v
+                     Go proxy (Fly app "amneal", process group "proxy", public :8080)
+                        |  6PN private network (UPSTREAM_URL)
+                        v
+                     FastAPI ("regwatch serve", dual-stack :8000, process group "app")
+                        |  DATABASE_URL (psycopg v3, session pooler)
+                        v
                      Supabase Postgres 17 + pgvector (structured store + chunks)
 
-embeddings: OpenAI text-embedding-3-small (1536) · LLM: OpenAI (existing config)
-auth: custom cookie sessions (unchanged) — Supabase Auth is NOT used
+embeddings: OpenAI text-embedding-3-small (1536)
+LLM: Databricks Model Serving since 2026-07-28 (LLM_PROVIDER=databricks,
+     endpoint alias workspace.default.regwatch, served model gpt-oss-20b-080525,
+     ONE model for all roles; called from the Python tier). OpenAI is the
+     rollback path: `fly secrets set LLM_PROVIDER=openai` reverts in ~60s.
+auth: custom cookie sessions (unchanged) -- Supabase Auth is NOT used
 ```
 
 Postgres + pgvector is the only datastore (R5 deleted the SQLite/Chroma
 dual-mode): `DATABASE_URL` is mandatory and the app refuses to boot without
 it. `EMBEDDING_PROVIDER` must be `openai` (the `chunk` table is
-`vector(1536)`; the API fails fast on a dimension mismatch).
+`vector(1536)`; the API fails fast on a dimension mismatch). Moving off
+OpenAI embeddings goes through the embedding-profile mechanism
+(`ACTIVE_EMBEDDING_PROFILE` / `EMBEDDING_SHADOW_PROFILE`, migration 0015),
+not by editing `EMBEDDING_PROVIDER`; prod still runs the legacy OpenAI
+profile today.
 
-Prerequisites on your machine: `uv`, `docker`, `flyctl` (or `railway`),
-`vercel` CLI (optional — the dashboard works too), repo checked out, and the
-production `OPENAI_API_KEY`.
+Prerequisites on your machine: `uv`, `docker`, `flyctl`, `vercel` CLI
+(optional -- the dashboard works too), repo checked out, and the production
+secret values: `OPENAI_API_KEY` (embeddings + the LLM rollback path),
+`DATABRICKS_LLM_BASE_URL` / `DATABRICKS_LLM_TOKEN` / `DATABRICKS_LLM_MODEL`
+(the live LLM), and `INTERNAL_RAG_TOKEN` (auth for the Go proxy's internal
+RAG relay to the Python tier).
 
 ---
 
@@ -80,100 +94,127 @@ file). A PG-native `pg_dump`/restore drill is the noted open follow-up (see
 The slim image (no torch) + `EMBEDDING_PROVIDER=openai` is the production
 combination.
 
-1. Create the app (one-time). From the repo root:
-
-   ```bash
-   fly launch --no-deploy --name regwatch-api --region iad
-   ```
-
-   Replace the generated `fly.toml` contents with:
+1. App + config. The Fly app is `amneal`, and `fly.toml` is COMMITTED at the
+   repo root -- it is authoritative, load-bearing config (two process groups,
+   the migration release_command, the step-5 flag pin). Do not regenerate it
+   with `fly launch`; a fresh checkout deploys with the committed file as-is.
+   Abridged excerpt -- the real `fly.toml` is heavily commented and is the
+   source of truth:
 
    ```toml
-   app = "regwatch-api"
+   app = "amneal"
    primary_region = "iad"
+   kill_timeout = 30                        # drain in-flight SSE on deploys
 
    [build]
      [build.args]
        INSTALL_LOCAL_EMBEDDINGS = "false"   # slim image: no torch
 
+   [deploy]
+     release_command = "alembic upgrade head"   # migrates BEFORE the roll
+
+   [processes]
+     app = "regwatch serve"      # dual-stack uvicorn on :8000
+     proxy = "regwatch-proxy"    # Go proxy, holds the public port
+
    [env]
      EMBEDDING_PROVIDER = "openai"
-     AUTH_COOKIE_SECURE = "true"            # API is behind HTTPS
-     # The Vercel production origin(s); keep this tight.
-     CORS_ALLOW_ORIGINS_CSV = "https://regwatch.vercel.app"
+     AUTH_COOKIE_SECURE = "true"
+     CORS_ALLOW_ORIGINS_CSV = "https://amneal.vercel.app"
+     SENTRY_ENVIRONMENT = "production"
+     TRUST_PROXY_HEADERS = "true"     # Go login limiter keys on Fly-Client-IP
+     REQUIRE_DATABASE_URL = "true"    # read by the GO PROXY only (see step 2)
+     GO_NATIVE_QUERY = "true"         # step-5 pin: proxy serves POST /query natively
+     UPSTREAM_URL = "http://app.process.amneal.internal:8000"
 
    [http_service]
-     internal_port = 8000
+     processes = ["proxy"]
+     internal_port = 8080
      force_https = true
-     auto_stop_machines = false   # cookie sessions are DB-backed, but keep warm
-     min_machines_running = 1
+     auto_stop_machines = false
+     min_machines_running = 2
+     [[http_service.checks]]     # end-to-end GET /health through the proxy
+       # interval/timeout/grace + method GET, path /health -- see fly.toml
 
-     [[http_service.checks]]
-       interval = "30s"
-       timeout = "10s"
-       grace_period = "30s"
-       method = "GET"
-       path = "/health"
+   [checks.app_health]           # deploy-gates the now-private app group on :8000
+     # processes ["app"], http GET /health -- see fly.toml
    ```
 
-   (`fly.toml` is environment config, not committed app code — keep it out of
-   the repo or commit it, your call; nothing in the image depends on it.)
+   Three tests guard this file against well-meaning "simplifications":
+   `tests/test_trust_proxy_fly_toml.py`, `tests/test_boot_command_drift.py`,
+   and `tests/test_dual_stack_bind.py`. Read the comments in `fly.toml`
+   before touching any guarded line.
 
 2. Secrets (never in `fly.toml`):
 
    ```bash
    fly secrets set \
      DATABASE_URL="$SUPABASE_DB_URL" \
-     OPENAI_API_KEY="sk-..." \
+     OPENAI_API_KEY="sk-..." \                        # embeddings + LLM rollback path
+     LLM_PROVIDER="databricks" \                      # live LLM since 2026-07-28
+     DATABRICKS_LLM_BASE_URL="https://<workspace-host>/serving-endpoints" \
+     DATABRICKS_LLM_TOKEN="..." \
+     DATABRICKS_LLM_MODEL="workspace.default.regwatch" \
+     INTERNAL_RAG_TOKEN="..." \                       # Go proxy -> Python RAG relay auth
      SENTRY_DSN="https://...ingest.sentry.io/..." \   # B4: error tracking
+     WHITEPAPER_TEMPLATE_URL="https://..." \          # signed Supabase Storage URL; see note below
      OPENFDA_API_KEY="..."        # optional
    ```
 
-   `DATABASE_URL` is mandatory everywhere since R5 (no `REQUIRE_DATABASE_URL`
-   flag exists anymore — Postgres + pgvector is the only datastore), so if
-   this secret is missing the app **refuses to boot** rather than losing the
-   audit trail (B1). `SENTRY_DSN` is strongly recommended:
-   without it the app still boots but logs a loud `sentry_disabled_in_production`
-   warning, and 500s go only to stderr (B4).
+   `D1_ENFORCED` / `D1_ALLOWED_LLM_MODELS` are STAGED, deliberately unset:
+   they arm the runtime served-model residency guard and stay unarmed until
+   the embedding flip closes the last D1 leak.
 
-3. Deploy:
+   `DATABASE_URL` is mandatory everywhere since R5 (Postgres + pgvector is
+   the only datastore), so if this secret is missing the app **refuses to
+   boot** rather than losing the audit trail (B1). A `REQUIRE_DATABASE_URL`
+   flag DOES still exist -- in `fly.toml` `[env]`, read by the GO PROXY only:
+   with it set, a proxy machine refuses to serve auth when `DATABASE_URL` is
+   missing. The Python side no longer reads it. `SENTRY_DSN` is strongly
+   recommended: without it the app still boots but logs a loud
+   `sentry_disabled_in_production` warning, and 500s go only to stderr (B4).
 
-   ```bash
-   fly deploy
-   ```
+3. Deploy. The NORMAL path is automatic: every green `ci` run on `main`
+   triggers `deploy.yml`, which rebuilds the image, re-scans it with Trivy,
+   and ships via `scripts/fly-deploy.sh`. Fly then runs the committed
+   `[deploy] release_command = "alembic upgrade head"` in a one-off machine
+   BEFORE the rolling replace, so schema-advancing releases migrate
+   themselves -- there is no manual pre-migration step on the normal path.
 
-   The entrypoint runs `regwatch init-db` on boot: on the already-migrated
-   Postgres it verifies the alembic stamp matches head and starts; on a
-   mismatch it refuses to start (that's the signal you deployed code without
-   migrating, or vice versa).
-
-   **Schema-advancing releases** (a new file in `migrations/versions/` since
-   the last deploy) need the database advanced FIRST — from any machine with
-   a repo checkout (the alembic env resolves `DATABASE_URL` itself):
+   Manual deploys (`fly deploy`, or `bash scripts/fly-deploy.sh` from the
+   exact commit) are for recovery only. The entrypoint runs `regwatch
+   init-db` on boot: it verifies the alembic stamp matches head and starts;
+   on a mismatch it refuses to start (that's the signal image and schema came
+   from different commits). Recovery for that refusal -- from a checkout of
+   the DEPLOYED commit on `main`, never an unmerged branch (the 2026-07-07
+   outage rule):
 
    ```bash
    DATABASE_URL="$SUPABASE_DB_URL" uv run alembic upgrade head
    ```
 
-   The same one-liner is the recovery for the boot refusal above: a message
-   like `stamped at alembic revision '0007_…' but this build expects
-   '0008_…'` means exactly this command, then deploy again.
+   then deploy again. A message like `stamped at alembic revision '0007_...'
+   but this build expects '0008_...'` means exactly this command.
 
 4. Verify:
 
    ```bash
-   curl -s https://regwatch-api.fly.dev/health | python -m json.tool
+   curl -s https://amneal.fly.dev/health | python -m json.tool
    ```
 
    Expect `"status": "ok"`, `db.ok true`, **`db.dialect "postgresql"`** (B1 —
    if you see `"sqlite"` here the prod stack is on the wrong datastore),
-   embedding provider `openai`, `llm.key_present true`, and a non-zero corpus
-   count.
+   embedding provider `openai`, **`llm.provider "databricks"`** (the
+   2026-07-28 flip; `"openai"` here means the rollback secret is set),
+   `llm.key_present true`, and a non-zero corpus count.
 
-5. Provision users (CLI-only, no self-signup; password is prompted):
+5. Provision users (CLI-only, no self-signup; password is prompted). Target
+   an `app`-group machine: the `proxy` machines run only the Go binary and
+   have no Python CLI, and a bare `fly ssh console` may land on one.
 
    ```bash
-   fly ssh console -C "regwatch create-user analyst@amneal.com --name 'CRA Analyst'"
+   fly ssh console -s -C "regwatch create-user analyst@amneal.com --name 'CRA Analyst'"
+   # at the -s picker, choose a machine from the "app" process group
    ```
 
 Notes:
@@ -186,10 +227,14 @@ Notes:
     - **Compose:** drop the file at `./data/templates/cra_white_paper_template.docx`
       (the `./data:/app/data` mount makes it visible at the default path — no
       config change needed).
-    - **Fly (this runbook attaches no volume):** either bake it into a *private*
-      overlay image (`FROM regwatch:… ; COPY cra_white_paper_template.docx
-      /app/data/templates/`) so it never enters this public repo, or attach a Fly
-      volume mounted at `/app/data/templates` and `fly sftp` the file up.
+    - **Fly (this runbook attaches no volume):** set the
+      `WHITEPAPER_TEMPLATE_URL` secret to a long-lived signed Supabase Storage
+      URL for the template -- the render path lazily fetches and caches it on
+      first use (`src/regwatch/whitepaper/template_fetch.py`); any fetch
+      failure falls back loudly, never a 500. Alternatives: bake it into a
+      *private* overlay image (`FROM regwatch:... ; COPY
+      cra_white_paper_template.docx /app/data/templates/`) so it never enters
+      this public repo, or attach a Fly volume at `/app/data/templates`.
   Absent the file, `/whitepaper/docx` returns a structurally-equivalent document
   stamped `(generated without the official CRA template file)` and logs a
   `whitepaper_template_missing` warning — never a silent or failed render.
@@ -198,12 +243,21 @@ Notes:
   attach a volume unless you run ingest/watch on this machine.
 - **Watch:** the production Watch path is the `watch-daily.yml` GitHub Actions
   cron (the sole scheduler; Dagster was removed in R5). Configure
-  `WATCH_DATABASE_URL`, `WATCH_OPENAI_API_KEY`, and optional
-  `WATCH_HEALTHCHECK_URL` / `SLACK_WEBHOOK_URL` per `docs/SECRETS_RUNBOOK.md`.
-  Keep ad hoc `regwatch watch` runs for break-glass recovery, not as the normal
-  production schedule.
+  `WATCH_DATABASE_URL`, `WATCH_OPENAI_API_KEY`, optional `OPENFDA_API_KEY`,
+  optional `WATCH_HEALTHCHECK_URL` / `SLACK_WEBHOOK_URL`, and -- the moment a
+  non-legacy embedding profile is promoted in prod -- the five parity secrets
+  `WATCH_ACTIVE_EMBEDDING_PROFILE` and
+  `WATCH_QWEN_EMBEDDING_{BASE_URL,TOKEN,MODEL,REVISION}`, all per
+  `docs/SECRETS_RUNBOOK.md`. Keep ad hoc `regwatch watch` runs for break-glass
+  recovery, not as the normal production schedule.
 
-### 3-alt. API on Railway (alternative)
+### 3-alt. API on Railway (HISTORICAL -- does not match the current prod shape)
+
+This alternative predates the two-process-group deployment (Go proxy on the
+public edge + private app group) and the committed `fly.toml`: Railway would
+run the image CMD only -- uvicorn exposed directly, no Go edge, no
+`GO_NATIVE_QUERY` path, no proxy-tier login limiting. Kept for reference; prod
+is Fly.
 
 ```bash
 railway init                       # link repo; Railway auto-detects the Dockerfile
@@ -211,7 +265,7 @@ railway variables --set DATABASE_URL="$SUPABASE_DB_URL" \
   --set OPENAI_API_KEY="sk-..." \
   --set EMBEDDING_PROVIDER=openai \
   --set AUTH_COOKIE_SECURE=true \
-  --set CORS_ALLOW_ORIGINS_CSV="https://regwatch.vercel.app"
+  --set CORS_ALLOW_ORIGINS_CSV="https://amneal.vercel.app"
 railway up
 ```
 
@@ -232,10 +286,10 @@ just works: Vercel terminates TLS.
 2. **Root Directory**: click *Edit* and set `regwatch/frontend` (the build
    will fail without this). Framework preset: Next.js (auto-detected).
 3. **Environment Variables** (Production):
-   - `API_PROXY_TARGET` = `https://regwatch-api.fly.dev` (or the Railway URL).
+   - `API_PROXY_TARGET` = `https://amneal.fly.dev`.
      Server-side only — no `NEXT_PUBLIC_` prefix.
-4. Click **Deploy**. Note the production URL (e.g.
-   `https://regwatch.vercel.app`).
+4. Click **Deploy**. Note the production URL
+   (`https://amneal.vercel.app` in prod).
 5. If the final Vercel URL differs from what you set in
    `CORS_ALLOW_ORIGINS_CSV` in step 3, update it:
    `fly secrets set` won't take env vars from `[env]` — edit `fly.toml` and
@@ -294,15 +348,24 @@ production data paths.
 
 ### 6.1 Rollback
 
-Three independent levers, least to most drastic. Pick the smallest one that
+Independent levers, least to most drastic. Pick the smallest one that
 covers the failure.
+
+**Lever 0 -- config flip (fastest; ~60s, no redeploy, no CI cycle).** Fly
+secrets take precedence over `fly.toml` `[env]`, so a bad provider or flag
+flip reverts with a secret:
+
+```bash
+fly secrets set LLM_PROVIDER=openai -a amneal    # revert the 2026-07-28 Databricks LLM flip
+fly secrets set GO_NATIVE_QUERY=false -a amneal  # proxy relays POST /query to Python again
+```
 
 1. **App rollback (bad deploy, schema unchanged).** List releases, note the
    image ref of the last good one, pin it:
 
    ```bash
    fly releases --image                       # last good release's image ref
-   fly deploy --image <previous-image-ref>    # e.g. registry.fly.io/regwatch-api:deployment-…
+   fly deploy --image <previous-image-ref>    # e.g. registry.fly.io/amneal:deployment-...
    ```
 
    > **Image and config are VERSION-COUPLED since the phase-2 dual-stack
@@ -316,6 +379,13 @@ covers the failure.
    > so the image and `[processes].app` come from the same commit. The same
    > constraint makes `--strategy immediate` safe ONLY when image and fly.toml
    > are from one commit. Within a single phase this lever is unaffected.
+   >
+   > The STEP-5 boundary added a second coupling of the same class: `fly.toml`
+   > `[env]` pins `GO_NATIVE_QUERY = "true"` (PR #127), so `fly deploy --image
+   > <old>` hands the pin to a proxy binary from before the CompleteQuery
+   > cutover. To roll back across step 5, deploy the reverted CHECKOUT, or
+   > neutralize the pin first with `fly secrets set GO_NATIVE_QUERY=false -a
+   > amneal` (lever 0 -- secrets override `[env]`).
 
    (Railway: **Deployments → ⋮ → Redeploy** on the previous build.) The DB
    schema is alembic-stamped and verified on boot: an older app that expects
@@ -325,7 +395,7 @@ covers the failure.
 
 2. **Data rollback (bad write / bad migration).** Supabase **Database →
    Backups** (daily on paid plans) → restore the last good backup, then
-   restart the API (`fly apps restart regwatch-api`). A restore overwrites
+   restart the API (`fly apps restart amneal`). A restore overwrites
    the whole database — stop the API first, and accept that sessions, audit
    rows, and any other writes since that backup are lost. Verify with the §5
    smoke checklist before calling it done.
@@ -345,7 +415,7 @@ Point an external monitor at the one open endpoint:
 - **Expected:** HTTP `200` with compact JSON shaped like
 
   ```json
-  {"status":"ok","components":{"db":{"ok":true},"vector_store":{"ok":true,"corpus_count":1795},"llm":{"provider":"openai","key_present":true},"embedding":{"provider":"openai"}},"warnings":[]}
+  {"status":"ok","components":{"db":{"ok":true},"vector_store":{"ok":true,"corpus_count":1795},"llm":{"provider":"databricks","key_present":true},"embedding":{"provider":"openai"}},"warnings":[]}
   ```
 
   (the `vector_store` key reports pgvector, the only vector store since R5).
@@ -391,6 +461,13 @@ through the real `ask` path in this job's prod embedding space
 means a sweep hiccup, or a recommendation that differs from `0.30`, can never
 block ingestion or alerting.
 
+**D1 note (deliberate residual):** this sweep AND the watch cron's change-day
+ingest embeds still call OpenAI (via `WATCH_OPENAI_API_KEY`), even though prod
+LLM inference moved to Databricks on 2026-07-28. That is the known remaining
+D1 leak; the fix goes through the embedding-profile mechanism
+(`ACTIVE_EMBEDDING_PROFILE` / `EMBEDDING_SHADOW_PROFILE`) once the Databricks
+embedding endpoint is wired into the app.
+
 **How to read `threshold_sweep.json`** (the same content is printed as a table in
 the step log):
 
@@ -413,9 +490,9 @@ the step log):
 **Decision procedure (human-in-the-loop):** a human reviews the recommendation
 and the two pathology lists. **Only if warranted** — a clean (`overlap: false`)
 recommendation that differs from `0.30`, or a non-empty pathology list — update
-the live threshold by setting the `REFUSAL_SCORE_THRESHOLD` env var (Fly:
-`fly secrets set REFUSAL_SCORE_THRESHOLD=...`; Railway: `railway variables --set`)
-and redeploy. The sweep only **recommends**; it never changes the value. `0.30`
+the live threshold by setting the `REFUSAL_SCORE_THRESHOLD` env var
+(`fly secrets set REFUSAL_SCORE_THRESHOLD=... -a amneal`).
+The sweep only **recommends**; it never changes the value. `0.30`
 stays PROVISIONAL until a human has reviewed at least one prod-space sweep. There
 is no gate and no auto-tune — over-tuning the refusal cutoff trades directly
 against INV safety, so it is an explicit operator decision.

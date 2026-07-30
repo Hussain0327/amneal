@@ -1,5 +1,23 @@
 # Open-model rollout: Qwen3 embeddings + Gemma generation
 
+> **STATUS 2026-07-29:** this plan is partially executed, out of its written
+> order, and parts of it are superseded.
+> - The machinery (migration 0015 embedding profiles, `Qwen3EmbeddingProvider`,
+>   `DatabricksProvider`) merged and deployed DORMANT on 2026-07-23 (#125).
+> - Generation cut over FIRST, on 2026-07-28 -- and not to Gemma: prod runs
+>   gpt-oss-20b behind the Databricks endpoint alias
+>   `workspace.default.regwatch` (served model id `gpt-oss-20b-080525`), one
+>   model for ALL roles, `LLM_PROVIDER=databricks`. OpenAI is rollback only.
+> - The embedding endpoint was created 2026-07-29:
+>   `workspace.default.regwatch-embed`, Qwen3-Embedding-0.6B, 1024-dim,
+>   pay-per-token (served id `qwen3-embedding-0-6b-112025`), verified by a
+>   live call. App wiring is NOT built yet -- prod queries still embed on
+>   OpenAI, and the config defaults below still describe the 4B/1536
+>   Matryoshka plan.
+> - The Qwen3-4B / 2560-dim sections and the Gemma GPU sizing section below
+>   are historical planning kept for context; the shape actually adopted is
+>   pay-per-token Databricks Model Serving.
+
 This rollout keeps retrieval orchestration, grounding, refusal, and audit
 behavior in the existing Regwatch Python application. Only model inference is
 split into independently deployed endpoints:
@@ -89,14 +107,29 @@ QWEN_EMBEDDING_QUERY_INSTRUCTION_VERSION=regwatch-regulatory-retrieval-v1
 ACTIVE_EMBEDDING_PROFILE=legacy
 # EMBEDDING_SHADOW_PROFILE=ep_<profile-id>
 
-# Gemma generation endpoint
+# Generation endpoint (live since 2026-07-28: gpt-oss-20b, one model for all roles)
 LLM_PROVIDER=databricks
 DATABRICKS_LLM_BASE_URL=https://<generation-endpoint-api-root>
 DATABRICKS_LLM_TOKEN=<service-principal-token>
 # The value sent in the Chat Completions `model` field, normally the Databricks
-# serving endpoint name.
-DATABRICKS_LLM_MODEL=<gemma-generation-endpoint-name>
+# serving endpoint name (in prod: the Unity Catalog alias workspace.default.regwatch).
+DATABRICKS_LLM_MODEL=<generation-endpoint-name>
 GEMMA_THINKING_ENABLED=false
+
+# Truncation knobs (merged 2026-07-29 in PR #138 after the 2026-07-28 incident):
+# "low" is the only reasoning level measured to finish under the 900-token cap
+# on gpt-oss-20b; the cap itself is now an operator knob.
+DATABRICKS_REASONING_EFFORT=low
+SYNTHESIZER_MAX_TOKENS=900
+
+# D1 runtime served-model guard (shipped in PR #138, deployed UNARMED).
+# When armed, _check_d1_enforcement (config/settings.py) refuses to boot unless
+# generation AND query embedding have BOTH left OpenAI -- flip
+# ACTIVE_EMBEDDING_PROFILE off "legacy" before arming. The allowlist is checked
+# against two strings, so it must carry BOTH the configured endpoint alias and
+# the model id the endpoint reports per response (D1ResidencyError otherwise).
+# D1_ENFORCED=true
+# D1_ALLOWED_LLM_MODELS='["workspace.default.regwatch","gpt-oss-20b-080525"]'
 ```
 
 `ACTIVE_EMBEDDING_PROFILE=legacy` keeps retrieval on the existing
@@ -139,6 +172,13 @@ skips them.
 
 ## Rollout sequence
 
+> **2026-07-29:** executed order differs from the plan below. Step 7 (the
+> generation cutover) happened FIRST, on 2026-07-28, to gpt-oss-20b. Step 1's
+> embedding half exists since 2026-07-29 (`workspace.default.regwatch-embed`,
+> pay-per-token). Steps 2-6 are the in-flight work, targeting the 1024-dim
+> Qwen3-Embedding-0.6B endpoint; step 3's 2560-dim comparison applies only if
+> a 4B endpoint is ever revisited.
+
 1. Deploy Qwen and Gemma as private, independently scaled endpoints. Keep the
    existing providers active while validating credentials and network paths.
 2. Apply the migration, register the 1,536-dimensional profile with the exact
@@ -159,7 +199,13 @@ skips them.
 7. Cut generation over separately with `LLM_PROVIDER=databricks`. Rollback is
    independent of the embedding profile.
 
-## Gemma production sizing
+## Gemma production sizing (HISTORICAL)
+
+> **2026-07-29:** superseded. Prod adopted Databricks pay-per-token Model
+> Serving for both generation (gpt-oss-20b) and embeddings
+> (Qwen3-Embedding-0.6B), so no GPU fleet is owned or sized by this project.
+> Kept for context in case a provisioned-throughput or self-hosted deployment
+> is ever revisited.
 
 Begin evaluation on one 80 GB H100 with a bounded maximum context length.
 Fitting the checkpoint in memory is not a production throughput result.

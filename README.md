@@ -112,17 +112,28 @@ regwatch runs as a **limited internal pilot**, not a generally available product
 - The **API (Fly.io)**, **Postgres + pgvector (Supabase)**, and **frontend
   (Vercel)** are deployed. The structured store and the vectors live in one
   managed Postgres.
-- A **polyglot migration is in progress**
-  ([`docs/POLYGLOT_TARGET_2026-07-10.md`](docs/POLYGLOT_TARGET_2026-07-10.md)): a
-  Go proxy now fronts the app on the public port and owns auth, sessions, and the
-  feedback/settings/product writes; query orchestration and audit persistence
-  move to Go next. Python keeps the stateless RAG core. The SQLite/Chroma
-  dual-mode was deleted (R5) — Postgres + pgvector is the only datastore.
+- **LLM inference runs inside the company's Databricks tenant** (since
+  2026-07-28): one small open-weight model, `gpt-oss-20b`, served from the
+  Model Serving endpoint `workspace.default.regwatch`, handles every LLM role
+  (`LLM_PROVIDER=databricks`). OpenAI remains the tested rollback path and
+  still serves embeddings while the Qwen3 embedding migration is staged - the
+  last piece of the data-residency (D1) move. See
+  [`docs/DATABRICKS_ADOPTION_2026-07-28.md`](docs/DATABRICKS_ADOPTION_2026-07-28.md)
+  and [`docs/DATA_RESIDENCY_D1.md`](docs/DATA_RESIDENCY_D1.md).
+- The **polyglot migration**
+  ([`docs/POLYGLOT_TARGET_2026-07-10.md`](docs/POLYGLOT_TARGET_2026-07-10.md))
+  is through step 5: the Go proxy owns the public port, serves auth, sessions,
+  feedback, settings, and products natively, and since 2026-07-24 also
+  orchestrates `POST /query` end-to-end (it persists the audit row and calls
+  Python's internal, token-gated RAG compute endpoint). Python keeps the
+  stateless RAG core. The SQLite/Chroma dual-mode was deleted (R5) - Postgres +
+  pgvector is the only datastore. Remaining: legacy-path deletion, hardening
+  step R3, steps 6-9.
 - It is **not yet externally exposed.** The work between here and an external
-  launch — the data-handling / LLM-vendor decision (D1), an SSO + TLS gateway,
-  gated deploy-step migrations, least-privilege DB credentials, and a rehearsed
-  restore drill — is tracked in [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md)
-  and [`docs/ROADMAP.md`](docs/ROADMAP.md).
+  launch - an SSO + TLS gateway, least-privilege DB credentials, a rehearsed
+  restore drill, and finishing the D1 embedding move - is tracked in
+  [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md) and
+  [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 **Deliberate scope** (boundaries, not gaps): the reranker is a hook that's off by
 default; the eval gold set is a curated starter set, expanded by hand from real
@@ -135,7 +146,8 @@ White Paper before being generalized to Ask and Assemble.
 # install (dev tools + LLM clients + local embeddings)
 uv sync --extra dev --extra llm --extra local-embeddings
 
-# configure — fill in OPENAI_API_KEY
+# configure - fill in OPENAI_API_KEY (default local providers; prod-parity
+# Databricks LLM vars are documented in .env.example under LLM_PROVIDER)
 cp .env.example .env && $EDITOR .env
 
 # initialize the DB and data directories
@@ -174,18 +186,32 @@ proxies `/api/*` to the backend, so only one origin is exposed.
 
 ## How it's built
 
+One browser-visible origin, two runtimes on Fly, one datastore, and a
+Databricks model plane inside the company tenant:
+
+```mermaid
+flowchart LR
+    B["Browser<br/>(analyst)"] -->|"HTTPS + HttpOnly cookie"| V["Vercel<br/>Next.js 16 shell"]
+    V -->|"/api/* rewrite"| GO["Fly.io - Go proxy (public port)<br/>auth + sessions + rate limits<br/>native /query orchestration + audit"]
+    GO -->|"6PN private network"| PY["Fly.io - Python FastAPI<br/>stateless RAG core:<br/>resolve, retrieve, cite or refuse"]
+    GO --> PG[("Supabase Postgres + pgvector<br/>one DB: rows, vectors, audit")]
+    PY --> PG
+    PY -->|"OpenAI-compatible API"| DBX["Databricks Model Serving<br/>gpt-oss-20b - all LLM roles<br/>qwen3-embedding-0.6b - staged"]
+    CRON["GitHub Actions cron<br/>daily watch + ingest"] --> PG
+```
+
 | Layer | Choice |
 |---|---|
-| Edge / control plane | **Go** proxy (`go/`, module `github.com/Hussain0327/amneal/go`) holds the public port. Since the step-4 polyglot cutover it serves auth, sessions, feedback, settings, and product CRUD natively (sqlc over the same Postgres), applies rate limiting + `Fly-Client-IP` handling, and relays everything else to Python. Part of the in-progress migration in [`docs/POLYGLOT_TARGET_2026-07-10.md`](docs/POLYGLOT_TARGET_2026-07-10.md) |
+| Edge / control plane | **Go** proxy (`go/`, module `github.com/Hussain0327/amneal/go`) holds the public port. Since the step-4 polyglot cutover it serves auth, sessions, feedback, settings, and product CRUD natively (sqlc over the same Postgres) and applies rate limiting + `Fly-Client-IP` handling; since the step-5 cutover it also orchestrates `POST /query` natively (persists the audit row, calls Python's internal RAG compute endpoint), and relays the remaining endpoints to Python. Migration plan: [`docs/POLYGLOT_TARGET_2026-07-10.md`](docs/POLYGLOT_TARGET_2026-07-10.md) |
 | Backend (RAG core) | Python 3.11+ (managed by `uv`), FastAPI — the stateless retrieval / synthesis / refusal core behind the proxy: Ask, Assemble, White Paper, Watch, and query orchestration |
 | Frontend | Next.js 16 (App Router, TypeScript) + React 18 in `regwatch/frontend/`. All four surfaces render in one `(shell)` route group — one sidebar, one product-scope bar. Talks to the API through a same-origin `/api` proxy |
-| LLM | OpenAI via the Responses API (`OPENAI_API_MODE=responses`). Role-specific models: router `gpt-5-nano`, synthesizer + extractor `gpt-5.4-nano` (each falling back to `LLM_MODEL`). Pluggable behind `LLMProvider` — `anthropic` and a test-only `echo` are also supported |
-| Embeddings | Pluggable. Prod AND Compose default: OpenAI `text-embedding-3-small` (1536-dim, matching the pgvector column). Local `BAAI/bge-small-en-v1.5` (384-dim) remains for offline tooling only -- the K6 dim assert refuses it against the app datastore |
+| LLM | **Databricks-hosted `gpt-oss-20b`** in prod (`LLM_PROVIDER=databricks`): one small open-weight model on the Model Serving endpoint `workspace.default.regwatch` serves ALL roles (router, synthesizer, extractor), keeping analyst questions inside the company tenant (D1). A runtime served-model guard (`D1_ENFORCED` + `D1_ALLOWED_LLM_MODELS`) refuses any response served by an off-perimeter model once armed. Pluggable behind `LLMProvider`: `openai` (Responses API; router `gpt-5-nano`, synthesizer + extractor `gpt-5.4-nano`) is the tested rollback path; `anthropic` and a test-only `echo` also ship |
+| Embeddings | Pluggable AND profile-versioned. Prod today: OpenAI `text-embedding-3-small` (1536-dim, matching the `vector(1536)` chunk column) - the last D1 gap, since every analyst question is embedded before retrieval. Staged replacement: Databricks-hosted `Qwen3-Embedding-0.6B` (1024-dim, endpoint `workspace.default.regwatch-embed`) via the embedding-profiles machinery (`ACTIVE_EMBEDDING_PROFILE`; blue/green re-embed into a named profile, never in-place). Local `BAAI/bge-small-en-v1.5` (384-dim) remains for offline tooling only -- the K6 dim assert refuses it against the app datastore |
 | Vector store | **pgvector** in the same Postgres, everywhere (Supabase in prod, a disposable local/CI Postgres otherwise). No other vector backend since R5 |
 | Structured store | **Postgres** via SQLModel (Supabase in prod); `DATABASE_URL` is mandatory and the app refuses to boot without it. Schema changes ship as Alembic migrations |
 | Retrieval | Two-stage. Stage 1: vector top-k 50 (`VECTOR_TOP_K`). Stage 2: rerank to top-k 8 (`RERANK_TOP_K`); reranker off by default |
 | Ingest | `httpx` + `selectolax`; `pdfplumber` (with `pypdf` fallback); heading- and page-aware chunking (~1000 tokens, ~150 overlap) |
-| Deploy | One Fly.io app, **two process groups**: the Go proxy on the public port, uvicorn on an internal port behind it. DB + vectors on Supabase, frontend on Vercel; daily Watch via GitHub Actions cron. Alembic (run by the Fly release command) stays the single schema authority |
+| Deploy | One Fly.io app, **two process groups**: the Go proxy on the public port, the Python app (dual-stack `regwatch serve`) on an internal port behind it. DB + vectors on Supabase, frontend on Vercel, LLM (and staged embeddings) on Databricks Model Serving, daily Watch via GitHub Actions cron. Alembic (run by the Fly release command) stays the single schema authority |
 | Tooling | Python: ruff, black, mypy (strict on `src/`), pytest, import-linter layering contracts. Go: gofmt, go vet, golangci-lint, sqlc (generated store + `sqlc vet` against a real schema). A cross-service contract suite (`tests_contract/`) boots the real Go proxy + uvicorn + Postgres to prove the wire contract across the boundary |
 
 The LLM provider, model, reranker, and embedding provider all sit behind
@@ -215,10 +241,13 @@ open by default and bearer-gated when `METRICS_TOKEN` is set. Full
 request/response shapes are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Since the step-4 cutover the **Go proxy serves `/auth/*`, `/sessions`,
-`/feedback`, `/settings`, and `/products` natively** at the public edge; the RAG
-and structured-source endpoints below relay to Python. The public wire contract
-is identical either way — the [`tests_contract/`](tests_contract/) suite proves
-it across the boundary.
+`/feedback`, `/settings`, and `/products` natively** at the public edge, and
+since step 5 it also **orchestrates `POST /query` natively** (it persists the
+audit row and calls Python's internal, token-gated
+`POST /internal/query/compute` for the RAG work; the `/internal/` subtree is
+never exposed publicly). The remaining structured-source endpoints relay to
+Python. The public wire contract is identical either way - the
+[`tests_contract/`](tests_contract/) suite proves it across the boundary.
 
 ```
 POST   /auth/login        {email, password} -> {user} + HttpOnly session cookie
@@ -227,9 +256,9 @@ GET    /auth/me           current user, or 401
 
 POST   /query             grounded, conversational Q&A
                           status in: answer | summary | clarify | scope_warning | refused
-POST   /query/stream      same, streamed over SSE: progress frames, then the
-                          validated answer as one result frame (no answer text
-                          before its citations are validated — INV-1)
+POST   /query/stream      same over SSE: progress frames, provisional token
+                          deltas (a cosmetic live draft), then the validated
+                          answer as the one authoritative result frame (INV-1)
 POST   /resolve           deterministic product resolution (not an LLM turn);
                           422 on a name != number mismatch. Backs the scope picker
 POST   /feedback          rate a Q&A answer {audit_id, rating: -1|1, comment?}
@@ -319,11 +348,13 @@ src/regwatch/
   generate/               LLM provider interface, grounded_qa, prompts
   watch/                  watchlist, aliases, matcher, alerts
   assemble/               dossier builder
+  whitepaper/             CRA White Paper populator + .docx writer
   eval/                   metrics, run_eval, gold_set.jsonl
   api/                    FastAPI surface
   auth/                   passwords (bcrypt), cookie sessions, require_user
   common/                 logging, audit, citations, text_normalize, conversation, ratelimit
-go/                       Go proxy: public edge + native auth/sessions/feedback/settings/products (sqlc store)
+migrations/               Alembic migration history (the single schema authority)
+go/                       Go proxy: public edge + native auth/sessions/feedback/settings/products + native /query orchestration (sqlc store)
 regwatch/frontend/        Next.js (App Router, TS) UI — one (shell) for all four surfaces
 tests/                    smoke, invariants, eval gate, per-module
 tests_contract/           cross-service contract suite: real Go proxy + uvicorn + Postgres
@@ -338,6 +369,10 @@ points:
 - [Non-technical guide](docs/NON_TECH_GUIDE.md) — plain English for business and
   regulatory readers.
 - [Production readiness](docs/PROD_READINESS.md) — the POC-to-production path.
+- [Data residency (D1)](docs/DATA_RESIDENCY_D1.md) - why analyst queries must
+  stay in-tenant, and the migration that gets them there.
+- [Databricks adoption](docs/DATABRICKS_ADOPTION_2026-07-28.md) - the inference-
+  plane decision, cost model, and rollout state.
 - [Decisions](docs/DECISIONS.md) — append-only log of what was chosen and why.
 - [CI/CD pipeline](docs/CI_CD.md) - the CI gate (Python lint/type/test, audit,
   docker build, frontend, Go proxy, schema-drift, and the cross-service contract
