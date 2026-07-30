@@ -44,6 +44,7 @@ from regwatch.process.embedder import (
 from regwatch.process.extractor import ExtractionResult, extract_be
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.embedding_profiles import content_hash as embedding_content_hash
+from regwatch.store.graph_store import derive_document_graph
 from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
 from regwatch.store.vector_store import (
     add_chunks,
@@ -429,6 +430,14 @@ def _commit_version_and_doc(
                         conn=s.connection(),
                     )
                     _write_profile_batches(s, ids, profile_batches)
+                    derive_document_graph(
+                        doc_id=psg_document_id,
+                        version_id=v.id,
+                        chunk_ids=ids,
+                        chunk_metas=metas,
+                        doc_attrs=_graph_doc_attrs(listing),
+                        conn=s.connection(),
+                    )
                     log.info("chunks_added", doc_id=psg_document_id, version_id=v.id, n=len(ids))
             if extraction is not None:
                 s.add(
@@ -562,6 +571,17 @@ def _extract_and_save_be(doc_id: int, version_id: int, pages: list[str], appl_no
         )
 
 
+def _graph_doc_attrs(listing: PsgListing) -> dict[str, object]:
+    """The doc-identity attrs the tier-1 graph derivation stamps on nodes."""
+    return {
+        "appl_no": listing.appl_no,
+        "normalized_name": listing.normalized_name,
+        "dosage_form": listing.dosage_form or "",
+        "route": listing.route or "",
+        "psg_type": listing.psg_type,
+    }
+
+
 def _chunk_metadata_base(doc_id: int, listing: PsgListing) -> dict[str, object]:
     # version_id is intentionally absent: _index_rows stamps it, so the
     # Postgres path can chunk+embed BEFORE the version row (and its id) exists.
@@ -629,18 +649,24 @@ def _regenerate_chunks(
     ids, metas, texts = _index_rows(doc_id, version_id, chunks)
     embeddings = _legacy_document_embeddings(texts)
     profile_batches = _profile_document_embeddings(texts)
-    if profile_batches:
-        with session_scope() as s:
-            add_chunks(
-                ids=ids,
-                embeddings=embeddings,
-                documents=texts,
-                metadatas=metas,
-                conn=s.connection(),
-            )
+    with session_scope() as s:
+        add_chunks(
+            ids=ids,
+            embeddings=embeddings,
+            documents=texts,
+            metadatas=metas,
+            conn=s.connection(),
+        )
+        if profile_batches:
             _write_profile_batches(s, ids, profile_batches)
-    else:
-        add_chunks(ids=ids, embeddings=embeddings, documents=texts, metadatas=metas)
+        derive_document_graph(
+            doc_id=doc_id,
+            version_id=version_id,
+            chunk_ids=ids,
+            chunk_metas=metas,
+            doc_attrs=_graph_doc_attrs(listing),
+            conn=s.connection(),
+        )
     log.info("chunks_added", doc_id=doc_id, version_id=version_id, n=len(chunks))
     _cleanup_stale_chunks(doc_id, version_id)
 
@@ -714,6 +740,14 @@ def rechunk_document(doc_id: int) -> str:
         add_chunks(ids=ids, embeddings=embeddings, documents=texts, metadatas=metas, conn=conn)
         if profile_batches:
             _write_profile_batches(s, ids, profile_batches)
+        derive_document_graph(
+            doc_id=doc_id,
+            version_id=version_id,
+            chunk_ids=ids,
+            chunk_metas=metas,
+            doc_attrs=_graph_doc_attrs(listing),
+            conn=conn,
+        )
     log.info("rechunked", doc_id=doc_id, version_id=version_id, n=len(chunks))
     return "rechunked"
 

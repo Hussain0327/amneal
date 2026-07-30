@@ -117,7 +117,7 @@ def test_db_boots_and_round_trips() -> None:
     with get_engine().connect() as conn:
         assert (
             conn.execute(text("select version_num from alembic_version")).scalar_one()
-            == "0017_chunk_ordinal"
+            == "0018_knowledge_graph"
         )
     with session_scope() as s:
         s.add(
