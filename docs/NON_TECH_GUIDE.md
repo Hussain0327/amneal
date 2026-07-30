@@ -33,9 +33,10 @@ REGWATCH is meant to reduce that research time.
 
 ## What It Does Today
 
-REGWATCH is a working system, not just a sketch. It is not yet a fully
-provisioned production deployment (see "Important Current Limitations"), but the
-core research features are built and tested.
+REGWATCH is a working system, not just a sketch. It is deployed and running on
+approved hosting, with connections encrypted in transit. Some finishing work
+remains before it is opened up more widely (see "Important Current
+Limitations"), but the core research features are built, tested, and live.
 
 Today, it can:
 
@@ -287,9 +288,8 @@ The current Docker setup can run:
 - a separate ingest job for loading FDA data
 
 (The web UI is a separate Next.js app under `regwatch/frontend/` and is run on
-its own.) This is useful groundwork, but it is not the same as a full
-production deployment. Production still needs security, hosting, backups,
-monitoring, and an approved way to manage secrets.
+its own.) This same packaging is what the deployed service runs on today, so
+the code behaves the same way in production as it does in testing.
 
 ## How The Web App Is Organized
 
@@ -300,7 +300,9 @@ A few things to know as a user:
 
 - Ask is a chat. You type a question and get a cited answer back, with the FDA
   sources shown as clickable chips; if the product is ambiguous, it offers you
-  clarify options to pick from.
+  clarify options to pick from. The answer is shown being typed out live as a
+  draft, but the final cited answer only appears once its citations have been
+  checked against the FDA sources.
 - At the top of every surface there is an "Under review" product-scope bar. It
   shows which product the whole app is currently focused on, and you can change
   the focus there with a product picker.
@@ -312,23 +314,26 @@ A few things to know as a user:
 
 ## Important Current Limitations
 
-The research features are built, but REGWATCH is not yet a fully provisioned,
-launched production service. The consolidated list of remaining work lives in
+REGWATCH is deployed and running, but some finishing work remains before it is
+opened up more widely. The consolidated list of remaining work lives in
 `docs/ROADMAP.md`. The headline items:
 
-- It has a Docker/container baseline, but it is not yet running on approved
-  hosting behind a gateway with TLS and single sign-on.
-- A managed Postgres / pgvector datastore is supported in code (the app can
-  switch from the local SQLite/Chroma files to Postgres) but has not actually
-  been provisioned, migrated from a clean snapshot, or restore-tested.
-- The biggest open decision is how the language model handles data — for example
-  a BAA, a zero-retention arrangement, or an in-house model. This is a
-  business/compliance call and must be logged in `DECISIONS.md` before launch.
-- The watch scheduler is not yet deployed and monitored as a production job.
+- It runs on approved hosting with encrypted connections. What remains is
+  connecting it to the company's single sign-on, and a rehearsed exercise that
+  proves backups can actually be restored.
+- The database move is done: one managed database now holds everything the
+  system stores. The only remaining piece there is that restore exercise.
+- The data-handling decision was made on 2026-07-28: the AI model that writes
+  answers now runs inside the company's own Databricks environment, so analyst
+  questions no longer leave the company boundary to get answered. One piece
+  still uses OpenAI: the "matching" step that finds the right FDA passages for
+  a question. Its in-company replacement is already set up in Databricks and
+  is waiting to be connected.
+- The daily watcher runs as a scheduled production job (on GitHub's
+  scheduler). What is still missing is fuller monitoring that raises an alarm
+  if a run fails.
 - The evaluation gold set should grow (from 12 Q&A + 16 white-paper rows toward
-  30-50) before production use.
-- The Ask chat does not yet stream answers token-by-token; it returns the full
-  cited answer at once.
+  30-50).
 - Human review is still required.
 
 ## The Architecture (Now Built)
@@ -336,16 +341,21 @@ launched production service. The consolidated list of remaining work lives in
 The system is organized exactly the way it was originally recommended:
 
 1. A TypeScript web UI for users (the Next.js app described above).
-2. A Python backend for FDA evidence, retrieval, citations, and AI.
-3. A router that decides which FDA source should answer.
-4. Source handlers for each FDA database.
-5. A final answer synthesizer that writes cited answers.
-6. Strong validation before anything is shown to users.
-7. Audit logs for every decision.
+2. A gatekeeper service (written in Go) that guards the door: it checks
+   logins, manages sessions, applies rate limits, and keeps the record of
+   every question asked, standing in front of the answering engine.
+3. A Python answering engine for FDA evidence, retrieval, citations, and AI.
+4. A router that decides which FDA source should answer.
+5. Source handlers for each FDA database.
+6. A final answer synthesizer that writes cited answers.
+7. Strong validation before anything is shown to users.
+8. Audit logs for every decision.
 
 The language model and embedding model are pluggable: no specific model name is
-hard-coded into the logic, so the model can be swapped once the data-handling
-decision (see Limitations and `docs/ROADMAP.md`) is made.
+hard-coded into the logic. That is what made the recent swap possible: the
+language model was switched to one running inside the company's own
+environment (the data-handling decision described in the Limitations above),
+without changing how the system works.
 
 The goal is not to build a chatbot that guesses. The goal is to build a
 research system that knows where to look and shows the source.

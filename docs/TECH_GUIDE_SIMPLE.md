@@ -12,26 +12,36 @@ questions only from that evidence, and refuses when it cannot support an answer.
 
 ## Current Shape
 
-REGWATCH is a working Python application with a Next.js front end. It is not
-yet provisioned for production (see `docs/ROADMAP.md` for the open
-launch-blockers), but the code paths described below are all shipped on `main`.
+REGWATCH is a deployed production service: the backend runs on Fly.io (app
+"amneal", TLS via `force_https`), the Next.js UI is on Vercel
+(amneal.vercel.app), and Supabase hosts the Postgres + pgvector datastore.
+Remaining pre-external-exposure work (enterprise SSO/OIDC, least-privilege DB
+creds, a rehearsed restore drill, distributed rate limiting) is tracked in
+`docs/ROADMAP.md`. The code paths described below are all shipped on `main`.
 
 Main stack:
 
 - Python 3.11+ / 3.12
-- FastAPI API (conversational `POST /query` with session/turn IDs)
+- Go edge service (`go/`) on the public port: auth, sessions, feedback,
+  settings, products served natively, rate limiting, and since 2026-07-24 the
+  end-to-end orchestration of `POST /query`
+- FastAPI RAG core behind the Go edge (conversational query pipeline with
+  session/turn IDs)
 - Next.js (App Router, TypeScript) UI in `regwatch/frontend/`
 - Authenticated: cookie-session auth on every endpoint except `GET /health`
   (DB-backed opaque tokens, bcrypt passwords, per-user chat history + rate
   limiting)
-- Dual-mode storage: SQLite + Chroma by default; set `DATABASE_URL` to switch
-  the structured store to Postgres and vectors to pgvector in the same DB
+- Postgres + pgvector as the only datastore (structured store and vectors in
+  the same DB); `DATABASE_URL` is mandatory - the app refuses to boot without
+  it
 - SQLModel / SQLAlchemy over the structured store
 - `httpx` and `selectolax` for FDA crawling
 - `pdfplumber` and `pypdf` for PDF parsing
-- pluggable LLM providers (OpenAI Responses API, role-specific models)
+- pluggable LLM providers; prod runs the `databricks` provider (open-weight
+  gpt-oss-20b for all roles, hosted in the company Databricks tenant), with
+  the `openai` role-model provider kept as the rollback path
 - pluggable embedding providers
-- Alembic migrations (baseline + incremental, currently through `0008`)
+- Alembic migrations (baseline + incremental, currently through `0016`)
 - Docker / Compose for the local API + ingest baseline
 - pytest, ruff, black, mypy
 
@@ -51,8 +61,8 @@ FDA PSG index
   -> parse PDF page text
   -> chunk text with page metadata
   -> embed chunks
-  -> store chunks in Chroma
-  -> store document/version/BE fields in the structured store (SQLite or Postgres)
+  -> store chunks in pgvector
+  -> store document/version/BE fields in the structured store (Postgres)
 ```
 
 Q&A flow:
@@ -77,15 +87,25 @@ config/
   settings.py              runtime config from env
 
 scripts/
-  (ops helpers)            deploy/restore utilities; seeding is `uv run regwatch seed`
+  export_openapi.py        dump the OpenAPI schema
+  fly-deploy.sh            Fly.io deploy helper
+  gen-store-schema.sh      regenerate the Go sqlc store schema
+  share-demo.sh            start API + UI behind one public link
 
 docker/
   entrypoint.sh            container startup: create data dirs and init DB
 
+go/
+  (Go edge service)        public port: auth, sessions, feedback, settings,
+                           products, rate limits, and POST /query orchestration
+
+migrations/
+  versions/                Alembic migrations (through 0016)
+
 src/regwatch/
   ingest/                  crawl FDA PSGs and parse PDFs
   process/                 chunk, embed, extract BE fields, detect changes
-  store/                   structured models/session (SQLite or Postgres) + vector store (Chroma or pgvector)
+  store/                   Postgres models/session + pgvector vector store
   common/conversation.py    chat session/message persistence and safe context
   retrieve/                product resolution and vector retrieval
   generate/                prompts, LLM providers, grounded Q&A
@@ -102,6 +122,7 @@ regwatch/
   backend/                 backend workspace docs; source stays in src/regwatch
   frontend/                Next.js (App Router, TypeScript) UI — all four surfaces (Ask / Assemble / Watch / White Paper) in one (shell) route group
 tests/                     unit, integration, invariant, eval-gate tests
+tests_contract/            cross-service contract suite over real Go + uvicorn + Postgres
 docs/                      specs, decisions, plans, onboarding docs
 ```
 
@@ -125,8 +146,8 @@ Important tables:
 - `User` / session tables: auth identities, opaque session tokens, and
   per-user chat ownership (see migration `0004`).
 
-The vector store (Chroma by default, pgvector when `DATABASE_URL` is set)
-holds PSG text chunks and metadata.
+The vector store (pgvector, in the same Postgres database as the structured
+store) holds PSG text chunks and metadata.
 
 Each vector chunk carries metadata like:
 
@@ -197,7 +218,7 @@ Splits page text into chunks while keeping:
 - section path
 - document metadata
 
-This is the text that goes into Chroma.
+This is the text that goes into pgvector.
 
 ### `process/embedder.py`
 
@@ -205,8 +226,12 @@ Defines the embedding interface.
 
 Providers:
 
-- `local-bge-small`: local sentence-transformers model
-- `echo`: deterministic test provider
+- `openai`: `text-embedding-3-small`, 1536-dim - the production provider
+- `qwen3`: Qwen3 embeddings over an OpenAI-compatible private endpoint
+  (Databricks-served target)
+- `local-bge-small`: local sentence-transformers model (384-dim; offline
+  tooling only - the dimension assert rejects it against the app datastore)
+- `echo`: deterministic test provider (1536-dim, matching the pgvector column)
 
 Business logic calls the provider interface, not a hard-coded model.
 
@@ -233,7 +258,7 @@ It does:
 4. parse PDF
 5. chunk text
 6. embed chunks
-7. store chunks in Chroma
+7. store chunks in pgvector
 8. run BE extraction
 9. save `BeRequirement`
 
@@ -261,7 +286,7 @@ Resolver outcomes:
 
 ### `retrieve/retriever.py`
 
-Embeds the query and searches Chroma.
+Embeds the query and searches pgvector.
 
 It supports metadata filters like:
 
@@ -299,10 +324,13 @@ Defines the LLM provider interface.
 
 Current providers:
 
-- OpenAI — uses the **Responses API** by default (`OPENAI_API_MODE=responses`;
-  `chat` falls back to Chat Completions), with role-specific models: router
-  `gpt-5-nano`, synthesizer + extractor `gpt-5.4-nano`, each falling back to
-  `LLM_MODEL`.
+- Databricks (`DatabricksProvider`) - the production provider since
+  2026-07-28: open-weight gpt-oss-20b served from the company Databricks
+  tenant (endpoint `workspace.default.regwatch`), one model for all roles.
+- OpenAI - the rollback path; uses the **Responses API** by default
+  (`OPENAI_API_MODE=responses`; `chat` falls back to Chat Completions), with
+  role-specific models: router `gpt-5-nano`, synthesizer + extractor
+  `gpt-5.4-nano`, each falling back to `LLM_MODEL`.
 - Anthropic
 - echo for tests
 
@@ -383,21 +411,30 @@ It is a research scaffold, not submission content.
 
 ## API And UI
 
-### `api/main.py`
+### `api/main.py` and the Go edge
 
-FastAPI exposes (auth + chat routes plus the read paths):
+The Go edge service (`go/`) owns the public port. It serves `/auth/*`,
+`/sessions*`, `/feedback`, `/settings`, and `/products` natively, orchestrates
+`POST /query` end-to-end (it persists the `query_log` audit row and calls the
+Python RAG core only through the token-gated internal
+`POST /internal/query/compute`), and relays everything else to FastAPI.
+
+Public endpoints:
 
 - `GET /health` — open liveness + component diagnostics
 - `GET /ready` — open readiness probe for DB/vector/LLM constructability
 - `GET /metrics` — Prometheus counters; open by default, bearer-gated when
   `METRICS_TOKEN` is set
-- `POST /auth/login`, `POST /auth/logout`, `GET /auth/me` — cookie-session auth
-- `POST /query` — conversational; accepts `session_id`/`user_id`, returns
-  `session_id`/`turn_id`/`status` (`answer`/`summary`/`clarify`/`scope_warning`/`refused`)
-- `POST /query/stream` — SSE progress frames plus one validated terminal
-  `QueryResponse` frame; falls back client-side to `POST /query` if the stream
-  fails before the result
-- `POST /feedback` — per-turn answer feedback against an audit row
+- `POST /auth/login`, `POST /auth/logout`, `GET /auth/me` - cookie-session
+  auth (Go-served)
+- `POST /query` - conversational; Go-orchestrated at the edge; accepts
+  `session_id`/`user_id`, returns `session_id`/`turn_id`/`status`
+  (`answer`/`summary`/`clarify`/`scope_warning`/`refused`)
+- `POST /query/stream` - SSE `status` progress frames, provisional `token`
+  delta frames (a cosmetic live draft), then one validated terminal
+  `QueryResponse` `result` frame; falls back client-side to `POST /query` if
+  the stream fails before the result
+- `POST /feedback` - per-turn answer feedback against an audit row (Go-served)
 - `POST /resolve` — deterministic entity resolution to a canonical spine
   (`{normalized_name, six-digit application number}`). It is NOT an LLM turn:
   it writes NO audit row and returns no answer text; a mismatch 422s with no
@@ -406,10 +443,10 @@ FastAPI exposes (auth + chat routes plus the read paths):
 - `POST /assemble`
 - `POST /whitepaper`, `POST /whitepaper/docx` — White Paper populate + export
 - `GET /watch/latest`
-- `GET /products`, `POST /products`
+- `GET /products`, `POST /products` (Go-served)
 - `GET /sessions`, `GET /sessions/{id}`, `DELETE /sessions/{id}` — per-user
-  chat history (foreign `session_id` 404s)
-- `GET /settings`
+  chat history (foreign `session_id` 404s) (Go-served)
+- `GET /settings` (Go-served)
 
 All other endpoints are behind a `require_user` dependency.
 Auth is a DB-backed cookie session (opaque token hashed at rest, bcrypt
@@ -500,11 +537,22 @@ The LLM is not trusted by itself. The code checks its output.
 
 ## Current Model Provider State
 
-Current state (this is implemented, not planned):
+Current state (this is implemented and deployed, not planned):
 
-- OpenAI provider uses the **Responses API** by default
-  (`OPENAI_API_MODE=responses`); `chat` falls back to Chat Completions.
-- Role-specific models, each falling back to `LLM_MODEL`:
+- Production runs the Databricks provider since 2026-07-28
+  (`LLM_PROVIDER=databricks`): open-weight gpt-oss-20b served inside the
+  company Databricks tenant (endpoint `workspace.default.regwatch`), one
+  model for all roles. This is the data-residency decision recorded in
+  `docs/DATABRICKS_ADOPTION_2026-07-28.md`.
+- Two tuning knobs shipped 2026-07-29: `DATABRICKS_REASONING_EFFORT`
+  (default `low`) and `SYNTHESIZER_MAX_TOKENS` (default 900).
+- Embeddings still use OpenAI `text-embedding-3-small` (1536-dim) - the
+  remaining data-residency gap. A Databricks Qwen3-Embedding-0.6B endpoint
+  (1024-dim, `workspace.default.regwatch-embed`) exists; app wiring is
+  pending.
+- OpenAI is the LLM rollback path. Its provider uses the **Responses API**
+  by default (`OPENAI_API_MODE=responses`; `chat` falls back to Chat
+  Completions) with role-specific models, each falling back to `LLM_MODEL`:
   - `gpt-5-nano` (reasoning) for the router/classification role
   - `gpt-5.4-nano` for answer synthesis and BE extraction
 - Reasoning models that reject `temperature` are retried without it.
@@ -578,7 +626,6 @@ Do not start with:
 - `.pytest_cache/`
 - `.mypy_cache/`
 - `.ruff_cache/`
-- `data/chroma/`
 - `__pycache__/`
 - raw PDFs unless you want source examples
 

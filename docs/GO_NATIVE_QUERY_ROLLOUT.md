@@ -1,17 +1,19 @@
 # GO_NATIVE_QUERY rollout (strangler Step 5): the query-cutover runbook
 
-Status 2026-07-24: PROD IS FLAG-ON. The flip went live on 2026-07-24 via
-`fly secrets set GO_NATIVE_QUERY=true -a amneal`; GO_NATIVE_QUERY and
-INTERNAL_RAG_TOKEN are BOTH Deployed Fly secrets and prod serves POST /query
-natively from the Go edge. PR B (the Go CompleteQuery cutover, merged #124)
-and the open-model work (#125) are deployed since 2026-07-23.
+Status 2026-07-29: PROD IS FLAG-ON AND THE PIN IS DEPLOYED. The flip went
+live on 2026-07-24 via `fly secrets set GO_NATIVE_QUERY=true -a amneal`;
+prod serves POST /query natively from the Go edge. The pin PR (#127) has
+since merged and deployed `GO_NATIVE_QUERY = "true"` in fly.toml [env], and
+the same-named secret was unset. The versioned [env] pin is now the ONLY
+authority for this flag (INTERNAL_RAG_TOKEN remains a Deployed secret). PR B
+(the Go CompleteQuery cutover, merged #124) and the open-model work (#125)
+are deployed since 2026-07-23.
 
-THE PIN HAS NOT DEPLOYED YET. `GO_NATIVE_QUERY = "true"` exists in fly.toml
-[env] (line 81) only on the unmerged branch go/step5-d-pin-and-inv-gaps;
-origin/main is still d582b82, which pins nothing. So in the RUNNING app the
-SECRET is the only authority for this flag, and that is what decides which
-revert command actually works -- read "Monitoring window and rollback" before
-typing one. Phases 0 and 1 below are HISTORICAL (already executed on
+ROLLBACK STATE: state B in "Monitoring window and rollback" is TRUE TODAY.
+The incident command is `fly secrets set GO_NATIVE_QUERY=false -a amneal`
+(a secret overrides the [env] pin); `fly secrets unset GO_NATIVE_QUERY` is a
+NO-OP reboot that leaves the flag ON. Read that section before typing
+anything. Phases 0 and 1 below are HISTORICAL (already executed on
 2026-07-24); they are kept as the record of what was run, not as a to-do.
 
 What the flip changes (and only this): with GO_NATIVE_QUERY=true, the Go
@@ -70,8 +72,9 @@ UPSTREAM_URL=http://app.process.amneal.internal:8000), and RAG_TIMEOUT_S
      chat message, unlike Python's zero-write shed. See the divergence
      table below.
 2. CI fully green on main at the deployed commit, INCLUDING the
-   cross-service contract lane: tests_contract/ (28+ scenarios over the
-   REAL compiled Go proxy + uvicorn + disposable Postgres). Native mode is
+   cross-service contract lane: tests_contract/ (the S1-S23 harness plus
+   the S28-S30 gap-fillers, over the REAL compiled Go proxy + uvicorn +
+   disposable Postgres). Native mode is
    the harness DEFAULT (tests_contract/conftest.py stack(native=True)), so
    a green contract lane is direct evidence for the post-flip topology; the
    base_relay_stack rows are what keep the flag-off rollback path proven.
@@ -138,8 +141,8 @@ ALREADY DONE. Mechanism used: flip by SECRET, then pin by PR once proven.
   value is the only authority. Leaving the secret set forever would make
   fly.toml lie about who controls the flag. NOTE: that unset CHANGES THE
   REVERT COMMAND (state B below); re-read the rollback section the moment it
-  is run. Status today: pin written on this branch, NOT deployed, secret
-  still set (state A).
+  is run. Status today (2026-07-29): DONE -- the pin PR (#127) is merged and
+  deployed, the secret is unset, and state B is the live state.
 
 Alternative considered: fly.toml-first (flip in a PR, the step-3
 GO_PROXY_ROLLOUT.md precedent -- versioned, reviewed, CI-gated). Rejected
@@ -211,18 +214,19 @@ and let the answer pick your command:
 
     fly secrets list -a amneal | grep GO_NATIVE_QUERY
 
-State A -- GO_NATIVE_QUERY IS LISTED as a secret (TRUE TODAY, 2026-07-24):
+State A -- GO_NATIVE_QUERY IS LISTED as a secret (HISTORICAL: true from the
+2026-07-24 flip until the pin PR #127 deployed and the secret was unset):
 
     fly secrets unset GO_NATIVE_QUERY -a amneal
 
-Removes the only authority; the deployed fly.toml on origin/main pins
-nothing, so the machines boot flag-off. If the pin PR has ALSO deployed by
-then, this unset drops back to the pinned "true" and does NOT revert -- in
-that case use state B instead.
+Removes the only authority; a deployed fly.toml that pins nothing lets the
+machines boot flag-off. If the pin PR has ALSO deployed by then, this unset
+drops back to the pinned "true" and does NOT revert -- in that case use
+state B instead.
 
 State B -- NO secret listed, the fly.toml [env] pin is the only authority
-(this becomes true the moment "After the flip is proven" step 1 unsets the
-secret):
+(TRUE TODAY, 2026-07-29: the pin PR #127 is deployed and the secret was
+unset -- this is the live state):
 
     fly secrets set GO_NATIVE_QUERY=false -a amneal
 
@@ -263,14 +267,15 @@ them as flip regressions.
 
 ## After the flip is proven
 
-In order, each its own PR:
+In order, each its own PR. Items 1 and 2 are DONE as of 2026-07-29; the
+remaining work is item 3 (the deletion PR), item 4 (R3), and plan steps 6-9.
 
-1. The pin PR (fly.toml [env] GO_NATIVE_QUERY = "true"), then unset the
-   secret -- see Phase 1. The unset moves the rollback from state A to
-   state B: after it, `fly secrets unset` no longer reverts anything and
-   the incident command becomes `fly secrets set GO_NATIVE_QUERY=false`.
-   Announce that switch wherever the on-call reads, not just here.
-2. REQUIRED FIRST, before any deletion: the tests/ -> tests_contract
+1. DONE (PR #127, deployed): the pin PR (fly.toml [env]
+   GO_NATIVE_QUERY = "true"), then unset the secret -- see Phase 1. The
+   unset moved the rollback from state A to state B: `fly secrets unset` no
+   longer reverts anything and the incident command is
+   `fly secrets set GO_NATIVE_QUERY=false -a amneal`.
+2. DONE (docs/STEP5_INV_TEST_MAPPING.md): the tests/ -> tests_contract
    INV-mapping audit. Walk every INV-tagged and query-path test in tests/
    that exercises Python's buffered query() route and record, per test,
    the tests_contract scenario that now carries its invariant. The gate is

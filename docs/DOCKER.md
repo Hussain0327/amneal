@@ -2,21 +2,22 @@
 
 This document records the Docker work added to REGWATCH and how to use it.
 
-The goal is not Kubernetes or full production deployment yet. The goal is a
-reliable local/container baseline that can run the Python API, Next.js UI,
-and ingest jobs without changing the core application code. (Dagster
-orchestration was removed in R5; GitHub Actions cron is the sole scheduler.)
+The goal is a reliable local/container baseline that can run the Python API,
+Next.js UI, and ingest jobs without changing the core application code.
+Production (the Fly app `amneal`) ships this same API image; `docs/DEPLOY.md`
+is the production runbook. (Dagster orchestration was removed in R5; GitHub
+Actions cron is the sole scheduler.)
 
 ## What Was Added
 
 | File | Purpose |
 |---|---|
-| `Dockerfile` | Builds the shared Python application image. |
+| `Dockerfile` | Multi-stage build: a digest-pinned `golang` stage compiles the static Go proxy binary (`regwatch-proxy`), then the `python:3.12-slim` stage builds the Python application; both ship in the one API image. |
 | `regwatch/frontend/Dockerfile` | Builds the local Next.js UI image. |
 | `.dockerignore` | Keeps secrets, local data, docs, caches, and local tooling out of the image context. |
 | `compose.yaml` | Defines the API, UI, one-shot ingest, and pgvector `db` services. |
-| `docker/entrypoint.sh` | Creates container data directories and runs `regwatch init-db` before app start. |
-| `.github/workflows/ci.yml` | Adds a Docker image build check in CI. |
+| `docker/entrypoint.sh` | Creates container data directories and runs `regwatch init-db` before app start (skipped for `alembic` and `regwatch-proxy` argvs -- see Startup Behavior). |
+| `.github/workflows/ci.yml` | Builds both images in CI and gates them with a pinned Trivy scan (fixable CRITICAL/HIGH vulns + embedded secrets); `deploy.yml` re-scans the API image before every Fly release. |
 | `pyproject.toml` / `uv.lock` | Moves heavy local embedding dependencies behind the `local-embeddings` extra. |
 | `src/regwatch/api/main.py` | Avoids running DB initialization twice when the entrypoint already ran it. |
 | `src/regwatch/process/embedder.py` | Gives a clear error if local embeddings are requested without installing the extra. |
@@ -37,10 +38,19 @@ orchestration daemon (Dagster was removed in R5).
 docker image: regwatch:local
   -> api                -> regwatch serve   (dual-stack uvicorn; see docs/GO_PROXY_ROLLOUT.md)
   -> ingest             -> regwatch seed
+  (also ships /usr/local/bin/regwatch-proxy -- no Compose service runs it)
 
 docker image: regwatch-web:local
   -> web                -> npm run dev
 ```
+
+Production differs here: on Fly this same API image runs TWO process groups
+(`fly.toml [processes]`). The `proxy` group execs the static Go binary
+`regwatch-proxy`, which holds the public edge on :8080 behind `[http_service]`
+and relays over the private 6PN network to the `app` group, which runs
+`regwatch serve` on :8000. Compose does not run the proxy locally -- the
+Next.js dev server proxies `/api` straight to the `api` service instead. See
+`docs/GO_PROXY_ROLLOUT.md` and `docs/DEPLOY.md`.
 
 ## Quick Commands
 
@@ -177,13 +187,13 @@ This gives two useful modes:
 
 ## Startup Behavior
 
-The entrypoint runs:
+The entrypoint creates the container data directories, then runs:
 
 ```bash
 regwatch init-db
 ```
 
-Then it exports:
+and exports:
 
 ```text
 REGWATCH_DB_INITIALIZED=1
@@ -191,6 +201,15 @@ REGWATCH_DB_INITIALIZED=1
 
 FastAPI checks that marker and skips its own duplicate `init_db()` call. This
 prevents startup from doing the same migration/init work twice.
+
+Two argv shapes skip `init-db` entirely (plus an explicit
+`REGWATCH_INIT_DB=false` override):
+
+- `alembic ...` -- the Fly release_command (`alembic upgrade head`) exists to
+  MOVE the schema stamp to head; the boot guard would otherwise refuse and
+  abort the deploy before the migration ever ran.
+- `regwatch-proxy` -- the Go proxy must boot DB-independent, so a proxy
+  machine never crash-loops on the stamp guard while holding the public port.
 
 ## Health Check
 
@@ -200,14 +219,22 @@ Compose checks:
 GET http://127.0.0.1:8000/health
 ```
 
-`/health` now returns component diagnostics — a superset of the original
+`/health` now returns component diagnostics -- a superset of the original
 `{"status":"ok"}`, so the Compose healthcheck is unchanged:
 
 ```json
-{"status":"ok","components":{"db":{"ok":true},"vector_store":{"ok":true,"corpus_count":123},
+{"status":"ok","components":{"db":{"ok":true,"dialect":"postgresql"},
+ "vector_store":{"ok":true,"corpus_count":123},
  "llm":{"provider":"openai","key_present":true},"embedding":{"provider":"openai"}},
- "warnings":[]}
+ "whitepaper_template":"absent","warnings":[]}
 ```
+
+The providers shown are the local Compose defaults. Production reports
+`"llm":{"provider":"databricks","key_present":true}` -- since the Databricks
+cutover every LLM role runs on the in-tenant `gpt-oss-20b` endpoint, while
+embeddings stay `openai` (see `docs/DATABRICKS_ADOPTION_2026-07-28.md`). Keys
+are conditional by design: `db` carries `dialect` on success XOR `error` on
+failure, and `allow_test_providers` appears only when set.
 
 It returns HTTP 503 with `"status":"unhealthy"` only when the DB or the vector
 store is actually unreachable. An empty corpus is healthy (with a warning) so a fresh
@@ -226,7 +253,11 @@ This Docker pass verified:
 
 The eval gate is green: `recall@k`, `citation_precision`, and `refusal_accuracy`
 all meet threshold on the seeded corpus, and a deterministic offline eval gate
-(`tests/test_eval_gate.py`) runs inside `uv run pytest`.
+(`tests/test_eval_gate.py`) runs inside `uv run pytest`. The separate LIVE eval
+lane in CI is key-gated and deliberately OFF: setting the repo-wide
+`OPENAI_API_KEY` un-skips it and it currently fails (`refusal_accuracy` 0.917
+against the 0.95 floor), turning CI red and blocking CD -- see `docs/CI_CD.md`
+and `docs/SECRETS_RUNBOOK.md`.
 
 ## The Next.js UI
 
@@ -276,21 +307,29 @@ This remains the local/container baseline. The active production runbook is
 of truth when they conflict with that runbook. The consolidated list of open
 items lives in `docs/ROADMAP.md`.
 
+Several items from the original list are DONE and pruned: CI supply-chain
+checks (pip-audit + npm audit + Trivy on both images in `ci.yml`, re-scanned in
+`deploy.yml`), non-root container users (both Dockerfiles drop privileges),
+managed Postgres/pgvector provisioning (Supabase serves prod), TLS termination
+(Fly's edge, `force_https` + `AUTH_COOKIE_SECURE=true` in `fly.toml`), the
+Kubernetes question (the hosting decision landed on Fly; no manifests needed),
+and the daily watch cadence (`watch-daily.yml`, cron 07:17 UTC, is the live
+prod scheduler).
+
 Still needed (cross-referenced in `docs/ROADMAP.md`):
 
-- secrets manager + documented/tested key rotation
-- SSO / gateway-level auth + TLS termination in front of the app-layer login
-  (cookie-session auth shipped; set `AUTH_COOKIE_SECURE=true` once TLS
-  terminates; see `docs/PROD_READINESS.md` #1). The current rate limiter is
-  in-memory/per-process, so multi-replica needs gateway-level limiting.
-- managed Postgres/pgvector actually provisioned (the `DATABASE_URL` switch is
-  code-ready) + migration from a clean snapshot + a rehearsed restore drill
-- production deployment smoke/load testing behind the approved gateway
-- observability and alerts (request/latency/cost metrics, a DB + vector store +
-  LLM readiness probe, Sentry DSN configured in prod)
-- resource limits
-- CI supply-chain checks: dependency audit (pip-audit / uv) + image vuln scan
-  (e.g. Trivy)
-- Kubernetes manifests or Helm chart, if the hosting decision requires them
-- verified production `watch-daily` run history, healthcheck pings, and any
-  product-facing alert delivery beyond the in-app `/watch/latest` feed
+- an approved secrets-manager policy + a tested key-rotation drill (the secret
+  inventory and provisioning runbook exist: `docs/SECRETS_RUNBOOK.md`)
+- SSO/OIDC against the corporate IdP in front of the app-layer login (see
+  `docs/PROD_READINESS.md` #1). The rate limiter is still per-process, so
+  multi-replica needs gateway-level limiting.
+- a rehearsed restore drill + least-privilege app DB credentials for the live
+  Supabase Postgres
+- load testing against the live deployment (the analyst smoke flows have run;
+  a load test has not)
+- observability depth: exported request/latency/cost metrics, confirmation
+  that `SENTRY_DSN` is set in prod (a Fly secret; the app logs a loud warning
+  when absent), an external uptime monitor beyond `uptime-eval.yml`, and
+  product-facing alert delivery beyond the watch cron's optional Slack digest
+  and the in-app `/watch/latest` feed
+- resource limits (`compose.yaml` and `fly.toml` set none)

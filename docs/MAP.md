@@ -23,20 +23,27 @@ flowchart TB
   Scope{{"Under review: ONE product<br/>scoped in the URL, shareable"}}
   Scope -.scopes.-> UI
 
-  UI -->|"same-origin /api proxy"| API["FastAPI · src/regwatch/api<br/>auth · rate limit · INV-1..9"]
+  UI -->|"same-origin /api proxy"| EDGE["Go proxy · go/ (public port)<br/>auth · sessions · rate limits<br/>native /query orchestration + audit"]
+  EDGE -->|"6PN relay"| API["FastAPI · src/regwatch/api<br/>stateless RAG core · INV-1..9"]
   API --> Router["Router → Handlers → Synthesizer"]
   API --> Resolve["POST /resolve<br/>deterministic, no audit row"]
   Router --> Sources["FDA sources<br/>PSG · Orange Book · Drugs@FDA<br/>NDC · DailyMed · Shortages · REMS"]
-  Router --> Stores[("Stores<br/>SQLite or Postgres<br/>Chroma or pgvector")]
+  Router --> Stores[("Postgres + pgvector (Supabase)<br/>the ONLY datastore since R5:<br/>rows + vectors + audit log")]
+  EDGE --> Stores
   Sources --> Stores
-  Router --> Audit[("Audit log<br/>one row per LLM turn")]
+  Router --> DBX["Databricks Model Serving<br/>gpt-oss-20b (all LLM roles)<br/>qwen3-embedding-0.6b (staged)"]
 ```
 
-Every UI surface talks only to the FastAPI backend through the same-origin `/api`
-proxy. The backend resolves the product **before** retrieval and constrains retrieval
-to the current PSG version, so shared FDA boilerplate can't leak a wrong-drug or a
-superseded citation. The scope bar's picker validates a product through
-`POST /resolve` (entity resolution only — not an LLM turn, writes no audit row).
+Every UI surface talks only to the **Go edge** through the same-origin `/api`
+proxy: the edge serves auth, sessions, feedback, settings, and products natively,
+orchestrates `POST /query` (persisting the audit row), and relays the rest to the
+FastAPI RAG core over Fly's private network. The backend resolves the product
+**before** retrieval and constrains retrieval to the current PSG version, so
+shared FDA boilerplate can't leak a wrong-drug or a superseded citation. The
+scope bar's picker validates a product through `POST /resolve` (entity resolution
+only - not an LLM turn, writes no audit row). LLM synthesis runs on a
+Databricks-hosted open-weight model inside the company tenant (the D1
+data-residency boundary); embeddings are mid-migration to the same plane.
 
 ## The docs, by purpose
 
@@ -47,8 +54,17 @@ superseded citation. The scope bar's picker validates a product through
 **How it's built**
 - [Architecture](ARCHITECTURE.md) — canonical system design (Router → Handlers → Synthesizer, the four surfaces, INV-1..9)
 - [Simple technical guide](TECH_GUIDE_SIMPLE.md) — folder map and core flows
+- [Polyglot target](POLYGLOT_TARGET_2026-07-10.md) - the TS/Go/Python/Rust strangler plan (steps 0-5 done)
+- [Go proxy rollout](GO_PROXY_ROLLOUT.md) - how Go took the public edge (complete)
+- [Go native query rollout](GO_NATIVE_QUERY_ROLLOUT.md) - the step-5 `/query` cutover runbook (flip live 2026-07-24)
 - [Project spec](PROJECT_SPEC.md) — the original build-ready spec
 - [Operating rules for Claude Code](CLAUDE.md) — hard rules + defaults
+
+**Models & data residency**
+- [Data residency D1](DATA_RESIDENCY_D1.md) - analyst queries must stay in-tenant; what leaks and the fix
+- [Databricks adoption](DATABRICKS_ADOPTION_2026-07-28.md) - inference-plane decision, cost model, incident log, rollout state
+- [Open-model rollout](OPEN_MODEL_ROLLOUT.md) - embedding profiles + open-weight providers (shipped dormant, now flipping)
+- [Threshold validation](THRESHOLD_VALIDATION_2026-06-25.md) - the 0.30 refusal threshold's provisional status + sweep harness
 
 **The web app**
 - [Frontend README](../regwatch/frontend/README.md) — the Next.js shell, the four surfaces, the scope picker
@@ -60,7 +76,9 @@ superseded citation. The scope bar's picker validates a product through
 
 **Run & ship**
 - [Docker guide](DOCKER.md) — containers, services, data mounts
-- [Deploy runbook](DEPLOY.md) — Supabase + Fly/Railway + Vercel cutover + operations
+- [Deploy runbook](DEPLOY.md) - Supabase + Fly + Vercel operations, rollback levers, restore drill
+- [CI/CD pipeline](CI_CD.md) - every CI job mapped to its local command; read before pushing
+- [Secrets runbook](SECRETS_RUNBOOK.md) - where every secret lives and how to rotate it
 
 **Status & what's left**
 - [Production readiness](PROD_READINESS.md) — the prod gates, what's done vs remaining

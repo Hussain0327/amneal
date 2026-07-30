@@ -36,7 +36,18 @@ Then read these in order if you are new to the project:
 | `ROADMAP.md` | Engineers / product / reviewers | Consolidated open / not-done work: launch blockers (LLM data-handling decision, provisioned Postgres/pgvector, gateway/TLS/SSO) and future workstreams (token-delta Ask streaming, eval expansion, observability, Watch cron proof). |
 | `whitepaper_schema.md` | Engineers / regulatory reviewers | DRAFT one-row-per-cell field-extraction map for the White Paper populator: {source, endpoint/query or SPL section, lookup key, mode} per template cell. |
 | `DEPLOY.md` | Engineers / deployment owners | Production cutover runbook (Supabase + Fly.io/Railway + Vercel) plus the Operations section: rollback levers, uptime monitoring, and the monthly staging restore drill (`scripts/restore_drill.sh`). |
-| `CI_CD.md` | Engineers / contributors | The CI gate explained: all five jobs mapped to the exact local command that satisfies each, a copy-paste pre-push checklist, and the recurring gotchas (black-not-ruff, stale `api-types.ts`, `uv.lock` drift, Trivy web-image esbuild + GHSA/CVE alias flips). Read before pushing. |
+| `CI_CD.md` | Engineers / contributors | The CI gate explained: every job mapped to the exact local command that satisfies each, a copy-paste pre-push checklist, and the recurring gotchas (black-not-ruff, stale `api-types.ts`, `uv.lock` drift, Trivy web-image esbuild + GHSA/CVE alias flips). Read before pushing. |
+| `SECRETS_RUNBOOK.md` | Engineers / deployment owners | Every secret across the GitHub Actions workflows and Fly, what consumes it, and how to rotate it. |
+| `DATA_RESIDENCY_D1.md` | Engineers / compliance | The D1 boundary: which paths send analyst queries off-perimeter, what is closed (generation, 2026-07-28), what remains (query embeddings + watch cron), and the runtime served-model guard. |
+| `DATABRICKS_ADOPTION_2026-07-28.md` | Engineers / decision record | The Databricks verdict: inference plane only, Supabase stays; cost model; the gpt-oss-20b flip and the truncation-incident knobs. |
+| `POLYGLOT_TARGET_2026-07-10.md` | Engineers | The approved 4-runtime strangler plan. Steps 0-5 done (Go edge + native /query); 6-9 open. |
+| `GO_PROXY_ROLLOUT.md` | Engineers | How the Go proxy took the public edge, including the deploy-incident history (complete). |
+| `GO_NATIVE_QUERY_ROLLOUT.md` | Engineers | The step-5 `/query` cutover runbook; flip live 2026-07-24; the rollback lever. |
+| `OPEN_MODEL_ROLLOUT.md` | Engineers | Embedding profiles + open-weight providers: shipped dormant 2026-07-23; the embedding half is now in flight. |
+| `STEP5_INV_TEST_MAPPING.md` | Engineers / reviewers | INV-by-INV test-coverage mapping across the Go/Python boundary, prerequisite for the step-5 deletion PR. |
+| `THRESHOLD_VALIDATION_2026-06-25.md` | Engineers / reviewers | Why the 0.30 refusal threshold stays (provisional) and the sweep required before any retune. |
+| `WHITEPAPER_RUNS_PHASE2_DESIGN.md` | Engineers | Design doc for the White Paper runs automation (P1+P2 shipped). |
+| `REFACTOR_BACKLOG_2026-07-09.md` | Engineers | The 120-item refactor backlog (working list). |
 | `../regwatch/backend/README.md` | Backend engineers | Explains why backend source remains in `src/regwatch` and how to run the FastAPI API. |
 | `../regwatch/frontend/README.md` | Frontend engineers | Explains how to run the Next.js UI and how it proxies to the API. |
 | `CLAUDE.md` | Agent operators | Working instructions for Claude Code or similar coding agents. |
@@ -54,6 +65,14 @@ Do not treat an archived blocker as open if `README.md`, `ARCHITECTURE.md`,
 | `typescript-ui-replaces-streamlit-golden-pudding.md` | Original Next.js-replaces-Streamlit plan; now realized and archived. |
 | `Jun8th.md` | Point-in-time work log from June 8, 2026. |
 | `audit_findings.md` | Point-in-time audit notes; use only as historical context unless revalidated. |
+| `ENGINEERING_AUDIT_2026-06-19.md` | Point-in-time SWE audit (verdict B+, zero P0); open items since folded into ROADMAP. |
+| `POLYGLOT_ARCHITECTURE_REVIEW_2026-06-17.md` | June "no new language" review - OVERRULED by the July 10 polyglot assessment and target. |
+| `POLYGLOT_ASSESSMENT_2026-07-10.md` | The assessment that approved the 4-runtime target; context for `POLYGLOT_TARGET_2026-07-10.md`. |
+| `SUPABASE_AUTH_AUDIT_2026-06-17.md` | Point-in-time Supabase/auth audit; the auth split-brain it flagged was resolved by the Go auth cutover. |
+| `PROD_GAPS_AND_ORCHESTRATION_COST_2026-06-17.md` | Point-in-time production-gap and cost analysis. |
+| `CONVERSATIONAL_REFUSAL_PLAN.md` | Point-in-time plan for the follow-up-cliff refusal feature. |
+| `UX_S1_EVIDENCE_DRAWER.md` | Build notes for the S1 evidence drawer. |
+| `BACKEND_REFACTOR_BACKLOG_2026-07-07.md` | Superseded by `REFACTOR_BACKLOG_2026-07-09.md`. |
 
 These `.txt` files are retained as planning notes and conversation artifacts.
 

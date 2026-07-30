@@ -11,7 +11,7 @@ to be read top-to-bottom once, then used as a reference. Companion docs:
 (the production runbook), [`whitepaper_schema.md`](whitepaper_schema.md) (the
 46-cell White Paper schema), and [`DECISIONS.md`](DECISIONS.md) (decision log).
 
-> Last verified: e06c66a / 2026-06-19
+> Last verified: 2026-07-29 (post step-5 Go query cutover, post Databricks LM flip)
 
 ---
 
@@ -61,37 +61,52 @@ it **guides with clickable options** instead of guessing.
 
 ## 2. Deployment topology
 
-Three tiers, one browser-visible origin. This is the **target topology** the code
-and runbook ([`DEPLOY.md`](DEPLOY.md)) are built for. Production is **live** on
-managed Supabase Postgres/pgvector (schema self-migrated on each deploy by the
-Fly `release_command` — see §9); a gateway/TLS/SSO front-door is still open
-work (see `docs/ROADMAP.md`). Postgres + pgvector is the only datastore since
-R5 (the SQLite/Chroma dual-mode was deleted); locally and in CI the stack runs
-against a disposable Postgres (`TEST_DATABASE_URL` for tests), same schema as
-prod.
+Four tiers, one browser-visible origin. Production is **live**: the Go proxy
+holds the public port (two Fly process groups, `proxy` + `app` - see
+`fly.toml`), the schema self-migrates on each deploy via the Fly
+`release_command` (§9), and LLM inference runs on a Databricks Model Serving
+endpoint inside the company tenant (the D1 data-residency boundary - see
+[`DATA_RESIDENCY_D1.md`](DATA_RESIDENCY_D1.md) and
+[`DATABRICKS_ADOPTION_2026-07-28.md`](DATABRICKS_ADOPTION_2026-07-28.md)).
+A gateway/TLS/SSO front-door is still open work (see `docs/ROADMAP.md`).
+Postgres + pgvector is the only datastore since R5 (the SQLite/Chroma
+dual-mode was deleted); locally and in CI the stack runs against a disposable
+Postgres (`TEST_DATABASE_URL` for tests), same schema as prod.
 
 ```
                          Browser (analyst)
                                │  HTTPS, HttpOnly session cookie
                                ▼
-            ┌──────────────────────────────────────┐
-            │  Vercel — Next.js 16 (App Router)       │   amneal.vercel.app
-            │  server-side rewrite  /api/* → backend  │   FREE tier
-            └───────────────────┬────────────────────┘
-                               │  /api/:path*  →  API_PROXY_TARGET/:path*
-                               ▼
-            ┌──────────────────────────────────────┐
-            │  Fly.io — FastAPI (uvicorn)             │   amneal.fly.dev
-            │  2× shared-cpu-1x, 1024 MB              │   ~$0–6/mo
-            └───────────────────┬────────────────────┘
-                               │  SQLAlchemy / psycopg
-                               ▼
-            ┌──────────────────────────────────────┐
-            │  Supabase — Postgres + pgvector         │   FREE tier
-            │  structured rows + 1536-dim vectors     │   one DB, RLS deny-all
-            │  in the SAME database                   │
-            └──────────────────────────────────────┘
+            ┌──────────────────────────────────────────┐
+            │  Vercel - Next.js 16 (App Router)        │   amneal.vercel.app
+            │  server-side rewrite  /api/* -> backend  │
+            └─────────────────────┬────────────────────┘
+                                  │  /api/:path*  ->  API_PROXY_TARGET/:path*
+                                  ▼
+            ┌──────────────────────────────────────────┐
+            │  Fly.io - Go proxy (public :8080)        │   amneal.fly.dev
+            │  auth, sessions, rate limits,            │   process group "proxy"
+            │  native /query orchestration + audit     │   (sqlc over Postgres)
+            └─────────────────────┬────────────────────┘
+                                  │  6PN private network (IPv6)
+                                  ▼
+            ┌──────────────────────────────────────────┐
+            │  Fly.io - FastAPI (`regwatch serve`)     │   process group "app"
+            │  stateless RAG core: resolve, retrieve,  │   dual-stack :8000
+            │  synthesize, cite-or-refuse              │
+            └───────┬────────────────────┬─────────────┘
+          SQLAlchemy│/psycopg            │ OpenAI-compatible HTTPS
+                    ▼                    ▼
+   ┌──────────────────────────────┐   ┌───────────────────────────────┐
+   │ Supabase - Postgres+pgvector │   │ Databricks Model Serving      │
+   │ rows + vectors + audit in    │   │ gpt-oss-20b (all LLM roles)   │
+   │ ONE database, RLS deny-all   │   │ qwen3-embedding-0.6b (staged) │
+   └──────────────────────────────┘   └───────────────────────────────┘
 ```
+
+The Go proxy reaches the same Postgres directly (sqlc) for the surfaces it
+serves natively; embeddings still go to OpenAI until the staged Qwen3 profile
+flip completes the D1 move.
 
 ### Single-origin proxy
 
@@ -120,7 +135,8 @@ Consequences of this choice:
 |---|---|---|
 | Structured store | Postgres (disposable local/CI instance) | Postgres (Supabase) |
 | Vector store | pgvector (same instance) | pgvector (same Postgres DB) |
-| Embeddings | `echo` test provider (1536-dim) or OpenAI | OpenAI `text-embedding-3-small` (1536-dim) |
+| Embeddings | `echo` test provider (1536-dim) or OpenAI | OpenAI `text-embedding-3-small` (1536-dim); Databricks `qwen3-embedding-0.6b` (1024-dim) staged behind `ACTIVE_EMBEDDING_PROFILE` |
+| LLM | `echo` test provider | Databricks `gpt-oss-20b` (`workspace.default.regwatch`, all roles); OpenAI = rollback path |
 | `DATABASE_URL` | required — `TEST_DATABASE_URL` for tests | required |
 
 Postgres + pgvector is the only datastore since R5 — see §9.
@@ -218,7 +234,12 @@ running instance.
 Since the step-4 cutover (docs/POLYGLOT_TARGET_2026-07-10.md) the Go proxy
 serves `/auth/*`, `/sessions*`, `/feedback`, `/settings`, and `/products*`
 natively at the public edge (`go/internal/api`) and MINTS the session cookie;
-the Python app VERIFIES it.
+the Python app VERIFIES it. Since the step-5 cutover
+(docs/GO_NATIVE_QUERY_ROLLOUT.md, live 2026-07-24) Go also orchestrates
+`POST /query` natively: it writes and finalizes the `query_log` audit row and
+calls Python's internal, token-gated `POST /internal/query/compute` for the
+RAG work (`INTERNAL_RAG_TOKEN`; fail-closed - the endpoint 404s when the token
+is unset, and the proxy never exposes the `/internal/` subtree).
 Python-side, the only open probes are `GET /health`, `/ready`, and
 `/metrics`. **Everything else** is registered on a single router with a
 router-level dependency:
@@ -240,7 +261,7 @@ visitors through the proxy.
 | POST | `/auth/login` | open | Issue the `regwatch_session` cookie (GO-served) |
 | POST | `/auth/logout` | open | Revoke server-side session + clear cookie (GO-served) |
 | GET | `/auth/me` | ✅ | Current user (GO-served) |
-| POST | `/query` | ✅ | Grounded Q&A (the conversational engine) |
+| POST | `/query` | ✅ | Grounded Q&A (GO-orchestrated since step 5; RAG compute stays in Python) |
 | POST | `/feedback` | ✅ | Thumbs up/down on one of the caller's own answers (GO-served) |
 | POST | `/sources/search` | ✅ | Structured FDA source lookup |
 | POST | `/resolve` | ✅ | Deterministic entity resolution (RLD + appl no) → canonical spine; pins the scope bar without a populate |
@@ -328,7 +349,9 @@ question
    │     • passages span >1 product? ───► CLARIFY
    │     • passages span >1 form?     ───► CLARIFY
    │
-   ├─ LLM synthesis  (temperature 0.0, strict grounding system prompt, max 900 tok)
+   ├─ LLM synthesis  (temperature 0.0, strict grounding system prompt,
+   │                  SYNTHESIZER_MAX_TOKENS budget - default 900, shared by a
+   │                  reasoning model's thought AND answer)
    │
    ├─ LLM returned the refusal sentinel? ──► REFUSE  (or CLARIFY if a drug was named by the user)
    ├─ validate every [short_name, p.N] citation against the passages actually sent
@@ -384,10 +407,12 @@ pipeline progress frames and then one terminal `result` frame containing the
 same validated `QueryResponse` returned by blocking `POST /query`. If the stream
 closes before that result frame, the client falls back to `POST /query` once.
 
-This is real progress streaming, not token-delta answer streaming. That boundary
-is intentional: INV-1 still forbids emitting answer text before citation
-validation, and both paths share the same serializer so the wire response shape
-cannot drift. Each turn still writes exactly one audit row.
+Between progress frames the backend also emits provisional `token` delta
+frames - a live draft the UI renders as it arrives. The deltas are cosmetic by
+design: INV-1 forbids treating answer text as authoritative before citation
+validation, so the validated terminal frame is the only answer of record, and
+both paths share the same serializer so the wire response shape cannot drift.
+Each turn still writes exactly one audit row.
 
 ---
 
@@ -485,6 +510,14 @@ path left to document.
   is rejected against the app datastore and stays available only for
   offline/eval tooling.
 
+- **Embedding profiles (migration 0015).** Alternative embedders write to a
+  `chunk_embedding` table keyed by an immutable named profile (`vector(d)` up
+  to 2000 dims, `halfvec` beyond); `legacy` means the original unversioned
+  1536 column. `ACTIVE_EMBEDDING_PROFILE` selects which profile serves
+  retrieval, so a re-embed is blue/green - populate and benchmark a shadow
+  profile, then flip - never an in-place rewrite. This is the seam the
+  Databricks Qwen3 (1024-dim) migration uses.
+
 - **pgvector index strategy:** per-drug queries (the common path) use a B-tree
   filter on `normalized_name` + exact distance — which beats HNSW for filtered
   search; HNSW is for unfiltered queries. Supavisor transaction-mode pooling;
@@ -513,8 +546,9 @@ path left to document.
 
 ## 10. Data model
 
-`store/models.py` — SQLModel definitions; nine Alembic migrations (0001–0009).
-Embeddings live in the vector store; everything below is the structured store.
+`store/models.py` - SQLModel definitions; sixteen Alembic migrations
+(0001-0016). Embeddings live in the vector store; everything below is the
+structured store.
 
 ### Corpus & evidence
 
@@ -548,7 +582,8 @@ eligibility are never persisted (INV-3, no regulatory judgment).
 `did_you_mean`, `brand_lookup`, …) — so an analyst or the eval harness can tell
 not just *that* the system clarified/refused but *why*. Token/cost columns are
 `NULL` when no LLM call happened or the provider reported no usage — never a
-guessed number.
+guessed number. Migration 0016 added `latency_ms` (per-turn wall clock), the
+measurement column for the router-latency verdict on the single-model plane.
 
 ---
 
@@ -728,14 +763,21 @@ and add an LLM-as-judge pass alongside the mechanical checks.
 ## 18. Configuration
 
 A single Pydantic `Settings` (`config/settings.py`), fully `.env`-driven. Providers
-are pluggable (`openai | anthropic | echo`); see [`.env.example`](../.env.example)
+are pluggable (LLM: `databricks | openai | anthropic | echo`; embeddings:
+`openai | qwen3 | local-bge-small | echo`); see [`.env.example`](../.env.example)
 for the annotated surface. The load-bearing knobs:
 
 | Variable | Effect |
 |---|---|
 | `DATABASE_URL` | **Mandatory** — Postgres + pgvector connection string; the app refuses to boot without it (no fallback since R5) |
-| `EMBEDDING_PROVIDER` | `openai` (1536-dim, matches the `vector(1536)` chunk column) \| `local-bge-small` (384-dim, offline/eval tooling only — rejected by the K6 dim assert against the app datastore) \| `echo` (1536-dim, test-only) |
-| `LLM_PROVIDER` + `ROUTER_MODEL` / `SYNTHESIZER_MODEL` / `EXTRACTOR_MODEL` | Role-specific models (cheap classifier, capable synthesizer/extractor) |
+| `EMBEDDING_PROVIDER` | `openai` (1536-dim, matches the `vector(1536)` chunk column) \| `qwen3` (OpenAI-compatible private endpoint, e.g. Databricks) \| `local-bge-small` (384-dim, offline/eval tooling only - rejected by the K6 dim assert against the app datastore) \| `echo` (1536-dim, test-only) |
+| `ACTIVE_EMBEDDING_PROFILE` (`legacy`) / `EMBEDDING_SHADOW_PROFILE` | Which named embedding profile serves retrieval / which one is being populated for a blue/green re-embed |
+| `LLM_PROVIDER` | `databricks` (prod: ONE endpoint, `DATABRICKS_LLM_MODEL`, serves every role) \| `openai` (role models below; the rollback path) \| `anthropic` \| `echo` (test-only) |
+| `DATABRICKS_LLM_BASE_URL` / `_TOKEN` / `_MODEL` | The in-tenant Model Serving endpoint (OpenAI-compatible); `_MODEL` has no default - a placeholder would 404 every synthesis |
+| `DATABRICKS_REASONING_EFFORT` (`low`) | Reasoning budget sent on every role. `low` is the only level measured to finish inside the 900-token cap on gpt-oss-20b |
+| `D1_ENFORCED` / `D1_ALLOWED_LLM_MODELS` | Residency tripwires: boot guard on half-migrated config + per-response served-model check. List BOTH the UC alias and the served model id |
+| `ROUTER_MODEL` / `SYNTHESIZER_MODEL` / `EXTRACTOR_MODEL` | OpenAI role-specific models (cheap classifier, capable synthesizer/extractor) |
+| `SYNTHESIZER_MAX_TOKENS` (900) | Synthesis output cap, buffered and streamed alike; a reasoning model's thought and answer share it |
 | `VECTOR_TOP_K` (50) / `RERANK_TOP_K` (8) / `RERANKER_ENABLED` (false) | Two-stage retrieval sizing |
 | `REFUSAL_SCORE_THRESHOLD` (0.30) | The refuse-over-guess line (INV-2) |
 | `AUTH_COOKIE_SECURE` / `AUTH_SESSION_TTL_HOURS` / `RATE_LIMIT_PER_MINUTE` | Auth + abuse controls |
@@ -744,6 +786,20 @@ for the annotated surface. The load-bearing knobs:
 
 `REGWATCH_ALLOW_TEST_PROVIDERS=1` is the only escape hatch that lets an `echo`
 provider face a real corpus (tests/CI only).
+
+### The D1 residency guard (runtime)
+
+The D1 boundary ("an analyst's question never leaves the company perimeter")
+is enforced twice. At boot, an armed `D1_ENFORCED=true` refuses half-migrated
+configurations - generation on Databricks while query embedding still goes to
+OpenAI (or vice versa) leaks the question anyway. At runtime, every completion
+and stream is checked against `D1_ALLOWED_LLM_MODELS` using the model id the
+endpoint REPORTS (a Unity Catalog alias can be repointed with no deploy, so
+the config name proves nothing); an off-perimeter response raises a dedicated
+`D1ResidencyError` that the streaming path deliberately excludes from its
+SSE-fallback retry - a residency violation must never cause the question to be
+re-sent to the very endpoint the guard fences off. See
+[`DATA_RESIDENCY_D1.md`](DATA_RESIDENCY_D1.md) for the full model.
 
 ---
 

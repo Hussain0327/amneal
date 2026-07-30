@@ -10,6 +10,13 @@ The key rule is:
 
 The API now supports conversational sessions for `POST /query`.
 
+Since 2026-07-24 the public `POST /query` is served by the Go edge service,
+which enforces the request gates - auth (401), request validation (422), rate
+limiting (429), and session ownership (a foreign `session_id` returns 404) -
+and then calls the Python RAG core through the token-gated internal endpoint
+`POST /internal/query/compute`. The semantics below are unchanged by that
+split.
+
 Request fields:
 
 - `question`: the user's message.
@@ -72,6 +79,14 @@ The database now stores:
 - `query_log.turn_id`: links the answer to the exact turn.
 - `query_log.status`: answer mode.
 - `query_log.route_json`: route, filters, context usage, and response mode.
+- `query_log.latency_ms`: wall time from turn start to the audit write
+  (migration `0016`).
+
+For `POST /query` these rows are written by the Go runtime
+(`go/internal/api/persist.go`): T1 is the user `chat_message` (pre-RAG,
+best-effort), T2 is the `query_log` audit row (post-RAG, authoritative), and
+T3 is the assistant `chat_message` (post-audit, best-effort) - so a chat or
+connection fault after T2 can never erase the committed audit row.
 
 This makes every conversational answer traceable to:
 
@@ -82,7 +97,11 @@ This makes every conversational answer traceable to:
 - citations,
 - refusal or scope-warning reason.
 
-Every `POST /query` turn writes exactly one audit row. By contrast, the
+Every completed `POST /query` turn writes exactly one audit row. One
+documented, accepted edge diverges from this: if the Python compute side sheds
+the request under saturation (a 503), the best-effort T1 user message may
+already have been written, leaving an orphaned user `chat_message` with no
+audit row - nothing ran, so there is nothing to audit. By contrast, the
 `POST /resolve` endpoint that backs the product-scope picker is *not* a
 conversational turn: it is deterministic entity resolution (it reuses the white
 paper's context builder to map an RLD name + application number to the canonical
@@ -105,11 +124,16 @@ REGWATCH should sound helpful, not abrupt, but it must keep these boundaries:
 
 ## Streaming Boundary
 
-`POST /query/stream` exists and uses Server-Sent Events. It emits real progress
-frames while the pipeline runs, then exactly one terminal `result` frame with the
-same validated `QueryResponse` shape as `POST /query`. The client falls back to
-blocking `POST /query` only when the stream fails before a result frame arrives.
+`POST /query/stream` exists and uses Server-Sent Events. While the pipeline
+runs it emits `status` progress frames and provisional `token` delta frames -
+a live draft of the answer text that the UI renders as it arrives - then
+exactly one terminal `result` frame with the same validated `QueryResponse`
+shape as `POST /query`. The client falls back to blocking `POST /query` only
+when the stream fails before a result frame arrives.
 
-It is not token-by-token answer streaming. That is deliberate: answer text is
-only emitted after citation validation has completed (INV-1), and the underlying
-`ask()` call still writes **exactly one** audit row.
+Only the terminal `result` frame is authoritative. The `token` deltas are
+cosmetic: they are emitted before citation validation has completed, so they
+are rendered as a clearly provisional draft with no citation surface and are
+replaced by the validated result (INV-1 - answer text is only final after
+citation validation; the refusal sentinel is never streamed as tokens). The
+underlying `ask()` call still writes **exactly one** audit row.
