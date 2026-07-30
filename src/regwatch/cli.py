@@ -585,6 +585,84 @@ def cmd_rechunk(
     raise typer.Exit(code=0 if counts.get("error", 0) == 0 else 2)
 
 
+@app.command("graph-backfill")
+def cmd_graph_backfill(
+    appl_no: str = typer.Option("", "--appl-no", help="Only this application number."),
+    limit: int = typer.Option(0, "--limit", min=0, help="Stop after N documents (0 = all)."),
+) -> None:
+    """Derive tier-1 graph nodes/edges/refs from EXISTING chunk rows.
+
+    For corpora chunked before the graph tables existed (ingest and rechunk
+    derive inline). Idempotent: re-running converges to the same rows.
+    Requires chunk.ordinal (migration 0017) to be populated.
+    """
+    from sqlalchemy import text as sa_text
+
+    from regwatch.store.db import session_scope
+    from regwatch.store.graph_store import derive_document_graph
+    from regwatch.store.models import PsgDocument
+
+    init_db()
+    with session_scope() as s:
+        conn = s.connection()
+        if appl_no:
+            rows = conn.execute(
+                sa_text(
+                    "SELECT DISTINCT doc_id FROM chunk "
+                    "WHERE doc_id IS NOT NULL AND appl_no = :appl_no ORDER BY doc_id"
+                ),
+                {"appl_no": appl_no},
+            ).all()
+        else:
+            rows = conn.execute(
+                sa_text(
+                    "SELECT DISTINCT doc_id FROM chunk WHERE doc_id IS NOT NULL ORDER BY doc_id"
+                )
+            ).all()
+    doc_ids = [int(r[0]) for r in rows]
+    if limit > 0:
+        doc_ids = doc_ids[:limit]
+    rprint(f"[cyan]deriving graph rows for {len(doc_ids)} document(s)[/cyan]")
+    done = errors = 0
+    for i, doc_id in enumerate(doc_ids, start=1):
+        try:
+            with session_scope() as s:
+                conn = s.connection()
+                doc = s.get(PsgDocument, doc_id)
+                chunk_rows = conn.execute(
+                    sa_text(
+                        "SELECT id, version_id, ordinal, section_path FROM chunk "
+                        "WHERE doc_id = :doc_id ORDER BY ordinal NULLS LAST, id"
+                    ),
+                    {"doc_id": doc_id},
+                ).all()
+                if doc is None or not chunk_rows:
+                    continue
+                version_id = next((int(r[1]) for r in chunk_rows if r[1] is not None), 0)
+                derive_document_graph(
+                    doc_id=doc_id,
+                    version_id=version_id,
+                    chunk_ids=[str(r[0]) for r in chunk_rows],
+                    chunk_metas=[{"ordinal": r[2], "section_path": r[3]} for r in chunk_rows],
+                    doc_attrs={
+                        "appl_no": doc.appl_no,
+                        "normalized_name": doc.normalized_name,
+                        "dosage_form": doc.dosage_form,
+                        "route": doc.route,
+                        "psg_type": doc.psg_type,
+                    },
+                    conn=conn,
+                )
+            done += 1
+        except Exception as exc:  # keep the sweep going; the doc is retryable
+            rprint(f"[red]doc {doc_id} failed: {exc}[/red]")
+            errors += 1
+        if i % 200 == 0:
+            rprint({"processed": i, "derived": done, "errors": errors})
+    rprint({"processed": len(doc_ids), "derived": done, "errors": errors})
+    raise typer.Exit(code=0 if errors == 0 else 2)
+
+
 @app.command("whitepaper")
 def cmd_whitepaper(
     appl: str = typer.Option(..., "--appl", help="NDA/ANDA number, e.g. 020503 or 'NDA 020503'."),
