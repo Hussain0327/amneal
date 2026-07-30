@@ -709,24 +709,28 @@ def rechunk_document(doc_id: int) -> str:
     init_db()
     with session_scope() as s:
         doc = s.get(PsgDocument, doc_id)
-    if doc is None:
-        return "missing"
+        if doc is None:
+            return "missing"
+        # Read everything needed WHILE the row is session-bound: session_scope
+        # expires attributes on exit, and a detached-instance refresh raises.
+        listing = _listing_from_document(doc)
+        pdf_path = doc.pdf_path
     version_id = _latest_version_id(doc_id)
     if version_id is None:
         return "no-version"
     pdf_bytes: bytes | None = None
-    if doc.pdf_path and Path(doc.pdf_path).is_file():
-        pdf_bytes = Path(doc.pdf_path).read_bytes()
+    if pdf_path and Path(pdf_path).is_file():
+        pdf_bytes = Path(pdf_path).read_bytes()
     if pdf_bytes is None:
         # Cache miss (fresh checkout / moved data dir): the download path is
-        # polite (on-disk cache + backoff) and doc.source_url is the PDF url.
+        # polite (on-disk cache + backoff) and the listing's source_url is the
+        # PDF url.
         try:
-            _, pdf_bytes, _ = download_pdf(doc.source_url)
+            _, pdf_bytes, _ = download_pdf(listing.pdf_url)
         except Exception as exc:
             log.error("rechunk_pdf_unavailable", doc_id=doc_id, error=str(exc))
             return "no-pdf"
     parsed = parse_pdf(pdf_bytes)
-    listing = _listing_from_document(doc)
     chunks = chunk_pdf(parsed.pages, base_metadata=_chunk_metadata_base(doc_id, listing))
     if not chunks:
         log.warning("rechunk_empty", doc_id=doc_id)
