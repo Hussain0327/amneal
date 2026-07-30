@@ -88,6 +88,10 @@ class Chunk(SQLModel, table=True):
     id: str = Field(primary_key=True)
     doc_id: int | None = Field(default=None, index=True)
     version_id: int | None = Field(default=None, index=True)
+    # In-document ordering (0017). The chunker always stamps it; NULL only on
+    # rows written before the column existed. Kept out of _FILTERABLE_COLUMNS:
+    # it orders siblings, it is not a retrieval filter.
+    ordinal: int | None = Field(default=None)
     page: int | None = Field(default=None)
     section_path: str | None = Field(default=None)
     normalized_name: str | None = Field(default=None, index=True)
@@ -116,16 +120,17 @@ _INSERT_BATCH_SIZE = 1000
 
 _UPSERT_SQL = """
 INSERT INTO chunk (
-    id, doc_id, version_id, page, section_path, normalized_name, dosage_form,
+    id, doc_id, version_id, ordinal, page, section_path, normalized_name, dosage_form,
     route, source_url, psg_type, appl_no, short_name, text, embedding
 ) VALUES (
-    :id, :doc_id, :version_id, :page, :section_path, :normalized_name, :dosage_form,
+    :id, :doc_id, :version_id, :ordinal, :page, :section_path, :normalized_name, :dosage_form,
     :route, :source_url, :psg_type, :appl_no, :short_name, :text,
     CAST(:embedding AS vector)
 )
 ON CONFLICT (id) DO UPDATE SET
     doc_id = EXCLUDED.doc_id,
     version_id = EXCLUDED.version_id,
+    ordinal = EXCLUDED.ordinal,
     page = EXCLUDED.page,
     section_path = EXCLUDED.section_path,
     normalized_name = EXCLUDED.normalized_name,
@@ -418,6 +423,7 @@ def add_chunks(
                 "id": chunk_id,
                 "doc_id": _as_int(meta.get("doc_id")),
                 "version_id": _as_int(meta.get("version_id")),
+                "ordinal": _as_int(meta.get("ordinal")),
                 "page": _as_int(meta.get("page")),
                 "section_path": _as_text(meta.get("section_path")),
                 "normalized_name": _as_text(meta.get("normalized_name")),
@@ -461,6 +467,27 @@ def delete_chunks_for_doc_except_version(doc_id: int, keep_version_id: int) -> i
             ),
             {"doc_id": doc_id, "keep_version_id": keep_version_id},
         )
+    deleted = int(result.rowcount or 0)
+    if deleted:
+        _metadata_values_cache.clear()
+    return deleted
+
+
+def delete_chunks_for_doc(doc_id: int, *, conn: Connection) -> int:
+    """Delete ALL indexed chunks for one PSG document, on the CALLER'S
+    connection/transaction.
+
+    Exists for the re-chunk driver: a chunking-recipe change can produce FEWER
+    chunks for a version than the recipe it replaces, and the id-keyed upsert
+    alone would leave the old recipe's high-ordinal rows behind as stale
+    retrieval hits. Delete-then-insert inside one transaction is the only
+    shape that cannot strand them; there is deliberately no own-engine
+    fallback here.
+    """
+    if conn.dialect.name != "postgresql":
+        raise ValueError("delete_chunks_for_doc(conn=...) requires a Postgres connection")
+    _ensure_ready()
+    result = conn.execute(sa_text("DELETE FROM chunk WHERE doc_id = :doc_id"), {"doc_id": doc_id})
     deleted = int(result.rowcount or 0)
     if deleted:
         _metadata_values_cache.clear()

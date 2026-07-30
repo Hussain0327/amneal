@@ -75,6 +75,18 @@ def delete_chunks_for_doc_except_version(doc_id: int, keep_version_id: int) -> i
     return pgvector_store.delete_chunks_for_doc_except_version(doc_id, keep_version_id)
 
 
+def delete_chunks_for_doc(doc_id: int, *, conn: Connection) -> int:
+    """Delete ALL chunks for one PSG document on the caller's transaction.
+
+    For the re-chunk driver only: delete-then-insert in one transaction is the
+    shape that cannot strand stale high-ordinal rows when a recipe change
+    produces fewer chunks (the id-keyed upsert alone would).
+    """
+    from regwatch.store import pgvector_store
+
+    return pgvector_store.delete_chunks_for_doc(doc_id, conn=conn)
+
+
 def similarity_search(
     query_embedding: list[float],
     *,
