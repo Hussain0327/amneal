@@ -1,4 +1,7 @@
-"""Chunker tests: page metadata is preserved on every chunk."""
+"""Chunker tests: page metadata is preserved on every chunk, and the v2
+recipe fixes the failure classes the 2026-07-30 corpus audit measured
+(stranded headings, list-item section identity, heading loss across pages,
+page furniture, mid-word window splits)."""
 
 from __future__ import annotations
 
@@ -24,6 +27,7 @@ def test_each_chunk_has_page_and_metadata() -> None:
         assert c.metadata["doc_id"] == 1
         assert c.metadata["normalized_name"] == "albuterol sulfate"
         assert "source_url" in c.metadata
+        assert c.metadata["ordinal"] == c.ordinal
 
 
 def test_no_chunk_loses_source_or_page() -> None:
@@ -43,3 +47,88 @@ def test_sliding_window_emits_multiple_chunks_for_long_section() -> None:
     # Overlap → adjacent chunks share at least some text.
     a, b = chunks[0].text, chunks[1].text
     assert a[-100:] in b[:300] or any(tok in b[:200] for tok in a[-100:].split())
+
+
+def test_numbered_list_items_do_not_split_sections() -> None:
+    """Arabic-numbered lines are list items, not section boundaries. v1 split
+    on them, which promoted list sentences to section_path identity and
+    stranded the real heading as a tiny chunk (audit class A)."""
+    lines = ["II. Option 2: One in vivo bioequivalence study with pharmacokinetic endpoints"]
+    lines += [f"{i}. Requirement line {i} " + "detail " * 20 for i in range(1, 6)]
+    chunks = chunk_pdf(
+        ["\n".join(lines)], base_metadata={"doc_id": 1, "version_id": 1, "source_url": "u"}
+    )
+    assert len(chunks) == 1
+    c = chunks[0]
+    assert c.section_path is not None and c.section_path.startswith("II Option 2:")
+    assert c.text.startswith("II. Option 2:")
+    assert "3. Requirement line 3" in c.text
+
+
+def test_heading_carries_across_pages() -> None:
+    """A section wrapping across a page break keeps its parent heading; v1
+    reset section_path to None on every page (audit KG-finding 3)."""
+    page1 = "I. Introduction\n" + "This guidance describes the requirements. " * 12
+    page2 = "Continuation of the introduction body without any header. " * 8
+    chunks = chunk_pdf(
+        [page1, page2], base_metadata={"doc_id": 1, "version_id": 1, "source_url": "u"}
+    )
+    page2_chunks = [c for c in chunks if c.page == 2]
+    assert page2_chunks
+    assert all(c.section_path == "I Introduction" for c in page2_chunks)
+
+
+def test_small_section_merges_forward_with_heading() -> None:
+    """A heading with a tiny body is never emitted alone: it travels as the
+    first line of the chunk it introduces (audit class A fix)."""
+    page = "A. Dissolution\nB. Study design\n" + "The study uses USP apparatus 2 at 50 rpm. " * 10
+    chunks = chunk_pdf([page], base_metadata={"doc_id": 1, "version_id": 1, "source_url": "u"})
+    assert len(chunks) == 1
+    assert chunks[0].text.startswith("A. Dissolution")
+    assert "B. Study design" in chunks[0].text
+
+
+def test_page_furniture_and_disclaimer_stripped() -> None:
+    """Fixed furniture lines, per-document repeated lines (running title), and
+    the FDA disclaimer paragraph never reach chunk text; body content and the
+    product-identification block survive (audit classes E and F)."""
+    title = "Guidance on Albuterol Sulfate"
+    footer = "Recommended Sep 2012; Revised Mar 2015, Aug 2024"
+    disclaimer = (
+        "This draft guidance, when finalized, will represent the current thinking of "
+        "the Food and Drug Administration on this topic. It does not create any rights "
+        "for any person and is not binding."
+    )
+
+    def page(n: int, body: str) -> str:
+        return "\n".join([title, "Contains Nonbinding Recommendations", body, f"{footer} {n}"])
+
+    body1 = "Active Ingredient: Albuterol sulfate\n" + "The study enrolls healthy subjects. " * 10
+    pages = [
+        page(1, disclaimer + "\n" + body1),
+        page(2, "Second page body content. " * 15),
+        page(3, "Third page body content. " * 15),
+    ]
+    chunks = chunk_pdf(pages, base_metadata={"doc_id": 1, "version_id": 1, "source_url": "u"})
+    all_text = "\n".join(c.text for c in chunks)
+    assert "Contains Nonbinding Recommendations" not in all_text
+    assert "Revised Mar 2015" not in all_text
+    assert title not in all_text
+    assert "when finalized" not in all_text
+    assert "Active Ingredient: Albuterol sulfate" in all_text
+    assert "Second page body content." in all_text
+
+
+def test_sliding_window_never_splits_mid_word() -> None:
+    """The v1 raw character slice could cut a word (and once did, corpus-wide
+    chunk 219-1801-16 opening 'uivalence...'); v2 backs up to a boundary."""
+    words = [f"word{i:05d}" for i in range(2000)]
+    chunks = chunk_pdf(
+        [" ".join(words)], base_metadata={"doc_id": 1, "version_id": 1, "source_url": "u"}
+    )
+    assert len(chunks) > 3
+    vocab = set(words)
+    for c in chunks:
+        toks = c.text.split()
+        assert toks[0] in vocab, f"chunk starts mid-word: {toks[0]!r}"
+        assert toks[-1] in vocab, f"chunk ends mid-word: {toks[-1]!r}"

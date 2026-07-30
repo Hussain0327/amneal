@@ -48,6 +48,7 @@ from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
 from regwatch.store.vector_store import (
     add_chunks,
     chunks_exist,
+    delete_chunks_for_doc,
     delete_chunks_for_doc_except_version,
     get_embedding_profile,
     upsert_profile_embeddings,
@@ -642,6 +643,79 @@ def _regenerate_chunks(
         add_chunks(ids=ids, embeddings=embeddings, documents=texts, metadatas=metas)
     log.info("chunks_added", doc_id=doc_id, version_id=version_id, n=len(chunks))
     _cleanup_stale_chunks(doc_id, version_id)
+
+
+def _listing_from_document(doc: PsgDocument) -> PsgListing:
+    """Rebuild the crawler listing shape from a stored psg_document row, for
+    re-chunking without re-crawling the FDA index. Every field the chunk
+    metadata consumes (_chunk_metadata_base) is persisted on the row;
+    doc.source_url IS the PDF url (_create_psg_document stores listing.pdf_url
+    there)."""
+    return PsgListing(
+        appl_no=doc.appl_no or "",
+        active_ingredient=doc.active_ingredient,
+        normalized_name=doc.normalized_name,
+        stripped_name=doc.normalized_name,
+        psg_type=doc.psg_type,
+        route=doc.route,
+        dosage_form=doc.dosage_form,
+        rld_or_rs_numbers=[n for n in (doc.rld_or_rs_number or "").split(",") if n],
+        recommended_date=doc.recommended_date,
+        pdf_url=doc.source_url,
+        source_url=doc.source_url,
+    )
+
+
+def rechunk_document(doc_id: int) -> str:
+    """Re-chunk one PSG document's CURRENT version from its cached PDF.
+
+    Recomputes chunks under the current chunking recipe and replaces the
+    document's rows atomically: delete + insert in ONE transaction, because a
+    recipe that emits fewer chunks than its predecessor would otherwise leave
+    the old recipe's high-ordinal rows behind as stale retrieval hits (the
+    id-keyed upsert alone cannot remove them). Embeddings are recomputed
+    through the same legacy + profile dual-write path as ingest. The
+    psg_version row and stored parsed text are untouched: this changes the
+    retrieval view, never the audit record.
+
+    Returns 'rechunked' | 'missing' | 'no-version' | 'no-pdf' | 'empty'.
+    """
+    init_db()
+    with session_scope() as s:
+        doc = s.get(PsgDocument, doc_id)
+    if doc is None:
+        return "missing"
+    version_id = _latest_version_id(doc_id)
+    if version_id is None:
+        return "no-version"
+    pdf_bytes: bytes | None = None
+    if doc.pdf_path and Path(doc.pdf_path).is_file():
+        pdf_bytes = Path(doc.pdf_path).read_bytes()
+    if pdf_bytes is None:
+        # Cache miss (fresh checkout / moved data dir): the download path is
+        # polite (on-disk cache + backoff) and doc.source_url is the PDF url.
+        try:
+            _, pdf_bytes, _ = download_pdf(doc.source_url)
+        except Exception as exc:
+            log.error("rechunk_pdf_unavailable", doc_id=doc_id, error=str(exc))
+            return "no-pdf"
+    parsed = parse_pdf(pdf_bytes)
+    listing = _listing_from_document(doc)
+    chunks = chunk_pdf(parsed.pages, base_metadata=_chunk_metadata_base(doc_id, listing))
+    if not chunks:
+        log.warning("rechunk_empty", doc_id=doc_id)
+        return "empty"
+    ids, metas, texts = _index_rows(doc_id, version_id, chunks)
+    embeddings = _legacy_document_embeddings(texts)
+    profile_batches = _profile_document_embeddings(texts)
+    with session_scope() as s:
+        conn = s.connection()
+        delete_chunks_for_doc(doc_id, conn=conn)
+        add_chunks(ids=ids, embeddings=embeddings, documents=texts, metadatas=metas, conn=conn)
+        if profile_batches:
+            _write_profile_batches(s, ids, profile_batches)
+    log.info("rechunked", doc_id=doc_id, version_id=version_id, n=len(chunks))
+    return "rechunked"
 
 
 def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:

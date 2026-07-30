@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS chunk (
     id TEXT PRIMARY KEY,
     doc_id INTEGER,
     version_id INTEGER,
+    ordinal INTEGER,
     page INTEGER,
     section_path TEXT,
     normalized_name TEXT,

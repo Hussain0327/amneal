@@ -5,15 +5,19 @@ Every chunk carries enough metadata to build a citation:
      recommended_date, source_url, page, section_path, ordinal}
 
 PSGs are short (often 2-8 pages). We do:
-  1. Per-page split (so page boundaries are preserved).
-  2. Within each page, heading-aware sub-split on Roman-numeral / lettered
-     section headers if present.
-  3. Within each section, sliding window of ~1000 tokens with ~150 overlap.
+  1. Strip page furniture (running titles/footers, the FDA nonbinding
+     disclaimer) from the CHUNK path only -- the stored parsed text keeps it.
+  2. Per-page split (so page boundaries are preserved).
+  3. Within each page, heading-aware sub-split on Roman-numeral / lettered
+     section headers, carrying the last heading across page breaks.
+  4. Within each section, sliding window of ~1000 tokens with ~150 overlap,
+     cut at sentence/word boundaries.
 """
 
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,9 +26,45 @@ from typing import Any
 CHARS_PER_TOKEN = 4
 TARGET_TOKENS = 1000
 OVERLAP_TOKENS = 150
-CHUNKING_VERSION = "page-section-window-1000-overlap-150-v1"
+# Below this a section body is merged into a neighbor on the same page instead
+# of being emitted on its own: the 2026-07-30 corpus audit measured ~21% of
+# sampled chunks as bare headings / stranded fragments with no citable content.
+MIN_SECTION_CHARS = 250
+CHUNKING_VERSION = "page-section-window-1000-overlap-150-v2"
 
-_HEADER_RE = re.compile(r"^\s*([IVX]+\.|[A-Z]\.|\d+\.)\s+(.{2,120})$", re.MULTILINE)
+# Section identity: Roman-numeral / lettered headers plus unnumbered
+# "Option N" blocks. Arabic-numbered lines are LIST ITEMS inside a section,
+# not boundaries -- v1 split on them, which stranded real headings as tiny
+# chunks and promoted list sentences to section_path identity.
+_HEADER_RE = re.compile(r"^\s*([IVX]+\.|[A-Z]\.|Option \d+[.:])\s+(.{2,120})$", re.MULTILINE)
+
+# Fixed page furniture, dropped line-wise from the chunk path. The revision
+# footer carries the page number glued to its end ("Recommended Sep 2012;
+# Revised Mar 2015, Aug 2024 13"); body prose starting with "Recommended"
+# survives because it lacks the month-year opening + trailing page number.
+_FURNITURE_LINE_RES = (
+    re.compile(r"^\s*Contains Nonbinding Recommendations\s*$", re.IGNORECASE),
+    re.compile(r"^\s*Draft\s*[-\u2013\u2014]\s*Not for Implementation\s*$", re.IGNORECASE),
+    re.compile(r"^\s*Recommended\s+[A-Z][a-z]{2,8}\.?\s+\d{4}\b.{0,120}?\s\d{1,3}\s*$"),
+)
+
+# FDA disclaimer boilerplate that dominates every page-1 chunk (~1500 of
+# ~1850 chars in the audited sample) and embeds near-identically across the
+# whole corpus. Matched on stable mid-sentence phrases (source apostrophes
+# vary between straight and curly, so no phrase below contains one). The block
+# is removed from its marker line to the end of the paragraph. It stays in the
+# stored parsed text -- it is legally meaningful; it just is not evidence.
+_DISCLAIMER_MARKERS = (
+    "This draft guidance, when finalized",
+    "guidance documents do not establish legally enforceable responsibilities",
+    "do not have the force and effect of law",
+)
+_DISCLAIMER_END_RE = re.compile(r"^\s*(Active Ingredient|[IVX]+\.\s|[A-Z]\.\s|Option \d)")
+
+_SENTENCE_BREAK_RE = re.compile(r"[.!?:]['\")\]]?\s")
+_BOUNDARY_LOOKBACK = 200
+
+_TRAILING_PAGE_NO_RE = re.compile(r"\s+\d{1,3}$")
 
 
 @dataclass
@@ -36,17 +76,83 @@ class Chunk:
     metadata: dict[str, Any]
 
 
-def _split_into_sections(page_text: str) -> list[tuple[str | None, str]]:
-    """Return [(section_path or None, body), ...] for one page."""
+def _line_key(line: str) -> str:
+    """Counting key for the repeated-line rule: the trailing page number is
+    stripped so per-page footers ("... Revised Aug 2024 13") still collide."""
+    return _TRAILING_PAGE_NO_RE.sub("", line.strip())
+
+
+def _repeated_furniture_keys(pages: list[str]) -> frozenset[str]:
+    """Line keys repeated on >= 60% of a document's pages (3-page minimum):
+    per-document furniture (running titles, footers) that body prose does not
+    reproduce verbatim on page after page."""
+    if len(pages) < 3:
+        return frozenset()
+    counts: Counter[str] = Counter()
+    for page_text in pages:
+        counts.update({_line_key(ln) for ln in page_text.splitlines() if ln.strip()})
+    threshold = max(3, -(-len(pages) * 3 // 5))  # ceil(0.6 * n)
+    return frozenset(key for key, n in counts.items() if n >= threshold and key)
+
+
+def _strip_furniture_lines(page_text: str, repeated: frozenset[str]) -> str:
+    kept: list[str] = []
+    for line in page_text.splitlines():
+        stripped = line.strip()
+        if stripped and _line_key(stripped) in repeated:
+            continue
+        if any(rx.match(line) for rx in _FURNITURE_LINE_RES):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _strip_disclaimer_blocks(page_text: str) -> str:
+    """Drop each disclaimer paragraph from its marker line to the block end
+    (blank line, next section header, or the "Active Ingredient" spine line
+    that follows the disclaimer in the PSG template)."""
+    lines = page_text.splitlines()
+    kept: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if any(marker in line for marker in _DISCLAIMER_MARKERS):
+            i += 1
+            while i < len(lines):
+                nxt = lines[i]
+                if not nxt.strip() or _DISCLAIMER_END_RE.match(nxt):
+                    break
+                i += 1
+            continue
+        kept.append(line)
+        i += 1
+    return "\n".join(kept)
+
+
+def prepare_pages(pages: list[str]) -> list[str]:
+    """The chunk-path view of a document's pages: furniture and disclaimer
+    boilerplate removed. Page count and order are preserved so page numbers
+    keep citing the source PDF; the stored parsed text is untouched."""
+    repeated = _repeated_furniture_keys(pages)
+    return [
+        _strip_disclaimer_blocks(_strip_furniture_lines(page_text, repeated)) for page_text in pages
+    ]
+
+
+def _split_into_sections(page_text: str, inherited: str | None) -> list[tuple[str | None, str]]:
+    """Return [(section_path, body), ...] for one page. Text before the first
+    header belongs to `inherited` -- the last heading seen on an earlier page
+    -- so a section that wraps across a page break keeps its parent (v1 reset
+    to None on every page, orphaning every continuation chunk)."""
     headers = list(_HEADER_RE.finditer(page_text))
     if not headers:
-        return [(None, page_text)]
+        return [(inherited, page_text)]
     sections: list[tuple[str | None, str]] = []
     # Preamble (before the first header)
     if headers[0].start() > 0:
         pre = page_text[: headers[0].start()].strip()
         if pre:
-            sections.append((None, pre))
+            sections.append((inherited, pre))
     for i, h in enumerate(headers):
         path = f"{h.group(1).rstrip('.')} {h.group(2).strip()}"[:120]
         start = h.start()
@@ -57,17 +163,76 @@ def _split_into_sections(page_text: str) -> list[tuple[str | None, str]]:
     return sections
 
 
+def _merge_small_sections(
+    sections: list[tuple[str | None, str]],
+) -> list[tuple[str | None, str]]:
+    """Forward-merge bodies under MIN_SECTION_CHARS into the next section on
+    the same page (a stranded heading travels as the first line of the chunk
+    it introduces); a trailing small body merges backward instead. A page
+    whose entire content is small still emits -- merging across pages would
+    misattribute the citation page."""
+    merged: list[tuple[str | None, str]] = []
+    carry: tuple[str | None, str] | None = None
+    for path, body in sections:
+        if carry is not None:
+            carry_path, carry_body = carry
+            body = f"{carry_body}\n{body}"
+            path = path if path is not None else carry_path
+            carry = None
+        if len(body) < MIN_SECTION_CHARS:
+            carry = (path, body)
+            continue
+        merged.append((path, body))
+    if carry is not None:
+        carry_path, carry_body = carry
+        if merged:
+            last_path, last_body = merged[-1]
+            merged[-1] = (last_path, f"{last_body}\n{carry_body}")
+        else:
+            merged.append((carry_path, carry_body))
+    return merged
+
+
+def _window_end(body: str, start: int, size: int) -> int:
+    """End of the window starting at `start`, backed up to the last sentence
+    break -- else whitespace -- inside the final _BOUNDARY_LOOKBACK chars, so
+    a forced split never lands mid-word (the v1 raw slice did)."""
+    hard_end = min(start + size, len(body))
+    if hard_end == len(body):
+        return hard_end
+    floor = max(start + 1, hard_end - _BOUNDARY_LOOKBACK)
+    last: re.Match[str] | None = None
+    for m in _SENTENCE_BREAK_RE.finditer(body, floor, hard_end):
+        last = m
+    if last is not None:
+        return last.end()
+    ws = body.rfind(" ", floor, hard_end)
+    if ws > start:
+        return ws + 1
+    return hard_end
+
+
 def _sliding_chunks(body: str) -> list[str]:
     """Sliding character-window chunks (approximated by char count)."""
-    if len(body) <= TARGET_TOKENS * CHARS_PER_TOKEN:
-        return [body]
-    step = (TARGET_TOKENS - OVERLAP_TOKENS) * CHARS_PER_TOKEN
     size = TARGET_TOKENS * CHARS_PER_TOKEN
+    overlap = OVERLAP_TOKENS * CHARS_PER_TOKEN
+    if len(body) <= size:
+        return [body]
     out: list[str] = []
     pos = 0
     while pos < len(body):
-        out.append(body[pos : pos + size])
-        pos += step
+        end = _window_end(body, pos, size)
+        out.append(body[pos:end])
+        if end >= len(body):
+            break
+        nxt = max(end - overlap, pos + 1)
+        if not body[nxt - 1].isspace():
+            # Never start a chunk mid-word; shrinking the overlap is safe --
+            # everything before `nxt` is already in the previous chunk.
+            adv = body.find(" ", nxt, end)
+            if adv != -1:
+                nxt = adv + 1
+        pos = nxt
     return out
 
 
@@ -79,10 +244,13 @@ def chunk_pdf(
     """Chunk a PDF's per-page text. Page numbers are 1-indexed."""
     chunks: list[Chunk] = []
     ordinal = 0
-    for page_idx, page_text in enumerate(pages, start=1):
+    current_section: str | None = None
+    for page_idx, page_text in enumerate(prepare_pages(pages), start=1):
         if not page_text.strip():
             continue
-        for section_path, body in _split_into_sections(page_text):
+        sections = _split_into_sections(page_text, current_section)
+        current_section = sections[-1][0]
+        for section_path, body in _merge_small_sections(sections):
             for piece in _sliding_chunks(body):
                 cleaned = piece.strip()
                 if not cleaned:

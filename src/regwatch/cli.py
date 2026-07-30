@@ -543,6 +543,48 @@ def cmd_ingest_all(
     raise typer.Exit(code=0 if stats.errors == 0 else 2)
 
 
+@app.command("rechunk")
+def cmd_rechunk(
+    appl_no: str = typer.Option("", "--appl-no", help="Only this application number."),
+    limit: int = typer.Option(0, "--limit", min=0, help="Stop after N documents (0 = all)."),
+) -> None:
+    """Re-chunk cached PSG PDFs under the current chunking recipe.
+
+    Replaces each document's chunk rows atomically (delete + insert in one
+    transaction) and re-embeds them through the same legacy + profile
+    dual-write path as ingest. Per-document commits make it safely resumable.
+    Run AFTER deploying a chunker change and BEFORE registering an embedding
+    profile that must record the new CHUNKING_VERSION.
+    """
+    from sqlmodel import select
+
+    from regwatch.ingest.pipeline import rechunk_document
+    from regwatch.store.db import session_scope
+    from regwatch.store.models import PsgDocument
+
+    init_db()
+    with session_scope() as s:
+        stmt = select(PsgDocument.id).order_by(PsgDocument.id)  # type: ignore[arg-type]
+        if appl_no:
+            stmt = stmt.where(PsgDocument.appl_no == appl_no)
+        doc_ids = [row for row in s.exec(stmt).all() if row is not None]
+    if limit > 0:
+        doc_ids = doc_ids[:limit]
+    rprint(f"[cyan]re-chunking {len(doc_ids)} document(s)[/cyan]")
+    counts: dict[str, int] = {}
+    for i, doc_id in enumerate(doc_ids, start=1):
+        try:
+            status = rechunk_document(doc_id)
+        except Exception as exc:  # keep the sweep going; the doc is retryable
+            rprint(f"[red]doc {doc_id} failed: {exc}[/red]")
+            status = "error"
+        counts[status] = counts.get(status, 0) + 1
+        if i % 100 == 0:
+            rprint({"processed": i, **counts})
+    rprint({"processed": len(doc_ids), **counts})
+    raise typer.Exit(code=0 if counts.get("error", 0) == 0 else 2)
+
+
 @app.command("whitepaper")
 def cmd_whitepaper(
     appl: str = typer.Option(..., "--appl", help="NDA/ANDA number, e.g. 020503 or 'NDA 020503'."),
