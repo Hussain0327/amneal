@@ -127,6 +127,30 @@ def fact_recall(answer_text: str, expected_facts: list[str]) -> float:
     return matched / len(expected_facts)
 
 
+_TRACE_PASSAGE_KEYS = ("chunk_id", "doc_id", "version_id", "page", "short_name", "score")
+_TRACE_CITATION_KEYS = ("short_name", "page", "chunk_id", "doc_id", "version_id", "score")
+
+
+def _trace(
+    result: Any,
+    retrieved: list[dict[str, Any]],
+    citations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Per-question evidence: what was retrieved, what was cited, what was said.
+
+    Snippets and passage text are deliberately excluded -- the ids, pages and
+    scores are what make a finding checkable, and the full text would bloat the
+    artifact past the point where anyone reads it.
+    """
+    return {
+        "status": getattr(result, "status", None),
+        "reason": getattr(result, "reason", None),
+        "answer": getattr(result, "answer", "") or "",
+        "retrieved": [{k: p.get(k) for k in _TRACE_PASSAGE_KEYS} for p in retrieved],
+        "citations": [{k: c.get(k) for k in _TRACE_CITATION_KEYS} for c in citations],
+    }
+
+
 def evaluate(
     items: list[GoldItem],
     *,
@@ -149,6 +173,10 @@ def evaluate(
         result = ask_callable(it.question)
         retrieved = result.retrieved
         citations = [c.__dict__ for c in result.citations]
+        # Every branch below records this. A scorecard says a metric moved; only
+        # the trace says which passages moved it, which is what a reviewer needs
+        # to tell a real retrieval regression from a stale expected-source list.
+        trace = _trace(result, retrieved, citations)
 
         # Decision accounting (refuse/clarify items don't contribute to
         # recall/precision/faithfulness — they assert WHICH decision is correct).
@@ -160,6 +188,7 @@ def evaluate(
                     "q": it.question,
                     "must_refuse": True,
                     "refused": result.refused,
+                    "trace": trace,
                 }
             )
             continue
@@ -183,6 +212,7 @@ def evaluate(
                         "status": result.status,
                         "reason": reason,
                         "skipped": "product_absent_from_corpus",
+                        "trace": trace,
                     }
                 )
                 continue
@@ -204,6 +234,7 @@ def evaluate(
                     "status": result.status,
                     "reason": reason,
                     "form_pinned": form_pinned,
+                    "trace": trace,
                 }
             )
             continue
@@ -214,6 +245,7 @@ def evaluate(
                     "q": it.question,
                     "must_refuse": False,
                     "refused": True,
+                    "trace": trace,
                 }
             )
             continue
@@ -242,6 +274,7 @@ def evaluate(
                 "faithfulness": f,
                 "fact_recall": fr,
                 "n_citations": len(citations),
+                "trace": trace,
             }
         )
 
