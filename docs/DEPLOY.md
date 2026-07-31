@@ -461,6 +461,17 @@ through the real `ask` path in this job's prod embedding space
 means a sweep hiccup, or a recommendation that differs from `0.30`, can never
 block ingestion or alerting.
 
+**Latest verified artifact (2026-07-30):** watch run
+[30531864530](https://github.com/Hussain0327/amneal/actions/runs/30531864530)
+produced a real OpenAI-1536 + pgvector sweep. Its six must-answer rows scored
+0.812-0.896, but all five must-refuse rows stopped before retrieval and had no
+cosine score. The one must-clarify row correctly clarified and was
+misclassified by the old harness. Thus the reported `0.917`
+`current_decision_accuracy` was not `run_eval.refusal_accuracy`, and the old
+`0.00` recommendation did not calibrate the cutoff. The corrected harness
+excludes must-clarify rows and returns no recommendation without scored rows on
+both sides. See [`EVAL_STATUS.md`](EVAL_STATUS.md).
+
 **D1 note (deliberate residual):** this sweep AND the watch cron's change-day
 ingest embeds still call OpenAI (via `WATCH_OPENAI_API_KEY`), even though prod
 LLM inference moved to Databricks on 2026-07-28. That is the known remaining
@@ -473,8 +484,11 @@ the step log):
 
 - `distributions.must_answer` and `distributions.must_refuse` — the two
   per-question max-passage-cosine distributions (`min`/`median`/`max`,
-  `n_scored`). A healthy threshold sits **above** the must-refuse max and **at or
-  below** the must-answer min.
+  `n_scored`). A threshold is calibratable only when both groups have scored
+  rows. When they do, a healthy threshold sits **above** the must-refuse max and
+  **at or below** the must-answer min.
+- `counts.must_clarify_excluded` - resolver clarification cases retained for
+  audit but excluded from the numeric cutoff curve.
 - `recommendation.recommended` vs `recommendation.current` (0.30), with
   `recommendation.rationale`. The rule: pick the cutoff that **maximizes
   refuse_recall without refusing anything 0.30 currently answers**
@@ -492,10 +506,11 @@ and the two pathology lists. **Only if warranted** — a clean (`overlap: false`
 recommendation that differs from `0.30`, or a non-empty pathology list — update
 the live threshold by setting the `REFUSAL_SCORE_THRESHOLD` env var
 (`fly secrets set REFUSAL_SCORE_THRESHOLD=... -a amneal`).
-The sweep only **recommends**; it never changes the value. `0.30`
-stays PROVISIONAL until a human has reviewed at least one prod-space sweep. There
-is no gate and no auto-tune — over-tuning the refusal cutoff trades directly
-against INV safety, so it is an explicit operator decision.
+The sweep only **recommends**; it never changes the value. `0.30` stays
+PROVISIONAL until a human has reviewed a prod-space sweep with scored positive
+and negative distributions. There is no gate and no auto-tune — over-tuning the
+refusal cutoff trades directly against INV safety, so it is an explicit
+operator decision.
 
 ### 6.4 Staging + restore drill (monthly, ~30 min)
 

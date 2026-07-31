@@ -323,17 +323,24 @@ Two layers grade the cite-or-refuse pipeline:
 - **`uv run python -m regwatch.eval.run_eval`** scores a curated gold set
   ([`src/regwatch/eval/gold_set.jsonl`](src/regwatch/eval/gold_set.jsonl)) of
   real, must-refuse, and must-clarify questions against the live corpus. Hard
-  gates (fail CI when below): `recall@k >= 0.90`, `citation_precision >= 0.95`,
-  `refusal_accuracy >= 0.95`. It no-ops on an empty store, so a fresh checkout
-  passes; the gate fires once a seed has run.
+  gates, when the provider-backed job is enabled, are `recall@k >= 0.90`,
+  `citation_precision >= 0.95`, and `refusal_accuracy >= 0.95`. It exits
+  nonzero on an empty store. The latest inspected CI run skipped its live seed
+  and eval steps because the repo-wide `OPENAI_API_KEY` was absent, so current
+  live-corpus pass/fail is unverified.
 - **[`tests/test_eval_gate.py`](tests/test_eval_gate.py)** is a deterministic,
   offline gate: it seeds a fixed corpus and a faithful LLM stub, so the full
   pipeline (resolve -> filter -> retrieve -> cite -> refuse) is graded on every
-  `uv run pytest`, including in CI where the live `run_eval` no-ops.
+  `uv run pytest`, including CI. Passing this fixture is not a live-corpus
+  quality result.
 
 Growing the gold set is a human process: thumbs up/down from the Ask UI is the
 candidate pool. Review them and promote good ones into `gold_set.jsonl` by hand —
 nothing is auto-ingested.
+
+See [`docs/EVAL_STATUS.md`](docs/EVAL_STATUS.md) for the verified gold-set
+counts, latest live-artifact interpretation, and the still-provisional `0.30`
+cutoff.
 
 ## Project layout
 

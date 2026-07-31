@@ -93,14 +93,16 @@ this (the heaviest) job's minutes.
 - Dep sync is `uv sync --extra dev --extra llm --extra local-embeddings` (there is
   no `orchestration` extra anymore -- Dagster left with R5).
 - The `seed` and `eval --check-thresholds` steps run **only if `OPENAI_API_KEY` is
-  set** as a repo secret -- and that secret is **DELIBERATELY withheld**. The live
-  eval currently FAILS (`refusal_accuracy` 0.917 against the 0.95 floor), so
-  setting `OPENAI_API_KEY` un-skips the live gate, turns CI red on every run, and
-  -- because `deploy.yml` fires only on a green `ci` run -- **blocks all deploys**.
-  Do not "helpfully" configure it; the watch cron uses the separately-named
-  `WATCH_OPENAI_API_KEY` precisely to keep it that way. See
+  set** as a repo secret. It was absent when verified on 2026-07-30, so the
+  latest CI run skipped both provider-backed steps. Current live-corpus
+  `run_eval` pass/fail is unknown; the previously cited `0.917` came from the
+  separate advisory threshold sweep and was not `run_eval.refusal_accuracy`.
+  Adding the secret activates paid live seed/eval work and makes those
+  thresholds deployment-gating, so establish and review an explicit baseline
+  before enabling it repo-wide. The watch cron uses separately scoped
+  `WATCH_OPENAI_API_KEY`. See [`EVAL_STATUS.md`](EVAL_STATUS.md) and
   [`SECRETS_RUNBOOK.md`](SECRETS_RUNBOOK.md). Locally, `pytest` runs the offline
-  deterministic eval gate, so you can validate without a key.
+  deterministic fixture without an API key.
 - To exercise the pgvector tests locally, point `TEST_DATABASE_URL` at a local
   Postgres+pgvector. Without it, `test_pgvector_store.py` /
   `test_postgres_bootstrap.py` **skip** -- they pass locally but the prod path
@@ -278,9 +280,9 @@ auto-deploys** -- and a red CI run (including one turned red by setting
   `store-schema-drift`. Regenerate and commit alongside the change.
 - **`uv.lock` drift.** Changing `pyproject.toml` without `uv lock` fails
   `python-audit`'s `--frozen` export.
-- **Setting the repo-wide `OPENAI_API_KEY` secret turns CI red** (live
-  `refusal_accuracy` 0.917 < 0.95) and thereby blocks CD. It is withheld on
-  purpose -- see job 1.
+- **Setting the repo-wide `OPENAI_API_KEY` activates provider-backed seed/eval.**
+  That result gates CD, but its current outcome is unverified. Run and review a
+  controlled baseline before making it a permanent repo-wide gate; see job 1.
 - **Trivy / web image (the recurring one).** See below.
 - **pgvector tests skip without a DB.** A green local `pytest` may not have run the
   Postgres path; CI always does.

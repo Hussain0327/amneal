@@ -23,6 +23,7 @@ from rich.table import Table
 
 from regwatch.eval.metrics import GoldItem, Scorecard, evaluate
 from regwatch.generate.grounded_qa import ask
+from regwatch.generate.prompts import generation_prompt_manifest
 from regwatch.store.db import init_db
 from regwatch.store.vector_store import collection_size
 
@@ -126,7 +127,10 @@ def run(
     sc = evaluate(items, ask_callable=ask)
     _print_scorecard(sc)
     if out:
-        out.write_text(json.dumps(asdict(sc), indent=2))
+        artifact = asdict(sc)
+        artifact["artifact_schema_version"] = 2
+        artifact["prompts"] = generation_prompt_manifest()
+        out.write_text(json.dumps(artifact, indent=2))
 
     if check_thresholds:
         violations = [

@@ -6,10 +6,9 @@ Why this exists
 ``low_top_score`` refusal in ``grounded_qa.ask`` (grounded_qa.py: the INV-2 gate
 ``max(p.score for p in passages) < refusal_score_threshold``). That ``0.30`` was
 calibrated in the bge-384 cosine era. Production now embeds with OpenAI-1536, a
-DIFFERENT vector space with a DIFFERENT cosine-similarity distribution, and CI
-structurally cannot re-validate it (CI runs bge + Chroma; only the prod path —
-e.g. the watch-daily job, which exports EMBEDDING_PROVIDER=openai + a real
-DATABASE_URL — exercises OpenAI-1536 + pgvector).
+DIFFERENT vector space with a DIFFERENT cosine-similarity distribution. The
+deterministic CI retrieval fixture does not re-validate that live distribution;
+only a provider-backed run, such as the credentialed watch-daily job, can do so.
 
 This harness dumps the per-query max-passage cosine score distribution across the
 gold set, split into must-answer vs must-refuse, and RECOMMENDS a cutoff. It is
@@ -18,7 +17,7 @@ changes ``0.30``, and (by itself) exits 0 even when its recommendation differs
 from the live value. It reports; humans decide.
 
 It reuses the exact prod retrieval path by calling the real ``grounded_qa.ask``
-over the small gold set (~26 questions). Each ``ask`` is one real retrieval plus
+over the small gold set. Each ``ask`` is one real retrieval plus
 one cheap LLM synthesis (gpt-5.4-nano) — acceptable cost for an advisory sweep,
 and the only way to read scores off the REAL prod embedding space rather than a
 re-implementation that could drift from the gate. The score read is independent
@@ -38,12 +37,12 @@ from typing import Any
 
 from regwatch.eval.metrics import GoldItem, recall_at_k
 
-# Default sweep grid: a fine 0.01 step over [0, 0.6]. 0.30 (the current default)
+# Default sweep grid: a fine 0.01 step over the full normalized [0, 1] score
+# range. 0.30 (the current default)
 # lands exactly on the grid, so the recommendation and the current value are
-# compared like-for-like. 0.6 is a generous upper bound — observed cosine maxima
-# on real PSG questions sit well below it.
+# compared like-for-like.
 _DEFAULT_STEP = 0.01
-_DEFAULT_HI = 0.60
+_DEFAULT_HI = 1.00
 _CURRENT_DEFAULT = 0.30
 
 
@@ -60,14 +59,20 @@ class ScoreRow:
 
     ``max_score`` is the pre-gate max passage cosine, or ``None`` when retrieval
     never ran (the resolver refused before retrieval — e.g. reason ``no_product``
-    or a vague input — leaving ``result.retrieved == []``). A ``None`` score is a
-    threshold-independent refusal: it refuses at EVERY candidate cutoff.
+    or requested clarification — leaving ``result.retrieved == []``). A ``None``
+    score is threshold-independent; its observed ``refused`` value applies at
+    every candidate cutoff.
     """
 
     question: str
     must_refuse: bool
+    # Clarification behavior is a resolver decision, not a numeric cosine-
+    # threshold decision. Keep it in the artifact for auditability, but exclude
+    # it from both sides of the threshold curve.
+    must_clarify: bool
     max_score: float | None
     recall_hit: bool
+    refused: bool
     status: str | None
     reason: str | None
     n_retrieved: int
@@ -100,8 +105,10 @@ def collect_scores(
             ScoreRow(
                 question=it.question,
                 must_refuse=bool(it.must_refuse),
+                must_clarify=bool(it.must_clarify),
                 max_score=max_score,
                 recall_hit=recall_at_k(retrieved, it.expected_sources) == 1,
+                refused=bool(getattr(result, "refused", False)),
                 status=getattr(result, "status", None),
                 reason=getattr(result, "reason", None),
                 n_retrieved=len(retrieved),
@@ -111,9 +118,15 @@ def collect_scores(
 
 
 def _would_refuse(row: ScoreRow, t: float) -> bool:
-    """The gate's decision at threshold ``t``: refuse iff no retrieval OR best
-    cosine < t. Mirrors grounded_qa's ``not passages or max(score) < threshold``."""
-    return row.max_score is None or row.max_score < t
+    """The decision at threshold ``t``.
+
+    A scored row follows the numeric gate. When retrieval never ran, preserve
+    the observed resolver/scope outcome; a clarification must not be silently
+    relabeled as a refusal.
+    """
+    if row.max_score is None:
+        return row.refused
+    return row.max_score < t
 
 
 def _would_answer(row: ScoreRow, t: float) -> bool:
@@ -159,6 +172,7 @@ class SweepResult:
     must_refuse_stats: DistStats | None = None
     n_must_answer: int = 0
     n_must_refuse: int = 0
+    n_must_clarify: int = 0
 
 
 def sweep(
@@ -170,15 +184,19 @@ def sweep(
 
     For each candidate ``t``:
       refuse_recall(t)     = fraction of must_refuse rows that WOULD refuse at t
-                             (max_score is None OR max_score < t)
+                             (observed pre-retrieval refusal OR max_score < t)
       answer_retention(t)  = fraction of must-answer rows that WOULD answer at t
                              (max_score is not None AND max_score >= t)
       decision_accuracy(t) = (correct refusals + correct answers) / n
+
+    ``must_clarify`` rows are excluded. They test resolver behavior and do not
+    supply a positive or negative cosine score for threshold calibration.
     """
     cands = list(candidates) if candidates is not None else default_candidates()
-    must_refuse = [r for r in rows if r.must_refuse]
-    must_answer = [r for r in rows if not r.must_refuse]
-    n = len(rows)
+    must_clarify = [r for r in rows if r.must_clarify]
+    must_refuse = [r for r in rows if r.must_refuse and not r.must_clarify]
+    must_answer = [r for r in rows if not r.must_refuse and not r.must_clarify]
+    n = len(must_refuse) + len(must_answer)
 
     curve: list[CurvePoint] = []
     for t in cands:
@@ -213,6 +231,7 @@ def sweep(
         must_refuse_stats=_dist_stats(must_refuse),
         n_must_answer=len(must_answer),
         n_must_refuse=len(must_refuse),
+        n_must_clarify=len(must_clarify),
     )
 
 
@@ -267,8 +286,8 @@ def recommend(
     labelled provisional.
     """
     curve = sweep_result.curve
-    must_refuse = [r for r in rows if r.must_refuse]
-    must_answer = [r for r in rows if not r.must_refuse]
+    must_refuse = [r for r in rows if r.must_refuse and not r.must_clarify]
+    must_answer = [r for r in rows if not r.must_refuse and not r.must_clarify]
 
     cur_point = _point_at(curve, current)
     cur_retention = cur_point.answer_retention if cur_point else 1.0
@@ -289,6 +308,37 @@ def recommend(
     ma_scores = [r.max_score for r in must_answer if r.max_score is not None]
     mr_scores = [r.max_score for r in must_refuse if r.max_score is not None]
     overlap = bool(ma_scores) and bool(mr_scores) and (min(ma_scores) <= max(mr_scores))
+
+    # A numeric cutoff cannot be calibrated without scored examples on both
+    # sides. Resolver/scope refusals with max_score=None are safety evidence, but
+    # they reveal nothing about where the cosine threshold should sit.
+    if not ma_scores or not mr_scores:
+        missing_groups: list[str] = []
+        if not ma_scores:
+            missing_groups.append("must-answer")
+        if not mr_scores:
+            missing_groups.append("must-refuse")
+        missing = " and ".join(missing_groups)
+        rationale = (
+            f"Cannot calibrate a cosine cutoff: no scored {missing} rows reached "
+            "vector retrieval. Pre-retrieval resolver or scope decisions do not "
+            "establish separation in the embedding score space."
+        )
+        return Recommendation(
+            recommended=None,
+            current=current,
+            rationale=rationale,
+            provisional=True,
+            overlap=False,
+            current_refuse_recall=cur_refuse_recall,
+            current_answer_retention=cur_retention,
+            current_decision_accuracy=cur_decision_acc,
+            recommended_refuse_recall=None,
+            recommended_answer_retention=None,
+            recommended_decision_accuracy=None,
+            wrongly_refused_at_current=wrongly_refused,
+            leaking_at_current=leaking,
+        )
 
     # Feasible set: candidates that do NOT lose any currently-answered item.
     feasible = [p for p in curve if p.answer_retention >= cur_retention]
@@ -384,6 +434,11 @@ def _serialize(
             "must_refuse": (
                 asdict(sweep_result.must_refuse_stats) if sweep_result.must_refuse_stats else None
             ),
+        },
+        "counts": {
+            "must_answer": sweep_result.n_must_answer,
+            "must_refuse": sweep_result.n_must_refuse,
+            "must_clarify_excluded": sweep_result.n_must_clarify,
         },
         "recommendation": asdict(rec),
     }

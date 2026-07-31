@@ -251,13 +251,12 @@ This Docker pass verified:
 - formatting and type checks
 - full pytest suite
 
-The eval gate is green: `recall@k`, `citation_precision`, and `refusal_accuracy`
-all meet threshold on the seeded corpus, and a deterministic offline eval gate
-(`tests/test_eval_gate.py`) runs inside `uv run pytest`. The separate LIVE eval
-lane in CI is key-gated and deliberately OFF: setting the repo-wide
-`OPENAI_API_KEY` un-skips it and it currently fails (`refusal_accuracy` 0.917
-against the 0.95 floor), turning CI red and blocking CD -- see `docs/CI_CD.md`
-and `docs/SECRETS_RUNBOOK.md`.
+The deterministic offline eval fixture (`tests/test_eval_gate.py`) passes inside
+`uv run pytest`. The separate provider-backed eval lane in CI is key-gated; the
+latest inspected run skipped it because the repo-wide `OPENAI_API_KEY` was
+absent. Its current live-corpus pass/fail status is unverified. The previously
+cited `0.917` was a separate threshold-sweep decision metric, not
+`run_eval.refusal_accuracy`; see `docs/EVAL_STATUS.md`.
 
 ## The Next.js UI
 
