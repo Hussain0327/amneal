@@ -30,6 +30,9 @@ dependencies = [
     "pgvector>=0.5.0",
     "psycopg[binary]>=3.2",
     "sentry-sdk[fastapi]>=2.66.1",
+    "pymupdf>=1.28.0",
+    "json-repair>=0.61.7",
+    "python-multipart>=0.0.32",
 ]
 
 [project.optional-dependencies]
@@ -196,6 +199,39 @@ module = [
 ]
 disallow_any_generics = false
 disallow_untyped_defs = false
+
+# Vendored DefPredict pipeline (deficiency-chatbot bdad5c5): upstream ships
+# untyped, and the vendoring contract is byte-faithful logic -- annotating it
+# would fork it. Only these three vendored subpackages are relaxed; the
+# regwatch-authored seams (deficiency.structured/precedents/runner/events and
+# the store/API layers) stay fully strict.
+[[tool.mypy.overrides]]
+module = [
+    "regwatch.deficiency.parse.*",
+    "regwatch.deficiency.detection.*",
+    "regwatch.deficiency.schemas.*",
+]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+disallow_any_generics = false
+check_untyped_defs = false
+# The codes below fire on mypy-invisible invariants inside upstream's OWN
+# annotated functions (e.g. Optional fields checked at runtime before compare);
+# silencing per-module keeps the vendored files free of scattered ignores.
+disable_error_code = ["assignment", "index", "union-attr", "operator"]
+
+# Ported upstream tests exercise those untyped vendored functions directly.
+[[tool.mypy.overrides]]
+module = [
+    "tests.test_deficiency_layout",
+    "tests.test_deficiency_section_splitter",
+    "tests.test_deficiency_parse",
+    "tests.test_deficiency_schemas",
+    "tests.test_deficiency_detection",
+    "tests.test_deficiency_structured",
+]
+disallow_untyped_calls = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -531,6 +531,31 @@ class Settings(BaseSettings):
     # 0 disables the deadline (CLI/batch use; per-call timeouts still apply).
     whitepaper_build_timeout_s: float = 90.0
 
+    # ---------- Deficiency analysis (DefPredict) ----------
+    # Upload->analyze runs execute as background tasks INSIDE the API process
+    # (a deliberate, documented exception to "the Fly image never parses a
+    # PDF" -- see DECISIONS.md 2026-07-30). These bound that work.
+    #
+    # Overall wall-clock deadline for one analysis (parse + 4-stage detection,
+    # including its LLM fan-out). On breach the run is marked error and the
+    # worker thread is abandoned (it cannot be killed mid-C-extension); the
+    # store's status guard makes a late finish a no-op. 0 disables.
+    deficiency_analyze_timeout_s: float = 600.0
+    # Concurrent analyses per process (dedicated CapacityLimiter, never the
+    # default anyio pool). Excess runs queue in accepted state.
+    deficiency_analyze_concurrency: int = 2
+    # A run still in accepted/parsing/detecting whose last heartbeat
+    # (updated_at) is older than this is flipped to error on read: the process
+    # died mid-run and nothing else will ever finish it.
+    deficiency_run_stale_minutes: int = 20
+    # Historical-deficiency precedents fetched per detection domain.
+    deficiency_precedent_top_k: int = 3
+    # Remote OCR for scanned pages (Databricks model-serving invocations URL +
+    # bearer token). Unset = OCR disabled; scanned pages degrade to whatever
+    # embedded text layer exists, exactly like the vendored fallback path.
+    deficiency_ocr_invocations_url: str | None = None
+    deficiency_ocr_token: str | None = None
+
     # ---------- Auth ----------
     # Cookie-session auth: opaque tokens in an HttpOnly cookie; the DB stores
     # only the sha256 of the token. Secure stays False for the localhost pilot
