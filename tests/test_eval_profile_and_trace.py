@@ -154,39 +154,62 @@ def test_apply_profile_rejects_an_arm_that_did_not_take_effect(
     assert "did not take effect" in str(excinfo.value)
 
 
+def _patch_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    complete: bool,
+    pending: int,
+    index_ready: bool,
+) -> None:
+    """Patch the two REAL functions the readiness check calls.
+
+    Coverage and index readiness are separate calls in the store module --
+    ProfileEmbeddingCoverage carries no index_ready field. A fake coverage
+    object with an invented attribute passes whatever the caller reads off it,
+    which is how a check that rejected every profile arm went unnoticed.
+    """
+
+    @dataclass
+    class _Coverage:
+        complete: bool
+        pending_chunks: int
+
+    import regwatch.store.embedding_profiles as profiles_mod
+
+    assert not hasattr(
+        profiles_mod.ProfileEmbeddingCoverage, "index_ready"
+    ), "coverage grew an index_ready field; readiness must still use the real probe"
+    monkeypatch.setattr(
+        profiles_mod, "profile_embedding_coverage", lambda _p: _Coverage(complete, pending)
+    )
+    monkeypatch.setattr(profiles_mod, "profile_hnsw_index_ready", lambda _p: index_ready)
+
+
 def test_assert_profile_ready_rejects_incomplete_coverage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Partial coverage degrades recall silently instead of erroring, so it must
     fail before the run spends LLM calls."""
-
-    @dataclass
-    class _Coverage:
-        complete: bool = False
-        pending_chunks: int = 12
-        index_ready: bool = True
-
-    import regwatch.store.embedding_profiles as profiles_mod
-
-    monkeypatch.setattr(profiles_mod, "profile_embedding_coverage", lambda _p: _Coverage())
+    _patch_readiness(monkeypatch, complete=False, pending=12, index_ready=True)
     with pytest.raises(SystemExit) as excinfo:
         run_eval._assert_profile_ready("ep_x")
     assert "not fully embedded" in str(excinfo.value)
 
 
 def test_assert_profile_ready_rejects_a_missing_index(monkeypatch: pytest.MonkeyPatch) -> None:
-    @dataclass
-    class _Coverage:
-        complete: bool = True
-        pending_chunks: int = 0
-        index_ready: bool = False
-
-    import regwatch.store.embedding_profiles as profiles_mod
-
-    monkeypatch.setattr(profiles_mod, "profile_embedding_coverage", lambda _p: _Coverage())
+    _patch_readiness(monkeypatch, complete=True, pending=0, index_ready=False)
     with pytest.raises(SystemExit) as excinfo:
         run_eval._assert_profile_ready("ep_x")
-    assert "no vector index" in str(excinfo.value)
+    assert "no ready HNSW index" in str(excinfo.value)
+
+
+def test_assert_profile_ready_accepts_a_complete_indexed_arm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The missing half of the check: a healthy arm must actually be ACCEPTED.
+    Without this, a readiness probe that always says no passes every test."""
+    _patch_readiness(monkeypatch, complete=True, pending=0, index_ready=True)
+    run_eval._assert_profile_ready("ep_x")
 
 
 def test_assert_profile_ready_is_a_no_op_for_legacy() -> None:

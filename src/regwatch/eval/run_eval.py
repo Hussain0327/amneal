@@ -79,10 +79,17 @@ def _assert_profile_ready(profile: str) -> None:
         return
     # Fail before spending a single LLM call on an arm that cannot serve every
     # question: partial coverage silently degrades recall instead of erroring.
-    from regwatch.store.embedding_profiles import profile_embedding_coverage
+    from regwatch.store.embedding_profiles import (
+        profile_embedding_coverage,
+        profile_hnsw_index_ready,
+    )
 
     try:
         coverage = profile_embedding_coverage(profile)
+        # Index readiness is its own probe, NOT a field on coverage. Reading it
+        # off the dataclass with a getattr default silently answered "no index"
+        # for every profile, which rejected every non-legacy arm outright.
+        index_ready = profile_hnsw_index_ready(profile)
     except (ValueError, LookupError) as exc:
         # A typo'd or unregistered arm is operator error, not a crash: the id
         # guard and the missing-row lookup both deserve one readable line.
@@ -92,9 +99,9 @@ def _assert_profile_ready(profile: str) -> None:
             f"profile {profile} is not fully embedded ({coverage.pending_chunks} "
             "chunk(s) pending); backfill before evaluating it"
         )
-    if not getattr(coverage, "index_ready", False):
+    if not index_ready:
         raise SystemExit(
-            f"profile {profile} has no vector index; run `regwatch "
+            f"profile {profile} has no ready HNSW index; run `regwatch "
             f"embedding-profile-index {profile}` before evaluating it"
         )
 
