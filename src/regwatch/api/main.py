@@ -16,6 +16,9 @@ Endpoints (per spec §10.16):
     POST   /whitepaper/runs/{id}/reopen - reopen a finalized run (auth)
     POST   /whitepaper/runs/{id}/docx - render a saved run as .docx (auth)
     DELETE /whitepaper/runs/{id} - creator-only draft delete (auth)
+    POST   /deficiency/analyze - upload a submission PDF for deficiency analysis (auth)
+    GET    /deficiency/runs - org-shared deficiency analysis runs (auth)
+    GET    /deficiency/runs/{id} - one run + its fault report (auth)
     GET    /watch/latest   — recent alerts (auth)
     GET    /health         — liveness + component diagnostics (open)
     GET    /ready          - readiness: db + vector store + LLM constructable (open)
@@ -26,12 +29,14 @@ Endpoints (per spec §10.16):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import os
 import re
+import tempfile
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from datetime import UTC, date, datetime
 from functools import partial
@@ -39,7 +44,19 @@ from typing import Any, Literal
 
 import anyio.to_thread
 from config.settings import Settings, get_settings
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -55,11 +72,13 @@ from regwatch.common.conversation import SESSION_FILTER_KEYS, SessionOwnershipEr
 from regwatch.common.logging import configure_logging, get_logger
 from regwatch.common.observability import capture_exception, init_sentry
 from regwatch.common.ratelimit import query_limiter
+from regwatch.deficiency.runner import run_deficiency_analysis
 from regwatch.generate.grounded_qa import QAResult, QueryStatusLiteral, ask, compute_turn
 from regwatch.generate.rag_contract import AuditPayload, RagOutcome, SessionPatch
 from regwatch.process.embedder import assert_embedding_runtime_available
 from regwatch.sources.router import search_sources
 from regwatch.sources.types import SourceKind, SourceQuery
+from regwatch.store import deficiency_runs as deficiency_run_store
 from regwatch.store import whitepaper_runs as run_store
 from regwatch.store.db import engine_dialect, get_engine, init_db, session_scope
 from regwatch.store.models import (
@@ -1797,6 +1816,196 @@ def watch_latest(
         # ever a run that actually happened, never inferred).
         "last_run": latest_watch_run(),
     }
+
+
+# ---------- /deficiency (DefPredict integration; DECISIONS.md 2026-07-30) ----------
+# Upload -> analyze runs execute as background tasks INSIDE the API process --
+# a deliberate, documented exception to "the Fly image never parses a PDF".
+# The uploaded PDF lives only in a temp file for the duration of the run; the
+# database keeps its sha256, never its bytes.
+
+_DEFICIENCY_MAX_PDF_BYTES = 50 * 1024 * 1024
+_DEFICIENCY_READ_CHUNK = 1024 * 1024
+# Module-level like _ASK_LIMITER: bounds concurrent analyses (each one fans out
+# LLM specialist calls); excess jobs queue on the limiter, bounded in turn by
+# the per-user rate limit at submit time.
+_DEFICIENCY_LIMITER = anyio.CapacityLimiter(max(1, get_settings().deficiency_analyze_concurrency))
+
+_DEFICIENCY_RUN_NOT_FOUND = "deficiency run not found"
+
+
+class DeficiencyAnalyzeResponse(BaseModel):
+    run_id: int
+    status: str
+
+
+class DeficiencyRunSummary(BaseModel):
+    """One run list row. ``status``/``error`` are the READ-TIME interpretation
+    (``effective_status``): a row stranded pending/running by a process restart
+    reads as failed after the stale cutoff instead of spinning forever."""
+
+    id: int
+    filename: str
+    status: str
+    created_at: datetime
+    completed_at: datetime | None
+    page_count: int | None
+    fault_count: int | None
+    error: str | None
+
+
+class DeficiencyRunListResponse(BaseModel):
+    count: int
+    total: int
+    limit: int
+    offset: int
+    runs: list[DeficiencyRunSummary]
+
+
+class DeficiencyRunDetailResponse(DeficiencyRunSummary):
+    """``report`` is a deliberately passthrough dict: the response must be
+    VERBATIM what the audited run stored (same discipline as the white-paper
+    detail route). Null unless the run is complete."""
+
+    report: dict[str, Any] | None
+
+
+def _deficiency_summary_fields(run: Any) -> dict[str, Any]:
+    status, error = deficiency_run_store.effective_status(run)
+    return {
+        "id": run.id,
+        "filename": run.filename,
+        "status": status,
+        "created_at": run.created_at,
+        "completed_at": run.completed_at,
+        "page_count": run.page_count,
+        "fault_count": run.fault_count,
+        "error": error,
+    }
+
+
+async def _deficiency_background(run_id: int, tmp_path: str) -> None:
+    """Background wrapper: limiter slot -> deadline -> worker thread -> cleanup.
+
+    ``fail_after`` cancels the AWAIT, not the worker thread
+    (``abandon_on_cancel=True``): the orphaned thread keeps running to its end,
+    but its ``complete_run`` is a compare-and-set that loses against the
+    ``fail_run`` written here, so a timed-out run can never flip back to
+    complete. The temp file outlives the abandoned thread deliberately --
+    unlinking it here on timeout would hand the still-parsing thread a
+    vanished file; the unlink-on-exit branch below only runs when the thread
+    finished or never started.
+    """
+    s = get_settings()
+    abandoned = False
+    try:
+        async with _DEFICIENCY_LIMITER:
+            try:
+                with anyio.fail_after(s.deficiency_analyze_timeout_s):
+                    await anyio.to_thread.run_sync(
+                        partial(run_deficiency_analysis, run_id, tmp_path),
+                        abandon_on_cancel=True,
+                    )
+            except TimeoutError:
+                abandoned = True
+                log.error(
+                    "deficiency_run_timeout",
+                    run_id=run_id,
+                    timeout_s=s.deficiency_analyze_timeout_s,
+                )
+                deficiency_run_store.fail_run(
+                    run_id,
+                    error=(f"analysis timed out after {int(s.deficiency_analyze_timeout_s)}s"),
+                )
+    except Exception as exc:
+        # run_deficiency_analysis records its own failures; this catches the
+        # wrapper machinery itself (limiter/threadpool) so the row never
+        # strands in pending on an infrastructure fault.
+        log.error("deficiency_background_failed", run_id=run_id, error_type=type(exc).__name__)
+        capture_exception(exc)
+        deficiency_run_store.fail_run(run_id, error=f"{type(exc).__name__}: {exc}")
+    finally:
+        if not abandoned:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                log.warning(
+                    "deficiency_tmpfile_cleanup_failed",
+                    run_id=run_id,
+                    error_type=type(exc).__name__,
+                )
+
+
+@protected.post("/deficiency/analyze", response_model=DeficiencyAnalyzeResponse, status_code=202)
+async def deficiency_analyze(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    user: User = Depends(require_user),
+) -> DeficiencyAnalyzeResponse:
+    """Accept a submission PDF, create the run row, schedule the analysis.
+
+    The whole body is size-capped and magic-checked while streaming to a temp
+    file -- never buffered in memory, never trusted from Content-Length. 202 +
+    run_id; the UI polls GET /deficiency/runs/{id}.
+    """
+    _enforce_query_rate_limit(user)
+    filename = os.path.basename(file.filename or "upload.pdf")[:200] or "upload.pdf"
+    hasher = hashlib.sha256()
+    size = 0
+    fd, tmp_path = tempfile.mkstemp(suffix=".pdf", prefix="deficiency-")
+    scheduled = False
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while chunk := await file.read(_DEFICIENCY_READ_CHUNK):
+                if size == 0 and not chunk.startswith(b"%PDF"):
+                    raise HTTPException(status_code=400, detail="not a PDF (missing %PDF header)")
+                size += len(chunk)
+                if size > _DEFICIENCY_MAX_PDF_BYTES:
+                    raise HTTPException(status_code=400, detail="PDF exceeds the 50 MB limit")
+                hasher.update(chunk)
+                out.write(chunk)
+        if size == 0:
+            raise HTTPException(status_code=400, detail="empty upload")
+        run = deficiency_run_store.create_run(
+            user_id=_user_pk(user), filename=filename, sha256=hasher.hexdigest()
+        )
+        if run.id is None:  # pragma: no cover - flush always assigns the PK
+            raise RuntimeError("deficiency run insert returned no id")
+        background.add_task(_deficiency_background, run.id, tmp_path)
+        scheduled = True
+        return DeficiencyAnalyzeResponse(run_id=run.id, status="pending")
+    finally:
+        if not scheduled:
+            # Refused/failed before scheduling: the temp file has no owner left.
+            with suppress(OSError):
+                os.unlink(tmp_path)
+
+
+@protected.get("/deficiency/runs", response_model=DeficiencyRunListResponse)
+def deficiency_runs_list(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> DeficiencyRunListResponse:
+    """Org-shared runs, newest first (same product decision as white-paper
+    runs: any authenticated analyst sees every run)."""
+    rows, total = deficiency_run_store.list_runs(limit=limit, offset=offset)
+    runs = [DeficiencyRunSummary(**_deficiency_summary_fields(r)) for r in rows]
+    return DeficiencyRunListResponse(
+        count=len(runs), total=total, limit=limit, offset=offset, runs=runs
+    )
+
+
+@protected.get("/deficiency/runs/{run_id}", response_model=DeficiencyRunDetailResponse)
+def deficiency_run_detail(run_id: int) -> DeficiencyRunDetailResponse:
+    """One run + its verbatim stored fault report (null until complete)."""
+    run = deficiency_run_store.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=_DEFICIENCY_RUN_NOT_FOUND)
+    fields = _deficiency_summary_fields(run)
+    report = run.report_json if fields["status"] == "complete" else None
+    return DeficiencyRunDetailResponse(**fields, report=report)
 
 
 app.include_router(protected)

@@ -471,3 +471,55 @@ class WatchRun(SQLModel, table=True):
     errors: int
     alerts: int
     digest_date: str | None = None
+
+
+class DeficiencyRun(SQLModel, table=True):
+    """One deficiency-analysis job over an uploaded submission PDF.
+
+    Unlike ``WhitepaperRun`` (which persists only completed results), this row
+    is created BEFORE the work runs: the upload endpoint answers 202 with the
+    row id and the UI polls it, so pending/running/failed are first-class
+    states. The analysis itself executes as a background task inside the API
+    process (a deliberate, documented exception to "the Fly image never parses
+    a PDF" -- DECISIONS.md 2026-07-30), so a process restart can strand a row
+    in pending/running forever; readers apply the ``deficiency_run_stale_minutes``
+    cutoff at read time (``store.deficiency_runs.effective_status``) instead of
+    trusting a janitor that would itself need the missing durable queue.
+
+    ``report_json`` is the full FaultReport payload, immutable after the one
+    ``complete`` transition; ``audit_id`` ties the run to its QueryLog row
+    (mode="defpredict", INV-6). The uploaded PDF is NOT stored -- only its
+    sha256, so a report can be matched to a document without the document
+    ever persisting.
+
+    Timestamps mirror ``WatchRun``: plain DateTime columns written from
+    ``datetime.now(UTC)``, round-tripping as naive-UTC like the rest of this
+    schema.
+    """
+
+    __tablename__ = "deficiency_run"
+    # Declared in metadata so create_all (the fresh-Postgres bootstrap) and
+    # migration 0019 produce identical constraints on both paths.
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'complete', 'failed')",
+            name="ck_deficiency_run_status",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
+    created_by_user_id: int = Field(foreign_key="user.id", index=True)
+    filename: str  # display label only; sanitized at the API boundary
+    sha256: str  # of the uploaded bytes; the document itself is never stored
+    status: str = Field(default="pending", index=True)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    page_count: int | None = None
+    fault_count: int | None = None
+    error: str | None = None
+    # Full FaultReport payload; NULL until the run completes, immutable after.
+    report_json: dict[str, Any] | None = Field(default=None, sa_column=_json_column())
+    # QueryLog row for this run (mode="defpredict"); set on the terminal
+    # transition so every LLM-content path stays audit-covered (INV-6).
+    audit_id: int | None = Field(default=None, index=True)

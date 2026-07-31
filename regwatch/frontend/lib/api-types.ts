@@ -21,6 +21,71 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/deficiency/analyze": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Deficiency Analyze
+         * @description Accept a submission PDF, create the run row, schedule the analysis.
+         *
+         *     The whole body is size-capped and magic-checked while streaming to a temp
+         *     file -- never buffered in memory, never trusted from Content-Length. 202 +
+         *     run_id; the UI polls GET /deficiency/runs/{id}.
+         */
+        post: operations["deficiency_analyze_deficiency_analyze_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/deficiency/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Deficiency Runs List
+         * @description Org-shared runs, newest first (same product decision as white-paper
+         *     runs: any authenticated analyst sees every run).
+         */
+        get: operations["deficiency_runs_list_deficiency_runs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/deficiency/runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Deficiency Run Detail
+         * @description One run + its verbatim stored fault report (null until complete).
+         */
+        get: operations["deficiency_run_detail_deficiency_runs__run_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -444,6 +509,11 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /** Body_deficiency_analyze_deficiency_analyze_post */
+        Body_deficiency_analyze_deficiency_analyze_post: {
+            /** File */
+            file: string;
+        };
         /** ClarifyOptionOut */
         ClarifyOptionOut: {
             /** Filters */
@@ -454,6 +524,84 @@ export interface components {
             label: string;
             /** Query */
             query: string;
+        };
+        /** DeficiencyAnalyzeResponse */
+        DeficiencyAnalyzeResponse: {
+            /** Run Id */
+            run_id: number;
+            /** Status */
+            status: string;
+        };
+        /**
+         * DeficiencyRunDetailResponse
+         * @description ``report`` is a deliberately passthrough dict: the response must be
+         *     VERBATIM what the audited run stored (same discipline as the white-paper
+         *     detail route). Null unless the run is complete.
+         */
+        DeficiencyRunDetailResponse: {
+            /** Completed At */
+            completed_at: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error */
+            error: string | null;
+            /** Fault Count */
+            fault_count: number | null;
+            /** Filename */
+            filename: string;
+            /** Id */
+            id: number;
+            /** Page Count */
+            page_count: number | null;
+            /** Report */
+            report: {
+                [key: string]: unknown;
+            } | null;
+            /** Status */
+            status: string;
+        };
+        /** DeficiencyRunListResponse */
+        DeficiencyRunListResponse: {
+            /** Count */
+            count: number;
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Runs */
+            runs: components["schemas"]["DeficiencyRunSummary"][];
+            /** Total */
+            total: number;
+        };
+        /**
+         * DeficiencyRunSummary
+         * @description One run list row. ``status``/``error`` are the READ-TIME interpretation
+         *     (``effective_status``): a row stranded pending/running by a process restart
+         *     reads as failed after the stale cutoff instead of spinning forever.
+         */
+        DeficiencyRunSummary: {
+            /** Completed At */
+            completed_at: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error */
+            error: string | null;
+            /** Fault Count */
+            fault_count: number | null;
+            /** Filename */
+            filename: string;
+            /** Id */
+            id: number;
+            /** Page Count */
+            page_count: number | null;
+            /** Status */
+            status: string;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -992,6 +1140,108 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AssembleResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    deficiency_analyze_deficiency_analyze_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_deficiency_analyze_deficiency_analyze_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeficiencyAnalyzeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    deficiency_runs_list_deficiency_runs_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeficiencyRunListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    deficiency_run_detail_deficiency_runs__run_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeficiencyRunDetailResponse"];
                 };
             };
             /** @description Validation Error */

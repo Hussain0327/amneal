@@ -648,7 +648,17 @@ def _init_postgres(engine: Engine) -> None:
     # Register both ORM tables and the additive profile/core tables before the
     # fresh-Postgres create_all + stamp-head path.  pgvector_store registers
     # ``chunk`` itself, which chunk_embedding's foreign key references.
-    from regwatch.store import embedding_profiles, models, pgvector_store  # noqa: F401
+    # graph_store was missing here from 0018's landing: a fresh bootstrap
+    # stamped head WITHOUT the three graph tables, so any later downgrade (or
+    # graph write) hit missing relations. Registering it restores the
+    # create_all-equals-migration-replay convergence contract.
+    from regwatch.store import (  # noqa: F401
+        deficiency_kb,
+        embedding_profiles,
+        graph_store,
+        models,
+        pgvector_store,
+    )
 
     cfg = _alembic_config()
     head = _head_revision(cfg)

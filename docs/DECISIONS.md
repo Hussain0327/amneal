@@ -319,3 +319,84 @@ The eval was RED on the real corpus (`recall@8=0.667, citation_precision=0.000, 
   resumable corpus re-embed runbook, a retrieval benchmark against the legacy
   1536 profile, then the `ACTIVE_EMBEDDING_PROFILE` flip -- and only then
   arming `D1_ENFORCED`.
+
+## Tier-1 knowledge graph landed; graph-assisted retrieval proposed (Jul 30 2026)
+
+- **Landed foundation, zero query behavior change.** Migration
+  `0018_knowledge_graph` and `store/graph_store.py` derive deterministic
+  `application`, `psg_doc`, and `psg_section` nodes; `HAS_PSG`, `HAS_SECTION`,
+  and `FOLLOWS` edges; and `primary` / `member` references back to source
+  chunks. Derivation shares the caller's chunk-write transaction. There are no
+  node embeddings and no runtime traversal consumer.
+- **Chunks remain the only evidence authority.** Graph nodes, edges, paths, and
+  any future generated descriptions may navigate to evidence but can never be
+  cited or sent to generation as a substitute for source chunks (INV-1).
+- **Proposed runtime shape.** Start with product/form/current-version-scoped
+  seed chunks, map them to graph nodes, traverse allowlisted edges within hard
+  hop/candidate/token budgets, collect referenced chunks, rerank, and test
+  evidence sufficiency. One targeted additional expansion may run for a named
+  missing aspect; incomplete evidence still refuses.
+- **No promotion before measurement.** Runtime traversal stays behind a
+  default-off flag until the Q&A eval set is expanded and a shadow comparison
+  proves reduced false refusals or ranking misses with zero product/form/version
+  leakage and no citation-precision regression. Full design:
+  `docs/GRAPH_ASSISTED_RETRIEVAL.md`.
+
+## Evaluation evidence correction; 0.30 remains provisional (Jul 30 2026)
+
+- **The documented `0.917` was mislabeled.** The inspected watch artifact's
+  value was `threshold_sweep.current_decision_accuracy`, not
+  `run_eval.refusal_accuracy`. The old sweep put the valid `must_clarify` case
+  in the must-answer bucket and counted its correct clarification as a
+  threshold-induced answer failure.
+- **Current provider-backed `run_eval` status is unknown.** The latest inspected
+  CI run passed the deterministic offline fixture but skipped provider-backed
+  seed/eval because the repo-wide `OPENAI_API_KEY` was absent. No current
+  live-corpus pass or fail claim is accepted without a preserved run artifact.
+- **The live sweep did not calibrate a cutoff.** All six ordinary must-answer
+  rows had cosine scores (0.812-0.896), while all five must-refuse rows stopped
+  before retrieval and had no score. Resolver and scope refusals are useful
+  safety evidence but cannot define a boundary in cosine-score space.
+- **Evaluator correction.** `must_clarify` rows are now excluded from the
+  numeric cutoff curve, and a no-score clarification is no longer silently
+  relabeled as a refusal. The harness returns no recommendation when either
+  scored distribution is empty, instead of calling absent negative scores
+  "cleanly separable" and recommending `0.00`.
+- **Decision: KEEP `0.30` PROVISIONAL.** Add reviewed scored hard negatives,
+  expand the 12-row Q&A gold set, and rerun both provider-backed `run_eval` and
+  the corrected threshold sweep on a controlled corpus snapshot before any
+  threshold change. Current evidence: `docs/EVAL_STATUS.md`.
+
+## DefPredict integration + recommendation-policy amendment (Jul 30-31 2026)
+
+- **Deficiency analysis joins the product.** The other intern's DefPredict
+  pipeline (DevDesai444/deficiency-chatbot, commit bdad5c5: PyMuPDF parse ->
+  heading section split -> 4-stage deterministic-first fault detection) is
+  vendored into `src/regwatch/deficiency/` and rewired onto regwatch seams
+  rather than run as a second service: LLM calls go through
+  `regwatch.generate.llm` providers (so the D1 served-model guard covers
+  them -- the upstream raw OpenAI SDK stack would have bypassed it),
+  precedents come from pgvector (`deficiency_kb`, Qwen3 1024-dim in-tenant
+  embeddings), and job state is the `deficiency_run` table (migration 0019).
+- **Owner amendment to the "no regulatory recommender" rule (docs/CLAUDE.md
+  Hard rule 3 / the "Don't" list).** Recorded 2026-07-30 from the product
+  owner: recommendation output IS now allowed. The refuse-or-cite discipline
+  stays -- every recommendation must carry citations or not exist -- and the
+  system should prefer escalating / gathering more context over dead-ending
+  in a refusal. Scope note: the vendored pipeline currently emits NO
+  recommendations (upstream prompts forbid proposing fixes); this entry
+  authorizes the future recommender work, it does not ship one.
+- **Public data first.** Uploads are expected to be public documents while
+  the pilot runs; the app still treats every upload as sensitive (D1: parsing
+  and all inference stay in-tenant, the PDF bytes never persist -- only a
+  sha256 -- and the temp file is deleted when the run ends).
+- **In-process background analysis is a deliberate exception** to "the Fly
+  image never parses a PDF": upload->analyze runs as a background task inside
+  the API process, bounded by `deficiency_analyze_concurrency` (limiter),
+  `deficiency_analyze_timeout_s` (deadline; compare-and-set state transitions
+  make the abandoned worker thread harmless), and
+  `deficiency_run_stale_minutes` (read-time reinterpretation of rows stranded
+  by a restart). A durable queue is the known upgrade path if volume arrives.
+- **Progress events are logs, not WebSockets.** Upstream's in-process event
+  bus was dropped; the UI polls the run row. A durable event feed can replace
+  `deficiency/events.py` without touching the vendored detection code.

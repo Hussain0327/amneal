@@ -8,6 +8,11 @@
 // (INV-3), so they are plain objects in the schema by design.
 import type { components } from "./api-types";
 import type {
+  DeficiencyAnalyzeAccepted,
+  DeficiencyRunDetail,
+  DeficiencyRunList,
+} from "./deficiency-types";
+import type {
   ChatMessageOut,
   ProductRecord as ProductRecordWire,
   ProductsResponse as ProductsResponseWire,
@@ -296,6 +301,30 @@ async function postJSON<T>(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      credentials: "include",
+    },
+    timeoutMs,
+    signal,
+  );
+  return handle<T>(res, "POST", path, gate);
+}
+
+// Same contract as postJSON (base URL, timeout, cookie credentials, error
+// normalization) for a multipart body. Content-Type is deliberately NOT set:
+// the browser must add it itself so the generated multipart boundary matches
+// the body -- setting it by hand produces a body the server cannot parse.
+async function postMultipart<T>(
+  path: string,
+  form: FormData,
+  gate = true,
+  signal?: AbortSignal,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<T> {
+  const res = await fetchWithTimeout(
+    `${apiBase()}${path}`,
+    {
+      method: "POST",
+      body: form,
       credentials: "include",
     },
     timeoutMs,
@@ -791,4 +820,54 @@ export function listProducts(): Promise<ProductsResponse> {
 
 export function getPublicSettings(): Promise<PublicSettings> {
   return getJSON<PublicSettings>("/settings");
+}
+
+// --- Deficiency (surface 05) ------------------------------------------------
+// These routes are not in the generated OpenAPI snapshot yet, so their wire
+// types are hand-mirrored from the Pydantic source in ./deficiency-types.
+// Re-exported here so consumers keep importing every wire type from one place.
+export type {
+  DeficiencyAnalyzeAccepted,
+  DeficiencyRunDetail,
+  DeficiencyRunList,
+  DeficiencyRunStatus,
+  DeficiencyRunSummary,
+  EvidenceClass,
+  Fault,
+  FaultReport,
+  FlawCategory,
+  ParseFailed,
+  Severity,
+  SimilarDeficiency,
+  Tier,
+} from "./deficiency-types";
+
+// Queue one PDF for fault detection. 202 + {run_id, status:"pending"} -- the
+// analysis itself runs server-side, so the caller polls getDeficiencyRun.
+// A 400 carries the server's own reason (not a PDF / too large) in `detail`;
+// the page still guards client-side first so an obviously bad file never
+// spends the upload.
+// LONG bound: this request carries the file, and a 50MB upload over a slow
+// link legitimately outlasts the 30s JSON default -- aborting it locally would
+// leave the analyst with a timeout for a request the server was still reading.
+export function analyzeDeficiency(file: File): Promise<DeficiencyAnalyzeAccepted> {
+  const form = new FormData();
+  // Single field "file", per the route contract.
+  form.append("file", file);
+  return postMultipart<DeficiencyAnalyzeAccepted>(
+    "/deficiency/analyze",
+    form,
+    true,
+    undefined,
+    LONG_TIMEOUT_MS,
+  );
+}
+
+// Newest first.
+export function listDeficiencyRuns(): Promise<DeficiencyRunList> {
+  return getJSON<DeficiencyRunList>("/deficiency/runs");
+}
+
+export function getDeficiencyRun(runId: number): Promise<DeficiencyRunDetail> {
+  return getJSON<DeficiencyRunDetail>(`/deficiency/runs/${runId}`);
 }
