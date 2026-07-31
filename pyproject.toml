@@ -17,7 +17,7 @@ dependencies = [
     "alembic>=1.18.5",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
-    "fastapi>=0.139.2",
+    "fastapi>=0.140.11",
     "uvicorn[standard]>=0.51.0",
     "structlog>=26.1.0",
     "rapidfuzz>=3.10",
@@ -42,7 +42,7 @@ local-embeddings = [
     "transformers<6",
 ]
 llm = [
-    "openai>=2.48.0",
+    "openai>=2.49.0",
     "anthropic>=0.120.0",
 ]
 dev = [
