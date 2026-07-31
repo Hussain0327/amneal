@@ -13,14 +13,17 @@ Targets (POC):
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
 
 import typer
+from config.settings import get_settings
 from rich.console import Console
 from rich.table import Table
 
+from regwatch.eval import run_fingerprint
 from regwatch.eval.metrics import GoldItem, Scorecard, evaluate
 from regwatch.generate.grounded_qa import ask
 from regwatch.store.db import init_db
@@ -36,6 +39,64 @@ THRESHOLDS = {
     "citation_precision": 0.95,
     "refusal_accuracy": 0.95,
 }
+
+
+def _apply_profile(profile: str) -> str:
+    """Point THIS PROCESS at one embedding arm, then re-read settings.
+
+    Retrieval already selects its arm from ACTIVE_EMBEDDING_PROFILE
+    (retrieve/retriever.py), so an A/B needs no second retrieval path -- only a
+    process configured for one arm. One arm per process is the point: two arms
+    in one interpreter would share the settings cache, the provider clients and
+    any warm state, and the second run would no longer be independent.
+    """
+    profile = (profile or run_fingerprint.LEGACY).strip()
+    if profile != run_fingerprint.LEGACY:
+        # Check the shape here, where it is still a CLI argument. init_db
+        # validates it too, but by then a typo surfaces as a boot traceback
+        # instead of a message about the flag you just typed.
+        from regwatch.store.embedding_profiles import _validate_profile_id
+
+        try:
+            _validate_profile_id(profile)
+        except ValueError as exc:
+            raise SystemExit(f"--profile {profile!r} is not a usable arm: {exc}") from exc
+    os.environ["ACTIVE_EMBEDDING_PROFILE"] = profile
+    get_settings.cache_clear()
+    s = get_settings()
+    resolved = (s.active_embedding_profile or run_fingerprint.LEGACY).strip()
+    if resolved != profile:
+        raise SystemExit(
+            f"--profile {profile!r} did not take effect (settings report {resolved!r})"
+        )
+    return profile
+
+
+def _assert_profile_ready(profile: str) -> None:
+    """DB-side readiness. Separate from _apply_profile because that one must run
+    before init_db (it decides configuration) while this one needs the engine."""
+    if profile == run_fingerprint.LEGACY:
+        return
+    # Fail before spending a single LLM call on an arm that cannot serve every
+    # question: partial coverage silently degrades recall instead of erroring.
+    from regwatch.store.embedding_profiles import profile_embedding_coverage
+
+    try:
+        coverage = profile_embedding_coverage(profile)
+    except (ValueError, LookupError) as exc:
+        # A typo'd or unregistered arm is operator error, not a crash: the id
+        # guard and the missing-row lookup both deserve one readable line.
+        raise SystemExit(f"--profile {profile!r} is not a usable arm: {exc}") from exc
+    if not coverage.complete:
+        raise SystemExit(
+            f"profile {profile} is not fully embedded ({coverage.pending_chunks} "
+            "chunk(s) pending); backfill before evaluating it"
+        )
+    if not getattr(coverage, "index_ready", False):
+        raise SystemExit(
+            f"profile {profile} has no vector index; run `regwatch "
+            f"embedding-profile-index {profile}` before evaluating it"
+        )
 
 
 def _load_gold(path: Path) -> list[GoldItem]:
@@ -96,6 +157,27 @@ def _print_scorecard(sc: Scorecard) -> None:
         )
 
 
+def _print_fingerprint(fp: run_fingerprint.RunFingerprint) -> None:
+    console = Console()
+    detail = fp.profile_detail
+    console.print(
+        f"[dim]arm={fp.profile} model={detail.get('model') or '?'} "
+        f"corpus={fp.corpus.chunks} chunks/{fp.corpus.docs} docs "
+        f"digest={fp.corpus.digest[:12] or '?'} "
+        f"vector_top_k={fp.retrieval.get('vector_top_k')} "
+        f"rerank_top_k={fp.retrieval.get('rerank_top_k')} "
+        f"reranker={'on' if fp.retrieval.get('reranker_enabled') else 'off'} "
+        f"llm={fp.models.get('llm_model')} commit={fp.commit[:8]}"
+        f"{' [yellow](dirty tree)[/yellow]' if fp.dirty else ''}[/dim]"
+    )
+    if fp.dirty:
+        # Two arms compared across a dirty tree may not have run the same code.
+        console.print(
+            "[yellow]working tree has uncommitted tracked changes: this run is "
+            "not reproducible from its commit alone[/yellow]"
+        )
+
+
 @app.command()
 def run(
     gold: Path = typer.Option(
@@ -109,8 +191,26 @@ def run(
         help="Exit non-zero if any metric is below the spec §12 target.",
     ),
     out: Path | None = typer.Option(None, "--out", help="Write scorecard JSON to this path."),
+    profile: str = typer.Option(
+        run_fingerprint.LEGACY,
+        "--profile",
+        help=(
+            "Embedding arm for this run: 'legacy' (chunk.embedding column) or a "
+            "registered profile id. Applies to this process only -- run each arm "
+            "in its own invocation so the two are independent."
+        ),
+    ),
 ) -> None:
-    init_db()
+    profile = _apply_profile(profile)
+    try:
+        init_db()
+    except KeyError as exc:
+        # init_db resolves the active arm (dimension fail-fast), so an
+        # unregistered id is caught here rather than by _assert_profile_ready
+        # below. KeyError from this call means exactly one thing -- the profile
+        # row does not exist -- so translating it cannot mask a boot failure.
+        raise SystemExit(f"--profile {profile!r} is not a usable arm: {exc}") from exc
+    _assert_profile_ready(profile)
     if collection_size() == 0:
         Console().print(
             "[yellow]Vector store is empty — no eval possible. "
@@ -123,10 +223,20 @@ def run(
         return
 
     items = _load_gold(gold)
+    # Built before the run so the artifact describes the configuration the
+    # questions actually executed under, not one a later flip could rewrite.
+    fingerprint = run_fingerprint.build(profile, THRESHOLDS)
     sc = evaluate(items, ask_callable=ask)
     _print_scorecard(sc)
+    _print_fingerprint(fingerprint)
     if out:
-        out.write_text(json.dumps(asdict(sc), indent=2))
+        out.write_text(
+            json.dumps(
+                {"fingerprint": fingerprint.to_dict(), "scorecard": asdict(sc)},
+                indent=2,
+                default=str,
+            )
+        )
 
     if check_thresholds:
         violations = [
