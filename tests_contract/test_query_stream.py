@@ -64,7 +64,7 @@ def test_s19_stream_grammar_and_blocking_parity(
     events = sse.events()
     assert set(events) <= {"status", "token", "result"}, f"unknown event name in {events}"
     assert events.count("status") >= 1
-    assert events.count("token") >= 1, "echo has a real stream(); token frames must flow"
+    assert events.count("token") >= 1, "an answer turn replays its rendered answer as tokens"
     result = sse.single_result()  # exactly one result frame, and it is last
 
     assert set(result.keys()) == QUERY_RESPONSE_KEYS
@@ -78,6 +78,12 @@ def test_s19_stream_grammar_and_blocking_parity(
         assert "ECHO:" not in frame["text"], "answer prose must never ride the status channel"
     for data in sse.data_for("token"):
         assert set(json.loads(data).keys()) == {"delta"}
+    # Token frames are a REPLAY of the gated, audited answer, not a live model
+    # stream: over the real wire the deltas must reassemble to exactly the bytes
+    # the terminal frame carries. If synthesis ever went back to streaming raw
+    # model output, the deltas would be the model's draft and this would fail.
+    replayed = "".join(json.loads(data)["delta"] for data in sse.data_for("token"))
+    assert replayed == result["answer"]
 
     assert query_log_count() == rows_before + 1, "exactly one audit row per streamed turn"
 
@@ -142,13 +148,13 @@ def test_s21a_provider_death_mid_pipeline_still_ends_with_a_result_frame(
 def test_s23_synthesis_refusal_streams_zero_tokens_and_lands_as_model_refusal(
     forced_refusal_stack: Stack, edge_login: Callable[..., EdgeClient]
 ) -> None:
-    """The streaming sentinel hold, reached over the wire: echo is forced to
-    STREAM the refusal sentinel mid-synthesis (REGWATCH_ECHO_FORCE_REFUSAL),
-    so this is the only scenario where _stream_synthesis actually decides.
-    S20's zero-token refusal is decided pre-synthesis and never exercises the
-    hold -- without this test, deleting the hold entirely stays green while a
-    real model refusal would paint as a grounded-looking provisional answer
-    for a beat and then vanish (the INV-2 UX failure the guard prevents)."""
+    """The post-synthesis decline hold, reached over the wire: echo is forced to
+    emit a NO_EVIDENCE turn (REGWATCH_ECHO_FORCE_REFUSAL), so this is the only
+    scenario where the SYNTHESIZER decides the decline. S20's zero-token refusal
+    is decided pre-synthesis and never exercises the hold -- without this test,
+    widening the token replay from `status in ("answer","summary")` to every
+    turn stays green while a real model refusal would paint as a
+    grounded-looking draft for a beat and then vanish (the INV-2 UX failure)."""
     seed_answerable_corpus()
     client = edge_login(forced_refusal_stack)
 

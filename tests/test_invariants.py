@@ -23,6 +23,7 @@ from sqlalchemy import func
 from sqlmodel import select
 
 from regwatch.generate import grounded_qa as qa_mod
+from regwatch.generate import turn_gate as tg
 from regwatch.generate.llm import LLMResponse
 from regwatch.process import extractor as ext
 from regwatch.process.embedder import get_embedding_provider
@@ -72,6 +73,38 @@ def _stub_llm(text: str) -> Any:
     return _LLM()
 
 
+def _turn(
+    claims: list[tuple[str, list[tuple[str, int]]]],
+    *,
+    turn_type: str = "ANSWER",
+) -> str:
+    """One structured synthesizer completion.
+
+    The synthesizer no longer writes prose or citation markers: it returns ONE
+    JSON object (see generate/turn_schema.py) declaring (short_name, page) per
+    claim, and the renderer writes every marker itself. Tests that hand the
+    provider stub prose are testing a channel that no longer exists.
+    """
+    return json.dumps(
+        {
+            "turn_type": turn_type,
+            "claims": [
+                {"text": text, "cites": [{"short_name": s, "page": p} for s, p in cites]}
+                for text, cites in claims
+            ],
+            "unsupported": [],
+        }
+    )
+
+
+def _only_route_json() -> dict:
+    """The single audit row's route_json, read INSIDE the session (detached rows expire)."""
+    with session_scope() as s:
+        routes = [dict(r.route_json or {}) for r in s.scalars(select(QueryLog))]
+    assert len(routes) == 1
+    return routes[0]
+
+
 # ---------- INV-1: Grounding ----------
 
 
@@ -88,27 +121,117 @@ def test_inv1_extractor_drops_uncited_field(monkeypatch: pytest.MonkeyPatch) -> 
     assert "study_type" not in res.citations
 
 
-def test_inv1_grounded_answer_has_only_known_citations(
+def test_inv1_fabricated_citation_drops_only_its_own_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fabricated marker cannot leave an uncited claim beside a valid claim."""
+    """A claim citing a passage that was never retrieved is dropped WHOLE.
+
+    MEANING CHANGED (structured turn contract). This test used to assert that a
+    single fabricated marker refused the ENTIRE turn, because the prose gate
+    split on sentence boundaries and could only accept or reject the whole
+    answer. The gate now admits claim by claim, so the fabricated claim vanishes
+    -- its TEXT and its marker together -- while the genuinely cited neighbour
+    survives and is disclosed as partial.
+
+    This asserts MORE, not less. The old prose path had two ways to leak: a
+    bibliography-style answer refused a correct turn (the bug this replaced),
+    and filter_citations rewrote a mixed bracket down to its valid pairs, which
+    left a model sentence whose real source was never retrieved standing under
+    someone else's real citation. Here the sentence never reaches the user at
+    all, and the drop is recorded in the audit row.
+    """
     _seed_corpus(
         [
             ("Fasting bioequivalence study with 36 subjects.", _meta(1, 3, "PSG_020503")),
             ("Dissolution: USP Apparatus 2 at 50 rpm.", _meta(1, 4, "PSG_020503")),
         ]
     )
-    # Answer cites a real passage AND a fabricated one.
-    answer_text = (
-        "A fasting bioequivalence study with 36 subjects is recommended "
-        "[PSG_020503, p.3]. The agency also recommends an in vivo fed study "
-        "[PSG_999999, p.7]."
+    # One claim cites a real retrieved passage; the other cites a document that
+    # was never retrieved. Neither dropped word is a materiality word, so this
+    # exercises the PARTIAL branch (the MATERIAL branch is the next test).
+    completion = _turn(
+        [
+            (
+                "A fasting bioequivalence study with 36 subjects is recommended.",
+                [("PSG_020503", 3)],
+            ),
+            ("The agency also recommends an in vivo fed study.", [("PSG_999999", 7)]),
+        ]
     )
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(answer_text))
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(completion))
     result = qa_mod.ask("What study design is recommended?")
+
+    assert not result.refused
+    assert result.status == "answer"
+    # Only the retrieved passage is citable.
+    assert {(c.short_name, c.page) for c in result.citations} == {("PSG_020503", 3)}
+    # The fabricated claim left NOTHING behind: no marker...
+    assert "PSG_999999" not in result.answer
+    # ...and no re-stamped sentence under the surviving valid citation.
+    assert "fed study" not in result.answer
+    # The admitted claim renders with a renderer-authored marker (INV-1: no
+    # regulatory sentence reaches the user uncited).
+    assert (
+        "A fasting bioequivalence study with 36 subjects is recommended [PSG_020503, p.3]."
+        in result.answer
+    )
+    # The user is told something was removed (OD-5), in plain language.
+    assert tg.PARTIAL_DROP_DISCLOSURE in result.answer
+    # Operator telemetry: the drop and its reason are on the audit row.
+    ledger = _only_route_json()["turn"]
+    assert (ledger["emitted"], ledger["admitted"], ledger["dropped"]) == (2, 1, 1)
+    assert [c["drop_reason"] for c in ledger["claims"] if not c["admitted"]] == [
+        tg.DROP_UNKNOWN_CITATION
+    ]
+
+
+def test_inv1_material_drop_rejects_the_whole_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dropping a claim that carries a qualifier rejects the ENTIRE answer.
+
+    The companion to the test above, and the reason claim-level admission is not
+    a weakening: when the dropped claim contains obligation/permission/exception
+    wording, the surviving claims can read as their own opposite, so nothing is
+    rendered -- not even the fully-cited survivor.
+    """
+    _seed_corpus(
+        [
+            ("Fasting bioequivalence study with 36 subjects.", _meta(1, 3, "PSG_020503")),
+            ("Dissolution: USP Apparatus 2 at 50 rpm.", _meta(1, 4, "PSG_020503")),
+        ]
+    )
+    completion = _turn(
+        [
+            (
+                "A fasting bioequivalence study with 36 subjects is recommended.",
+                [("PSG_020503", 3)],
+            ),
+            # "not"/"required" -> MATERIAL. Cites a document never retrieved.
+            ("A fed study is not required for this product.", [("PSG_999999", 7)]),
+        ]
+    )
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(completion))
+    result = qa_mod.ask("What study design is recommended?")
+
     assert result.refused
     assert result.citations == []
-    assert result.answer == get_settings().refusal_text
+    assert result.answer == tg.MATERIAL_DROP_TEXT
+    # The admitted claim is suppressed too -- an answer with the qualifier
+    # deleted is the failure mode this branch exists to prevent.
+    assert "36 subjects" not in result.answer
+    route_json = _only_route_json()
+    assert route_json["reason"] == "material_drop"
+    # OD-5's operator half on the branch that most needs it: the whole answer
+    # was thrown away, so the ONLY durable record of what the model actually
+    # claimed and why it was rejected is this ledger on the audit row.
+    ledger = route_json["turn"]
+    assert ledger["verdict"] == "material_drop"
+    assert ledger["material_word"] == "not"
+    assert (ledger["emitted"], ledger["admitted"], ledger["dropped"]) == (2, 1, 1)
+    dropped = [c for c in ledger["claims"] if not c["admitted"]]
+    assert [c["drop_reason"] for c in dropped] == ["unknown_citation"]
+    assert dropped[0]["bad_cites"] == ["PSG_999999,p.7"]
 
 
 # ---------- INV-2: Refuse over guess ----------
@@ -130,27 +253,93 @@ def test_inv2_refuses_when_corpus_empty(monkeypatch: pytest.MonkeyPatch) -> None
     assert called["n"] == 0
 
 
-def test_inv2_refuses_when_model_outputs_refusal_string(
+def test_inv2_refuses_when_model_declines_with_no_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If the model returns the refusal string, the system must refuse."""
+    """When the model declines, the system must refuse.
+
+    MEANING CHANGED (structured turn contract): the model no longer emits the
+    refusal STRING -- prose is not a channel it has. It declines by selecting
+    turn_type="NO_EVIDENCE" (the only two values it may select are ANSWER and
+    NO_EVIDENCE). The property is identical: a model decline never becomes an
+    answer, and the user-visible text is still the corpus refusal copy.
+    """
     _seed_corpus([("Generic body of content about bioequivalence.", _meta(2, 1, "PSG_222222"))])
     refusal = get_settings().refusal_text
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(refusal))
+    monkeypatch.setattr(
+        qa_mod,
+        "get_llm_provider",
+        lambda *a, **k: _stub_llm(_turn([], turn_type="NO_EVIDENCE")),
+    )
     result = qa_mod.ask("Some adversarial out-of-corpus question?")
     assert result.refused
+    assert result.citations == []
     assert result.answer == refusal
+
+
+def test_inv2_no_evidence_turn_cannot_smuggle_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NO_EVIDENCE turn's claims are discarded wholesale, cites or not.
+
+    A model that declines has, by its own account, nothing to cite, so anything
+    it left in a claim slot is unvetted -- including a claim whose citation
+    WOULD have resolved. Nothing from it may reach the user.
+    """
+    _seed_corpus([("Bioequivalence requires a fasting study.", _meta(3, 1, "PSG_333333"))])
+    completion = _turn(
+        [("A fasting study is recommended for this product.", [("PSG_333333", 1)])],
+        turn_type="NO_EVIDENCE",
+    )
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(completion))
+    result = qa_mod.ask("What study design is recommended?")
+    assert result.refused
+    assert result.citations == []
+    assert result.answer == get_settings().refusal_text
+    assert "fasting" not in result.answer.lower()
 
 
 def test_inv2_refuses_when_answer_has_no_valid_citations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A confident answer without any verifiable citation must collapse to refusal."""
+    """A confident answer whose every citation fails validation collapses to refusal.
+
+    Zero admitted claims is deliberately NOT reported as a model decline: the
+    refusal text is the corpus statement, and the reason recorded on the audit
+    row must say the citations failed, not that the corpus lacked coverage.
+    """
     _seed_corpus([("Bioequivalence requires a fasting study.", _meta(3, 1, "PSG_333333"))])
-    fabricated = "The recommended dose is 100 mg per day [PSG_999999, p.99]."
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(fabricated))
+    completion = _turn(
+        [("The recommended dose is 100 mg per day.", [("PSG_999999", 99)])],
+    )
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(completion))
     result = qa_mod.ask("What is the recommended dose?")
     assert result.refused
+    assert result.citations == []
+    assert result.answer == get_settings().refusal_text
+    # The fabricated claim text never surfaces.
+    assert "100 mg" not in result.answer
+    assert _only_route_json()["reason"] == "no_valid_citations"
+
+
+def test_inv2_malformed_turn_is_a_machine_error_not_a_corpus_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unparseable completion must NOT be recorded as "not in the corpus".
+
+    New property of the structured contract. A parse failure says something
+    about the MACHINE; serving the corpus refusal copy would write an assertion
+    about FDA coverage that was never tested into the permanent audit row.
+    """
+    _seed_corpus([("Bioequivalence requires a fasting study.", _meta(3, 1, "PSG_333333"))])
+    monkeypatch.setattr(
+        qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm("Sure! Here is your answer.")
+    )
+    result = qa_mod.ask("What study design is recommended?")
+    assert result.refused
+    assert result.citations == []
+    assert result.answer != get_settings().refusal_text
+    assert result.status == "error"
 
 
 # ---------- INV-6: Auditability ----------
@@ -163,8 +352,15 @@ def _row_count(model: Any) -> int:
 
 def test_inv6_every_qa_call_logs_one_row(monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_corpus([("Fasting BE study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
+    # A conformant ANSWER turn: without it the stub's prose fails the gate and
+    # this test would count rows on the parse-failure path instead of the
+    # answer path it is meant to cover.
     monkeypatch.setattr(
-        qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm("Yes. [PSG_020503, p.3]")
+        qa_mod,
+        "get_llm_provider",
+        lambda *a, **k: _stub_llm(
+            _turn([("A fasting study with 36 subjects is recommended.", [("PSG_020503", 3)])])
+        ),
     )
     assert _row_count(QueryLog) == 0
     qa_mod.ask("Is a fasting study recommended?")

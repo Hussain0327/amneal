@@ -14,29 +14,43 @@ from sqlmodel import col, select
 
 from regwatch.common.conversation import update_session_filters
 from regwatch.generate import grounded_qa as qa_mod
+from regwatch.generate import turn_gate as tg
 from regwatch.generate.llm import LLMResponse
 from regwatch.process.embedder import get_embedding_provider
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import ChatMessage, ChatSession, QueryLog
 from regwatch.store.vector_store import add_chunks
+from tests.conftest import synth_turn_json
+
+# The adversarial structured turn. Claim 0 declares ONLY the retrieved albuterol
+# passage, so it is admitted and the turn stays an ANSWER (which is what keeps the
+# session/audit bookkeeping below observable). Claim 1 declares the valid albuterol
+# pair AND a wrong-drug levalbuterol pair that was never retrieved this turn.
+#
+# The contract changed here and the assertions below changed with it: the old gate
+# scrubbed the bad pair OUT of the bracket and let the sentence stand, re-stamping
+# model text onto a passage that may not support it. The turn gate drops the WHOLE
+# claim instead (OD-4) -- strictly stricter -- so claim 1's text never renders at
+# all. Its wording is deliberately free of MATERIALITY_WORDS so the drop is
+# immaterial and the turn renders with a disclosure; a materiality word there
+# would reject the entire answer and this test would stop covering the
+# leak-inside-a-surfaced-answer case.
+_LEAKY_TURN = synth_turn_json(
+    [
+        ("The albuterol PSG evidence supports the requested point", [("PSG_020503", 4)]),
+        (
+            "Cross-product dissolution details appear in a second guidance document",
+            [("PSG_020503", 4), ("PSG_021730", 4)],
+        ),
+    ]
+)
 
 
 class _LeakyLLM:
     name = "stub"
 
     def complete(self, *args: object, **kwargs: object) -> LLMResponse:
-        return LLMResponse(
-            # Wrong-drug pair shares the bracket with the valid one so the
-            # sentence still carries a citation after the leak is stripped. As a
-            # trailing sentence of its own it would be left bare, and the
-            # per-segment citation contract would refuse the turn -- which would
-            # test refusal rather than that a surfaced answer is scrubbed.
-            text=(
-                "The albuterol PSG evidence supports the requested point "
-                "[PSG_020503, p.4; PSG_021730, p.4]."
-            ),
-            model="stub",
-        )
+        return LLMResponse(text=_LEAKY_TURN, model="stub")
 
 
 def _seed_two_inhalation_drugs() -> None:
@@ -107,6 +121,11 @@ def test_follow_up_uses_session_product_context_without_cross_drug_leak(
     assert {r["short_name"] for r in follow_up.retrieved} == {"PSG_020503"}
     assert {(c.short_name, c.page) for c in follow_up.citations} == {("PSG_020503", 4)}
     assert "PSG_021730" not in follow_up.answer
+    # The leaky claim is dropped WHOLE, not scrubbed: neither its citation nor
+    # its TEXT may reach the user riding on the valid pair it also declared.
+    assert "Cross-product dissolution details" not in follow_up.answer
+    # OD-5: the user is told something was removed, in plain language.
+    assert tg.PARTIAL_DROP_DISCLOSURE in follow_up.answer
 
     with session_scope() as s:
         session = s.get(ChatSession, first.session_id)
@@ -139,6 +158,19 @@ def test_follow_up_uses_session_product_context_without_cross_drug_leak(
     )
     assert all(log["retrieved_json"] for log in logs)
     assert all(log["citations_json"] for log in logs)
+    # OD-5's operator half: the drop the USER only sees as a plain-language
+    # disclosure is fully forensic in the audit row -- which claim, why, and the
+    # exact (short_name, page) that failed. A silent drop would be the same
+    # invisible-degradation class the disclosure exists to prevent.
+    ledgers = [log["route_json"]["turn"] for log in logs]
+    assert all(led["verdict"] == tg.VERDICT_PARTIAL for led in ledgers)
+    assert all(
+        any(
+            c["drop_reason"] == tg.DROP_UNKNOWN_CITATION and "PSG_021730,p.4" in c["bad_cites"]
+            for c in led["claims"]
+        )
+        for led in ledgers
+    )
 
 
 def test_update_session_filters_never_resurrects_deleted_sessions() -> None:

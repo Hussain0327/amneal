@@ -131,14 +131,20 @@ class Settings(BaseSettings):
     router_model: str = "gpt-5-nano"
     synthesizer_model: str = "gpt-5.4-nano"
     extractor_model: str = "gpt-5.4-nano"
-    # Output cap for the SYNTHESIZER role only (both the buffered and the
-    # streaming twin; see generate/grounded_qa.py). A setting rather than a
-    # constant because a reasoning model needs headroom the gpt-5.4-nano tuning
-    # never did, and an operator must be able to give it that during an incident
-    # without a deploy. The default is deliberately the historical constant:
-    # LLM_PROVIDER=openai is the live rollback path and its answer length,
-    # eval baselines, dossier and white-paper output must stay byte-identical.
-    synthesizer_max_tokens: int = 900
+    # Output cap for the SYNTHESIZER role only (see generate/grounded_qa.py). A
+    # setting rather than a constant because a reasoning model needs headroom
+    # the gpt-5.4-nano tuning never did, and an operator must be able to give it
+    # that during an incident without a deploy.
+    #
+    # Raised 900 -> 1600 when synthesis moved to a JSON claims envelope. The
+    # envelope spends tokens on structure (per-claim objects with named cite
+    # objects) that prose spent on content, and a truncated JSON payload is
+    # UNPARSEABLE where truncated prose merely lost a sentence -- the failure
+    # got sharper, so the budget has to get bigger. A live replay of the failing
+    # prod call already used 842 completion tokens against the old 900 cap, in
+    # PROSE. 1600 is a sized guess, not a measurement: instrument output_tokens
+    # on the first structured turns and re-tune from data.
+    synthesizer_max_tokens: int = 1600
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     # ---------- LLM client transport (B3) ----------

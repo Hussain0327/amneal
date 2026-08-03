@@ -1,16 +1,27 @@
-"""POST /query/stream — the Server-Sent Events twin of POST /query.
+"""POST /query/stream -- the Server-Sent Events twin of POST /query.
 
-These assert the INV-1 emit boundary holds over the wire: no answer text or
-citation appears before the single validated ``result`` frame; refusals stream
-no prose and never leak a fabricated citation; exactly one audit row is written
-(INV-6); the streamed result matches blocking /query (parity); only the three
-event names the frontend parses (``status``/``token``/``result``) are emitted
-(``token`` needs a streaming provider — covered in test_streaming_synthesis.py)
-plus anonymous ``: keep-alive`` comment frames the parser skips; auth /
-rate-limit / ownership are enforced BEFORE the stream opens; a mid-stream
-failure closes the stream with NO result frame (the client's fallback
-trigger); request filters are whitelisted at the boundary; and ask() dispatch
-rides a dedicated bounded worker pool with defined behavior at saturation.
+These assert the INV-1 emit boundary holds over the wire: no answer text and no
+citation marker appears in a ``status`` frame; every ``token`` frame carries the
+GATED, RENDERED, ALREADY-AUDITED answer and nothing else (the joined deltas are
+byte-identical to the validated ``result``), so a draft the gate declined or
+retracted can never be painted; refusals stream no prose, no tokens, and never
+leak a fabricated citation or the ungrounded claim text behind it; exactly one
+audit row is written (INV-6); the streamed result matches blocking /query
+(parity); only the three event names the frontend parses
+(``status``/``token``/``result``) are emitted, plus anonymous ``: keep-alive``
+comment frames the parser skips; auth / rate-limit / ownership are enforced
+BEFORE the stream opens; a mid-stream failure closes the stream with NO result
+frame (the client's fallback trigger); request filters are whitelisted at the
+boundary; and ask() dispatch rides a dedicated bounded worker pool with defined
+behavior at saturation.
+
+CONTRACT NOTE (structured synthesizer). The synthesizer returns ONE JSON turn,
+never prose, and live token streaming from synthesis is gone. ``token`` frames
+are now a post-audit REPLAY of the renderer's own answer, so they no longer need
+a streaming provider -- and they are strictly SAFER than the provisional draft
+they replace, which put ungated model bytes on the wire and relied on the client
+to label them. The tests below pin that: token bytes must equal the validated
+result exactly, and a non-answer turn must produce none at all.
 """
 
 from __future__ import annotations
@@ -31,14 +42,59 @@ from sqlmodel import select
 
 from regwatch.api import main as api_main
 from regwatch.generate import grounded_qa as qa_mod
+from regwatch.generate.llm import LLMResponse
 from regwatch.store.db import session_scope
 from regwatch.store.models import QueryLog
 from tests.conftest import create_user, session_client
-from tests.test_invariants import _meta, _seed_corpus, _stub_llm
+from tests.test_invariants import _meta, _seed_corpus
 
 pytestmark = pytest.mark.invariants
 
 _ACCEPT = {"Accept": "text/event-stream"}
+
+
+def _turn_json(
+    *claims: tuple[str, list[tuple[str, int]]],
+    turn_type: str = "ANSWER",
+    unsupported: tuple[str, ...] = (),
+) -> str:
+    """One conformant structured synthesizer turn as raw completion text.
+
+    Each claim is ``(text, [(short_name, page), ...])``. The model authors NO
+    citation markers -- the renderer writes them from validated passages -- so
+    the claim text here is deliberately marker-free.
+    """
+    return json.dumps(
+        {
+            "turn_type": turn_type,
+            "claims": [
+                {
+                    "text": text,
+                    "cites": [{"short_name": s, "page": p} for s, p in cites],
+                }
+                for text, cites in claims
+            ],
+            "unsupported": list(unsupported),
+        }
+    )
+
+
+def _turn_llm(payload: str) -> Any:
+    """A buffered, complete()-only provider returning one raw completion.
+
+    Deliberately local rather than shared: what these tests pin IS the
+    synthesizer's output contract, so the stub encoding that contract must not
+    be able to change shape underneath them from another module. It has no
+    ``stream`` attribute on purpose -- structured synthesis is buffered-only.
+    """
+
+    class _LLM:
+        name = "stub"
+
+        def complete(self, *a: object, **kw: object) -> LLMResponse:
+            return LLMResponse(text=payload, model="stub")
+
+    return _LLM()
 
 
 def _parse_sse(body: str) -> list[tuple[str, str]]:
@@ -77,11 +133,13 @@ def _row_count() -> int:
 def test_query_stream_streams_progress_then_one_result_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Zero-or-more status frames, then exactly one terminal result frame —
-    answer text lives ONLY in the result (INV-1), never in a status frame."""
+    """Zero-or-more status frames, then the answer replayed as token frames,
+    then exactly one terminal result frame. Answer text never appears in a
+    status frame (INV-1), and the token bytes are EXACTLY the gated, rendered,
+    already-audited answer -- never a provisional draft."""
     _seed_corpus([("Fasting BE study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
-    answer = "A fasting bioequivalence study is recommended [PSG_020503, p.3]."
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(answer))
+    turn = _turn_json(("A fasting bioequivalence study is recommended", [("PSG_020503", 3)]))
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _turn_llm(turn))
     client = session_client(create_user())
     try:
         res = _stream(client, "What study design is recommended?")
@@ -89,10 +147,8 @@ def test_query_stream_streams_progress_then_one_result_frame(
         assert "text/event-stream" in res.headers["content-type"]
         frames = _parse_sse(res.text)
         events = [e for e, _ in frames]
-        # The contract: exactly one result, last. `token` is absent HERE only
-        # because the shared _stub_llm is complete()-only (no .stream method);
-        # token-frame coverage lives in test_streaming_synthesis.py.
-        assert set(events) <= {"status", "result"}
+        # The contract: only the three parsed names, exactly one result, last.
+        assert set(events) <= {"status", "token", "result"}
         assert events.count("result") == 1
         assert events[-1] == "result"
         # Real progress streamed (not just one canned line): the heartbeat plus
@@ -111,6 +167,12 @@ def test_query_stream_streams_progress_then_one_result_frame(
         assert {(c["short_name"], c["page"]) for c in result["citations"]} == {("PSG_020503", 3)}
         assert isinstance(result["audit_id"], int)
         assert result["session_id"] and result["turn_id"]
+        # The token frames are a post-audit replay of the RENDERED answer: no
+        # byte the gate did not admit reaches the wire, and none is lost.
+        deltas = [json.loads(d) for e, d in frames if e == "token"]
+        assert deltas, "an answer turn must replay its rendered answer as tokens"
+        assert all(set(p) == {"delta"} for p in deltas)
+        assert "".join(p["delta"] for p in deltas) == result["answer"]
     finally:
         client.__exit__(None, None, None)
 
@@ -118,14 +180,19 @@ def test_query_stream_streams_progress_then_one_result_frame(
 def test_query_stream_matches_blocking_query(monkeypatch: pytest.MonkeyPatch) -> None:
     """The streamed result frame is content-identical to blocking POST /query."""
     _seed_corpus([("Fasting BE study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
-    answer = "A fasting study is recommended [PSG_020503, p.3]."
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(answer))
+    turn = _turn_json(("A fasting study is recommended", [("PSG_020503", 3)]))
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _turn_llm(turn))
     client = session_client(create_user())
     try:
         q = "What study design is recommended?"
         blocking = client.post("/query", json={"question": q})
         assert blocking.status_code == 200
         blocking_json = blocking.json()
+        # Parity is only meaningful on a real ANSWER turn: two identical
+        # service-error refusals would satisfy every assertion below while
+        # proving nothing about the synthesis path.
+        assert blocking_json["refused"] is False
+        assert blocking_json["status"] == "answer"
         streamed = _result_payload(_parse_sse(_stream(client, q).text))
         # Per-turn identifiers differ; the answer content must not.
         for field in ("answer", "refused", "status"):
@@ -138,30 +205,44 @@ def test_query_stream_matches_blocking_query(monkeypatch: pytest.MonkeyPatch) ->
 def test_query_stream_refuses_fabricated_citation_without_leaking_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A confident answer whose only citation is fabricated collapses to a
-    refusal, and the fabricated marker never appears in ANY frame (INV-1)."""
+    """A confident claim whose only declared citation resolves to no retrieved
+    passage is dropped WHOLE; with nothing admitted the turn collapses to a
+    refusal, and neither the fabricated pair nor the claim text it carried
+    appears in ANY frame (INV-1)."""
     _seed_corpus([("Bioequivalence requires a fasting study.", _meta(3, 1, "PSG_333333"))])
-    fabricated = "The recommended dose is 100 mg per day [PSG_999999, p.99]."
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(fabricated))
+    fabricated = _turn_json(("The recommended dose is 100 mg per day", [("PSG_999999", 99)]))
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _turn_llm(fabricated))
     client = session_client(create_user())
     try:
         body = _stream(client, "What is the recommended dose?").text
-        # The fabricated citation is never emitted, in any frame.
+        # The fabricated citation is never emitted, in any frame -- and neither
+        # is the ungrounded claim it was attached to.
         assert "PSG_999999" not in body
-        result = _result_payload(_parse_sse(body))
+        assert "100 mg per day" not in body
+        frames = _parse_sse(body)
+        # A retracted draft is never painted: a non-answer turn streams no tokens.
+        assert "token" not in [e for e, _ in frames]
+        result = _result_payload(frames)
         assert result["refused"] is True
         assert result["citations"] == []
+        # The corpus statement, not the service-error copy: the gate parsed the
+        # turn fine and rejected its evidence, so this IS an assertion about
+        # coverage and the audit row must record it as one.
         assert result["answer"] == get_settings().refusal_text
     finally:
         client.__exit__(None, None, None)
 
 
 def test_query_stream_writes_exactly_one_audit_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    """INV-6: one streamed query writes exactly one query_log row, attributed."""
+    """INV-6: one streamed query writes exactly one query_log row, attributed.
+
+    Exercised on a real ANSWER turn on purpose -- that is the branch using the
+    STRICT audit write (no-audit-no-answer), where a duplicate or missing row
+    would be worst.
+    """
     _seed_corpus([("Fasting BE study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
-    monkeypatch.setattr(
-        qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm("Yes. [PSG_020503, p.3]")
-    )
+    turn = _turn_json(("A fasting study is recommended", [("PSG_020503", 3)]))
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _turn_llm(turn))
     user_id = create_user()
     client = session_client(user_id)
     try:
@@ -173,6 +254,8 @@ def test_query_stream_writes_exactly_one_audit_row(monkeypatch: pytest.MonkeyPat
             row = s.scalars(select(QueryLog)).all()[-1]
             assert row.mode == "qa"
             assert row.user_id == str(user_id)
+            assert row.refused is False
+            assert row.status == "answer"
     finally:
         client.__exit__(None, None, None)
 

@@ -6,11 +6,16 @@ row first, then the assistant message that references the audit id). Four
 pinned properties:
 
   * core purity   -- every write function raises if touched while ask_core
-                     runs (success, refusal, clarify, and meta paths alike);
+                     runs (success, refusal, clarify, and meta paths alike),
+                     and the core emits no user-visible bytes at all: it has
+                     no token sink any more, so nothing can reach a reader
+                     before the gate and the audit write have both run;
   * shell ordering -- ask() writes the user message, THEN the audit row, THEN
                      the assistant message carrying that audit id (INV-6:
                      the audit write precedes everything the turn leaves
-                     behind except the pre-compute user row);
+                     behind except the pre-compute user row), and the
+                     ``on_token`` replay comes after the audit row and only
+                     on a turn that actually answered;
   * shell parity  -- ask() persists exactly what the pre-refactor code wrote,
                      for the answer flow AND each terminal decline family
                      (audit row fields, both chat messages, filter carry-over);
@@ -37,6 +42,7 @@ from regwatch.process.embedder import get_embedding_provider
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import ChatMessage, ChatSession, QueryLog
 from regwatch.store.vector_store import add_chunks
+from tests.conftest import synth_turn_json
 from tests.test_invariants import _meta, _seed_corpus, _stub_llm
 
 pytestmark = pytest.mark.invariants
@@ -111,7 +117,16 @@ def _seed_names(names: list[str]) -> None:
     )
 
 
-_CITED_ANSWER = "A fasting study is recommended [PSG_020503, p.3]."
+# The synthesizer returns a STRUCTURED turn, never prose: one claim, one
+# (short_name, page) pair that the seeded corpus actually contains. The claim
+# text carries no citation marker of its own -- markers are renderer-authored,
+# so a stub that wrote one would be testing a channel the gate strips.
+_CLAIM_TEXT = "A fasting study is recommended"
+_CITED_TURN = synth_turn_json([(_CLAIM_TEXT, [("PSG_020503", 3)])])
+# What the renderer stamps onto that claim. Asserted (rather than recomputed
+# from the module under test) so a silent change to marker shape shows up here
+# as a persistence-parity failure instead of passing vacuously.
+_CLAIM_MARKER = "[PSG_020503, p.3]"
 
 
 # ---------- core purity: no writes on any path ----------
@@ -119,7 +134,7 @@ _CITED_ANSWER = "A fasting study is recommended [PSG_020503, p.3]."
 
 def test_core_success_path_never_writes(monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_albuterol()
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_CITED_ANSWER))
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_CITED_TURN))
     _forbid_persistence(monkeypatch)
 
     outcome, audit, patch = _run_core("What study design is recommended?")
@@ -196,7 +211,7 @@ def test_shell_write_order_audit_before_assistant_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _seed_albuterol()
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_CITED_ANSWER))
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_CITED_TURN))
 
     # The real write functions, taken from their home modules (identical
     # objects to grounded_qa's module globals before the monkeypatch below).
@@ -234,13 +249,53 @@ def test_shell_write_order_audit_before_assistant_message(
     assert events[2][1] == result.audit_id
 
 
+def test_shell_replays_tokens_only_after_the_audit_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``on_token`` is a SHELL concern now, not a core one.
+
+    The core used to stream provisional model tokens, so a reader could see text
+    the citation gate later retracted, and a complete answer could reach them
+    with no audit row anywhere. The sink now replays the rendered, gated answer
+    after the audit row commits. Two properties, both INV-1/INV-6 load-bearing:
+    every byte emitted is exactly the recorded answer, and no byte precedes the
+    audit write.
+    """
+    _seed_albuterol()
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_CITED_TURN))
+
+    events: list[str] = []
+
+    def _rec_log(**kw: Any) -> int:
+        events.append("log_query")
+        return log_query(**kw)
+
+    monkeypatch.setattr(qa_mod, "log_query", _rec_log)
+
+    tokens: list[str] = []
+
+    def _on_token(delta: str) -> None:
+        events.append("token")
+        tokens.append(delta)
+
+    result = qa_mod.ask("What study design is recommended?", on_token=_on_token)
+
+    assert result.status == "answer"
+    assert tokens  # an answer turn does emit
+    # Byte-identical to the record: the sink cannot show a draft, a stripped
+    # marker, or a claim the gate dropped.
+    assert "".join(tokens) == result.answer
+    assert events.count("log_query") == 1
+    assert events.index("log_query") < events.index("token")
+
+
 # ---------- shell parity: ask() persists the pre-refactor golden ----------
 
 
 def test_shell_persists_the_pre_refactor_golden(monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_albuterol()
     question = "What study design is recommended?"
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_CITED_ANSWER))
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_CITED_TURN))
 
     result = qa_mod.ask(question)
 
@@ -257,12 +312,23 @@ def test_shell_persists_the_pre_refactor_golden(monkeypatch: pytest.MonkeyPatch)
         assert row.session_id == result.session_id
         assert row.turn_id == result.turn_id
         assert row.answer_text == result.answer
+        # What is persisted is the RENDERED answer, not the model's draft: the
+        # claim text plus a renderer-authored marker. The model never wrote one.
+        assert row.answer_text.startswith(f"{_CLAIM_TEXT} {_CLAIM_MARKER}.")
         assert [(c["short_name"], c["page"]) for c in row.citations_json] == [("PSG_020503", 3)]
         assert list(row.retrieved_json) == result.retrieved
         route = dict(row.route_json)
         assert route["reason"] == "retrieval"
         assert route["response_mode"] == "answer"
         assert route["filters"]["normalized_name"] == "albuterol sulfate"
+        # The gate's forensic ledger rides on the SAME audit row (its id is the
+        # response id), so a drop decision is reconstructable after the fact.
+        turn_ledger = dict(route["turn"])
+        assert turn_ledger["verdict"] == "answer"
+        assert turn_ledger["emitted"] == 1
+        assert turn_ledger["admitted"] == 1
+        assert turn_ledger["dropped"] == 0
+        assert [c["index"] for c in turn_ledger["claims"]] == [0]
         # Token fields NULL: the echo-stub response reported no usage.
         assert row.input_tokens is None
         assert row.output_tokens is None
@@ -305,7 +371,7 @@ class _BoomProvider:
 
 def _setup_answer(monkeypatch: pytest.MonkeyPatch) -> str:
     _seed_albuterol()
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_CITED_ANSWER))
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_CITED_TURN))
     return "What study design is recommended?"
 
 
@@ -318,7 +384,7 @@ def _setup_summary(monkeypatch: pytest.MonkeyPatch) -> str:
     import config.settings as cs
 
     cs.get_settings.cache_clear()
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_CITED_ANSWER))
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_CITED_TURN))
     return "Summarize the recommended study design."
 
 
@@ -416,3 +482,24 @@ def test_shell_terminal_shapes_persist_like_pre_refactor(
     assert [m[0] for m in messages] == ["user", "assistant"]
     assert messages[1][1] == result.audit_id
     assert messages[1][2] == expected_status
+
+
+@pytest.mark.parametrize("expected_status", ["refused", "clarify", "meta", "error"])
+def test_shell_replays_no_tokens_on_a_non_answer_turn(
+    expected_status: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn that did not answer paints NOTHING.
+
+    This is where the deleted ``_stream_synthesis`` sentinel guard now lives: it
+    used to hold the refusal string token by token so a decline was never
+    painted as a grounded answer for a beat. The shell reaches the same end by
+    replaying only on an answer/summary turn -- a refusal, a clarify, a meta
+    reply and a provider outage all emit zero bytes to the sink.
+    """
+    question = _SCENARIOS[expected_status](monkeypatch)
+    tokens: list[str] = []
+
+    result = qa_mod.ask(question, on_token=tokens.append)
+
+    assert result.status == expected_status
+    assert tokens == []

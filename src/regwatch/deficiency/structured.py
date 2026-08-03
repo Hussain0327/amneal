@@ -22,12 +22,27 @@ violation must fail the run loudly, not degrade into a needs-human-review card.
 from __future__ import annotations
 
 import json
-from typing import Any, TypeVar
+from typing import TypeVar
 
 from json_repair import repair_json
 from pydantic import BaseModel, ValidationError
 
 from regwatch.common.logging import get_logger
+
+# The three helpers now live in common/ so generate/ can use them too (see
+# common/structured_json.py for why the move was necessary). Re-exported with
+# `as` aliases because mypy runs strict=true, which turns on
+# no_implicit_reexport -- a bare import would break every downstream import of
+# these names from this module.
+from regwatch.common.structured_json import (
+    _sanitize as _sanitize,
+)
+from regwatch.common.structured_json import (
+    extract_json_blob as _extract_json_blob,
+)
+from regwatch.common.structured_json import (
+    schema_for_prompt as schema_for_prompt,
+)
 from regwatch.deficiency.schemas.llm import ParseFailed
 from regwatch.generate.llm import D1ResidencyError, LLMMessage, LLMProvider, get_llm_provider
 
@@ -38,66 +53,6 @@ T = TypeVar("T", bound=BaseModel)
 # Upstream defaults (config.py max_tokens_ceiling / structured_output_max_repair_calls).
 _MAX_TOKENS_CEILING = 8000
 _MAX_REPAIR_CALLS = 1
-
-
-def schema_for_prompt(model_cls: type[BaseModel]) -> dict[str, Any]:
-    """Pydantic JSON schema sanitized the way the upstream stack shipped it.
-
-    additionalProperties: false, no string patterns, anyOf[X, null] flattened.
-    Kept even though the schema now travels in the prompt rather than as a
-    strict response_format: smaller schemas prompt better and the sanitizer is
-    load-bearing for optional-field shapes.
-    """
-    return _sanitize(model_cls.model_json_schema())
-
-
-def _sanitize(node: Any) -> Any:
-    if isinstance(node, dict):
-        node = dict(node)
-        if "anyOf" in node:
-            variants = node["anyOf"]
-            non_null = [
-                v for v in variants if not (isinstance(v, dict) and v.get("type") == "null")
-            ]
-            if len(non_null) == 1:
-                inherited = _sanitize(non_null[0])
-                for k, v in inherited.items():
-                    if k not in node:
-                        node[k] = v
-                node.pop("anyOf", None)
-            else:
-                node["anyOf"] = [_sanitize(v) for v in variants]
-        node.pop("pattern", None)
-        if node.get("type") == "object":
-            node["additionalProperties"] = False
-        for k, v in list(node.items()):
-            node[k] = _sanitize(v)
-        return node
-    if isinstance(node, list):
-        return [_sanitize(v) for v in node]
-    return node
-
-
-def _extract_json_blob(text: str) -> str:
-    """Strip common wrappers: markdown fences, leading prose."""
-    if not text:
-        return text
-    stripped = text.strip()
-    if "```" in stripped:
-        first = stripped.find("```")
-        after_fence = stripped[first + 3 :]
-        newline = after_fence.find("\n")
-        if 0 < newline < 20:
-            after_fence = after_fence[newline + 1 :]
-        end = after_fence.rfind("```")
-        if end > 0:
-            return after_fence[:end].strip()
-    for open_c, close_c in [("{", "}"), ("[", "]")]:
-        start = stripped.find(open_c)
-        end = stripped.rfind(close_c)
-        if start >= 0 and end > start:
-            return stripped[start : end + 1]
-    return stripped
 
 
 def parse_structured(raw: str, model_cls: type[T]) -> tuple[T | None, str | None]:
@@ -148,8 +103,14 @@ def _complete_with_truncation_retry(
     temperature: float,
     max_tokens: int,
 ) -> str:
-    """L1 + L2. Providers raise RuntimeError on finish_reason=length/incomplete;
-    retry once with doubled max_tokens, then let the failure propagate."""
+    """L1 + L2. Retry once with doubled max_tokens, then let the failure propagate.
+
+    NOT every provider raises on truncation: only Databricks inspects
+    finish_reason (llm.py _raise_for_finish_reason) and the Responses path
+    inspects status=incomplete. OpenAI chat mode and Anthropic inspect neither,
+    so on those a budget-exhausted payload arrives cleanly closed and simply
+    fails validation instead of reaching this retry.
+    """
     capped = min(max_tokens, _MAX_TOKENS_CEILING)
     try:
         return provider.complete(

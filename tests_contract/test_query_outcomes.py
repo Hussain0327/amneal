@@ -59,9 +59,19 @@ def _one_new_row(payload: dict[str, Any], client: EdgeClient) -> dict[str, Any]:
         prompt = row["route_json"]["prompt"]
         assert set(prompt) == {"prompt_id", "version", "sha256"}
         assert prompt["prompt_id"] == "regwatch.grounded_qa"
-        assert prompt["version"] == "2"
+        # A deliberate pin, never a mirror of the source: changing the prompt
+        # identity must be a conscious edit here. "3" is the structured-turn
+        # rewrite (the model emits claims + declared cites, never prose with
+        # its own markers).
+        assert prompt["version"] == "3"
         assert re.fullmatch(r"[0-9a-f]{64}", prompt["sha256"])
         assert isinstance(row["route_json"]["partial_evidence"], bool)
+        # The gate ledger reached the row, and its verdict agrees with the
+        # turn that was served: an answer/summary is only rendered when at
+        # least one claim was admitted.
+        turn = row["route_json"]["turn"]
+        assert turn["verdict"] in {"answer", "partial"}
+        assert turn["admitted"] >= 1
     return row
 
 

@@ -37,6 +37,7 @@ from regwatch.retrieve.retriever import RetrievedPassage
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import PsgDocument, PsgVersion, QueryLog
 from regwatch.store.vector_store import add_chunks
+from tests.conftest import synth_turn_json
 
 pytestmark = pytest.mark.invariants
 
@@ -141,23 +142,35 @@ _SINGLE_FORM: list[_Row] = [
 ]
 
 
+def _first_passage_pair(messages: list[Any]) -> tuple[str, int] | None:
+    """The (short_name, page) header of the FIRST passage sent this turn."""
+    user = next((m.content for m in reversed(messages) if m.role == "user"), "")
+    region = user.split("<untrusted_source_passages>\n", 1)[-1].split(
+        "\n</untrusted_source_passages>", 1
+    )[0]
+    first = next((b.strip() for b in region.split("\n---\n") if b.strip()), "")
+    head = first.partition("\n")[0]
+    m = re.search(r"\[([^,\]]+),\s*p\.(\d+)\]", head)
+    return (m.group(1), int(m.group(2))) if m else None
+
+
 class _CitingStub:
-    """Cites the first passage it was handed — faithful by construction."""
+    """Cites the first passage it was handed — faithful by construction.
+
+    Returns the STRUCTURED turn object the synthesizer contract now requires
+    (one claim, one declared cite); the renderer, not the model, writes the
+    citation marker. A model that cannot cite declines with turn_type
+    "NO_EVIDENCE" -- the refusal STRING is no longer a synthesizer output.
+    """
 
     name = "stub"
 
     def complete(self, messages: list[Any], **_kw: object) -> LLMResponse:
-        user = next((m.content for m in reversed(messages) if m.role == "user"), "")
-        region = user.split("<untrusted_source_passages>\n", 1)[-1].split(
-            "\n</untrusted_source_passages>", 1
-        )[0]
-        first = next((b.strip() for b in region.split("\n---\n") if b.strip()), "")
-        head = first.partition("\n")[0]
-        m = re.search(r"\[([^,\]]+),\s*p\.(\d+)\]", head)
-        if not m:
-            return LLMResponse(text=get_settings().refusal_text, model=self.name)
+        pair = _first_passage_pair(messages)
+        if pair is None:
+            return LLMResponse(text=synth_turn_json(turn_type="NO_EVIDENCE"), model=self.name)
         return LLMResponse(
-            text=f"Recommended BE study design summary [{m.group(1)}, p.{m.group(2)}].",
+            text=synth_turn_json([("Recommended BE study design summary", [pair])]),
             model=self.name,
         )
 
@@ -211,6 +224,62 @@ def test_selecting_one_combo_answers_with_citation(monkeypatch: pytest.MonkeyPat
     # Constrained to the chosen form only — no vaginal-tablet leak.
     assert {p["short_name"] for p in r.retrieved} == {"PSG_020001"}
     assert {(c.short_name, c.page) for c in r.citations} == {("PSG_020001", 1)}
+
+
+def test_wrong_form_citation_after_pin_is_dropped_not_restamped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """INV-1, the reason this whole file exists: once a combo is pinned, a claim
+    citing the OTHER form's PSG must be dropped WHOLE, never re-stamped onto the
+    pinned passage. PSG_020002 is a real seeded document, so only "was it sent
+    THIS turn" can reject it. Zero admitted claims -> refuse with no citations.
+    """
+    _stub(monkeypatch)
+    _seed(_MULTIFORM)
+
+    class _WrongFormStub:
+        name = "stub"
+
+        def complete(self, messages: list[Any], **_kw: object) -> LLMResponse:
+            # Cites the vaginal-tablet PSG while only the gel PSG was retrieved.
+            return LLMResponse(
+                text=synth_turn_json(
+                    [("Recommended BE study design summary", [("PSG_020002", 1)])]
+                ),
+                model=self.name,
+            )
+
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _WrongFormStub())
+
+    r = qa_mod.ask(
+        "What bioequivalence study design does FDA recommend for estradiol?",
+        filters={"normalized_name": "estradiol", "dosage_form": "Gel", "route": "Transdermal"},
+    )
+
+    assert r.refused is True
+    assert r.status == "refused"
+    assert r.reason == "no_valid_citations"
+    assert r.citations == []
+    # Neither form's marker may appear: the claim is not re-stamped onto the
+    # pinned gel passage, and the unretrieved tablet PSG is not echoed either.
+    assert "PSG_020001" not in r.answer
+    assert "PSG_020002" not in r.answer
+    # INV-6: the decline is audited, and the unvalidated claim never lands in the
+    # persisted answer. OD-5's operator half: a DECLINE row carries the gate
+    # ledger too, so the drop reason and the offending (short_name, page) are
+    # forensically recoverable from the DB -- not only from a structlog line.
+    with session_scope() as s:
+        row = s.get(QueryLog, r.audit_id)
+        assert row is not None
+        assert row.refused is True
+        ledger = row.route_json["turn"]
+        assert ledger["verdict"] == "no_valid_citations"
+        assert (ledger["emitted"], ledger["admitted"], ledger["dropped"]) == (1, 0, 1)
+        claims = ledger["claims"]
+        assert [c["drop_reason"] for c in claims] == ["unknown_citation"]
+        assert claims[0]["bad_cites"] == ["PSG_020002,p.1"]
+        assert list(row.citations_json or []) == []
+        assert "PSG_020002" not in row.answer_text
 
 
 # ---------- 2. same-combo docs stay answerable ----------

@@ -29,7 +29,15 @@ from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import ChatMessage, PsgDocument, PsgVersion
 from regwatch.store.queries import fetch_citation_recency
 from regwatch.store.vector_store import add_chunks
-from tests.conftest import create_user, session_client
+from tests.conftest import create_user, session_client, synth_turn_json
+
+# The synthesizer returns ONE structured turn, never prose: the model declares
+# (short_name, page) per claim and the renderer writes every citation marker.
+# The stub therefore emits the same JSON contract the real provider is held to.
+ANSWER_TURN = synth_turn_json([("A fasting study is recommended.", [("PSG_020503", 3)])])
+
+# What the renderer -- not the model -- writes for that claim.
+EXPECTED_MARKER = "[PSG_020503, p.3]"
 
 
 def _stub_llm(text: str) -> Any:
@@ -99,9 +107,7 @@ def _seed_psg_rows(*, doc_id: int, version_id: int, recommended: str, diff: str)
 
 def test_wire_citation_carries_retrieved_score(monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_corpus([("Fasting bioequivalence study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
-    monkeypatch.setattr(
-        qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm("A fasting study [PSG_020503, p.3].")
-    )
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(ANSWER_TURN))
     result = qa_mod.ask("What study design is recommended?")
     assert not result.refused
     assert result.citations, "expected a cited answer"
@@ -124,9 +130,7 @@ def test_wire_citation_carries_recommended_date_and_diff(monkeypatch: pytest.Mon
     _seed_corpus([("Fasting bioequivalence study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
     # version_id mirrors _meta (doc_id * 10).
     _seed_psg_rows(doc_id=1, version_id=10, recommended="2023-07-15", diff="Tightened Cmax band.")
-    monkeypatch.setattr(
-        qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm("A fasting study [PSG_020503, p.3].")
-    )
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(ANSWER_TURN))
     result = qa_mod.ask("What study design is recommended?")
     assert result.citations
 
@@ -182,9 +186,7 @@ def test_query_does_not_block_when_recency_lookup_fails(monkeypatch: pytest.Monk
     """A DB failure under the recency join must degrade to null, not break the
     answer: the validated citation (and its score) still serializes."""
     _seed_corpus([("Fasting bioequivalence study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
-    monkeypatch.setattr(
-        qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm("A fasting study [PSG_020503, p.3].")
-    )
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(ANSWER_TURN))
     result = qa_mod.ask("What study design is recommended?")
     assert result.citations
 
@@ -265,9 +267,7 @@ def test_refusal_round_trips_reason_and_related(monkeypatch: pytest.MonkeyPatch)
 
 def test_answer_round_trips_audit_id(monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_corpus([("Fasting bioequivalence study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
-    monkeypatch.setattr(
-        qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm("A fasting study [PSG_020503, p.3].")
-    )
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(ANSWER_TURN))
     client: TestClient = session_client(create_user())
     try:
         r = client.post("/query", json={"question": "What study design is recommended?"})
@@ -275,6 +275,33 @@ def test_answer_round_trips_audit_id(monkeypatch: pytest.MonkeyPatch) -> None:
         body = r.json()
         assert body["status"] in {"answer", "summary"}
         assert not body["refused"]
+
+        # PR-1 promise: the structured synthesizer changed how the answer is
+        # PRODUCED, not what the wire says. Same key set, same status vocabulary,
+        # no new response key -- pinned exactly so a "just one more field" leak
+        # fails here rather than in the Go/TS clients.
+        assert set(body) == {
+            "answer",
+            "citations",
+            "refused",
+            "model_name",
+            "audit_id",
+            "session_id",
+            "turn_id",
+            "status",
+            "reason",
+            "interpretation",
+            "clarify",
+            "related",
+        }
+        # INV-1 at the wire: the model authored NO marker (see ANSWER_TURN); the
+        # renderer stamps one from the validated passage, so the answer the user
+        # reads is still cited.
+        assert EXPECTED_MARKER in body["answer"]
+        assert body["citations"], "a non-refused answer must carry citations"
+        assert body["citations"][0]["short_name"] == "PSG_020503"
+        assert body["citations"][0]["page"] == 3
+
         session_id = body["session_id"]
         audit_id = body["audit_id"]
         assert isinstance(audit_id, int)
