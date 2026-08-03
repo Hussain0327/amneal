@@ -75,7 +75,13 @@ def test_beclomethasone_question_cannot_leak_albuterol(
     import config.settings as cs
 
     cs.get_settings.cache_clear()
-    leaky = "Single actuation content (SAC) [PSG_020911, p.2]. See also [PSG_020503, p.2]."
+    # The leaked pair rides in the SAME bracket as the valid one. filter_citations
+    # rewrites a bracket down to its allowed pairs, so the leak is stripped while
+    # the sentence keeps a citation -- which is the point of this test: proving a
+    # leak is scrubbed from an answer that still gets SURFACED. Giving the leak
+    # its own sentence would leave that sentence bare, and the per-segment
+    # citation contract would refuse the whole turn, testing refusal instead.
+    leaky = "Single actuation content (SAC) [PSG_020911, p.2; PSG_020503, p.2]."
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(leaky))
 
     result = qa_mod.ask("What type of study does the beclomethasone dipropionate PSG recommend?")

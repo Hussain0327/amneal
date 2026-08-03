@@ -138,6 +138,7 @@ RETRIEVED_ITEM_KEYS = frozenset(
     {"chunk_id", "score", "doc_id", "version_id", "page", "normalized_name", "short_name"}
 )
 ROUTE_JSON_KEYS = frozenset({"route", "filters", "reason", "context_applied", "response_mode"})
+ANSWER_ROUTE_JSON_KEYS = ROUTE_JSON_KEYS | frozenset({"prompt", "partial_evidence"})
 
 # The full status vocabulary (src/regwatch/generate/rag_contract.py).
 QUERY_STATUSES = frozenset(
