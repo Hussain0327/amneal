@@ -10,12 +10,14 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from config.settings import get_settings  # noqa: F401  (mirrors test_invariants imports)
+from config.settings import get_settings
 
 from regwatch.generate import grounded_qa as qa_mod
 from regwatch.generate.llm import LLMResponse
+from regwatch.generate.prompts import GROUNDED_QA_PROMPT
 from regwatch.process.embedder import get_embedding_provider
-from regwatch.store.db import init_db
+from regwatch.store.db import init_db, session_scope
+from regwatch.store.models import QueryLog
 from regwatch.store.vector_store import add_chunks
 
 pytestmark = pytest.mark.invariants
@@ -66,7 +68,7 @@ def _stub_llm(text: str) -> Any:
 def test_inv1_fabricated_citation_stripped_from_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A real marker is preserved; a fabricated one is removed from the prose."""
+    """A fabricated marker cannot leave its now-uncited claim beside a valid one."""
     _seed_corpus(
         [
             ("Fasting bioequivalence study with 36 subjects.", _meta(1, 3, "PSG_020503")),
@@ -81,10 +83,10 @@ def test_inv1_fabricated_citation_stripped_from_answer(
 
     result = qa_mod.ask("What study design is recommended?")
 
-    assert not result.refused
-    assert {(c.short_name, c.page) for c in result.citations} == {("PSG_020503", 3)}
+    assert result.refused
+    assert result.citations == []
     assert "[PSG_999999, p.9]" not in result.answer
-    assert "[PSG_020503, p.3]" in result.answer
+    assert result.answer == get_settings().refusal_text
 
 
 def test_mixed_case_duplicate_of_valid_citation_is_kept(
@@ -113,6 +115,29 @@ def test_mixed_case_duplicate_of_valid_citation_is_kept(
     # ...while the citations list stays deduped to one validated entry.
     assert {(c.short_name.upper(), c.page) for c in result.citations} == {("PSG_020503", 3)}
     assert len(result.citations) == 1
+
+
+def test_supported_partial_answer_is_accepted_and_prompt_identity_is_audited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_corpus([("Fasting bioequivalence study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
+    answer_text = (
+        "A fasting bioequivalence study is recommended [PSG_020503, p.3].\n"
+        "Evidence not found in the supplied passages for: waiver conditions."
+    )
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(answer_text))
+
+    result = qa_mod.ask(
+        "What study design and waiver conditions does the albuterol sulfate guidance state?"
+    )
+
+    assert not result.refused
+    assert "Evidence not found" in result.answer
+    with session_scope() as session:
+        row = session.get(QueryLog, result.audit_id)
+        assert row is not None
+        assert row.route_json["prompt"] == GROUNDED_QA_PROMPT.as_dict()
+        assert row.route_json["partial_evidence"] is True
 
 
 # ---------- citation binds to the best-ranked same-page chunk ----------

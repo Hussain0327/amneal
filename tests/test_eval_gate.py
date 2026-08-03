@@ -167,8 +167,8 @@ class _FaithfulStub:
 
     def complete(self, messages: list[Any], **_kw: object) -> LLMResponse:
         user = next((m.content for m in reversed(messages) if m.role == "user"), "")
-        region = user.split("Source passages:\n", 1)[-1]
-        region = region.split("\n\nAnswer with citations", 1)[0]
+        region = user.split("<untrusted_source_passages>\n", 1)[-1]
+        region = region.split("\n</untrusted_source_passages>", 1)[0]
         sentences: list[str] = []
         for block in (b.strip() for b in region.split("\n---\n") if b.strip()):
             head, _, body = block.partition("\n")

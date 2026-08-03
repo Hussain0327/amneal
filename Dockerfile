@@ -92,10 +92,15 @@ COPY scripts ./scripts
 COPY src ./src
 COPY docker/entrypoint.sh /usr/local/bin/regwatch-entrypoint
 
+# Compilers and kernel headers are build-only. Leaving build-essential in the
+# runtime image shipped linux-libc-dev (and its fixable kernel CVEs) even though
+# neither the Python app nor the static Go proxy uses it.
 RUN chmod +x /usr/local/bin/regwatch-entrypoint \
     && EXTRAS="--extra llm" \
     && if [ "$INSTALL_LOCAL_EMBEDDINGS" = "true" ]; then EXTRAS="$EXTRAS --extra local-embeddings"; fi \
-    && uv sync --frozen $EXTRAS --no-dev
+    && uv sync --frozen $EXTRAS --no-dev \
+    && apt-get purge -y --auto-remove build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
 # Static proxy binary. Ships inert: the phase-3 "proxy" process group
 # (docs/GO_PROXY_ROLLOUT.md) will exec it through the entrypoint; no fly.toml

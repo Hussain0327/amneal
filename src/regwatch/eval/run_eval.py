@@ -26,6 +26,7 @@ from rich.table import Table
 from regwatch.eval import run_fingerprint
 from regwatch.eval.metrics import GoldItem, Scorecard, evaluate
 from regwatch.generate.grounded_qa import ask
+from regwatch.generate.prompts import generation_prompt_manifest
 from regwatch.store.db import init_db
 from regwatch.store.vector_store import collection_size
 
@@ -237,9 +238,18 @@ def run(
     _print_scorecard(sc)
     _print_fingerprint(fingerprint)
     if out:
+        # Both halves of the provenance story, neither dropped: the fingerprint
+        # says which corpus/arm/config produced the run, the prompt manifest
+        # says which prompts did. default=str keeps non-JSON fingerprint values
+        # (paths, enums) from failing the write.
         out.write_text(
             json.dumps(
-                {"fingerprint": fingerprint.to_dict(), "scorecard": asdict(sc)},
+                {
+                    "artifact_schema_version": 2,
+                    "fingerprint": fingerprint.to_dict(),
+                    "prompts": generation_prompt_manifest(),
+                    "scorecard": asdict(sc),
+                },
                 indent=2,
                 default=str,
             )

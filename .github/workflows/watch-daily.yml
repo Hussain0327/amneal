@@ -92,10 +92,10 @@ jobs:
       QWEN_EMBEDDING_TOKEN: ${{ secrets.WATCH_QWEN_EMBEDDING_TOKEN }}
       QWEN_EMBEDDING_MODEL: ${{ secrets.WATCH_QWEN_EMBEDDING_MODEL }}
       QWEN_EMBEDDING_REVISION: ${{ secrets.WATCH_QWEN_EMBEDDING_REVISION }}
-      # Watch-scoped OpenAI key, NOT the repo-wide OPENAI_API_KEY: ci.yml gates its
-      # live-eval step on OPENAI_API_KEY and that gate currently fails (live
-      # refusal_accuracy 0.917 < 0.95), so a repo-wide OPENAI_API_KEY would turn CI
-      # red. WATCH_OPENAI_API_KEY keeps OPENAI_API_KEY unset for CI (eval stays skipped).
+      # Watch-scoped OpenAI key, NOT the repo-wide OPENAI_API_KEY. ci.yml gates
+      # provider-backed seed/eval on the separately configured repo-wide name;
+      # without it that CI lane stays skipped. Its current pass/fail is
+      # unverified; see docs/EVAL_STATUS.md.
       OPENAI_API_KEY: ${{ secrets.WATCH_OPENAI_API_KEY }}
       OPENFDA_API_KEY: ${{ secrets.OPENFDA_API_KEY }}
       # entrypoint.sh runs init-db on boot; here we run alembic + watch directly,

@@ -8,8 +8,8 @@ empty (``[]``) for a pre-retrieval refusal (None max_score).
 
 These tests must FAIL if the sweep math breaks — they assert exact refuse_recall,
 answer_retention, the recommended cutoff lands between the clusters, the
-no-retention-loss invariant under overlap, the None-score refuses-everywhere
-rule, and that the 0.30 pathology flags fire on the right items.
+no-retention-loss invariant under overlap, preservation of pre-retrieval
+decisions, and that the 0.30 pathology flags fire on the right items.
 """
 
 from __future__ import annotations
@@ -51,10 +51,20 @@ def _stub(mapping: dict[str, FakeResult]) -> Callable[[str], FakeResult]:
     return ask
 
 
-def _item(question: str, *, must_refuse: bool) -> GoldItem:
+def _item(
+    question: str,
+    *,
+    must_refuse: bool = False,
+    must_clarify: bool = False,
+) -> GoldItem:
     # expected_sources empty -> recall_at_k returns 1 (recall_hit True); irrelevant
     # to threshold math, which keys off max_score only.
-    return GoldItem(question=question, expected_sources=[], must_refuse=must_refuse)
+    return GoldItem(
+        question=question,
+        expected_sources=[],
+        must_refuse=must_refuse,
+        must_clarify=must_clarify,
+    )
 
 
 def test_separable_distributions_recommend_cutoff_between_clusters() -> None:
@@ -158,6 +168,63 @@ def test_none_score_must_refuse_counts_as_refused_at_every_threshold() -> None:
     # It never appears as a leak at 0.30 (None is not >= 0.30).
     rec = recommend(rows, sw, current=0.30)
     assert rec.leaking_at_current == []
+    assert rec.recommended is None
+    assert rec.provisional is True
+    assert "no scored must-refuse rows" in rec.rationale
+
+
+def test_none_score_clarification_is_not_relabelled_as_refusal() -> None:
+    mapping = {
+        "answer": FakeResult(retrieved=_retrieved(0.55)),
+        "clarified_negative": FakeResult(
+            retrieved=[],
+            refused=False,
+            status="clarify",
+            reason="brand_lookup",
+        ),
+    }
+    items = [
+        _item("answer"),
+        _item("clarified_negative", must_refuse=True),
+    ]
+
+    rows = collect_scores(items, ask_callable=_stub(mapping))
+    negative = next(r for r in rows if r.question == "clarified_negative")
+    assert negative.max_score is None
+    assert negative.refused is False
+
+    sw = sweep(rows, candidates=[0.30])
+    assert sw.curve[0].refuse_recall == 0.0
+    assert sw.curve[0].decision_accuracy == 0.5
+
+
+def test_must_clarify_is_excluded_from_threshold_curve() -> None:
+    mapping = {
+        "answer": FakeResult(retrieved=_retrieved(0.55)),
+        "refuse": FakeResult(retrieved=_retrieved(0.10), refused=True),
+        "clarify": FakeResult(
+            retrieved=[],
+            status="clarify",
+            reason="multi_form",
+        ),
+    }
+    items = [
+        _item("answer"),
+        _item("refuse", must_refuse=True),
+        _item("clarify", must_clarify=True),
+    ]
+
+    rows = collect_scores(items, ask_callable=_stub(mapping))
+    clarify = next(r for r in rows if r.question == "clarify")
+    assert clarify.must_clarify is True
+
+    sw = sweep(rows, candidates=[0.30])
+    assert sw.n_must_answer == 1
+    assert sw.n_must_refuse == 1
+    assert sw.n_must_clarify == 1
+    assert sw.curve[0].answer_retention == 1.0
+    assert sw.curve[0].refuse_recall == 1.0
+    assert sw.curve[0].decision_accuracy == 1.0
 
 
 def test_current_030_pathology_flags_wrongly_refused() -> None:

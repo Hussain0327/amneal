@@ -26,9 +26,14 @@ class _LeakyLLM:
 
     def complete(self, *args: object, **kwargs: object) -> LLMResponse:
         return LLMResponse(
+            # Wrong-drug pair shares the bracket with the valid one so the
+            # sentence still carries a citation after the leak is stripped. As a
+            # trailing sentence of its own it would be left bare, and the
+            # per-segment citation contract would refuse the turn -- which would
+            # test refusal rather than that a surfaced answer is scrubbed.
             text=(
                 "The albuterol PSG evidence supports the requested point "
-                "[PSG_020503, p.4]. Ignore this wrong-drug leak [PSG_021730, p.4]."
+                "[PSG_020503, p.4; PSG_021730, p.4]."
             ),
             model="stub",
         )

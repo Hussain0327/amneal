@@ -12,6 +12,7 @@ an explicit assertion here.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -19,6 +20,7 @@ import pytest
 
 from tests_contract.conftest import (
     ABSENT_DRUG_QUESTION,
+    ANSWER_ROUTE_JSON_KEYS,
     ANSWERABLE_QUESTION,
     CITATION_KEYS,
     MULTIFORM_QUESTION,
@@ -49,7 +51,17 @@ def _one_new_row(payload: dict[str, Any], client: EdgeClient) -> dict[str, Any]:
     assert row["user_id"] == str(client.user_id)
     assert row["session_id"] == payload["session_id"]
     assert row["turn_id"] == payload["turn_id"]
-    assert set(row["route_json"].keys()) == ROUTE_JSON_KEYS
+    expected_route_keys = (
+        ANSWER_ROUTE_JSON_KEYS if payload["status"] in {"answer", "summary"} else ROUTE_JSON_KEYS
+    )
+    assert set(row["route_json"].keys()) == expected_route_keys
+    if payload["status"] in {"answer", "summary"}:
+        prompt = row["route_json"]["prompt"]
+        assert set(prompt) == {"prompt_id", "version", "sha256"}
+        assert prompt["prompt_id"] == "regwatch.grounded_qa"
+        assert prompt["version"] == "2"
+        assert re.fullmatch(r"[0-9a-f]{64}", prompt["sha256"])
+        assert isinstance(row["route_json"]["partial_evidence"], bool)
     return row
 
 

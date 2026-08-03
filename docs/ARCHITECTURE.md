@@ -9,9 +9,11 @@ This document is the canonical description of how REGWATCH is built. It is meant
 to be read top-to-bottom once, then used as a reference. Companion docs:
 [`PROJECT_SPEC.md`](PROJECT_SPEC.md) (the requirements/spec), [`DEPLOY.md`](DEPLOY.md)
 (the production runbook), [`whitepaper_schema.md`](whitepaper_schema.md) (the
-46-cell White Paper schema), and [`DECISIONS.md`](DECISIONS.md) (decision log).
+46-cell White Paper schema), [`GRAPH_ASSISTED_RETRIEVAL.md`](GRAPH_ASSISTED_RETRIEVAL.md)
+(the proposed graph-assisted retrieval evolution), and [`DECISIONS.md`](DECISIONS.md)
+(decision log).
 
-> Last verified: 2026-07-29 (post step-5 Go query cutover, post Databricks LM flip)
+> Last verified: 2026-07-30 (post Tier-1 graph foundation; no runtime graph consumer)
 
 ---
 
@@ -378,6 +380,27 @@ search to them, so a superseded chunk can never be cited even if it's still in t
 index. (A pure vector-only mode — used by some unit tests that seed pgvector chunks
 without a matching structured-store catalog row — is detected and skipped.)
 
+### Graph-assisted adaptive retrieval (proposed; foundation landed)
+
+Migration `0018_knowledge_graph` and `store/graph_store.py` now derive a
+deterministic Tier-1 hierarchy at chunk-write time:
+
+- `application` → `psg_doc` via `HAS_PSG`;
+- `psg_doc` → `psg_section` via `HAS_SECTION`;
+- ordered sections via `FOLLOWS`; and
+- graph nodes → source chunks via `primary` / `member` references.
+
+Chunks remain the only citable unit. The graph has no node embeddings and no
+runtime query consumer yet, so the current Ask path above is unchanged.
+
+The proposed consumer uses scoped vector/exact-term hits as seed chunks, maps
+them to section nodes, performs bounded typed traversal, collects the referenced
+current source chunks, reranks them, and runs an adaptive evidence-sufficiency
+check. It may make one additional targeted expansion before refusing. It may
+never answer from a graph node or generated graph summary. The algorithm,
+budgets, invariants, rollout phases, and evaluation gates are specified in
+[`GRAPH_ASSISTED_RETRIEVAL.md`](GRAPH_ASSISTED_RETRIEVAL.md).
+
 ### Conversation memory
 
 `common/conversation.py` persists per-session filters (`ChatSession.active_filters_json`)
@@ -498,8 +521,9 @@ path left to document.
 
 - **Score convention.** `Hit.score` is cosine similarity in `[0, 1]`, computed
   as `score = 1 - cosine_distance / 2` (1.0 identical, 0.5 orthogonal, 0.0
-  opposite). The refusal threshold (0.30) is calibrated against this one
-  convention.
+  opposite). The refusal threshold uses this convention, but the current `0.30`
+  value remains provisional in the OpenAI-1536 score space; see
+  [`EVAL_STATUS.md`](EVAL_STATUS.md).
 
 - **Embedding provider is paired to the vector dimension.** Production uses
   OpenAI `text-embedding-3-small` (1536-dim) — chosen over local `bge-small`
@@ -743,18 +767,24 @@ form, clarify) that backstops any caller who bypassed the resolver.
   over-refusal rate for grounded Q&A.
 - `whitepaper_metrics.py` — White Paper cell-level checks.
 
-The CI gate holds **recall@8 ≥ 0.90, citation_precision ≥ 0.95,
-refusal_accuracy ≥ 0.95** (`run_eval.py --check-thresholds`; a deterministic eval
-gate also runs inside `pytest`). Measured calibration currently clears these
-comfortably (recall/precision at 1.0, zero over-refusals). (One known
-gold-semantics item — an absent product now drawing a *safe* brand-suggestion
-clarify on the full corpus instead of a hard refuse — is a stale-gold fix, not a
-regression: the gold set should accept refuse-OR-clarify for absent products.)
+The configured provider-backed thresholds are **recall@8 ≥ 0.90,
+citation_precision ≥ 0.95, refusal_accuracy ≥ 0.95**
+(`run_eval.py --check-thresholds`). A separate deterministic fixture runs inside
+every `pytest`. The latest inspected CI run passed that fixture but skipped the
+provider-backed seed and eval because the repo-wide `OPENAI_API_KEY` was absent.
+Current live-corpus pass/fail is therefore unverified.
 
-The current gold set is `gold_set.jsonl` (26 Q&A items) + `whitepaper_gold.jsonl`
-(21 White-Paper rows), scored mechanically on `(short_name, page)` +
-`expected_facts`. Open work (`docs/ROADMAP.md`): grow the gold set toward 30–50
-and add an LLM-as-judge pass alongside the mechanical checks.
+The current committed gold sets contain `gold_set.jsonl` (12 Q&A rows: 6
+must-answer, 5 must-refuse, 1 must-clarify) and `whitepaper_gold.jsonl` (16
+White-Paper rows), scored mechanically on `(short_name, page)` +
+`expected_facts`. The previously documented `0.917` was a
+`threshold_sweep.current_decision_accuracy` value produced by misclassifying the
+valid must-clarify row; it was not a measured `run_eval.refusal_accuracy`.
+[`EVAL_STATUS.md`](EVAL_STATUS.md) records the evidence and remaining gaps.
+
+Open work (`ROADMAP.md`): grow the Q&A gold set toward 30-50, add scored hard
+negatives and an LLM-as-judge pass alongside the mechanical checks, then run the
+provider-backed gate against a controlled corpus snapshot.
 
 `answer_feedback` thumbs feed new candidate gold items, closing the loop.
 

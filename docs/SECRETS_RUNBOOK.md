@@ -17,12 +17,13 @@ inventory of what each secret gates. Current state:
    ships the exact validated commit (docker build + Trivy re-scan +
    `scripts/fly-deploy.sh`) using `FLY_API_TOKEN`. As of 2026-07-29 14:41 UTC
    it auto-deployed `f579030` successfully -- `main` == prod.
-3. **One secret is DELIBERATELY withheld: the repo-wide `OPENAI_API_KEY`.**
-   `ci.yml` gates its live seed + eval steps on it, and that live eval
-   currently FAILS (live `refusal_accuracy` 0.917 < the 0.95 threshold).
-   Setting `OPENAI_API_KEY` un-skips the gate, turns CI red, and thereby
-   BLOCKS CD. The watch cron uses the separately-named `WATCH_OPENAI_API_KEY`
-   precisely to keep it that way.
+3. **The repo-wide `OPENAI_API_KEY` is not configured.** Verified secret names
+   on 2026-07-30 were `FLY_API_TOKEN`, `OPENFDA_API_KEY`,
+   `WATCH_DATABASE_URL`, and `WATCH_OPENAI_API_KEY`. Without the repo-wide key,
+   `ci.yml` skips its provider-backed seed + eval steps. Their current pass/fail
+   result is unverified; the previously cited `0.917` came from a separate
+   threshold-sweep metric and was not `run_eval.refusal_accuracy`. Establish a
+   controlled baseline before making paid live evaluation deployment-gating.
 
 > **This runbook provisions secrets. It does NOT print, echo, or commit any secret
 > VALUE.** Every command below sets a value from your local environment or a fresh
@@ -70,7 +71,7 @@ its value comes from, and whether it is required.
 |---|---|---|---|
 | `WATCH_DATABASE_URL` | `watch-daily.yml` -> `env.DATABASE_URL`; gates ALL real steps (checkout, deps, `regwatch watch`, threshold sweep). Unset => job skips. | `.env` key **`DATABASE_URL`** -- the prod Supabase **session pooler** URI WITH `?sslmode=require` | **Required** (watch) |
 | `WATCH_OPENAI_API_KEY` | `watch-daily.yml` -> mapped to the job's `OPENAI_API_KEY`: `regwatch watch` ingest embeds every chunk (`EMBEDDING_PROVIDER=openai`); also the advisory threshold sweep. The "preflight WATCH_OPENAI_API_KEY" step hard-fails the run when it is unset/empty. | `.env` key **`OPENAI_API_KEY`** (the production key), stored under the WATCH_ name | **Required** (watch) |
-| `OPENAI_API_KEY` (repo-wide) | `ci.yml` -> the live seed + `eval --check-thresholds` gate. **Deliberately UNSET**: live `refusal_accuracy` is 0.917 < 0.95, so setting it turns CI red on every push and blocks CD. | do not set | **Withheld** |
+| `OPENAI_API_KEY` (repo-wide) | `ci.yml` -> provider-backed seed + `eval --check-thresholds`. **Currently unset:** the latest CI run skipped both steps, so pass/fail is unverified. Enabling it adds paid live work whose result gates CD; baseline it first. | OpenAI project key approved for CI, if this gate is enabled | Not configured |
 | `FLY_API_TOKEN` | `deploy.yml` -> the whole release path: docker build, Trivy re-scan, then `bash scripts/fly-deploy.sh` (the retrying flyctl wrapper). Unset => deploy step fails; no release. | **`fly tokens create deploy`** (mint fresh; NOT in `.env`) | **Required** (CD) |
 | `WATCH_ACTIVE_EMBEDDING_PROFILE` | `watch-daily.yml` -> `env.ACTIVE_EMBEDDING_PROFILE`; embedding-profile parity with prod. While prod runs the `legacy` profile this is unset and the profile block is inert. | the promoted profile id (matches prod's `ACTIVE_EMBEDDING_PROFILE`) | Staged |
 | `WATCH_QWEN_EMBEDDING_BASE_URL` / `_TOKEN` / `_MODEL` / `_REVISION` | `watch-daily.yml` -> profile provider credentials. Guarded by "preflight embedding-profile credentials" (hard-fails when the profile is set but BASE_URL/TOKEN/MODEL are missing) and "verify embedding-profile coverage" (post-ingest assertion that the active profile still covers every chunk). | the Databricks/Qwen serving-endpoint credentials, mirroring prod | Staged |
@@ -173,9 +174,9 @@ grep -E '^DATABASE_URL=' .env | head -1 | cut -d= -f2- \
   | gh secret set WATCH_DATABASE_URL -R Hussain0327/amneal
 
 # WATCH_OPENAI_API_KEY <- local OPENAI_API_KEY (production key), stored under
-# the watch-scoped name. WARNING: do NOT set the repo-wide OPENAI_API_KEY --
-# that un-skips ci.yml's live-eval gate, which currently FAILS
-# (refusal_accuracy 0.917 < 0.95), turning CI red and blocking CD.
+# the watch-scoped name. The repo-wide OPENAI_API_KEY is a separate decision:
+# setting it activates ci.yml's paid provider-backed seed/eval and makes that
+# result deployment-gating. Establish and review a controlled baseline first.
 grep -E '^OPENAI_API_KEY=' .env | head -1 | cut -d= -f2- \
   | gh secret set WATCH_OPENAI_API_KEY -R Hussain0327/amneal
 ```

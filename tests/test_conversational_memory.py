@@ -159,7 +159,7 @@ def test_single_turn_prompt_has_no_recent_context(monkeypatch: pytest.MonkeyPatc
     qa_mod.ask("What study design is recommended?")
     prompt = stub.user_prompts[-1]
     assert "Recent conversation" not in prompt
-    assert prompt.startswith("Question:")
+    assert prompt.startswith("<untrusted_question>\n")
 
 
 def test_followup_prompt_threads_prior_turn_without_citations(
@@ -183,7 +183,7 @@ def test_followup_prompt_threads_prior_turn_without_citations(
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: stub)
     qa_mod.ask("What study design is recommended?", session_id=sid)
     prompt = stub.user_prompts[-1]
-    recent_part = prompt.split("Question:")[0]
+    recent_part = prompt.split("<untrusted_question>", 1)[0]
     assert "Recent conversation" in recent_part
     assert "fed study is also recommended" in recent_part  # answer prose threaded
     assert "recommend for the BE study" in recent_part  # question prose threaded
@@ -191,10 +191,8 @@ def test_followup_prompt_threads_prior_turn_without_citations(
 
 
 def test_format_recent_drops_unbracketed_sources_trailer() -> None:
-    """The stored answer's prompt-mandated 'Sources:' trailer carries UNbracketed
-    '<short_name>, p.<n>' pairs that the bracket-only citation strip misses --
-    the memory block must drop the whole trailer so the model never sees a stale
-    re-citable (short_name, page) pointer from a prior turn."""
+    """Legacy stored answers may carry unbracketed source entries that the
+    bracket-only citation strip misses; the whole trailer must still be dropped."""
     turns = [
         PriorTurn(
             question="What dissolution method for albuterol?",

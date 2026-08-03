@@ -133,6 +133,10 @@ class LLMProvider(Protocol):
         ...
 
 
+# Matches the passage headers _format_passages writes: "[<short_name>, p.<n>]".
+_ECHO_CITATION_RE = re.compile(r"\[[A-Za-z0-9_]+,\s*p\.\s*\d+\]")
+
+
 # ---------- echo provider ----------
 class EchoLLMProvider:
     """For tests. Returns a deterministic string derived from the last user message.
@@ -175,6 +179,22 @@ class EchoLLMProvider:
             )
         if self._force_refusal():
             return LLMResponse(text=get_settings().refusal_text, model="echo", usage=usage)
+        # Echo the prompt's FIRST passage marker as a single cited sentence
+        # rather than the whole prompt. The per-segment citation contract
+        # refuses any answer carrying an uncited segment, and an echoed prompt
+        # is mostly uncited lines -- so the raw echo can never be a valid
+        # answer, and every echo-backed test would refuse instead of exercising
+        # the path it exists to test. The marker is scraped from the prompt, so
+        # it always names a passage that was really retrieved and survives
+        # citation validation. Falls back to the old behavior when the prompt
+        # carries no marker (non-QA callers, which have no such contract).
+        marker = _ECHO_CITATION_RE.search(last_user)
+        if marker:
+            return LLMResponse(
+                text=f"ECHO: grounded test answer {marker.group(0)}.",
+                model="echo",
+                usage=usage,
+            )
         return LLMResponse(text=f"ECHO: {last_user}", model="echo", usage=usage)
 
     def stream(

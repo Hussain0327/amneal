@@ -14,12 +14,14 @@ Then read these in order if you are new to the project:
 2. `NON_TECH_GUIDE.md` - plain-English explanation for regulatory and business readers.
 3. `TECH_GUIDE_SIMPLE.md` - simplified technical walkthrough of how the code connects.
 4. `ARCHITECTURE.md` - canonical system design: Router -> Handlers -> Synthesizer, the four UI surfaces, and the compliance invariants.
-5. `CONVERSATIONAL_SESSIONS.md` - chat sessions, follow-up context, and audit rules.
-6. `DOCKER.md` - container setup, services, data mounts, and ingest notes.
-7. `PROD_READINESS.md` - active production-readiness checklist.
-8. `DEPLOY.md` - active production cutover and operations runbook.
-9. `ROADMAP.md` - consolidated list of open / not-yet-done work (launch blockers and future workstreams).
-10. `DECISIONS.md` - append-only history of important engineering decisions.
+5. `GRAPH_ASSISTED_RETRIEVAL.md` - proposed bounded graph traversal and adaptive evidence-sufficiency design; clearly separates the landed Tier-1 graph foundation from runtime work.
+6. `CONVERSATIONAL_SESSIONS.md` - chat sessions, follow-up context, and audit rules.
+7. `DOCKER.md` - container setup, services, data mounts, and ingest notes.
+8. `EVAL_STATUS.md` - current eval evidence: gold-set size, CI/live distinction, and threshold-artifact interpretation.
+9. `PROD_READINESS.md` - active production-readiness checklist.
+10. `DEPLOY.md` - active production cutover and operations runbook.
+11. `ROADMAP.md` - consolidated list of open / not-yet-done work (launch blockers and future workstreams).
+12. `DECISIONS.md` - append-only history of important engineering decisions.
 
 ## Current Reference Docs
 
@@ -29,8 +31,10 @@ Then read these in order if you are new to the project:
 | `NON_TECH_GUIDE.md` | Non-technical stakeholders | Explains what REGWATCH does, what it must not do, and why citations/refusals matter. |
 | `TECH_GUIDE_SIMPLE.md` | Technical readers | Explains folder structure, core flows, and the files to read first. |
 | `ARCHITECTURE.md` | Engineers / reviewers | Canonical system design: Router -> Handlers -> Synthesizer, pluggable Embedding/LLM providers, the unified four-surface Next.js shell, and INV-1..9. |
+| `GRAPH_ASSISTED_RETRIEVAL.md` | AI / backend engineers, reviewers | Proposed retrieval evolution: chunk-seeded graph traversal, bounded context expansion, adaptive evidence sufficiency, cite-or-refuse invariants, rollout phases, and promotion gates. Tier-1 storage is landed; runtime traversal is not. |
 | `CONVERSATIONAL_SESSIONS.md` | Product / engineering / compliance reviewers | Explains session IDs, follow-up context, response statuses, and auditability. |
 | `DOCKER.md` | Engineers / deployment owners | Documents the Dockerfile, Compose services, embedding modes, and ingest implications. |
+| `EVAL_STATUS.md` | Engineers / reviewers | Verified current eval truth: committed gold-set counts, offline-vs-live CI coverage, the 0.917 correction, and why the 0.30 cutoff remains provisional. |
 | `DECISIONS.md` | Engineers / reviewers | Append-only decision log. Read this before changing architecture. |
 | `PROD_READINESS.md` | Engineers / deployment owners | Tracks what stands between the POC and a real production deployment, prioritized and mapped to the tree. |
 | `ROADMAP.md` | Engineers / product / reviewers | Consolidated open / not-done work: launch blockers (LLM data-handling decision, provisioned Postgres/pgvector, gateway/TLS/SSO) and future workstreams (token-delta Ask streaming, eval expansion, observability, Watch cron proof). |

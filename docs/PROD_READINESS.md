@@ -177,7 +177,11 @@ Each item notes where it lives in the tree so the work is actionable cold.
 - **Gap:** gold sets are still small (12 Q&A JSON rows, 16 white-paper cell
   rows; spec wants 30–50 for Q&A); live-corpus scoring is still mechanical
   `(short_name, page)` + `expected_facts` substrings; LLM-as-judge is not wired,
-  so semantically-equivalent answers undercount.
+  so semantically-equivalent answers undercount. The latest inspected CI run
+  skipped provider-backed `run_eval`, so current live pass/fail is unverified.
+  The latest advisory threshold artifact had six scored answer rows but zero
+  scored refusal rows; it cannot validate the `0.30` cosine cutoff. See
+  [`EVAL_STATUS.md`](EVAL_STATUS.md).
 - **Done when:** gold set expanded to 30–50 paired to what the seed actually
   ingests; LLM-as-judge added alongside mechanical metrics; thresholds
   (`recall@k≥0.90`, `citation_precision≥0.95`, `refusal_accuracy≥0.95`) hold.

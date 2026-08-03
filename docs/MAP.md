@@ -53,6 +53,7 @@ data-residency boundary); embeddings are mid-migration to the same plane.
 
 **How it's built**
 - [Architecture](ARCHITECTURE.md) — canonical system design (Router → Handlers → Synthesizer, the four surfaces, INV-1..9)
+- [Graph-assisted adaptive retrieval](GRAPH_ASSISTED_RETRIEVAL.md) — proposed bounded graph traversal from citable chunks; Tier-1 graph storage is landed, runtime traversal is not
 - [Simple technical guide](TECH_GUIDE_SIMPLE.md) — folder map and core flows
 - [Polyglot target](POLYGLOT_TARGET_2026-07-10.md) - the TS/Go/Python/Rust strangler plan (steps 0-5 done)
 - [Go proxy rollout](GO_PROXY_ROLLOUT.md) - how Go took the public edge (complete)
@@ -64,6 +65,7 @@ data-residency boundary); embeddings are mid-migration to the same plane.
 - [Data residency D1](DATA_RESIDENCY_D1.md) - analyst queries must stay in-tenant; what leaks and the fix
 - [Databricks adoption](DATABRICKS_ADOPTION_2026-07-28.md) - inference-plane decision, cost model, incident log, rollout state
 - [Open-model rollout](OPEN_MODEL_ROLLOUT.md) - embedding profiles + open-weight providers (shipped dormant, now flipping)
+- [Evaluation status](EVAL_STATUS.md) - current gold-set counts, CI/live evidence, and the 0.917 correction
 - [Threshold validation](THRESHOLD_VALIDATION_2026-06-25.md) - the 0.30 refusal threshold's provisional status + sweep harness
 
 **The web app**

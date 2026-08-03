@@ -119,11 +119,13 @@ are done (Go edge + native `/query`, flipped live 2026-07-24). Remaining:
   layer (9).
 
 ### ⚪ Refusal-threshold validation
-`REFUSAL_SCORE_THRESHOLD=0.30` remains provisional - tuned on the gold set,
-never validated in prod score space
+`REFUSAL_SCORE_THRESHOLD=0.30` remains provisional
 ([`THRESHOLD_VALIDATION_2026-06-25.md`](THRESHOLD_VALIDATION_2026-06-25.md)).
-The sweep harness runs advisory in the watch cron and uploads artifacts; what
-is missing is the decision: keep or retune, off real sweep data.
+The watch cron now produces a real OpenAI-1536 + pgvector artifact, but its five
+must-refuse cases all stopped before retrieval and supplied no negative cosine
+scores. It therefore cannot justify keeping or retuning `0.30`. Add scored hard
+negatives and rerun the corrected harness; see
+[`EVAL_STATUS.md`](EVAL_STATUS.md).
 
 ### Secrets management  (PROD_READINESS #10)
 `.env` and friends are gitignored, the Actions secret surface is documented in
@@ -142,13 +144,31 @@ enforced. Residual: container resource limits (none in `compose.yaml` /
 
 ### Eval expansion  (PROD_READINESS #8)
 Gold sets are small (12 Q&A + 16 white-paper rows; spec wants 30-50) and
-scoring is mechanical `(short_name, page)` + `expected_facts`. The live-corpus
-eval currently FAILS `refusal_accuracy` (0.917 < 0.95) - this is why the
-repo-wide `OPENAI_API_KEY` CI secret is deliberately withheld (see
-[`CI_CD.md`](CI_CD.md)); expanding and re-pairing the gold set to what the
-seed actually ingests is the path to turning the live gate back on. Add
-LLM-as-judge alongside the mechanical metrics.
+scoring is mechanical `(short_name, page)` + `expected_facts`. The latest CI
+run skipped provider-backed evaluation, so current live-corpus pass/fail is
+unverified. The previously reported `0.917` was the advisory threshold sweep's
+`current_decision_accuracy`, not `run_eval.refusal_accuracy`; it came from
+misclassifying the valid must-clarify case. Expand and re-pair the gold set to
+what the seed actually ingests, add scored hard negatives, turn the live gate on
+for an explicit baseline run, and add LLM-as-judge alongside the mechanical
+metrics. See [`EVAL_STATUS.md`](EVAL_STATUS.md).
 - Where: `src/regwatch/eval/`, `gold_set.jsonl`, `tests/test_eval_gate.py`.
+
+### Graph-assisted adaptive retrieval
+The deterministic Tier-1 graph foundation is landed (`0018_knowledge_graph`,
+`store/graph_store.py`): application/document/section nodes, typed hierarchy
+and adjacency edges, and references back to the citable chunks. No runtime
+query path reads it yet.
+
+The proposed consumer starts from scoped seed chunks, performs bounded typed
+traversal, reranks the expanded source chunks, and tests evidence sufficiency.
+It may make one targeted second expansion before refusing. Runtime traversal
+must stay default-off until the eval set is expanded and the graph-assisted path
+shows lower false-refusal/ranking-miss rates without citation, scope, latency,
+or context-budget regressions. Full design and staged gates:
+[`GRAPH_ASSISTED_RETRIEVAL.md`](GRAPH_ASSISTED_RETRIEVAL.md).
+- Where: `src/regwatch/store/graph_store.py`, `src/regwatch/retrieve/`,
+  `src/regwatch/generate/grounded_qa.py`, `src/regwatch/eval/`.
 
 ### Persist-and-cite beyond the White Paper  (PROD_READINESS #9)
 The persist-and-cite + freshness pattern (OB/SPL provenance with

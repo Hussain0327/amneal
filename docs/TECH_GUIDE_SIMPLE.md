@@ -496,11 +496,14 @@ Metrics:
   answer (scores answer content, not just which pages were cited)
 - refusal accuracy
 
-`run_eval.py` scores the gold set against the live corpus (and no-ops on an
-empty store). `tests/test_eval_gate.py` is a deterministic, offline gate: it
-seeds a fixed corpus and a faithful LLM stub and hard-gates every metric, so the
-gate fires inside `uv run pytest` (and therefore in CI). The eval is
-intentionally mechanical and auditable; it does not yet use an LLM-as-judge.
+`run_eval.py` scores the gold set against the live corpus and exits nonzero on
+an empty store. Its provider-backed CI lane is key-gated; the latest inspected
+run skipped it, so current live pass/fail is unverified.
+`tests/test_eval_gate.py` is a deterministic, offline gate: it seeds a fixed
+corpus and a faithful LLM stub and hard-gates every metric, so the fixture fires
+inside `uv run pytest` (and therefore in CI). The eval is intentionally
+mechanical and auditable; it does not yet use an LLM-as-judge. See
+[`EVAL_STATUS.md`](EVAL_STATUS.md) for the current evidence.
 
 Open eval work (see `docs/ROADMAP.md`): expand the gold set (12 Q&A + 16
 white-paper rows -> 30-50), add an LLM-as-judge alongside the mechanical

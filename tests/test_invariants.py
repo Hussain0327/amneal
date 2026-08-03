@@ -91,7 +91,7 @@ def test_inv1_extractor_drops_uncited_field(monkeypatch: pytest.MonkeyPatch) -> 
 def test_inv1_grounded_answer_has_only_known_citations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every [short, p.N] in an answer must correspond to a passage we sent."""
+    """A fabricated marker cannot leave an uncited claim beside a valid claim."""
     _seed_corpus(
         [
             ("Fasting bioequivalence study with 36 subjects.", _meta(1, 3, "PSG_020503")),
@@ -106,9 +106,9 @@ def test_inv1_grounded_answer_has_only_known_citations(
     )
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(answer_text))
     result = qa_mod.ask("What study design is recommended?")
-    assert not result.refused
-    assert {(c.short_name, c.page) for c in result.citations} == {("PSG_020503", 3)}
-    assert "[PSG_999999, p.7]" not in result.answer
+    assert result.refused
+    assert result.citations == []
+    assert result.answer == get_settings().refusal_text
 
 
 # ---------- INV-2: Refuse over guess ----------

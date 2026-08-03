@@ -16,7 +16,11 @@ from typing import Any
 
 from regwatch.common.logging import get_logger
 from regwatch.generate.llm import LLMMessage, current_model_name, get_llm_provider
-from regwatch.generate.prompts import BE_EXTRACTION_SYSTEM, BE_EXTRACTION_USER
+from regwatch.generate.prompts import (
+    BE_EXTRACTION_PROMPT,
+    BE_EXTRACTION_SYSTEM,
+    BE_EXTRACTION_USER,
+)
 
 log = get_logger(__name__)
 
@@ -106,6 +110,9 @@ def _validate_field_citation(
     if not isinstance(page, int) or page < 1 or page > len(pages):
         log.warning("be_extraction_bad_page", field=field_name, page=page)
         return None, None
+    if not isinstance(quote, str) or len(quote) > 200:
+        log.warning("be_extraction_bad_quote_length", field=field_name)
+        return None, None
     if not _quote_appears_on_page(quote, pages, page):
         log.warning("be_extraction_quote_not_found", field=field_name, quote=quote[:80])
         return None, None
@@ -120,6 +127,7 @@ def extract_be(pages: list[str]) -> ExtractionResult:
     discarded; we keep only validated fields.
     """
     passages = _passages_for_prompt(pages)
+    log.info("llm_prompt", role="extractor", **BE_EXTRACTION_PROMPT.log_fields())
     provider = get_llm_provider(role="extractor")
     response = provider.complete(
         [
