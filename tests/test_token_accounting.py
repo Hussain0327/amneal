@@ -14,6 +14,7 @@ from regwatch.generate.llm import (
     OpenAIProvider,
     estimate_cost_usd,
 )
+from tests.conftest import synth_turn_json
 
 # ---------- provider usage extraction ----------
 
@@ -270,16 +271,19 @@ class _StubLLM:
         return LLMResponse(text=self._text, model=self._model, usage=self._usage)
 
 
+# The synthesizer returns a structured turn, not prose: the stub must be held to
+# the same contract or these tests would measure the token accounting of a
+# malformed_structure refusal instead of an answer turn.
+_ANSWER_TURN = synth_turn_json([("A fasting study is recommended", [("PSG_020503", 3)])])
+
+
 def test_ask_records_synthesizer_usage_and_cost(monkeypatch: pytest.MonkeyPatch) -> None:
     from regwatch.generate import grounded_qa as qa_mod
     from regwatch.store.db import session_scope
     from regwatch.store.models import QueryLog
 
     _seed_corpus()
-    stub = _StubLLM(
-        "A fasting study is recommended [PSG_020503, p.3].",
-        LLMUsage(input_tokens=1_000, output_tokens=500),
-    )
+    stub = _StubLLM(_ANSWER_TURN, LLMUsage(input_tokens=1_000, output_tokens=500))
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: stub)
 
     result = qa_mod.ask("What study design is recommended for albuterol sulfate?")
@@ -304,7 +308,7 @@ def test_ask_prices_server_reported_snapshot_model(monkeypatch: pytest.MonkeyPat
 
     _seed_corpus()
     stub = _StubLLM(
-        "A fasting study is recommended [PSG_020503, p.3].",
+        _ANSWER_TURN,
         LLMUsage(input_tokens=1_000, output_tokens=500),
         model="gpt-5.4-nano-2026-01-15",  # what OpenAI actually echoes back
     )

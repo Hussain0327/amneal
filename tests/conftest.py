@@ -33,6 +33,36 @@ from regwatch.store import vector_store as vs_module
 DEFAULT_USER_EMAIL = "analyst@example.com"
 DEFAULT_USER_PASSWORD = "correct-horse-battery-staple"
 
+
+def synth_turn_json(
+    claims: list[tuple[str, list[tuple[str, int]]]] | None = None,
+    *,
+    turn_type: str = "ANSWER",
+    unsupported: tuple[str, ...] = (),
+) -> str:
+    """The JSON string a stubbed synthesizer should return.
+
+    ``claims`` is [(sentence, [(short_name, page), ...]), ...]. Keeping this in
+    one place means a schema change is one edit rather than fifteen, and every
+    stub exercises the SAME contract the real provider is held to.
+    """
+    import json as _json
+
+    return _json.dumps(
+        {
+            "turn_type": turn_type,
+            "claims": [
+                {
+                    "text": text,
+                    "cites": [{"short_name": s, "page": p} for s, p in cites],
+                }
+                for text, cites in (claims or [])
+            ],
+            "unsupported": list(unsupported),
+        }
+    )
+
+
 _TEST_DB_URL = (os.environ.get("TEST_DATABASE_URL") or "").strip()
 # Hosts we accept as "definitely a disposable database". The host .env carries
 # the LIVE production Supabase URL in DATABASE_URL; this guard makes it

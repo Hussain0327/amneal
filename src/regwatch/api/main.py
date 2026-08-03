@@ -845,8 +845,9 @@ async def query(req: QueryRequest, user: User = Depends(require_user)) -> QueryR
 def _sse_event(name: str, data: dict[str, Any]) -> str:
     """One Server-Sent Events frame. The Ask client (askQueryStream) parses three
     event names: ``status`` (``{"text": ...}`` progress), ``token`` (``{"delta":
-    ...}`` provisional answer text), and ``result`` (the full validated
-    QueryResponse). Any other name is ignored, so we emit only these."""
+    ...}`` a slice of the already-gated, already-audited answer), and ``result``
+    (the full validated QueryResponse). Any other name is ignored, so we emit
+    only these."""
     return f"event: {name}\ndata: {json.dumps(data)}\n\n"
 
 
@@ -858,13 +859,16 @@ _SSE_KEEPALIVE_INTERVAL_S = 15.0
 async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[str]:
     """SSE body for POST /query/stream.
 
-    Streams real pipeline progress as ``status`` frames and provisional answer
-    text as ``token`` frames, then the validated answer as exactly ONE terminal
-    ``result`` frame. The ``token`` deltas are COSMETIC: the authoritative answer
-    is only the ``result`` frame, built from ask()'s post-citation-validation text
-    (INV-1), and the refusal sentinel is never streamed as tokens (guarded inside
-    ask()). The client renders tokens as a clearly-provisional "draft" with no
-    citation surface, then replaces it with the validated ``result`` (INV-2).
+    Streams real pipeline progress as ``status`` frames and the answer as
+    ``token`` frames, then that same answer as exactly ONE terminal ``result``
+    frame. The ``token`` deltas are NOT a live model stream and never were a
+    provisional draft under this contract: synthesis is one buffered json-mode
+    call, and ask() replays the RENDERED answer only after the turn cleared the
+    claim gate (INV-1) and its audit row was committed (INV-6), and only for an
+    answer/summary turn -- a decline replays zero tokens. So a token delta is
+    always a slice of the exact bytes the ``result`` frame will carry. The
+    client is free to keep rendering them as a no-citation-surface draft that
+    the ``result`` replaces (it does today, which is strictly conservative).
     ask() runs in a worker thread so its progress/token callbacks push onto the
     event loop while it works, and writes exactly one audit row internally (INV-6,
     never duplicated). Once ask() has been dispatched onto its thread it runs to
@@ -873,7 +877,7 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
     window BEFORE dispatch cancels the work before it starts and writes no row —
     correct, since nothing ran to audit. On any unexpected failure the stream
     closes with no ``result`` frame, which makes the client fall back to blocking
-    POST /query exactly once (any provisional tokens are discarded).
+    POST /query exactly once (any tokens already emitted are discarded).
     """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
@@ -883,8 +887,8 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
         loop.call_soon_threadsafe(queue.put_nowait, ("status", textline))
 
     def on_token(delta: str) -> None:
-        # Provisional answer delta from the worker thread — cosmetic only; the
-        # authoritative answer is still the terminal validated ``result`` frame.
+        # A slice of the gated, audited answer from the worker thread — cosmetic
+        # only; the authoritative answer is still the terminal ``result`` frame.
         loop.call_soon_threadsafe(queue.put_nowait, ("token", delta))
 
     async def _run() -> None:

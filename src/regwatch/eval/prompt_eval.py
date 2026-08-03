@@ -17,7 +17,7 @@ import typer
 from config.settings import get_settings
 
 from regwatch.common.citations import iter_psg_citations
-from regwatch.generate.grounded_qa import _uncited_answer_segments
+from regwatch.generate import turn_gate as tg
 from regwatch.generate.llm import LLMMessage, current_model_name, get_llm_provider
 from regwatch.generate.prompts import (
     BE_EXTRACTION_SYSTEM,
@@ -26,8 +26,10 @@ from regwatch.generate.prompts import (
     GROUNDED_QA_USER,
     generation_prompt_manifest,
 )
+from regwatch.generate.turn_schema import TURN_SCHEMA_MESSAGE
 from regwatch.process.change_detector import summarize_change
 from regwatch.process.extractor import FIELD_NAMES, _passages_for_prompt, _validate_field_citation
+from regwatch.retrieve.retriever import RetrievedPassage
 
 app = typer.Typer(add_completion=False, help="Validate or run synthetic prompt evaluations.")
 _SET_DIR = Path(__file__).with_name("prompt_sets")
@@ -69,7 +71,13 @@ def validate_prompt_sets() -> dict[str, dict[str, Any]]:
     """Load every committed synthetic set and return its immutable identity."""
     loaded = {name: _load_jsonl(path) for name, path in _SET_FILES.items()}
     required = {
-        "qa": {"question", "passages", "expected_facts", "expected_citations", "must_refuse"},
+        "qa": {
+            "question",
+            "passages",
+            "expected_facts",
+            "expected_citations",
+            "expected_turn_type",
+        },
         "extraction": {"pages", "expected", "expected_null"},
         "changes": {"previous_pages", "current_pages", "expected_terms", "expected_markers"},
     }
@@ -103,6 +111,31 @@ def _qa_user(row: dict[str, Any]) -> str:
     )
 
 
+def _qa_passages(row: dict[str, Any]) -> list[RetrievedPassage]:
+    """Synthetic passages in the shape the gate validates against.
+
+    The eval feeds the gate the SAME objects the runtime does, so a citation the
+    gate would reject at runtime is rejected here too -- the harness cannot pass
+    an answer the product would decline.
+    """
+    return [
+        RetrievedPassage(
+            chunk_id=f"{row['id']}-{index}",
+            text=passage["text"],
+            score=1.0,
+            doc_id=index,
+            version_id=index,
+            page=int(passage["page"]),
+            section_path=passage.get("section"),
+            normalized_name="synthetic",
+            source_url="",
+            short_name=str(passage["short_name"]),
+            metadata={},
+        )
+        for index, passage in enumerate(row["passages"])
+    ]
+
+
 def _run_qa(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     settings = get_settings()
     provider = get_llm_provider(role="synthesizer")
@@ -110,17 +143,26 @@ def _run_qa(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in rows:
         response = provider.complete(
             [
-                LLMMessage(
-                    role="system",
-                    content=GROUNDED_QA_SYSTEM.format(refusal=settings.refusal_text),
-                ),
+                LLMMessage(role="system", content=GROUNDED_QA_SYSTEM),
                 LLMMessage(role="user", content=_qa_user(row)),
+                TURN_SCHEMA_MESSAGE,
             ],
             temperature=0.0,
             max_tokens=settings.synthesizer_max_tokens,
+            response_format="json",
         )
-        text = response.text.strip()
-        refused = text.startswith(settings.refusal_text)
+        admitted = tg.admit_turn(
+            response.text.strip(),
+            passages=_qa_passages(row),
+            question=row["question"],
+        )
+        if isinstance(admitted, tg.GateFailure):
+            details.append({"id": row["id"], "passed": False, "model": response.model})
+            continue
+        # Every text assertion runs against the RENDERED string -- what a user
+        # would actually read -- not against the model's raw draft.
+        text = tg.render_answer(admitted)
+        turn_type = "NO_EVIDENCE" if admitted.verdict == tg.VERDICT_NO_EVIDENCE else "ANSWER"
         citations = {(name.upper(), page) for name, page in iter_psg_citations(text)}
         expected_citations = {
             (str(name).upper(), int(page)) for name, page in row["expected_citations"]
@@ -131,13 +173,15 @@ def _run_qa(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         )
         passed = all(
             (
-                refused == bool(row["must_refuse"]),
+                turn_type == str(row["expected_turn_type"]),
                 citations == expected_citations,
                 _contains_all(text, row["expected_facts"]),
                 _contains_none(text, row.get("forbidden", [])),
                 partial_ok,
                 labels_ok,
-                not _uncited_answer_segments(text) if not refused else True,
+                # Strictly stronger than the old "no uncited segment" criterion:
+                # nothing the model drafted may have been dropped at all.
+                not admitted.dropped,
             )
         )
         details.append({"id": row["id"], "passed": passed, "model": response.model})

@@ -17,6 +17,7 @@ from typing import Any, Protocol
 from config.settings import d1_model_rejection, get_settings
 
 from regwatch.common.logging import get_logger
+from regwatch.common.structured_json import extract_json_blob as _extract_json_blob
 
 log = get_logger(__name__)
 
@@ -134,7 +135,7 @@ class LLMProvider(Protocol):
 
 
 # Matches the passage headers _format_passages writes: "[<short_name>, p.<n>]".
-_ECHO_CITATION_RE = re.compile(r"\[[A-Za-z0-9_]+,\s*p\.\s*\d+\]")
+_ECHO_CITATION_RE = re.compile(r"\[([A-Za-z0-9_]+),\s*p\.\s*(\d+)\]")
 
 
 # ---------- echo provider ----------
@@ -143,23 +144,25 @@ class EchoLLMProvider:
 
     If response_format == 'json', returns valid JSON: {"echo": "<last user msg>"}.
 
-    REGWATCH_ECHO_FORCE_REFUSAL (truthy) flips prose completions to the exact
-    configured refusal sentinel so wire-level suites (tests_contract) can reach
-    the synthesis-time refusal path -- no other test-grade knob can make the
-    synthesizer stream the sentinel. JSON mode is exempt on purpose: it serves
-    the extractor, never the synthesizer, and a non-JSON refusal there would
-    break unrelated callers instead of exercising the sentinel hold. Echo is a
-    test-grade provider already fenced from prod by the
-    REGWATCH_ALLOW_TEST_PROVIDERS boot guard, so this knob can never reach a
-    real deployment either.
+    REGWATCH_ECHO_FORCE_REFUSAL (truthy) flips completions to a decline so
+    wire-level suites (tests_contract) can reach the synthesis-time decline
+    path. REGWATCH_ECHO_FORCE_MALFORMED (truthy) returns unparseable text in
+    json mode so the same suites can drive the malformed_structure branch over
+    the real wire. Echo is a test-grade provider already fenced from prod by the
+    REGWATCH_ALLOW_TEST_PROVIDERS boot guard, so neither knob can reach a real
+    deployment.
     """
 
     name = "echo"
 
     @staticmethod
-    def _force_refusal() -> bool:
-        value = os.environ.get("REGWATCH_ECHO_FORCE_REFUSAL", "").strip().lower()
+    def _flag(name: str) -> bool:
+        value = os.environ.get(name, "").strip().lower()
         return value not in ("", "0", "false")
+
+    @staticmethod
+    def _force_refusal() -> bool:
+        return EchoLLMProvider._flag("REGWATCH_ECHO_FORCE_REFUSAL")
 
     def complete(
         self,
@@ -171,30 +174,47 @@ class EchoLLMProvider:
     ) -> LLMResponse:
         last_user = next((m.content for m in reversed(messages) if m.role == "user"), "")
         usage = LLMUsage(input_tokens=0, output_tokens=0)  # stub: zeros, never None
+        # Scrape the prompt's FIRST passage marker BEFORE the json branch: it is
+        # what discriminates the synthesizer (whose user prompt carries passage
+        # headers) from the extractor / change detector (which carry none) now
+        # that BOTH ask for json. Get this wrong and the wire suite fails, not a
+        # unit test.
+        marker = _ECHO_CITATION_RE.search(last_user)
         if response_format == "json":
+            if self._flag("REGWATCH_ECHO_FORCE_MALFORMED"):
+                return LLMResponse(text="not json at all {", model="echo", usage=usage)
+            if marker is None:
+                # Non-QA json callers keep the historical shape verbatim.
+                return LLMResponse(text=json.dumps({"echo": last_user}), model="echo", usage=usage)
+            if self._force_refusal():
+                return LLMResponse(
+                    text=json.dumps({"turn_type": "NO_EVIDENCE", "claims": [], "unsupported": []}),
+                    model="echo",
+                    usage=usage,
+                )
             return LLMResponse(
-                text=json.dumps({"echo": last_user}),
+                text=json.dumps(
+                    {
+                        "turn_type": "ANSWER",
+                        "claims": [
+                            {
+                                "text": "ECHO grounded test answer",
+                                "cites": [
+                                    {
+                                        "short_name": marker.group(1),
+                                        "page": int(marker.group(2)),
+                                    }
+                                ],
+                            }
+                        ],
+                        "unsupported": [],
+                    }
+                ),
                 model="echo",
                 usage=usage,
             )
         if self._force_refusal():
             return LLMResponse(text=get_settings().refusal_text, model="echo", usage=usage)
-        # Echo the prompt's FIRST passage marker as a single cited sentence
-        # rather than the whole prompt. The per-segment citation contract
-        # refuses any answer carrying an uncited segment, and an echoed prompt
-        # is mostly uncited lines -- so the raw echo can never be a valid
-        # answer, and every echo-backed test would refuse instead of exercising
-        # the path it exists to test. The marker is scraped from the prompt, so
-        # it always names a passage that was really retrieved and survives
-        # citation validation. Falls back to the old behavior when the prompt
-        # carries no marker (non-QA callers, which have no such contract).
-        marker = _ECHO_CITATION_RE.search(last_user)
-        if marker:
-            return LLMResponse(
-                text=f"ECHO: grounded test answer {marker.group(0)}.",
-                model="echo",
-                usage=usage,
-            )
         return LLMResponse(text=f"ECHO: {last_user}", model="echo", usage=usage)
 
     def stream(
@@ -206,8 +226,8 @@ class EchoLLMProvider:
     ) -> Iterator[LLMStreamChunk]:
         # Deterministic two-chunk stream of the same text complete() returns, so
         # tests exercise real delta accumulation + the terminal validated chunk.
-        # In forced-refusal mode this streams the sentinel split across two
-        # deltas -- exactly the shape the _stream_synthesis hold must catch.
+        # stream() carries no response_format, so this is the PROSE shape; the
+        # synthesizer no longer streams from the provider.
         resp = self.complete(messages, temperature=temperature, max_tokens=max_tokens)
         mid = len(resp.text) // 2
         for part in (resp.text[:mid], resp.text[mid:]):
@@ -748,7 +768,20 @@ class DatabricksProvider:
         finish_reason = getattr(choice, "finish_reason", None)
         self._raise_for_finish_reason(finish_reason)
         message = getattr(choice, "message", None)
-        text = _visible_gemma_text(_chat_content_text(getattr(message, "content", None)))
+        candidate = _chat_content_text(getattr(message, "content", None))
+        if response_format == "json":
+            # _visible_gemma_text is a PROSE thought-channel scrubber and it
+            # destroys JSON: it returns only what follows the LAST "</think>",
+            # drops everything from a "<|channel>thought" opener, and deletes
+            # "<|think|>" inline. A JSON payload quoting any of those tokens
+            # (a user can ask "how do I read the </think> markers in the SPL?")
+            # would come back unparseable -- a per-question hard error rather
+            # than the lost prefix it used to be. Slice out the JSON blob
+            # instead; the thought channel is unreachable in json mode anyway
+            # (_request_kwargs forces allow_thinking False).
+            text = _extract_json_blob(candidate)
+        else:
+            text = _visible_gemma_text(candidate)
         model = served or self.model
         return LLMResponse(
             text=text,

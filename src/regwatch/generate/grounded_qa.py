@@ -3,14 +3,17 @@
 Flow:
   1. Retrieve top-k passages.
   2. If top-1 score < REFUSAL_SCORE_THRESHOLD → refuse (do NOT call the LLM).
-  3. Otherwise, call the LLM with the strict grounding system prompt and the
-     retrieved passages.
-  4. Parse the answer. If the LLM emitted the refusal string → refuse.
-  5. Validate citations: every `[short_name, p.N]` in the answer must
-     correspond to a passage we actually sent. Unknown citations are stripped
-     to a warning; if the answer has NO valid citations AND it contains
-     content, fall back to refusal.
+  3. Otherwise, call the LLM with the grounding system prompt, the retrieved
+     passages, and the turn JSON Schema, in buffered json mode.
+  4. Hand the completion to ``turn_gate.admit_turn``, which parses it and admits
+     CLAIMS one at a time against the passages actually sent this turn.
+  5. Dispatch on the gate's verdict: render the admitted claims, decline, or --
+     when the payload did not parse -- serve the service-error copy.
   6. Write an audit log row (INV-6) regardless of outcome and return.
+
+The synthesizer no longer writes prose or citation markers, so there is no
+per-sentence prose gate any more: every user-visible byte on an answer turn is
+either an admitted claim or renderer-authored (see generate/turn_gate.py).
 
 Strangler Step 2: ``ask_core`` computes steps 1-5 and RETURNS what to persist
 (rag_contract dataclasses); the ``ask()`` shell owns step 6 and every other
@@ -31,13 +34,7 @@ from sqlalchemy import func
 from sqlmodel import select
 
 from regwatch.common.audit import log_query
-from regwatch.common.citations import (
-    filter_citations,
-    has_citation,
-    iter_psg_citations,
-    strip_all_citations,
-    strip_sources_trailer,
-)
+from regwatch.common.citations import strip_all_citations, strip_sources_trailer
 from regwatch.common.conversation import (
     PriorTurn,
     SessionOwnershipError,
@@ -51,7 +48,9 @@ from regwatch.common.conversation import (
 from regwatch.common.logging import get_logger
 from regwatch.common.observability import capture_exception
 from regwatch.common.text_normalize import canonical_name
+from regwatch.generate import turn_gate as tg
 from regwatch.generate.llm import (
+    D1ResidencyError,
     LLMMessage,
     LLMProvider,
     LLMResponse,
@@ -86,6 +85,8 @@ from regwatch.generate.rag_contract import (
 from regwatch.generate.rag_contract import (
     QueryStatusLiteral as QueryStatusLiteral,
 )
+from regwatch.generate.turn_gate import AdmittedTurn, GateFailure, admit_turn
+from regwatch.generate.turn_schema import TURN_SCHEMA_MESSAGE
 from regwatch.retrieve.reranker import rerank_passages
 from regwatch.retrieve.resolver import resolve_brand, resolve_product, suggest_products
 from regwatch.retrieve.retriever import RetrievedPassage, retrieve
@@ -98,8 +99,10 @@ from regwatch.watch.watchlist import list_watchlist
 
 log = get_logger(__name__)
 
-_ANSWER_SEGMENT_SPLIT = re.compile(r"(?<=[.!?])(?:\s+|$)|\n+")
-_PARTIAL_EVIDENCE_PREFIX = "Evidence not found in the supplied passages for:"
+# Replay chunk size for the post-audit "typing" effect. ~60 chars is a
+# comfortable read cadence and is far larger than any citation marker, so a
+# marker is never the thing that forces a chunk boundary.
+_REPLAY_CHUNK_CHARS = 60
 
 
 def _maybe_inject_fault(stage: str) -> None:
@@ -256,15 +259,14 @@ _META_PHRASES = (
     "whats new",
 )
 
-# Synthesis temperature, shared by the buffered and streaming twin paths
-# (provider.complete in ask() / provider.stream in _stream_synthesis). One
-# source so a tuning bump can never make determinism depend on whether the
-# client streamed. It stays a constant, not a setting: determinism is an
-# invariant here, not an operator knob. The output cap moved to
-# SYNTHESIZER_MAX_TOKENS (a reasoning model needs headroom gpt-5.4-nano never
-# did) and ask_core reads it ONCE per turn, then hands the same number to both
-# twins, which is what keeps them from diverging.
+# Synthesis temperature. A constant, not a setting: determinism is an invariant
+# here, not an operator knob. The output cap is the operator knob
+# (SYNTHESIZER_MAX_TOKENS) and ask_core reads it ONCE per turn.
 _SYNTH_TEMPERATURE = 0.0
+# Hard ceiling on a single synthesis call, INDEPENDENT of the setting. The
+# truncation retry doubles the budget, so an operator who raises the setting
+# must not be able to make one turn cost an unbounded number of tokens.
+_SYNTH_MAX_TOKENS_CEILING = 4000
 
 
 def _looks_like_follow_up(question: str) -> bool:
@@ -616,139 +618,98 @@ def _format_recent(turns: list[PriorTurn]) -> str:
     return "\n\n".join(lines)
 
 
-def _stream_synthesis(
+def _complete_structured(
     provider: LLMProvider,
     messages: list[LLMMessage],
     *,
-    on_emit: Callable[[str], None],
-    refusal_text: str,
     max_tokens: int,
 ) -> LLMResponse:
-    """Drive ``provider.stream()``, releasing provisional answer tokens to
-    ``on_emit`` UNLESS the output is (the start of) the refusal sentinel — a
-    refusal must never be painted as a streaming answer (it would read grounded
-    for a beat, then vanish). Tokens are cosmetic; the returned LLMResponse is the
-    fully-assembled text, on which the caller runs the UNCHANGED INV-1 pipeline.
+    """One buffered json-mode completion, with a single 2x truncation retry.
 
-    ``max_tokens`` is required, not defaulted: a default here would be a second
-    source of truth for the output cap, and the two synthesis twins could then
-    silently disagree about answer length.
+    Buffered, never ``provider.stream()``: stream() takes no response_format on
+    the Protocol or in any implementation, ``_buffered_stream`` drops it, and
+    the Databricks stream fallback re-issues through ``_buffered_stream`` -- so
+    a schema-rejecting endpoint would silently hand unstructured PROSE back to a
+    structured caller. The user-visible "typing" effect is preserved by replaying
+    the RENDERED answer after the audit write (see ``_persist_turn``).
+
+    D1ResidencyError is re-raised FIRST: a residency violation must fail the
+    turn loudly, never be retried against the very endpoint the guard fences off
+    and never degrade into a parse failure.
     """
-    buffer = ""  # the FULL accumulated answer text (drives the guard + the fallback)
-    released = False
-    response: LLMResponse | None = None
-    for chunk in provider.stream(messages, temperature=_SYNTH_TEMPERATURE, max_tokens=max_tokens):
-        if chunk.done:
-            response = chunk.response
-            break
-        if not chunk.delta:
-            continue
-        buffer += chunk.delta
-        if released:
-            on_emit(chunk.delta)
-            continue
-        # Compare with leading whitespace dropped, mirroring the .strip() the
-        # authoritative path applies (llm.py joins-then-strips, ask() strips
-        # again before its sentinel check): a "\n"-prefixed sentinel must HOLD
-        # here too, or the whole refusal would paint as a provisional answer.
-        held = buffer.lstrip()
-        if refusal_text.startswith(held):
-            continue  # still a prefix of the refusal sentinel — hold, stay silent
-        if held.startswith(refusal_text):
-            continue  # it IS the refusal (+ any trailing) — never emit as tokens
-        # Diverged from the sentinel: a real answer. Flush the held prefix (the
-        # whole buffer so far), then stream each later delta live.
-        on_emit(buffer)
-        released = True
-    if response is None:
-        # Defensive: a stream that ended without a terminal chunk (or with a null
-        # response) still yields the FULL accumulated text so the pipeline runs —
-        # empty text hits the empty-completion refusal; a held refusal validates as
-        # a refusal; a real answer validates normally.
-        response = LLMResponse(text=buffer, model=current_model_name(role="synthesizer"))
-    return response
-
-
-def _validate_citations(
-    answer_text: str, passages: list[RetrievedPassage]
-) -> tuple[list[Citation], list[tuple[str, int]]]:
-    """Return (validated citations in order of appearance, list of bad cites)."""
-    # Key case-insensitively: the citation parser is re.IGNORECASE, so the model
-    # may echo a bracket lowercase, while the passage short_name is canonical
-    # uppercase (PSG_NNNNNN). A case-sensitive miss would drop a valid citation
-    # and could flip a genuinely-grounded answer to a false refusal.
-    allowed: dict[tuple[str, int], RetrievedPassage] = {}
-    for p in passages:
-        # Passages arrive best-first; a page often spans several chunks, so
-        # setdefault keeps the TOP-ranked chunk per (doc, page) -- the one the
-        # model most plausibly used -- as the citation's chunk_id/snippet/score
-        # (a plain assignment would bind the evidence to the weakest chunk).
-        allowed.setdefault((p.short_name.upper(), p.page), p)
-
-    seen: set[tuple[str, int]] = set()
-    validated: list[Citation] = []
-    bad: list[tuple[str, int]] = []
-
-    for short_name, page in iter_psg_citations(answer_text):
-        fold = (short_name.upper(), page)
-        passage = allowed.get(fold)
-        if passage is None:
-            bad.append((short_name, page))
-            continue
-        if fold in seen:
-            continue
-        seen.add(fold)
-        snippet = passage.text.strip().replace("\n", " ")[:200]
-        validated.append(
-            Citation(
-                short_name=short_name,
-                page=page,
-                chunk_id=passage.chunk_id,
-                doc_id=passage.doc_id,
-                version_id=passage.version_id,
-                source_url=passage.source_url,
-                snippet=snippet,
-                # Confidence: the matched passage's retriever score, carried on
-                # the citation it grounds (Tier-2). INV-1 unaffected — this is
-                # the same passage that validated the citation.
-                score=passage.score,
-            )
+    capped = min(max_tokens, _SYNTH_MAX_TOKENS_CEILING)
+    try:
+        return provider.complete(
+            messages,
+            temperature=_SYNTH_TEMPERATURE,
+            max_tokens=capped,
+            response_format="json",
         )
-    return validated, bad
+    except D1ResidencyError:
+        raise
+    except RuntimeError as exc:
+        # RuntimeError is the provider layer's "the call returned, but the
+        # payload is unusable" signal, and truncation is its dominant cause
+        # (OpenAI status="incomplete", Databricks finish_reason="length"). It is
+        # not EXCLUSIVELY truncation -- OpenAI status="failed", Databricks
+        # finish_reason="content_filter" and "no choices" raise the same type --
+        # so the retry can cost one extra call on a non-truncation fault. That
+        # is bounded to one and never changes the outcome, and narrowing the
+        # predicate would couple this module to provider message text; do it
+        # with a typed exception in llm.py, not a substring match. Transport
+        # faults (429/5xx/timeouts) are openai.APIError, NOT RuntimeError, so
+        # they skip this branch entirely and land on the audited
+        # provider_error path on the first failure.
+        if capped >= _SYNTH_MAX_TOKENS_CEILING:
+            raise
+        log.warning("qa_synthesis_truncation_retry", old=capped, error=str(exc)[:200])
+        return provider.complete(
+            messages,
+            temperature=_SYNTH_TEMPERATURE,
+            max_tokens=min(capped * 2, _SYNTH_MAX_TOKENS_CEILING),
+            response_format="json",
+        )
 
 
-def _uncited_answer_segments(answer_text: str) -> list[str]:
-    """Return answer-body segments that violate the per-sentence cite contract.
+def _gate_log_fields(admitted: AdmittedTurn) -> dict[str, Any]:
+    """Operator counters for one gate decision -- no claim text, no citations.
 
-    This is deliberately mechanical rather than pretending to be an entailment
-    judge. Semantic support is measured by the prompt eval; at runtime this guard
-    ensures one valid marker cannot launder additional uncited prose.
+    The full per-claim record (text prefix, cites, drop reason, materiality
+    word) is persisted in route_json["turn"]; this line exists so the drop rate
+    is greppable without a DB query.
     """
-    body = strip_sources_trailer(answer_text).strip()
-    segments = [
-        raw.strip().lstrip("-* ").strip()
-        for raw in _ANSWER_SEGMENT_SPLIT.split(body)
-        if raw.strip().lstrip("-* ").strip()
-    ]
-    missing: list[str] = []
-    partial_seen = False
-    for index, segment in enumerate(segments):
-        if segment.startswith(_PARTIAL_EVIDENCE_PREFIX):
-            # Retrieval-state disclosure, not a regulatory claim. Require the
-            # exact prefix, one short label-only tail, and final position so
-            # arbitrary uncited prose cannot masquerade as it.
-            labels = segment[len(_PARTIAL_EVIDENCE_PREFIX) :].strip().removesuffix(".")
-            valid_labels = bool(
-                labels
-                and len(labels) <= 160
-                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 /,()'&-]*", labels)
-            )
-            if not partial_seen and index == len(segments) - 1 and valid_labels:
-                partial_seen = True
-                continue
-        if not has_citation(segment):
-            missing.append(segment)
-    return missing
+    counts: dict[str, int] = {}
+    for claim in admitted.dropped:
+        counts[claim.reason] = counts.get(claim.reason, 0) + 1
+    return {
+        "verdict": admitted.verdict,
+        "emitted": admitted.emitted,
+        "admitted": len(admitted.admitted),
+        "dropped": len(admitted.dropped),
+        "material_word": admitted.material_word,
+        "drop_reasons": counts,
+    }
+
+
+def _replay_chunks(text: str) -> list[str]:
+    """Split a rendered answer into ~60-char whitespace-boundary chunks.
+
+    Whitespace boundaries only: splitting mid-token could tear a citation
+    marker across two frames, and a half-marker is exactly the shape a client
+    would render as literal prose.
+    """
+    chunks: list[str] = []
+    current = ""
+    for token in re.split(r"(\s+)", text):
+        if not token:
+            continue
+        current += token
+        if len(current) >= _REPLAY_CHUNK_CHARS and not token.isspace():
+            chunks.append(current)
+            current = ""
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def _usage_fields(model_name: str, usage: LLMUsage | None) -> dict[str, Any]:
@@ -810,6 +771,7 @@ def _persist_turn(
     audit: AuditPayload,
     patch: SessionPatch,
     t0: float | None = None,
+    on_token: Callable[[str], None] | None = None,
 ) -> QAResult:
     """The shell's write half of a turn: audit row FIRST, then the chat history.
 
@@ -819,6 +781,14 @@ def _persist_turn(
     ``t0`` is the shell's turn clock. Latency is stamped HERE rather than
     supplied by the core because the core is stateless and cannot see transport
     time — the same split Go's ``auditParams`` makes.
+
+    ``on_token`` replays the RENDERED, gated answer AFTER the audit write
+    succeeds, and only on an answer/summary turn. This is deliberately not where
+    it used to live: streaming provisional model tokens from inside the core
+    meant a user could read text that the gate later retracted, and it meant a
+    complete answer could reach the reader with no audit row anywhere (INV-6).
+    The cost is time-to-first-token; the compensation is that no byte a user
+    sees is ever un-audited or un-gated.
     """
     log_kwargs = {**audit.log_kwargs(), "latency_ms": _latency_ms(t0)}
     if audit.allow_skip:
@@ -842,7 +812,7 @@ def _persist_turn(
             fb_outcome, fb_audit, fb_patch = audit.failure_fallback
             # Same t0: the fallback row records how long THIS turn took, not
             # how long the retry after a failed audit write took.
-            return _persist_turn(fb_outcome, fb_audit, fb_patch, t0)
+            return _persist_turn(fb_outcome, fb_audit, fb_patch, t0, on_token)
     # Terminal-decline log lines, emitted after the audit write exactly as the
     # pre-split _refuse/_clarify/_meta did (each status maps to one maker, so
     # the event names cannot drift). The answer/summary path never logged here.
@@ -854,6 +824,21 @@ def _persist_turn(
         log.info("qa_meta", audit_id=audit_id)
     elif outcome.refused:
         log.info("qa_refused", reason=outcome.reason, audit_id=audit_id)
+    # The "typing" effect, rebuilt on the safe side of the write. The status
+    # filter is the whole guard: a decline, a clarify or an error replays
+    # NOTHING, so a retracted draft can never be painted for a beat and then
+    # vanish. Best-effort, exactly like on_progress -- a failing sink must never
+    # break a turn that is already audited and already answered.
+    if on_token is not None and outcome.status in ("answer", "summary"):
+        for chunk in _replay_chunks(outcome.answer):
+            try:
+                on_token(chunk)
+            except Exception:  # broad: a token sink is cosmetic, never fatal
+                # Stop replaying rather than hammer a sink that just failed: the
+                # turn is already audited and the authoritative answer still
+                # rides the terminal result frame.
+                log.debug("on_token_failed", exc_info=True)
+                break
     result = QAResult(
         answer=outcome.answer,
         citations=outcome.citations,
@@ -1192,7 +1177,6 @@ def ask_core(
     load_session_filters: Callable[[], dict[str, Any]],
     load_recent_turns: Callable[[], list[PriorTurn]],
     on_progress: Callable[[str], None] | None = None,
-    on_token: Callable[[str], None] | None = None,
 ) -> tuple[RagOutcome, AuditPayload, SessionPatch]:
     """The PURE compute half of a turn: load context -> compute -> describe.
 
@@ -1207,9 +1191,10 @@ def ask_core(
     ``session_id``/``turn_id`` are the SHELL's ids (already ensured/degraded);
     the core only threads them into what it returns.
 
-    ``on_progress``/``on_token`` behave exactly as documented on ``ask()``:
-    cosmetic, best-effort, never answer-bearing (INV-1 lives in the
-    post-validation result, and the refusal sentinel is never streamed).
+    ``on_progress`` behaves exactly as documented on ``ask()``: cosmetic,
+    best-effort, never answer-bearing. There is deliberately NO token sink here
+    -- answer text is replayed by the shell after the audit write, so the core
+    emits no user-visible bytes at all.
     """
     s = get_settings()
 
@@ -1220,14 +1205,6 @@ def ask_core(
             on_progress(textline)
         except Exception:  # broad: progress is best-effort, never fatal
             log.debug("on_progress_failed", exc_info=True)
-
-    def _emit_token(delta: str) -> None:
-        if on_token is None:
-            return
-        try:
-            on_token(delta)
-        except Exception:  # broad: the token sink is best-effort, never fatal
-            log.debug("on_token_failed", exc_info=True)
 
     model_name = current_model_name(role="synthesizer")
     active_filters: dict[str, Any] = dict(filters or {})
@@ -1260,6 +1237,7 @@ def ask_core(
         *,
         reason: str,
         response_mode: str,
+        route_extra: dict[str, Any] | None = None,
         **kw: Any,
     ) -> tuple[RagOutcome, AuditPayload, SessionPatch]:
         """One ceremony for every terminal decline (_refuse/_clarify/_scope_warning/
@@ -1268,13 +1246,19 @@ def ask_core(
         record an audit route that silently disagrees with the turn it describes.
         Reads active_filters/context_applied at CALL time (they mutate as the
         pipeline advances); post-synthesis branches override model_name
-        (response.model) and pass usage via **kw."""
+        (response.model) and pass usage via **kw.
+
+        ``route_extra`` is merged into the audit route_json and is a NAMED
+        keyword, so it is never forwarded to ``maker`` via **kw. Post-gate
+        declines use it to carry the turn ledger onto the row (see below)."""
         rj = _route_json(
             filters=active_filters,
             reason=reason,
             context_applied=context_applied,
             response_mode=response_mode,
         )
+        if route_extra:
+            rj.update(route_extra)
         kw.setdefault("model_name", model_name)
         outcome, audit = maker(
             question=question,
@@ -1566,36 +1550,22 @@ def ask_core(
         question=question,
         passages=_format_passages(passages),
     )
-    system_prompt = GROUNDED_QA_SYSTEM.format(refusal=s.refusal_text)
     route_json["prompt"] = GROUNDED_QA_PROMPT.as_dict()
 
     _emit("Composing a cited answer…")
     log.info("llm_prompt", role="synthesizer", **GROUNDED_QA_PROMPT.log_fields())
     provider = get_llm_provider(role="synthesizer")
     synth_messages = [
-        LLMMessage(role="system", content=system_prompt),
+        LLMMessage(role="system", content=GROUNDED_QA_SYSTEM),
         LLMMessage(role="user", content=user_prompt),
+        # The schema rides as a TRAILING system message, so it is the last thing
+        # the model reads and it never has to survive a .format() pass.
+        TURN_SCHEMA_MESSAGE,
     ]
     try:
-        if on_token is not None and hasattr(provider, "stream"):
-            # Stream provisional tokens for a live "typing" answer. INV-1 is
-            # untouched: tokens are cosmetic, the returned LLMResponse is the
-            # fully-assembled text, and the SAME post-validation below decides the
-            # recorded answer. The refusal sentinel is never streamed (guard in
-            # _stream_synthesis).
-            response = _stream_synthesis(
-                provider,
-                synth_messages,
-                on_emit=_emit_token,
-                refusal_text=s.refusal_text,
-                max_tokens=s.synthesizer_max_tokens,
-            )
-        else:
-            response = provider.complete(
-                synth_messages,
-                temperature=_SYNTH_TEMPERATURE,
-                max_tokens=s.synthesizer_max_tokens,
-            )
+        response = _complete_structured(
+            provider, synth_messages, max_tokens=s.synthesizer_max_tokens
+        )
     except Exception as exc:  # provider transport error (timeout / 429 / 5xx)
         # B2: a synthesizer failure must NOT return a naked 500 with no audit
         # row — that would break INV-6 exactly when the system misbehaves. We
@@ -1616,7 +1586,7 @@ def ask_core(
     # INV-1/INV-2: a degenerate completion (empty after stripping — e.g. a
     # max_tokens truncation or a provider hiccup) is not an answer. Refuse
     # rather than fall through and emit a non-refused, zero-citation empty
-    # "answer" (the sentinel check below would not catch an empty string).
+    # "answer".
     if not answer:
         return _decline(
             _refuse,
@@ -1627,16 +1597,44 @@ def ask_core(
             usage=response.usage,
         )
 
-    # LLM-side refusal: it returned the exact refusal sentinel.
-    if answer == s.refusal_text or answer.startswith(s.refusal_text):
-        if answer != s.refusal_text:
-            # Model appended prose after the sentinel (told not to). We still refuse
-            # (the safe direction), but flag the deviation so it's visible in the log.
-            log.warning("qa_refusal_prefix_match", trailing=answer[len(s.refusal_text) :][:200])
-        # The user named a real drug but the model couldn't answer this phrasing
-        # (the live net for vague inputs `_looks_vague` didn't catch) → guide.
-        # When the product came from the single-product fallback (no drug named),
-        # a model refusal is a genuine "not covered" → stay refused (INV-2).
+    _emit("Checking each claim against its source…")
+    admitted = admit_turn(answer, passages=passages, question=question)
+    if isinstance(admitted, GateFailure):
+        # A parse failure asserts something about the MACHINE, never about the
+        # corpus. Serving settings.refusal_text here ("I couldn't find this in
+        # the current FDA guidance corpus") would record a claim about coverage
+        # that was never tested, in the audit row, forever.
+        log.warning("qa_malformed_structure", detail=admitted.detail[:500])
+        return _decline(
+            _refuse,
+            reason=admitted.reason,
+            response_mode="refused",
+            passages=passages,
+            model_name=response.model,
+            status="error",
+            answer_text=_SERVICE_UNAVAILABLE_TEXT,
+            usage=response.usage,
+        )
+
+    log.info("qa_turn_gate", **_gate_log_fields(admitted))
+
+    # OD-5's operator half rides on EVERY post-gate audit row, not just the
+    # answer path. The decline branches below are exactly the turns where a
+    # claim was DROPPED (no_valid_citations, material_drop), so persisting the
+    # ledger only on the answer path would leave the per-claim drop reason and
+    # the offending (short_name, page) pairs in a structlog line and nowhere in
+    # the DB -- the opposite of what turn_gate.ledger claims to provide. Built
+    # once here so the answer and decline paths cannot drift.
+    turn_route = {
+        "turn": tg.ledger(admitted, model=response.model, prompt_version=GROUNDED_QA_PROMPT.version)
+    }
+
+    if admitted.verdict == tg.VERDICT_NO_EVIDENCE:
+        # The model declined. Unchanged two-way branch: the user named a real
+        # drug but the model couldn't answer this phrasing (the live net for
+        # vague inputs `_looks_vague` didn't catch) -> guide. When the product
+        # came from the single-product fallback (no drug named), a decline is a
+        # genuine "not covered" -> stay refused (INV-2).
         if resolved_by_name and resolved_name:
             return _decline(
                 _clarify,
@@ -1646,6 +1644,7 @@ def ask_core(
                 interpretation=_interpretation_for(resolved_name),
                 options=build_options(resolved_name),
                 usage=response.usage,
+                route_extra=turn_route,
             )
         return _decline(
             _refuse,
@@ -1654,54 +1653,46 @@ def ask_core(
             passages=passages,
             model_name=response.model,
             usage=response.usage,
+            route_extra=turn_route,
         )
 
-    citations, bad = _validate_citations(answer, passages)
-    if bad:
-        log.warning("qa_unknown_citations", bad=bad)
-
-    # INV-1: strip any fabricated citation markers from the prose so the
-    # rendered answer never shows an unverifiable citation. Valid markers are
-    # kept intact; only those whose (short_name, page) is not in the validated
-    # set are removed (compound brackets keep just their valid pairs).
-    # filter_citations compares keys EXACTLY while _validate_citations dedupes
-    # case-insensitively (keeping one casing), so collect every AS-EMITTED
-    # casing whose fold validated -- otherwise a later mixed-case duplicate of a
-    # valid marker would be stripped, leaving its sentence uncited.
-    folded_valid = {(c.short_name.upper(), c.page) for c in citations}
-    valid_keys = {
-        (short_name, page)
-        for short_name, page in iter_psg_citations(answer)
-        if (short_name.upper(), page) in folded_valid
-    }
-    cleaned_answer = filter_citations(answer, valid_keys)
-    # Tidy whitespace left behind by removed markers.
-    cleaned_answer = re.sub(r"\s+([.,;:])", r"\1", cleaned_answer)
-    cleaned_answer = re.sub(r"[ \t]{2,}", " ", cleaned_answer).strip()
-
-    # INV-1: validate AFTER fabricated markers are removed. Otherwise one real
-    # citation can launder additional uncited claims, or a fabricated marker can
-    # make an unsupported sentence look cited during the check.
-    answer_body = strip_all_citations(strip_sources_trailer(cleaned_answer)).strip()
-    uncited = _uncited_answer_segments(cleaned_answer)
-    if not answer_body or not citations or uncited:
-        if uncited:
-            log.warning("qa_uncited_answer_segments", count=len(uncited))
+    if admitted.verdict == tg.VERDICT_NO_VALID_CITATIONS:
+        # Every claim failed the gate (or the model emitted none). NOT a
+        # no-evidence turn: see the note in turn_gate.
         return _decline(
             _refuse,
-            reason="uncited_claims" if uncited else "no_valid_citations",
+            reason="no_valid_citations",
             response_mode="refused",
             passages=passages,
             model_name=response.model,
             usage=response.usage,
+            route_extra=turn_route,
         )
-    route_json["partial_evidence"] = _PARTIAL_EVIDENCE_PREFIX in strip_sources_trailer(
-        cleaned_answer
-    )
+
+    if admitted.verdict == tg.VERDICT_MATERIAL_DROP:
+        # OD-4: what was dropped carried obligation/permission/exception
+        # wording, so the surviving claims can read as their own opposite.
+        # Reject the whole answer rather than hand back a confident, fully
+        # cited, faithfulness-1.0 statement with the qualifier deleted.
+        return _decline(
+            _refuse,
+            reason="material_drop",
+            response_mode="refused",
+            passages=passages,
+            model_name=response.model,
+            answer_text=tg.MATERIAL_DROP_TEXT,
+            usage=response.usage,
+            route_extra=turn_route,
+        )
+
+    rendered_answer = tg.render_answer(admitted)
+    citations = tg.citations(admitted)
+    route_json["partial_evidence"] = bool(admitted.unsupported)
+    route_json.update(turn_route)
 
     audited = _audit_retrieved(passages)
     outcome = RagOutcome(
-        answer=cleaned_answer,
+        answer=rendered_answer,
         citations=citations,
         refused=False,
         model_name=response.model,
@@ -1715,7 +1706,7 @@ def ask_core(
         mode="qa",
         query_text=question,
         retrieved=audited,
-        answer_text=cleaned_answer,
+        answer_text=rendered_answer,
         citations=[asdict(c) for c in citations],
         refused=False,
         model_name=response.model,
@@ -1743,6 +1734,10 @@ def ask_core(
             status="error",
             answer_text=_SERVICE_UNAVAILABLE_TEXT,
             usage=response.usage,
+            # If the strict write fails this fallback row is the ONLY record of
+            # the turn, so it carries the ledger too -- otherwise a PARTIAL
+            # verdict's drops would vanish exactly when the DB is misbehaving.
+            route_extra=turn_route,
         ),
         **_usage_fields(response.model, response.usage),
     )
@@ -1778,11 +1773,11 @@ def ask(
     NO answer text or citations — INV-1 lives entirely in the post-validation
     answer path — and a failing sink can never break or slow the query.
 
-    ``on_token`` (optional) receives provisional answer text deltas for a live
-    "typing" effect. It is cosmetic ONLY: the recorded and returned answer is the
-    post-validation text, and the refusal sentinel is never streamed as an
-    answer. A missing sink or a non-streaming provider degrades to a single
-    buffered completion with no behavior change.
+    ``on_token`` (optional) receives the FINAL answer text in chunks, for a live
+    "typing" effect. It fires only after the audit row is committed and only on
+    an answer/summary turn, so every byte it emits is gated, rendered and
+    audited — a declined or retracted draft can never reach it. A missing sink
+    changes nothing else about the turn.
     """
     # Touch settings/model-name BEFORE any write, matching pre-split ask(): both
     # are lru_cache-backed (near-free on every call after the first) but a first-
@@ -1841,7 +1836,6 @@ def ask(
             load_session_filters=lambda: get_session_filters(sid),
             load_recent_turns=lambda: get_recent_turns(sid, limit=3, exclude_turn_id=tid),
             on_progress=on_progress,
-            on_token=on_token,
         )
     except Exception as exc:
         # The SAME audited-error boundary compute_turn owns for the Go control
@@ -1859,7 +1853,7 @@ def ask(
             user_id=user_id,
             filters=filters,
         )
-    return _persist_turn(outcome, audit, patch, t0)
+    return _persist_turn(outcome, audit, patch, t0, on_token)
 
 
 def _pipeline_error(

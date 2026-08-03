@@ -2,15 +2,19 @@
 empty Chroma).
 
 Seeds a tiny fixed corpus into the isolated per-test store with the echo
-embedder, drives the real `grounded_qa.ask()` pipeline (resolve → filter →
-retrieve → rerank → cite → validate → answer/refuse), and grades it with the
-real `eval.metrics.evaluate`. The only stand-in is a FAITHFUL LLM stub that
-reconstructs one citation-terminated sentence per passage it is handed — so the
-gate exercises everything except the model, with no network and no API key.
+embedder, drives the real `grounded_qa.ask()` pipeline (resolve -> filter ->
+retrieve -> rerank -> admit claims -> render/refuse), and grades it with the real
+`eval.metrics.evaluate`. The only stand-in is a FAITHFUL LLM stub that returns
+the STRUCTURED turn the real synthesizer now returns: one claim per passage it
+was handed, each declaring that passage's own (short_name, page). So the gate
+exercises everything except the model, with no network and no API key.
 
 What this protects: product resolution, the mandatory normalized_name filter,
-citation validation, the refusal routing, AND now answer CONTENT (fact_recall)
-and per-sentence grounding (faithfulness) — all hard-gated at threshold here.
+claim admission against the passages actually retrieved, the refusal routing,
+AND answer CONTENT (fact_recall) and per-sentence grounding (faithfulness) --
+all hard-gated at threshold here. faithfulness stays a real assertion because
+the RENDERER, not the model, writes every marker and places it before the
+terminal punctuation the scorer splits on.
 """
 
 from __future__ import annotations
@@ -19,7 +23,6 @@ import re
 from typing import Any
 
 import pytest
-from config.settings import get_settings
 
 from regwatch.eval.metrics import GoldItem, evaluate
 from regwatch.generate import grounded_qa as qa_mod
@@ -28,13 +31,16 @@ from regwatch.process.embedder import get_embedding_provider
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import PsgDocument, PsgVersion
 from regwatch.store.vector_store import add_chunks
+from tests.conftest import synth_turn_json
 
 pytestmark = pytest.mark.invariants
 
 # (period-free body text carrying the expected facts, appl_no, normalized_name, page).
-# Period-free is load-bearing: the faithful stub emits one sentence per passage
-# ending in its citation, and faithfulness() splits on sentence punctuation — an
-# internal "." would create an uncited fragment.
+# Period-free is still load-bearing, for a NEW reason: the stub puts one passage
+# body into one claim slot, and the turn gate drops any claim whose sanitized
+# text is more than one sentence (a slot must not hold a cited fact plus an
+# uncited rider). An internal "." would therefore drop the claim, not merely
+# create an uncited fragment.
 _ROWS = [
     (
         "fasting single-dose two-way crossover in vivo bioequivalence study",
@@ -158,10 +164,15 @@ _HEADER_RE = re.compile(r"\[([^,\]]+),\s*p\.(\d+)\]")
 
 
 class _FaithfulStub:
-    """Stands in for the synthesizer. Reads the passages it was handed and emits
-    one period-free, citation-terminated sentence per passage — faithful by
-    construction (cites only what it was given), so every citation validates and
-    every sentence carries a citation."""
+    """Stands in for the STRUCTURED synthesizer.
+
+    Reads the passages it was handed and returns one JSON turn carrying one
+    claim per passage: the passage body as the claim text, that passage's own
+    (short_name, page) as its declared citation. Faithful by construction -- it
+    declares only what it was given -- so every claim is admitted, the renderer
+    stamps every marker, and no claim is ever dropped. It authors NO markers of
+    its own; that is now the renderer's job alone.
+    """
 
     name = "faithful-stub"
 
@@ -169,16 +180,18 @@ class _FaithfulStub:
         user = next((m.content for m in reversed(messages) if m.role == "user"), "")
         region = user.split("<untrusted_source_passages>\n", 1)[-1]
         region = region.split("\n</untrusted_source_passages>", 1)[0]
-        sentences: list[str] = []
+        claims: list[tuple[str, list[tuple[str, int]]]] = []
         for block in (b.strip() for b in region.split("\n---\n") if b.strip()):
             head, _, body = block.partition("\n")
             m = _HEADER_RE.search(head)
             if not m:
                 continue
-            short, page = m.group(1), m.group(2)
-            sentences.append(f"{body.strip()} [{short}, p.{page}].")
-        text = " ".join(sentences) if sentences else get_settings().refusal_text
-        return LLMResponse(text=text, model=self.name)
+            claims.append((body.strip(), [(m.group(1), int(m.group(2)))]))
+        if not claims:
+            # Nothing to cite -> the model DECLINES, the structured twin of the
+            # old refusal-string emission.
+            return LLMResponse(text=synth_turn_json(turn_type="NO_EVIDENCE"), model=self.name)
+        return LLMResponse(text=synth_turn_json(claims), model=self.name)
 
 
 def test_eval_gate_passes_on_deterministic_corpus(monkeypatch: pytest.MonkeyPatch) -> None:

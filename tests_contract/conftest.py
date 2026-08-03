@@ -26,8 +26,8 @@ Five stack flavors exist because the scenario matrix needs boot-time env
 differences (settings are lru_cached in the app): base, low_score
 (REFUSAL_SCORE_THRESHOLD=1.0), dead_provider (real openai SDK pointed at a
 reserved closed port), rate_limited (RATE_LIMIT_PER_MINUTE=1), forced_refusal
-(REGWATCH_ECHO_FORCE_REFUSAL=1: echo returns the refusal sentinel, making the
-streaming sentinel hold wire-reachable). Each flavor is its own uvicorn +
+(REGWATCH_ECHO_FORCE_REFUSAL=1: echo emits a NO_EVIDENCE turn, making the
+synthesis-time model decline wire-reachable). Each flavor is its own uvicorn +
 proxy pair; all share the one Postgres. Stacks boot lazily and live for the
 session.
 
@@ -138,7 +138,12 @@ RETRIEVED_ITEM_KEYS = frozenset(
     {"chunk_id", "score", "doc_id", "version_id", "page", "normalized_name", "short_name"}
 )
 ROUTE_JSON_KEYS = frozenset({"route", "filters", "reason", "context_applied", "response_mode"})
-ANSWER_ROUTE_JSON_KEYS = ROUTE_JSON_KEYS | frozenset({"prompt", "partial_evidence"})
+# "turn" is the turn_gate ledger (what the model emitted, what was admitted,
+# what was dropped and why). It rides on every route that reached the claim
+# gate: the answer path AND the post-gate declines (model_refusal,
+# no_valid_citations, material_drop, audit_error). Pre-gate declines
+# (no_product, low_top_score, clarify, scope_warning, meta) keep the base keys.
+ANSWER_ROUTE_JSON_KEYS = ROUTE_JSON_KEYS | frozenset({"prompt", "partial_evidence", "turn"})
 
 # The full status vocabulary (src/regwatch/generate/rag_contract.py).
 QUERY_STATUSES = frozenset(
@@ -534,11 +539,11 @@ _FLAVOR_OVERRIDES: dict[str, dict[str, str]] = {
     # for the uvicorn SESSION -- so only ONE test may use this flavor per
     # minute; a second would 429 on its very first call.
     "rate_limited": {"RATE_LIMIT_PER_MINUTE": "1"},
-    # Echo returns the configured refusal sentinel (streamed across two deltas)
-    # instead of "ECHO: ..." -- the only way a wire scenario can make the
-    # synthesizer stream the sentinel and so reach the _stream_synthesis hold
-    # (S23). Fenced from prod by the REGWATCH_ALLOW_TEST_PROVIDERS boot guard
-    # like echo itself.
+    # Echo emits a NO_EVIDENCE turn instead of an ANSWER turn -- the only way a
+    # wire scenario can reach the synthesis-time model-decline branch, and so
+    # the only way to prove over the wire that a decline replays ZERO token
+    # frames (S23). Fenced from prod by the REGWATCH_ALLOW_TEST_PROVIDERS boot
+    # guard like echo itself.
     "forced_refusal": {"REGWATCH_ECHO_FORCE_REFUSAL": "1"},
     # S24: force an UNEXPECTED raise inside retrieve() (fenced by the same
     # allow-test-providers guard) so the step-5 compute_turn audited-error
