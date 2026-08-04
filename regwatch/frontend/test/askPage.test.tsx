@@ -235,6 +235,33 @@ describe("AskPage — run()/stop() orchestration", () => {
     act(() => stream.resolve?.(makeResponse()));
     await screen.findByText(ANSWER_TEXT);
   });
+
+  it.each([
+    ["refused", "low_top_score", "Evidence gap — see the reply"],
+    ["error", "provider_error", "Answer unavailable — see the reply"],
+    ["scope_warning", "scope_warning", "Out of scope — see the reply"],
+  ] as const)(
+    "announces a %s result with its specific outcome",
+    async (status, reason, expectedLabel) => {
+      const user = userEvent.setup();
+      askQueryStreamMock.mockResolvedValue(
+        makeResponse({
+          answer: "Here is a safer next step.",
+          status,
+          refused: true,
+          citations: [],
+          reason,
+        } as Partial<QueryResponse>),
+      );
+      const { container } = render(<AskPage />);
+
+      await submit(user, "help me with this question");
+      const liveRegion = container.querySelector('.sr-only[aria-live="polite"]');
+      await waitFor(() =>
+        expect(liveRegion).toHaveTextContent(`${expectedLabel}: Here is a safer next step.`),
+      );
+    },
+  );
 });
 
 describe("AskPage — session identity across switches", () => {

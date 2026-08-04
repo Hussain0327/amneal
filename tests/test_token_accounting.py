@@ -323,20 +323,20 @@ def test_ask_prices_server_reported_snapshot_model(monkeypatch: pytest.MonkeyPat
         assert row.cost_usd == pytest.approx((1_000 * 0.05 + 500 * 0.40) / 1_000_000)
 
 
-def test_pre_llm_refusal_keeps_token_fields_null() -> None:
-    """No LLM call -> NULL token fields (not zeros): nothing was spent."""
+def test_guidance_refusal_records_echo_usage() -> None:
+    """A pre-synthesis guidance turn records the provider's real zero usage."""
     from regwatch.generate import grounded_qa as qa_mod
     from regwatch.store.db import init_db, session_scope
     from regwatch.store.models import QueryLog
 
-    init_db()  # empty corpus -> no_product refusal before any LLM call
+    init_db()  # empty corpus -> no_product guidance instead of synthesis
     result = qa_mod.ask("What does the FDA recommend for romidepsin?")
     assert result.refused
     with session_scope() as s:
         row = s.get(QueryLog, result.audit_id)
         assert row is not None
-        assert row.input_tokens is None
-        assert row.output_tokens is None
+        assert row.input_tokens == 0
+        assert row.output_tokens == 0
         assert row.cost_usd is None
 
 

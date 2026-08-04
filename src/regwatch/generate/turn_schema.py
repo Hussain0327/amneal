@@ -5,19 +5,20 @@ plus a list of claims, where a claim is one factual sentence and the citations
 it declares. The gate (``turn_gate``) admits claims one at a time; the renderer
 writes every citation marker itself, from validated passages.
 
-WHY THE MODEL-SELECTABLE ENUM IS TWO VALUES, NOT FOUR
+WHY THE SYNTHESIZER-SELECTABLE ENUM IS TWO VALUES, NOT FOUR
 The four user-visible turn types are a DOMAIN vocabulary; this enum is the
-subset the model may DECIDE after seeing passages.
-  * CAPABILITY is deterministic: the meta gate in grounded_qa is a hard veto
-    that only fires pre-retrieval, so a model-selected CAPABILITY turn would
-    always be one the veto already rejected.
-  * CLARIFY is deterministic: grounded_qa already turns a model decline into a
-    clarify when the product resolved by name, using application-authored
-    interpretation/option text. A model-authored ``ask`` field would be a NEW
-    uncited output channel, and a shape-only gate on it (length, ends with '?')
-    stops nothing semantic.
-The governing rule: the model may SELECT a turn and may AUTHOR text only inside
-a claim slot. Every other user-visible byte is deterministic.
+subset the synthesizer may DECIDE after seeing passages.
+  * CAPABILITY remains an application-owned outcome. A separate constrained
+    guidance planner may select ``view_capabilities`` only when the server puts
+    that action on the turn's allowlist.
+  * CLARIFY remains an application-owned outcome with application-authored
+    interpretation and option text. The guidance planner may select a safe next
+    step and prioritize existing option IDs, but it cannot author an ``ask``
+    field or create an uncited output channel.
+The governing synthesis rule: the model may SELECT a turn and may AUTHOR text
+only inside a claim slot. The separate planner contract in ``guidance.py``
+selects actions, never user-visible prose. Every other user-visible byte is
+deterministic.
 """
 
 from __future__ import annotations

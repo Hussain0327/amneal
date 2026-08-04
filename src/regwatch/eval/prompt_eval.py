@@ -18,6 +18,7 @@ from config.settings import get_settings
 
 from regwatch.common.citations import iter_psg_citations
 from regwatch.generate import turn_gate as tg
+from regwatch.generate.guidance import GuidanceRequest, build_guidance_request, parse_guidance_plan
 from regwatch.generate.llm import LLMMessage, current_model_name, get_llm_provider
 from regwatch.generate.prompts import (
     BE_EXTRACTION_SYSTEM,
@@ -26,6 +27,7 @@ from regwatch.generate.prompts import (
     GROUNDED_QA_USER,
     generation_prompt_manifest,
 )
+from regwatch.generate.rag_contract import ClarifyOption
 from regwatch.generate.turn_schema import TURN_SCHEMA_MESSAGE
 from regwatch.process.change_detector import summarize_change
 from regwatch.process.extractor import FIELD_NAMES, _passages_for_prompt, _validate_field_citation
@@ -35,6 +37,7 @@ app = typer.Typer(add_completion=False, help="Validate or run synthetic prompt e
 _SET_DIR = Path(__file__).with_name("prompt_sets")
 _SET_FILES = {
     "qa": _SET_DIR / "qa.jsonl",
+    "guidance": _SET_DIR / "guidance.jsonl",
     "extraction": _SET_DIR / "extraction.jsonl",
     "changes": _SET_DIR / "changes.jsonl",
 }
@@ -78,6 +81,16 @@ def validate_prompt_sets() -> dict[str, dict[str, Any]]:
             "expected_citations",
             "expected_turn_type",
         },
+        "guidance": {
+            "question",
+            "status",
+            "reason",
+            "product",
+            "clarify",
+            "related",
+            "expected_next_steps",
+            "expected_first_option_ids",
+        },
         "extraction": {"pages", "expected", "expected_null"},
         "changes": {"previous_pages", "current_pages", "expected_terms", "expected_markers"},
     }
@@ -86,6 +99,32 @@ def validate_prompt_sets() -> dict[str, dict[str, Any]]:
             missing = required[name] - row.keys()
             if missing:
                 raise ValueError(f"{name}:{row['id']}: missing {sorted(missing)}")
+            if name == "guidance":
+                request = _guidance_request(row)
+                expected = row["expected_next_steps"]
+                if (
+                    not isinstance(expected, list)
+                    or not expected
+                    or not all(isinstance(step, str) and step for step in expected)
+                ):
+                    raise ValueError(
+                        f"guidance:{row['id']}: expected_next_steps needs non-empty strings"
+                    )
+                if not set(expected).issubset(request.allowed_next_steps):
+                    raise ValueError(
+                        f"guidance:{row['id']}: expected_next_steps must be route-allowlisted"
+                    )
+                expected_options = row["expected_first_option_ids"]
+                if not isinstance(expected_options, list) or not all(
+                    isinstance(option_id, str) and option_id for option_id in expected_options
+                ):
+                    raise ValueError(
+                        f"guidance:{row['id']}: expected_first_option_ids must be strings"
+                    )
+                if not set(expected_options).issubset(request.option_ids):
+                    raise ValueError(
+                        f"guidance:{row['id']}: expected option ids must be route-allowlisted"
+                    )
     return {name: {"count": len(item.rows), "sha256": item.sha256} for name, item in loaded.items()}
 
 
@@ -134,6 +173,50 @@ def _qa_passages(row: dict[str, Any]) -> list[RetrievedPassage]:
         )
         for index, passage in enumerate(row["passages"])
     ]
+
+
+def _guidance_options(row: dict[str, Any], field: str) -> list[ClarifyOption]:
+    raw_options = row[field]
+    if not isinstance(raw_options, list):
+        raise ValueError(f"guidance:{row['id']}: {field} must be a list")
+    options: list[ClarifyOption] = []
+    for index, raw in enumerate(raw_options):
+        if not isinstance(raw, dict):
+            raise ValueError(f"guidance:{row['id']}: {field}[{index}] must be an object")
+        label = raw.get("label")
+        query = raw.get("query")
+        filters = raw.get("filters")
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError(f"guidance:{row['id']}: {field}[{index}] needs a label")
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError(f"guidance:{row['id']}: {field}[{index}] needs a query")
+        if filters is not None and not isinstance(filters, dict):
+            raise ValueError(f"guidance:{row['id']}: {field}[{index}].filters must be an object")
+        options.append(ClarifyOption(label=label, query=query, filters=filters))
+    return options
+
+
+def _guidance_request(row: dict[str, Any]) -> GuidanceRequest:
+    question = row["question"]
+    status = row["status"]
+    reason = row["reason"]
+    product = row["product"]
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError(f"guidance:{row['id']}: question must be a non-empty string")
+    if not isinstance(status, str) or not status:
+        raise ValueError(f"guidance:{row['id']}: status must be a non-empty string")
+    if not isinstance(reason, str) or not reason:
+        raise ValueError(f"guidance:{row['id']}: reason must be a non-empty string")
+    if product is not None and (not isinstance(product, str) or not product.strip()):
+        raise ValueError(f"guidance:{row['id']}: product must be null or a non-empty string")
+    return build_guidance_request(
+        question=question,
+        status=status,
+        reason=reason,
+        product=product,
+        clarify=_guidance_options(row, "clarify"),
+        related=_guidance_options(row, "related"),
+    )
 
 
 def _run_qa(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -185,6 +268,47 @@ def _run_qa(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             )
         )
         details.append({"id": row["id"], "passed": passed, "model": response.model})
+    return details
+
+
+def _run_guidance(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Score bounded next-step selections; never render or score display copy."""
+    provider = get_llm_provider(role="router")
+    details: list[dict[str, Any]] = []
+    for row in rows:
+        request = _guidance_request(row)
+        response = provider.complete(
+            request.messages,
+            temperature=0.0,
+            max_tokens=600,
+            response_format="json",
+        )
+        try:
+            plan = parse_guidance_plan(response.text, request)
+        except ValueError as exc:
+            details.append(
+                {
+                    "id": row["id"],
+                    "passed": False,
+                    "model": response.model,
+                    "failure": str(exc),
+                }
+            )
+            continue
+        expected_first = row["expected_first_option_ids"]
+        option_match = not expected_first or (
+            bool(plan.option_ids) and plan.option_ids[0] in expected_first
+        )
+        details.append(
+            {
+                "id": row["id"],
+                "passed": plan.next_step in row["expected_next_steps"] and option_match,
+                "model": response.model,
+                "next_step": plan.next_step,
+                "option_ids": plan.option_ids,
+                "option_match": option_match,
+            }
+        )
     return details
 
 
@@ -270,6 +394,7 @@ def run_command(
     sets = {name: _load_jsonl(path) for name, path in _SET_FILES.items()}
     results = {
         "qa": _run_qa(sets["qa"].rows),
+        "guidance": _run_guidance(sets["guidance"].rows),
         "extraction": _run_extraction(sets["extraction"].rows),
         "changes": _run_changes(sets["changes"].rows),
     }

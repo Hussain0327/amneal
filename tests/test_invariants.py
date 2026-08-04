@@ -238,7 +238,7 @@ def test_inv1_material_drop_rejects_the_whole_answer(
 
 
 def test_inv2_refuses_when_corpus_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No documents indexed → must refuse, must not call the LLM."""
+    """No documents indexed → refuse safely after one guidance attempt."""
     init_db()
     called = {"n": 0}
 
@@ -250,7 +250,7 @@ def test_inv2_refuses_when_corpus_empty(monkeypatch: pytest.MonkeyPatch) -> None
     result = qa_mod.ask("What is the BE acceptance interval for metformin ER?")
     assert result.refused
     assert result.answer == get_settings().refusal_text
-    assert called["n"] == 0
+    assert called["n"] == 1
 
 
 def test_inv2_refuses_when_model_declines_with_no_evidence(
@@ -380,7 +380,7 @@ def test_inv6_refusal_also_audited(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(rows) == 1
     assert rows[0][0] is True
     assert rows[0][1] == "qa"
-    assert rows[0][2] == get_settings().refusal_text
+    assert "couldn't identify the product" in rows[0][2].lower()
 
 
 def test_inv6_authenticated_query_records_user_attribution() -> None:

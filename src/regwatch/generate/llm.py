@@ -173,6 +173,9 @@ class EchoLLMProvider:
         response_format: str | None = None,
     ) -> LLMResponse:
         last_user = next((m.content for m in reversed(messages) if m.role == "user"), "")
+        is_guidance = any(
+            m.role == "system" and "[REGWATCH_QUERY_GUIDANCE_V1]" in m.content for m in messages
+        )
         usage = LLMUsage(input_tokens=0, output_tokens=0)  # stub: zeros, never None
         # Scrape the prompt's FIRST passage marker BEFORE the json branch: it is
         # what discriminates the synthesizer (whose user prompt carries passage
@@ -183,6 +186,24 @@ class EchoLLMProvider:
         if response_format == "json":
             if self._flag("REGWATCH_ECHO_FORCE_MALFORMED"):
                 return LLMResponse(text="not json at all {", model="echo", usage=usage)
+            if is_guidance:
+                # Test/local parity for the constrained guidance planner. The
+                # user message is the exact JSON context built by guidance.py;
+                # echo selects only values the application supplied, just like a
+                # compliant live router response.
+                try:
+                    context = json.loads(last_user)
+                    steps = list(context.get("allowed_next_steps") or [])
+                    options = list(context.get("available_options") or [])
+                    next_step = str(steps[0])
+                    option_ids = [str(row["id"]) for row in options[:3]]
+                except (json.JSONDecodeError, KeyError, TypeError, IndexError):
+                    return LLMResponse(text="{}", model="echo", usage=usage)
+                return LLMResponse(
+                    text=json.dumps({"next_step": next_step, "option_ids": option_ids}),
+                    model="echo",
+                    usage=usage,
+                )
             if marker is None:
                 # Non-QA json callers keep the historical shape verbatim.
                 return LLMResponse(text=json.dumps({"echo": last_user}), model="echo", usage=usage)

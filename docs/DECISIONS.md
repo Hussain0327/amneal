@@ -400,3 +400,28 @@ The eval was RED on the real corpus (`recall@8=0.667, citation_precision=0.000, 
 - **Progress events are logs, not WebSockets.** Upstream's in-process event
   bus was dropped; the UI polls the run row. A durable event feed can replace
   `deficiency/events.py` without touching the vendored detection code.
+
+## Constrained AI guidance for every healthy Ask turn (Aug 4 2026)
+
+- **One valid turn, one AI role.** Every healthy Ask message now gets exactly one
+  model role and contract. An answerable, sufficiently grounded retrieval result uses the
+  synthesizer; a pre-synthesis product, dosage-form, scope, capability,
+  vague-input, or weak-retrieval outcome uses the configured `router` role as a
+  guidance planner. Operational errors are not AI-routed, and a post-synthesis
+  refusal never triggers a second model role. The existing bounded truncation
+  retry may repeat the same structured completion without changing authority.
+- **The application retains authority.** Product resolution, dosage-form
+  selection, regulatory-scope policy, status/reason, filters, citation gates,
+  and user-visible copy remain deterministic. The guidance model can select only
+  one server-allowlisted `next_step` and up to three IDs for options already
+  created by the application. It cannot author display prose, invent an option,
+  change the route, or produce an uncited regulatory claim.
+- **The 0.30 boundary still blocks answer generation.** Removing the threshold
+  would let irrelevant but real passages give unsupported claims plausible
+  citations. Below-threshold passages therefore go to neither the synthesizer
+  nor the guidance planner; the planner sees only the question and trusted route
+  context. This supersedes Phase 2's old “pre-LLM refusal” behavior without
+  weakening INV-1 or INV-2.
+- **No live-model result is claimed here.** This decision records the shipped
+  prompt/schema boundary and its deterministic validation; provider-backed
+  conversational quality remains an explicit evaluation step.

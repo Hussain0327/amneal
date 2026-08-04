@@ -4,8 +4,8 @@ A regulatory question that happens to contain a meta phrase ("what do you cover"
 must NEVER reach the uncited meta path (INV-1/INV-2). These tests pin that:
 
   T1 routing-veto    — a named in-corpus drug skips meta (the hard veto fires).
-  T2 meta-uncited    — a true meta question answers with status='meta', no LLM,
-                       no citations, no retrieval.
+  T2 meta-uncited    — a true meta question keeps application-authored system
+                       facts, uses one guidance-planner call, and does no retrieval.
   T3 no-drug-fact-leak — the meta answer carries only system facts (corpus /
                        watchlist / digest), never BE/dissolution regulatory prose.
   T4 meta-audited    — exactly ONE QueryLog row, status='meta' (extends INV-6).
@@ -183,12 +183,12 @@ def test_t1_named_drug_overrides_a_matching_meta_phrase(
     assert result.status != "meta", "named-drug veto failed — meta phrase reached the uncited path"
 
 
-# ---------- T2 meta-uncited: a true meta question is answered, no LLM ----------
+# ---------- T2 meta-uncited: trusted facts plus one AI guidance turn ----------
 
 
-def test_t2_meta_uncited_no_llm_no_retrieval(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_t2_meta_uncited_guidance_without_retrieval(monkeypatch: pytest.MonkeyPatch) -> None:
     """'what products do you cover?' => status=='meta', refused False, citations
-    [], LLM call counter == 0, and retrieval never runs."""
+    [], one constrained guidance call, and retrieval never runs."""
     _seed(["atorvastatin calcium", "metformin hydrochloride"])
     llm_calls = {"n": 0}
     retrieve_calls = {"n": 0}
@@ -201,7 +201,7 @@ def test_t2_meta_uncited_no_llm_no_retrieval(monkeypatch: pytest.MonkeyPatch) ->
     assert result.refused is False
     assert result.citations == []
     assert result.retrieved == []
-    assert llm_calls["n"] == 0, "the meta path must call NO LLM"
+    assert llm_calls["n"] == 1, "the meta path must call guidance exactly once"
     assert retrieve_calls["n"] == 0, "the meta path must run NO retrieval"
 
 

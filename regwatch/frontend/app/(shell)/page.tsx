@@ -8,7 +8,7 @@ import { StatusTicker } from "@/components/StatusTicker";
 import { AssistantTurn, ProvisionalDraft, UserTurn } from "@/components/Turns";
 import { useSessions } from "@/components/SessionsProvider";
 import { askQueryStream, getSession, STREAM_FALLBACK_STATUS, type Citation, type Suggestion } from "@/lib/api";
-import { assistantTurn, turnFromMessage, userTurn, type Turn } from "@/lib/turns";
+import { assistantTurn, nonAnswerLabel, turnFromMessage, userTurn, type Turn } from "@/lib/turns";
 import { syncTextareaHeight } from "@/lib/composer";
 
 // Example inquiries grouped by the KIND of question the corpus answers — the
@@ -262,11 +262,12 @@ function AskView() {
         setTurns((prev) => [...prev, assistantTurn(next)]);
         setActiveSessionId(next.session_id);
         refocusRef.current = true;
+        const nonAnswer = nonAnswerLabel(next.status, next.refused, next.reason ?? null);
         const label =
           next.status === "clarify"
             ? "Clarification requested"
-            : next.refused || next.status === "scope_warning"
-              ? "Request declined — see the reply"
+            : nonAnswer
+              ? `${nonAnswer} — see the reply`
               : next.status === "meta"
                 ? "Information ready"
                 : "Answer ready";

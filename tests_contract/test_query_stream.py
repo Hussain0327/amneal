@@ -22,6 +22,8 @@ from tests_contract.conftest import (
     ABSENT_DRUG_QUESTION,
     ANSWERABLE_QUESTION,
     DEAD_PROVIDER_TIMEOUT,
+    GUIDED_ROUTE_JSON_KEYS,
+    NO_PRODUCT_GUIDANCE_TEXT,
     QUERY_RESPONSE_KEYS,
     REFUSAL_TEXT,
     SERVICE_UNAVAILABLE_TEXT,
@@ -98,8 +100,8 @@ def test_s19_stream_grammar_and_blocking_parity(
 def test_s20_refusal_streams_zero_token_frames(
     base_stack: Stack, edge_login: Callable[..., EdgeClient]
 ) -> None:
-    """The sentinel guard holds refusal prose out of the token channel: the
-    refusal text appears ONLY inside the terminal result frame."""
+    """The hold keeps trusted AI-selected guidance out of the token channel:
+    the no-product guidance appears ONLY inside the terminal result frame."""
     client = edge_login(base_stack)
 
     status, content_type, sse = _stream_to_eof(client, {"question": ABSENT_DRUG_QUESTION})
@@ -111,12 +113,29 @@ def test_s20_refusal_streams_zero_token_frames(
     assert result["status"] == "refused"
     assert result["refused"] is True
     assert result["citations"] == []
-    assert result["answer"] == REFUSAL_TEXT
+    assert result["answer"] == NO_PRODUCT_GUIDANCE_TEXT
     # Not in any status frame either -- only the result carries it.
     for data in sse.data_for("status"):
-        assert REFUSAL_TEXT not in data
+        assert NO_PRODUCT_GUIDANCE_TEXT not in data
 
     assert query_log_count() == 1
+    row = latest_query_log_row()
+    assert row["id"] == result["audit_id"]
+    assert row["answer_text"] == NO_PRODUCT_GUIDANCE_TEXT
+    assert set(row["route_json"]) == GUIDED_ROUTE_JSON_KEYS
+    assert row["route_json"]["prompt"]["prompt_id"] == "regwatch.query_guidance"
+    assert row["route_json"]["prompt"]["version"] == "1"
+    assert row["route_json"]["guidance"] == {
+        "attempted": True,
+        "applied": True,
+        "next_step": "name_product",
+        "option_ids": [],
+        "selected_options": [],
+    }
+    # Echo reports real zero usage; NULL would mean the router was bypassed.
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert row["cost_usd"] is None
 
 
 def test_s21a_provider_death_mid_pipeline_still_ends_with_a_result_frame(
