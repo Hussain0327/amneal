@@ -11,6 +11,10 @@ dependencies = [
     "selectolax>=0.4.11",
     "tenacity>=9.0",
     "pdfplumber>=0.11.10",
+    # Transitive via pdfplumber -> pdfminer.six. Floored here because 49.0.0 is
+    # PYSEC-2026-3552 / CVE-2026-69247 (HIGH), which fails both the pip-audit job
+    # and the Trivy image scan; 50.0.0 is the fix.
+    "cryptography>=50.0.0",
     "pypdf>=6.14.2",  # 6.13.3 fixes GHSA-jm82-fx9c-mx94 (unbounded stream-length DoS)
     "sqlmodel>=0.0.39",
     "sqlalchemy>=2.0.51",
