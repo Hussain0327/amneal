@@ -3,7 +3,7 @@
 import { usePathname, useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 
-import { logout as apiLogout, me, setUnauthorizedHandler, type User } from "@/lib/api";
+import { ApiError, logout as apiLogout, me, setUnauthorizedHandler, type User } from "@/lib/api";
 import { Wordmark } from "./Wordmark";
 
 interface AuthState {
@@ -61,8 +61,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const u = await me();
       if (seq === refreshSeq.current) setUser(u);
-    } catch {
-      if (seq === refreshSeq.current) setUser(null);
+    } catch (e) {
+      // Only a real 401 means the session is gone -- and handle() has already
+      // cleared it via the 401 hook below, so this branch is belt-and-braces.
+      // Everything else (offline, an edge 502, the 504 timeout ApiError) says
+      // nothing about the cookie: clearing on those signed a working analyst out
+      // mid-task on one bad hop, unmounting their composer text with a live
+      // session. Same discrimination as Sidebar.tsx:60.
+      if (seq === refreshSeq.current && e instanceof ApiError && e.status === 401) setUser(null);
     } finally {
       if (seq === refreshSeq.current) {
         setLoading(false);

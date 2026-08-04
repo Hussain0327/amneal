@@ -1,11 +1,12 @@
 """Grounded Q&A orchestration.
 
 Flow:
-  1. Retrieve top-k passages.
-  2. If top-1 score < REFUSAL_SCORE_THRESHOLD → refuse (do NOT call the LLM).
-  3. Otherwise, call the LLM with the grounding system prompt, the retrieved
-     passages, and the turn JSON Schema, in buffered json mode.
-  4. Hand the completion to ``turn_gate.admit_turn``, which parses it and admits
+  1. Resolve product/form and retrieve top-k passages when the turn is answerable.
+  2. Every healthy Ask turn reaches one AI path: constrained query guidance for
+     a pre-synthesis non-answer outcome, or grounded synthesis for evidence.
+  3. The synthesis path sends only above-threshold evidence with the grounding
+     prompt and turn JSON Schema, in buffered json mode.
+  4. Hand a synthesis completion to ``turn_gate.admit_turn``, which parses it and admits
      CLAIMS one at a time against the passages actually sent this turn.
   5. Dispatch on the gate's verdict: render the admitted claims, decline, or --
      when the payload did not parse -- serve the service-error copy.
@@ -49,6 +50,14 @@ from regwatch.common.logging import get_logger
 from regwatch.common.observability import capture_exception
 from regwatch.common.text_normalize import canonical_name
 from regwatch.generate import turn_gate as tg
+from regwatch.generate.guidance import (
+    QUERY_GUIDANCE_PROMPT,
+    build_guidance_request,
+    parse_guidance_plan,
+    prioritize_options,
+    render_guidance_message,
+    selected_option_records,
+)
 from regwatch.generate.llm import (
     D1ResidencyError,
     LLMMessage,
@@ -713,7 +722,7 @@ def _replay_chunks(text: str) -> list[str]:
 
 
 def _usage_fields(model_name: str, usage: LLMUsage | None) -> dict[str, Any]:
-    """log_query kwargs for the synthesizer call's token usage (H3).
+    """log_query kwargs for the turn's synthesizer or guidance usage (H3).
 
     None (no LLM call happened) keeps all three columns NULL; an unpriced
     model keeps cost_usd NULL while still recording the token counts.
@@ -1131,11 +1140,13 @@ def _meta(
 ) -> tuple[RagOutcome, AuditPayload]:
     """Answer a "what does this system do" question from system state only.
 
-    Mirrors ``_scope_warning`` as a terminal handler — one audit row (INV-6),
-    zero citations, NO LLM call — but is NOT a refusal: ``refused`` is False and
-    ``status`` is "meta". The answer is assembled in ``_meta_answer_text`` from
-    the corpus / watchlist / digest facts, so it is structurally citation- and
-    fabrication-incapable; it can never carry a regulatory claim.
+    Mirrors ``_scope_warning`` as an application-owned handler: one audit row
+    (INV-6), zero citations, and no model-authored prose. The surrounding
+    ``_decline`` ceremony still gives the valid turn one bounded guidance call.
+    This is NOT a refusal: ``refused`` is False and ``status`` is "meta". The
+    answer is assembled in ``_meta_answer_text`` from corpus/watchlist/digest
+    facts, so it is structurally citation- and fabrication-incapable; it can
+    never carry a regulatory claim.
     """
     answer = _meta_answer_text(question)
     audit = AuditPayload(
@@ -1238,6 +1249,7 @@ def ask_core(
         reason: str,
         response_mode: str,
         route_extra: dict[str, Any] | None = None,
+        guide: bool = True,
         **kw: Any,
     ) -> tuple[RagOutcome, AuditPayload, SessionPatch]:
         """One ceremony for every terminal decline (_refuse/_clarify/_scope_warning/
@@ -1248,9 +1260,11 @@ def ask_core(
         pipeline advances); post-synthesis branches override model_name
         (response.model) and pass usage via **kw.
 
-        ``route_extra`` is merged into the audit route_json and is a NAMED
-        keyword, so it is never forwarded to ``maker`` via **kw. Post-gate
-        declines use it to carry the turn ledger onto the row (see below)."""
+        ``route_extra`` and ``guide`` are NAMED keywords, so neither is forwarded
+        to ``maker`` via **kw. Healthy PRE-synthesis terminal branches keep
+        ``guide=True`` and therefore attempt one constrained router completion;
+        post-synthesis/error branches set it false because an AI call already
+        happened or the failure makes another call inappropriate."""
         rj = _route_json(
             filters=active_filters,
             reason=reason,
@@ -1269,6 +1283,91 @@ def ask_core(
             route_json=rj,
             **kw,
         )
+
+        if guide and outcome.status != "error":
+            # Every healthy Ask turn reaches exactly one AI path. On a branch that
+            # cannot safely synthesize a cited answer, the router model selects a
+            # server-allowlisted NEXT STEP and existing option IDs. It never writes
+            # display prose, changes status, invents filters, or sees weak passage
+            # text. A provider/shape failure keeps the trusted deterministic reply.
+            product = str(active_filters.get("normalized_name") or "").strip() or None
+            # An ambiguous/suggested candidate is not trusted product context.
+            # Scope guidance is the one handler that may resolve a product inside
+            # its deterministic maker without updating active_filters; recover it
+            # only when every application-authored option agrees.
+            if product is None and reason == "scope_warning":
+                candidates = {
+                    str(candidate)
+                    for option in outcome.related
+                    if (candidate := (option.filters or {}).get("normalized_name"))
+                }
+                if len(candidates) == 1:
+                    product = candidates.pop()
+            request = build_guidance_request(
+                question=question,
+                status=outcome.status,
+                reason=reason,
+                product=product,
+                clarify=outcome.clarify,
+                related=outcome.related,
+            )
+            rj["prompt"] = QUERY_GUIDANCE_PROMPT.as_dict()
+            rj["guidance"] = {"attempted": True, "applied": False}
+            router_model_name = current_model_name(role="router")
+            outcome.model_name = router_model_name
+            audit.model_name = router_model_name
+            log.info("llm_prompt", role="router", **QUERY_GUIDANCE_PROMPT.log_fields())
+            try:
+                guide_response = _complete_structured(
+                    get_llm_provider(role="router"), request.messages, max_tokens=600
+                )
+            except D1ResidencyError:
+                # Same fail-closed residency behavior as grounded synthesis: the
+                # outer audited pipeline boundary converts this into status=error.
+                raise
+            except Exception as exc:
+                log.warning(
+                    "qa_guidance_provider_error",
+                    error_type=type(exc).__name__,
+                )
+                capture_exception(exc)
+                rj["guidance"]["fallback_reason"] = "provider_error"
+            else:
+                outcome.model_name = guide_response.model
+                audit.model_name = guide_response.model
+                for field_name, value in _usage_fields(
+                    guide_response.model, guide_response.usage
+                ).items():
+                    setattr(audit, field_name, value)
+                try:
+                    plan = parse_guidance_plan(guide_response.text, request)
+                except ValueError as exc:
+                    log.warning("qa_guidance_invalid", reason=str(exc))
+                    rj["guidance"]["fallback_reason"] = str(exc)
+                else:
+                    message = render_guidance_message(
+                        plan,
+                        reason=reason,
+                        product=product,
+                        fallback=outcome.answer,
+                    )
+                    outcome.answer = message
+                    audit.answer_text = message
+                    if outcome.status == "clarify":
+                        outcome.interpretation = message
+                    outcome.clarify = prioritize_options(
+                        outcome.clarify, channel="clarify", plan=plan
+                    )
+                    outcome.related = prioritize_options(
+                        outcome.related, channel="related", plan=plan
+                    )
+                    rj["guidance"] = {
+                        "attempted": True,
+                        "applied": True,
+                        "next_step": plan.next_step,
+                        "option_ids": list(plan.option_ids),
+                        "selected_options": selected_option_records(plan, request),
+                    }
         return outcome, audit, _build_patch(outcome, filters=active_filters, route_json=rj)
 
     if _is_scope_warning_request(question):
@@ -1281,8 +1380,9 @@ def ask_core(
             filters=active_filters,
         )
 
-    # Meta gate — "what does this system do" → answer from system state, no LLM,
-    # no retrieval. This sits AFTER the scope-warning check and BEFORE entity
+    # Meta gate — "what does this system do" → answer from trusted system state,
+    # then one bounded guidance turn; no retrieval. This sits AFTER the
+    # scope-warning check and BEFORE entity
     # resolution/retrieval ON PURPOSE. It is a HARD VETO: fire meta only when the
     # phrase matches AND the question does NOT resolve to a named in-corpus drug.
     # The ordering is load-bearing — a named-drug question that happens to carry a
@@ -1387,8 +1487,8 @@ def ask_core(
     # default BE answer. Fires however the product was pinned — named in the
     # question, an API/UI filter, or session carry-over — so a no-topic input
     # ("Hello" with an Active-ingredient filter) never reaches the synthesizer
-    # and comes back as a cited greeting. Deterministic, pre-LLM (the
-    # unit-testable hero path).
+    # and comes back as a cited greeting. This deterministic guard owns the
+    # options and status before the bounded guidance planner sees the turn.
     if resolved_name and _looks_vague(question, resolved_name):
         return _decline(
             _clarify,
@@ -1429,6 +1529,7 @@ def ask_core(
                 passages=[],
                 status="error",
                 answer_text=_SERVICE_UNAVAILABLE_TEXT,
+                guide=False,
             )
         if len(combos) > 1:
             # Before clarifying, honor a form the QUESTION already names: if exactly
@@ -1465,7 +1566,10 @@ def ask_core(
     passages = rerank_passages(question, passages)
     passages = passages[: s.effective_rerank_top_k]
 
-    # INV-2: if retrieval is weak, refuse before calling the LLM. Gate on the
+    # INV-2: weak passages never enter grounded synthesis. The constrained
+    # guidance model still sees the QUESTION and trusted route/options, but not
+    # the sub-threshold passage text, so it can choose a useful next step without
+    # letting irrelevant evidence become citation cover. Gate on the
     # MAX cosine score, not passages[0]: the reranker (when enabled) reorders by
     # a cross-encoder score on a different scale, so passages[0].score may be a
     # demoted-but-still-present passage's cosine value — the 0.30 threshold is
@@ -1481,6 +1585,13 @@ def ask_core(
             # stay untouched — this never dresses the refusal as an answer.
             related=_related_from_passages(passages),
         )
+
+    # One strong hit must not launder weaker neighbors into the prompt or
+    # citation allowlist. Keep all retrieved rows in the audit trail, but only
+    # individually above-threshold passages may support synthesis.
+    evidence_passages = [
+        passage for passage in passages if passage.score >= s.refusal_score_threshold
+    ]
 
     # Post-retrieval guard (defense in depth): every passage must be the same
     # product. The filter guarantees this; this catches a caller that bypassed
@@ -1526,7 +1637,7 @@ def ask_core(
             passages=passages,
         )
 
-    _emit(f"Reading {len(passages)} matching guidance passage(s)…")
+    _emit(f"Reading {len(evidence_passages)} matching guidance passage(s)…")
     # Conversational memory: thread the last few ANSWERED turns so a follow-up
     # ("what about the fed study?") resolves naturally. Context ONLY — citations
     # are stripped (_format_recent) and the system prompt forbids treating it as a
@@ -1548,7 +1659,7 @@ def ask_core(
     user_prompt = GROUNDED_QA_USER.format(
         recent_context=recent_context,
         question=question,
-        passages=_format_passages(passages),
+        passages=_format_passages(evidence_passages),
     )
     route_json["prompt"] = GROUNDED_QA_PROMPT.as_dict()
 
@@ -1580,6 +1691,7 @@ def ask_core(
             passages=passages,
             status="error",
             answer_text=_SERVICE_UNAVAILABLE_TEXT,
+            guide=False,
         )
     answer = response.text.strip()
 
@@ -1595,10 +1707,11 @@ def ask_core(
             passages=passages,
             model_name=response.model,
             usage=response.usage,
+            guide=False,
         )
 
     _emit("Checking each claim against its source…")
-    admitted = admit_turn(answer, passages=passages, question=question)
+    admitted = admit_turn(answer, passages=evidence_passages, question=question)
     if isinstance(admitted, GateFailure):
         # A parse failure asserts something about the MACHINE, never about the
         # corpus. Serving settings.refusal_text here ("I couldn't find this in
@@ -1614,6 +1727,7 @@ def ask_core(
             status="error",
             answer_text=_SERVICE_UNAVAILABLE_TEXT,
             usage=response.usage,
+            guide=False,
         )
 
     log.info("qa_turn_gate", **_gate_log_fields(admitted))
@@ -1645,6 +1759,7 @@ def ask_core(
                 options=build_options(resolved_name),
                 usage=response.usage,
                 route_extra=turn_route,
+                guide=False,
             )
         return _decline(
             _refuse,
@@ -1654,6 +1769,7 @@ def ask_core(
             model_name=response.model,
             usage=response.usage,
             route_extra=turn_route,
+            guide=False,
         )
 
     if admitted.verdict == tg.VERDICT_NO_VALID_CITATIONS:
@@ -1667,6 +1783,7 @@ def ask_core(
             model_name=response.model,
             usage=response.usage,
             route_extra=turn_route,
+            guide=False,
         )
 
     if admitted.verdict == tg.VERDICT_MATERIAL_DROP:
@@ -1683,6 +1800,7 @@ def ask_core(
             answer_text=tg.MATERIAL_DROP_TEXT,
             usage=response.usage,
             route_extra=turn_route,
+            guide=False,
         )
 
     rendered_answer = tg.render_answer(admitted)
@@ -1738,6 +1856,7 @@ def ask_core(
             # the turn, so it carries the ledger too -- otherwise a PARTIAL
             # verdict's drops would vanish exactly when the DB is misbehaving.
             route_extra=turn_route,
+            guide=False,
         ),
         **_usage_fields(response.model, response.usage),
     )

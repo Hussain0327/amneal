@@ -4,10 +4,10 @@ reproduce. S30 (GAP-3) proves the INV-5 filters whitelist runs at the edge,
 via the audit row's route_json.
 
 Status-code-only tests would silently un-pin: the reason strings, the
-retrieved_json empty-vs-populated distinction, the token/cost NULL
-discipline (NULL when no LLM ran, zeros under echo, cost never guessed),
-route_json's exact key set, and the exactly-ONE-row property itself. Each is
-an explicit assertion here.
+retrieved_json empty-vs-populated distinction, the token/cost discipline
+(NULL when no model ran, zeros when either echo model ran, cost never
+guessed), route_json's exact key set, and the exactly-ONE-row property itself.
+Each is an explicit assertion here.
 """
 
 from __future__ import annotations
@@ -23,9 +23,11 @@ from tests_contract.conftest import (
     ANSWER_ROUTE_JSON_KEYS,
     ANSWERABLE_QUESTION,
     CITATION_KEYS,
+    GUIDED_ROUTE_JSON_KEYS,
+    LOW_SCORE_GUIDANCE_TEXT,
     MULTIFORM_QUESTION,
+    NO_PRODUCT_GUIDANCE_TEXT,
     QUERY_RESPONSE_KEYS,
-    REFUSAL_TEXT,
     RETRIEVED_ITEM_KEYS,
     ROUTE_JSON_KEYS,
     EdgeClient,
@@ -40,6 +42,30 @@ from tests_contract.conftest import (
 # 300s: first test per flavor pays go-build/init-db/boot; thread-method kill is diagnostics-poor.
 pytestmark = [pytest.mark.contract, pytest.mark.timeout(300)]
 
+_GUIDED_REASONS = frozenset(
+    {
+        "ambiguous_product",
+        "brand_lookup",
+        "did_you_mean",
+        "low_top_score",
+        "meta",
+        "mixed_products",
+        "multi_form",
+        "no_product",
+        "scope_warning",
+        "vague_input",
+    }
+)
+
+
+def _assert_prompt_identity(route_json: dict[str, Any], *, prompt_id: str, version: str) -> None:
+    """Pin prompt identity without importing the implementation manifest."""
+    prompt = route_json["prompt"]
+    assert set(prompt) == {"prompt_id", "version", "sha256"}
+    assert prompt["prompt_id"] == prompt_id
+    assert prompt["version"] == version
+    assert re.fullmatch(r"[0-9a-f]{64}", prompt["sha256"])
+
 
 def _one_new_row(payload: dict[str, Any], client: EdgeClient) -> dict[str, Any]:
     """The turn's single query_log row, with the invariants every branch
@@ -51,20 +77,18 @@ def _one_new_row(payload: dict[str, Any], client: EdgeClient) -> dict[str, Any]:
     assert row["user_id"] == str(client.user_id)
     assert row["session_id"] == payload["session_id"]
     assert row["turn_id"] == payload["turn_id"]
-    expected_route_keys = (
-        ANSWER_ROUTE_JSON_KEYS if payload["status"] in {"answer", "summary"} else ROUTE_JSON_KEYS
-    )
+    if payload["status"] in {"answer", "summary"}:
+        expected_route_keys = ANSWER_ROUTE_JSON_KEYS
+    elif payload["reason"] in _GUIDED_REASONS:
+        expected_route_keys = GUIDED_ROUTE_JSON_KEYS
+    else:
+        expected_route_keys = ROUTE_JSON_KEYS
     assert set(row["route_json"].keys()) == expected_route_keys
     if payload["status"] in {"answer", "summary"}:
-        prompt = row["route_json"]["prompt"]
-        assert set(prompt) == {"prompt_id", "version", "sha256"}
-        assert prompt["prompt_id"] == "regwatch.grounded_qa"
+        _assert_prompt_identity(row["route_json"], prompt_id="regwatch.grounded_qa", version="4")
         # A deliberate pin, never a mirror of the source: changing the prompt
-        # identity must be a conscious edit here. "3" is the structured-turn
-        # rewrite (the model emits claims + declared cites, never prose with
-        # its own markers).
-        assert prompt["version"] == "3"
-        assert re.fullmatch(r"[0-9a-f]{64}", prompt["sha256"])
+        # identity must be a conscious edit here. "4" adds the helpful,
+        # partial-evidence behavior while retaining the structured claim gate.
         assert isinstance(row["route_json"]["partial_evidence"], bool)
         # The gate ledger reached the row, and its verdict agrees with the
         # turn that was served: an answer/summary is only rendered when at
@@ -73,6 +97,27 @@ def _one_new_row(payload: dict[str, Any], client: EdgeClient) -> dict[str, Any]:
         assert turn["verdict"] in {"answer", "partial"}
         assert turn["admitted"] >= 1
     return row
+
+
+def _assert_echo_guidance(row: dict[str, Any], *, next_step: str, option_ids: list[str]) -> None:
+    """A healthy non-answer turn ran exactly the bounded router-model path."""
+    _assert_prompt_identity(row["route_json"], prompt_id="regwatch.query_guidance", version="1")
+    guidance = row["route_json"]["guidance"]
+    assert {key: guidance[key] for key in ("attempted", "applied", "next_step", "option_ids")} == {
+        "attempted": True,
+        "applied": True,
+        "next_step": next_step,
+        "option_ids": option_ids,
+    }
+    selected = guidance["selected_options"]
+    assert [option["id"] for option in selected] == option_ids
+    assert all(set(option) == {"id", "label", "channel"} for option in selected)
+    assert all(option["id"].startswith(f"{option['channel']}:") for option in selected)
+    assert row["model_name"] == "echo"
+    # Echo reports real zero usage. NULL would mean no model call occurred.
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
+    assert row["cost_usd"] is None
 
 
 def _assert_two_chat_messages(payload: dict[str, Any], *, status: str, cited: bool) -> None:
@@ -163,21 +208,18 @@ def test_s8_no_product_refusal_on_empty_corpus(
     assert payload["status"] == "refused"
     assert payload["reason"] == "no_product"
     assert payload["refused"] is True
-    assert payload["answer"] == REFUSAL_TEXT
+    assert payload["answer"] == NO_PRODUCT_GUIDANCE_TEXT
     assert payload["citations"] == []
     assert payload["related"] == []
 
     row = _one_new_row(payload, client)
     assert row["status"] == "refused"
     assert row["refused"] is True
-    assert row["answer_text"] == REFUSAL_TEXT
+    assert row["answer_text"] == NO_PRODUCT_GUIDANCE_TEXT
     assert row["retrieved_json"] == []
     assert row["citations_json"] == []
     assert row["route_json"]["reason"] == "no_product"
-    # No LLM ran: token/cost columns are NULL, not zero (INV-2 discipline).
-    assert row["input_tokens"] is None
-    assert row["output_tokens"] is None
-    assert row["cost_usd"] is None
+    _assert_echo_guidance(row, next_step="name_product", option_ids=[])
 
     _assert_two_chat_messages(payload, status="refused", cited=False)
 
@@ -198,16 +240,16 @@ def test_s9_low_top_score_refusal_audits_the_weak_evidence(
     assert payload["status"] == "refused"
     assert payload["reason"] == "low_top_score"
     assert payload["refused"] is True
+    assert payload["answer"] == LOW_SCORE_GUIDANCE_TEXT
     assert payload["citations"] == []
     assert payload["related"], "sub-threshold evidence still yields related product pointers"
 
     row = _one_new_row(payload, client)
     assert row["status"] == "refused"
+    assert row["answer_text"] == LOW_SCORE_GUIDANCE_TEXT
     assert row["route_json"]["reason"] == "low_top_score"
     assert row["retrieved_json"], "the weak evidence is the point of this row"
-    assert row["input_tokens"] is None
-    assert row["output_tokens"] is None
-    assert row["cost_usd"] is None
+    _assert_echo_guidance(row, next_step="narrow_source_topic", option_ids=["related:0"])
 
 
 def test_s10_vague_input_clarify(base_stack: Stack, edge_login: Callable[..., EdgeClient]) -> None:
@@ -229,8 +271,11 @@ def test_s10_vague_input_clarify(base_stack: Stack, edge_login: Callable[..., Ed
     assert row["status"] == "clarify"
     assert row["route_json"]["reason"] == "vague_input"
     assert row["retrieved_json"] == []  # pre-retrieval clarify
-    assert row["input_tokens"] is None
-    assert row["output_tokens"] is None
+    _assert_echo_guidance(
+        row,
+        next_step="narrow_source_topic",
+        option_ids=["clarify:0", "clarify:1", "clarify:2"],
+    )
 
 
 def test_s11_multi_form_clarify_pins_every_combo(
@@ -257,6 +302,11 @@ def test_s11_multi_form_clarify_pins_every_combo(
     assert row["status"] == "clarify"
     assert row["route_json"]["reason"] == "multi_form"
     assert row["retrieved_json"] == []  # the guard fires BEFORE retrieval
+    _assert_echo_guidance(
+        row,
+        next_step="choose_dosage_form",
+        option_ids=["clarify:0", "clarify:1"],
+    )
 
 
 def test_s12_scope_warning(base_stack: Stack, edge_login: Callable[..., EdgeClient]) -> None:
@@ -278,7 +328,11 @@ def test_s12_scope_warning(base_stack: Stack, edge_login: Callable[..., EdgeClie
     assert row["route_json"]["reason"] == "scope_warning"
     assert row["route_json"]["response_mode"] == "scope_warning"
     assert row["retrieved_json"] == []
-    assert row["input_tokens"] is None
+    _assert_echo_guidance(
+        row,
+        next_step="ask_evidence_question",
+        option_ids=["related:0", "related:1", "related:2"],
+    )
 
 
 def test_s13_meta_answer(base_stack: Stack, edge_login: Callable[..., EdgeClient]) -> None:
@@ -300,9 +354,7 @@ def test_s13_meta_answer(base_stack: Stack, edge_login: Callable[..., EdgeClient
     assert row["citations_json"] == []
     assert row["retrieved_json"] == []
     assert row["route_json"]["response_mode"] == "meta"
-    assert row["input_tokens"] is None
-    assert row["output_tokens"] is None
-    assert row["cost_usd"] is None
+    _assert_echo_guidance(row, next_step="view_capabilities", option_ids=[])
 
 
 def test_s30_filters_whitelist_holds_at_the_edge(

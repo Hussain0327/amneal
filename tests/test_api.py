@@ -156,13 +156,26 @@ def test_cors_allowlist() -> None:
 def test_query_refuses_on_empty_corpus(
     monkeypatch: pytest.MonkeyPatch, auth_client: TestClient
 ) -> None:
-    # Empty Chroma → refusal; no LLM should be called.
-    def _bad_llm(*a: object, **k: object) -> None:
-        raise AssertionError("LLM must not be called when retrieval is empty")
+    # Empty corpus → no grounded answer, but each valid query still gets one
+    # constrained guidance turn.
+    calls = {"n": 0}
+
+    def _guidance_llm(*a: object, **k: object) -> object:
+        calls["n"] += 1
+
+        class _LLM:
+            name = "stub"
+
+            def complete(self, *args: object, **kwargs: object) -> object:
+                from regwatch.generate.llm import LLMResponse
+
+                return LLMResponse(text="{}", model="stub")
+
+        return _LLM()
 
     from regwatch.generate import grounded_qa as qa_mod
 
-    monkeypatch.setattr(qa_mod, "get_llm_provider", _bad_llm)
+    monkeypatch.setattr(qa_mod, "get_llm_provider", _guidance_llm)
     r = auth_client.post("/query", json={"question": "Does this exist?"})
     assert r.status_code == 200
     body = r.json()
@@ -170,6 +183,7 @@ def test_query_refuses_on_empty_corpus(
     assert body["citations"] == []
     assert body["session_id"]
     assert body["turn_id"]
+    assert calls["n"] == 1
 
     r2 = auth_client.post(
         "/query",
@@ -179,6 +193,7 @@ def test_query_refuses_on_empty_corpus(
     body2 = r2.json()
     assert body2["session_id"] == body["session_id"]
     assert body2["turn_id"] != body["turn_id"]
+    assert calls["n"] == 2
 
 
 def test_query_rejects_zero_k(auth_client: TestClient) -> None:

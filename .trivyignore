@@ -25,22 +25,40 @@ GHSA-fx2h-pf6j-xcff
 # (@sentry/nextjs -> @sentry/bundler-plugin-core -> glob -> minimatch) off the
 # vulnerable range. `npm audit --omit=dev --audit-level=high` is clean.
 #
-# What remains in the image cannot be fixed HERE, and is dev-tooling only:
-#   * node_modules/brace-expansion@1.1.16 and
-#     @redocly/openapi-core/node_modules/brace-expansion@2.1.2 -- their consumers
-#     `require('brace-expansion')` and CALL the result. In 5.x that require
-#     returns {expand}, NOT a callable (verified against 5.0.8), so forcing them
-#     onto the fixed line is a guaranteed TypeError at runtime. Only an upstream
-#     bump of those consumers fixes it -- which is why the override above is
-#     scoped to ^5.0.0 rather than applied blanket.
-#   * usr/local/lib/node_modules/npm/node_modules/brace-expansion -- npm's OWN
-#     bundled copy from `npm install -g npm@11.18.0` in the Dockerfile. No
-#     lockfile change reaches it; it moves when npm ships a rebuilt release.
-# The image serves Next.js; none of these three sit on a request path, and the
-# advisory needs attacker-controlled brace input to the expander. Drop entries
-# as those consumers and npm ship fixed releases.
+# The two APP-TREE copies are now FIXED, not suppressed: upstream backported the
+# patch to the legacy lines, so package-lock.json pins
+# node_modules/brace-expansion@1.1.18 and
+# @redocly/openapi-core/node_modules/brace-expansion@2.1.4. Both still do
+# `module.exports = expandTop` (verified against the 1.1.18/2.1.4 tarballs), so
+# their consumers -- which `require('brace-expansion')` and CALL the result --
+# keep working. That is why the 5.x override stays scoped to ^5.0.0: only the 5.x
+# line returns {expand} instead of a callable.
+#
+# What remains cannot be fixed HERE and is dev-tooling only:
+#   * usr/local/lib/node_modules/npm/node_modules/brace-expansion@5.0.7 -- npm's
+#     OWN bundled copy from `npm install -g npm@11.18.0` in the Dockerfile. No
+#     lockfile change reaches it, and npm 11.19.0 (the newest release this
+#     node:20 base can take -- npm 12 needs Node >=22) still bundles 5.0.7, so
+#     bumping the pin does nothing. It moves when npm ships a rebuilt release.
+# The image serves Next.js; npm's bundled copy is not on a request path, and the
+# advisory needs attacker-controlled brace input to the expander. Drop entries as
+# npm ships fixed releases.
 CVE-2026-14257
 GHSA-mh99-v99m-4gvg
+# Same package, later advisory: DoS via unbounded intermediate arrays, bypassing
+# the CVE-2026-14257 mitigation. Affects npm's bundled 5.0.7 (fixed in 5.0.9).
+CVE-2026-69152
+GHSA-rgw5-rvv9-x895
+
+# --- web image: ip-address SSRF via leading-zero octet confusion -------------
+# usr/local/lib/node_modules/npm/node_modules/ip-address@10.2.0 (fixed 10.3.1),
+# pulled in by npm's own socks-proxy-agent. Same story as brace-expansion above:
+# it is inside the globally installed npm, no lockfile reaches it, and npm
+# 11.19.0 still bundles 10.2.0. Address4 only parses addresses npm itself hands
+# it when talking through a SOCKS proxy -- the image sets no proxy and the app
+# never calls this code. Drop when npm rebundles.
+CVE-2026-69192
+GHSA-mwp4-54f8-5fhr
 
 # --- web image: Go stdlib CVEs inside esbuild's bundled Go binary ------------
 # esbuild ships as a pre-compiled Go binary (@esbuild/<platform>/bin/esbuild),

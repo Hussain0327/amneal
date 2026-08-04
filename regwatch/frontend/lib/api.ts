@@ -199,6 +199,10 @@ const LONG_TIMEOUT_MS = 120_000;
 // closest defined status is "gateway timeout". handle()/login key their UI off
 // err.status; this keeps a timeout indistinguishable from a real upstream 504.
 const TIMEOUT_STATUS = 504;
+// One authored line for a transport failure that produced no usable body. Lives
+// beside the statuses it keys off (same place as the 429 copy in handle()) rather
+// than in a second mapper -- lib/turns.ts maps QUERY status, not HTTP status.
+const UNREACHABLE_MESSAGE = "Can't reach RegWatch right now - wait a moment and try again.";
 
 // fetch with a hard timeout that is COMPOSED with any caller-supplied signal.
 // A fired timeout aborts the request and rejects with an ApiError (so existing
@@ -256,8 +260,11 @@ async function handle<T>(res: Response, method: string, path: string, gate: bool
   }
   if (!res.ok) {
     let detail = "";
+    // Read the body ONCE as text, then parse. res.json() consumes the stream, so
+    // a res.text() fallback after it rejects would throw "body stream already read".
+    const raw = await res.text();
     try {
-      const body = (await res.json()) as { detail?: unknown };
+      const body = JSON.parse(raw) as { detail?: unknown };
       if (typeof body.detail === "string") detail = body.detail;
       // FastAPI request-validation (422) returns detail as an array of
       // {loc, msg, type}; a field-length reject on /assemble would otherwise
@@ -267,7 +274,13 @@ async function handle<T>(res: Response, method: string, path: string, gate: bool
         if (first && typeof first.msg === "string") detail = first.msg;
       }
     } catch {
-      // non-JSON error body
+      // Not JSON -- an edge/gateway body (Vercel's router answers text/plain, the
+      // Go proxy answers "upstream unavailable"). Adopt it only when it is short
+      // and not markup: it is the only diagnostic anyone gets, since ApiError never
+      // reaches Sentry, but a full HTML error page would render as garbage in the
+      // many UI sites that print this message verbatim.
+      const text = raw.trim();
+      if (text && text.length <= 300 && !text.startsWith("<")) detail = text;
     }
     // 429 surfaces on six expensive routes but the backend detail is the terse
     // "rate limit exceeded"; give every consumer one friendly default so a
@@ -281,7 +294,16 @@ async function handle<T>(res: Response, method: string, path: string, gate: bool
   if (res.status === 204) {
     return undefined as unknown as T;
   }
-  return res.json() as Promise<T>;
+  try {
+    return (await res.json()) as T;
+  } catch {
+    // A 2xx whose body is not JSON means something between the browser and the API
+    // answered (edge interstitial, captive portal) -- report the hop as bad rather
+    // than leaking V8's "Unexpected token '<'" to the analyst. Every real 2xx here
+    // is JSON: 204s returned above, the .docx blob bypasses handle() on success,
+    // and SSE never reaches this function.
+    throw new ApiError(502, UNREACHABLE_MESSAGE);
+  }
 }
 
 // credentials: "include" — auth rides in the HttpOnly session cookie. The
@@ -367,6 +389,12 @@ export async function logout(): Promise<void> {
 
 export async function me(): Promise<User> {
   const data = await getJSON<{ user: User }>("/auth/me");
+  // A 200 carrying no user is a broken contract, not a signed-out session. Route
+  // it into the same "transport is wrong" bucket so a malformed body can never
+  // silently sign a valid analyst out -- AuthProvider clears only on a real 401.
+  if (!data?.user || typeof data.user.id !== "number") {
+    throw new ApiError(502, UNREACHABLE_MESSAGE);
+  }
   return data.user;
 }
 
@@ -847,7 +875,7 @@ export type {
 // A 400 carries the server's own reason (not a PDF / too large) in `detail`;
 // the page still guards client-side first so an obviously bad file never
 // spends the upload.
-// LONG bound: this request carries the file, and a 50MB upload over a slow
+// LONG bound: this request carries the file, and a multi-MB upload over a slow
 // link legitimately outlasts the 30s JSON default -- aborting it locally would
 // leave the analyst with a timeout for a request the server was still reading.
 export function analyzeDeficiency(file: File): Promise<DeficiencyAnalyzeAccepted> {

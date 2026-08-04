@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { AssistantTurn, ProvisionalDraft, UserTurn } from "@/components/Turns";
 import type { ChatMessage } from "@/lib/api";
-import { reasonCopy, turnFromMessage, userTurn } from "@/lib/turns";
+import { nonAnswerLabel, reasonCopy, turnFromMessage, userTurn, type Turn } from "@/lib/turns";
 
 // A rehydrated history message carries only the persisted fields; the rest
 // default inside turnFromMessage. Cast keeps the test independent of the
@@ -37,15 +37,120 @@ describe("rise gate — the live flag", () => {
 
 describe("reasonCopy — plain-language decline/clarify reasons", () => {
   it("maps a known backend reason code to analyst copy", () => {
-    expect(reasonCopy("no_product")).toBe("No product in the corpus matched this query.");
+    expect(reasonCopy("no_product")).toBe(
+      "The product could not be identified confidently from this query.",
+    );
   });
 
-  it("falls back to the raw code for an unknown reason", () => {
-    expect(reasonCopy("some_future_code")).toBe("some_future_code");
+  it("never exposes an unknown internal reason code", () => {
+    expect(reasonCopy("some_future_code")).toBe(
+      "The request could not be completed as expected.",
+    );
+  });
+
+  it("explains technical and safety failures in plain language", () => {
+    expect(reasonCopy("pipeline_error")).toBe(
+      "An internal processing step could not be completed.",
+    );
+    expect(reasonCopy("malformed_structure")).toBe(
+      "The model response could not be validated.",
+    );
+    expect(reasonCopy("material_drop")).toBe(
+      "The draft omitted a material qualifier, so it was withheld.",
+    );
   });
 
   it("returns null when there is no reason", () => {
     expect(reasonCopy(null)).toBeNull();
+  });
+});
+
+describe("nonAnswerLabel — neutral, reason-aware outcomes", () => {
+  it("distinguishes evidence gaps, technical unavailability, and scope", () => {
+    expect(nonAnswerLabel("refused", true, "low_top_score")).toBe("Evidence gap");
+    expect(nonAnswerLabel("error", true, "provider_error")).toBe("Answer unavailable");
+    expect(nonAnswerLabel("scope_warning", true, "scope_warning")).toBe("Out of scope");
+  });
+});
+
+function nonAnswerTurn(overrides: Partial<Turn>): Turn {
+  return {
+    role: "assistant",
+    content: "Try **asking about one product** or review [FDA guidance](https://www.fda.gov/).",
+    status: "refused",
+    refused: true,
+    citations: [],
+    clarify: [],
+    related: [],
+    interpretation: null,
+    reason: "low_top_score",
+    live: true,
+    meta: null,
+    ...overrides,
+  };
+}
+
+describe("AssistantTurn — helpful non-answer rendering", () => {
+  it("keeps the canonical clarification body, with a distinct interpretation as a caption", () => {
+    const turn = nonAnswerTurn({
+      status: "clarify",
+      refused: false,
+      content: "Please choose **one dosage form**.",
+      interpretation: "You are asking about metformin.",
+      reason: "multi_form",
+    });
+    const { container } = render(
+      <AssistantTurn turn={turn} sessionId={null} onPick={() => {}} onCite={() => {}} busy={false} />,
+    );
+
+    expect(container.querySelector(".msg__body")?.textContent).toContain("Please choose one dosage form.");
+    expect(container.querySelector(".msg__body strong")?.textContent).toBe("one dosage form");
+    expect(container.querySelector(".msg__interp")?.textContent).toBe(
+      "Interpreted as: You are asking about metformin.",
+    );
+    expect(container.querySelector(".cite-stamp")).toBeNull();
+  });
+
+  it("renders evidence-gap guidance as Markdown without citation affordances", () => {
+    const { container, getByRole } = render(
+      <AssistantTurn
+        turn={nonAnswerTurn({})}
+        sessionId={null}
+        onPick={() => {}}
+        onCite={() => {}}
+        busy={false}
+      />,
+    );
+
+    expect(container.querySelector(".msg__declined-tag")?.textContent).toBe("Evidence gap");
+    expect(container.querySelector(".msg__body strong")?.textContent).toBe("asking about one product");
+    expect(getByRole("link", { name: "FDA guidance" })).toHaveAttribute("href", "https://www.fda.gov/");
+    expect(container.querySelector(".cite-stamp")).toBeNull();
+    expect(container.querySelector(".cite")).toBeNull();
+  });
+
+  it("keeps scope warnings distinct from unavailable answers", () => {
+    const { container, rerender } = render(
+      <AssistantTurn
+        turn={nonAnswerTurn({ status: "scope_warning", reason: "scope_warning" })}
+        sessionId={null}
+        onPick={() => {}}
+        onCite={() => {}}
+        busy={false}
+      />,
+    );
+    expect(container.querySelector(".msg__declined-tag")?.textContent).toBe("Out of scope");
+
+    rerender(
+      <AssistantTurn
+        turn={nonAnswerTurn({ status: "error", reason: "provider_error" })}
+        sessionId={null}
+        onPick={() => {}}
+        onCite={() => {}}
+        busy={false}
+      />,
+    );
+    expect(container.querySelector(".msg__declined-tag")?.textContent).toBe("Answer unavailable");
   });
 });
 

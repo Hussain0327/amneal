@@ -8,12 +8,15 @@ without ever fabricating (zero citations) or guessing the drug. Genuine
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 import pytest
-from config.settings import get_settings
 from sqlalchemy import func
 from sqlmodel import select
 
 from regwatch.generate import grounded_qa as qa_mod
+from regwatch.generate.llm import LLMResponse
 from regwatch.process.embedder import get_embedding_provider
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import QueryLog
@@ -58,7 +61,7 @@ _TWO = ["propranolol hydrochloride", "metformin hydrochloride"]
 
 
 def test_bare_drug_name_clarifies() -> None:
-    """A bare, name-matched drug → clarify with options, deterministically (no LLM)."""
+    """A bare drug keeps deterministic options and gets an AI guidance turn."""
     _seed(_TWO)
     r = qa_mod.ask("propranolol")
     assert r.status == "clarify"
@@ -84,6 +87,36 @@ def test_two_matched_drugs_clarify_with_candidates() -> None:
     assert {o.filters["normalized_name"] for o in r.clarify if o.filters} == set(_TWO)
 
 
+def test_ambiguous_candidates_are_not_sent_as_trusted_product_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The router may rank candidates, but none is trusted until the user chooses."""
+    _seed(_TWO)
+    context: dict[str, Any] = {}
+
+    def _factory(*a: object, **k: object) -> Any:
+        class _Planner:
+            name = "router-stub"
+
+            def complete(self, messages: list[Any], **kw: object) -> LLMResponse:
+                user_message = next(
+                    message.content for message in messages if message.role == "user"
+                )
+                context.update(json.loads(user_message))
+                return LLMResponse(
+                    text='{"next_step":"choose_product","option_ids":[]}',
+                    model="router-stub",
+                )
+
+        return _Planner()
+
+    monkeypatch.setattr(qa_mod, "get_llm_provider", _factory)
+    result = qa_mod.ask("compare propranolol and metformin studies")
+
+    assert result.status == "clarify"
+    assert context["trusted_product_context"] is None
+
+
 def test_typo_offers_did_you_mean() -> None:
     """A genuine typo (>=88) offers a 'did you mean', and it ASKS (no auto-answer)."""
     _seed(_TWO)
@@ -103,7 +136,8 @@ def test_romidepsin_stays_refused_with_no_suggestion() -> None:
     assert r.refused
     assert r.status == "refused"
     assert not r.clarify
-    assert r.answer == get_settings().refusal_text
+    assert "couldn't identify the product" in r.answer.lower()
+    assert "generic ingredient" in r.answer.lower()
 
 
 def test_clarify_logs_exactly_one_audit_row() -> None:

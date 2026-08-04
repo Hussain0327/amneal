@@ -22,8 +22,9 @@ Four surfaces, one shared "product under review":
 
 - **Ask** — Plain-language Q&A over the guidance corpus, as a cited chat. Every
   claim carries an inline `[source, p.N]` citation you can click to read the
-  exact passage; if the corpus doesn't contain the answer, Ask refuses instead
-  of guessing. Ambiguous questions ("propranolol") get clickable clarifying
+  exact passage. If the corpus cannot support an answer, Ask keeps unverified
+  text out of the answer channel and guides the analyst toward a safer next
+  question. Ambiguous questions ("propranolol") get clickable clarifying
   options rather than a wrong answer.
 - **Assemble** — For a target product, build a fully cited dossier: the relevant
   PSG(s), extracted bioequivalence requirements, the brand-drug label from
@@ -51,15 +52,24 @@ This is the whole point, and it's enforced in code with tests — not a guidelin
 2. **Retrieve, scoped and current.** Retrieval is filtered to that product's
    ingredient and to the *current* PSG version, so a superseded passage can't be
    cited as if it were live.
-3. **Refuse weak grounding.** If the best match scores below
-   `REFUSAL_SCORE_THRESHOLD` (default 0.30), the LLM is never called — the
-   request is refused. After synthesis, any claim whose citation doesn't trace
-   to a retrieved passage is stripped; if nothing valid remains, the whole answer
-   becomes a refusal.
-4. **Audit everything.** Every query — answered, clarified, or refused — writes
+3. **Keep weak evidence out of answers.** If the best match scores below
+   `REFUSAL_SCORE_THRESHOLD` (default 0.30), those passages are sent to neither
+   the answer synthesizer nor the guidance planner. The planner may select a
+   safe, allowlisted next step, but it cannot author factual answer text.
+   After synthesis, any claim whose citation doesn't trace to a retrieved
+   passage is stripped; if nothing valid remains, the whole answer becomes a
+   refusal.
+4. **Give each healthy Ask turn one bounded AI role.** A grounded question uses
+   the synthesizer. A pre-synthesis product, form, scope, capability, or
+   evidence-gap outcome uses the router-role guidance planner, which can only
+   select an application-approved next step and existing option IDs. Product,
+   form, scope, status, citation validation, and display copy remain enforced
+   by application code. Operational errors do not enter the guidance path.
+5. **Audit everything.** Every query — answered, clarified, or refused — writes
    exactly one `query_log` row.
 
-A refusal is shown as a refusal, never dressed up as an answer.
+A non-answer is shown as an evidence gap, clarification, or scope boundary —
+never dressed up as a grounded answer.
 
 ### How a question flows
 
@@ -70,32 +80,24 @@ Assemble and White Paper follow the same discipline over structured FDA sources.
 flowchart TD
     Q["User question<br/>(+ session, filters, k)"] --> AUTH{"Authenticated?"}
     AUTH -- "no" --> E401["401"]
-    AUTH -- "yes" --> AUDIT["Write query_log row<br/>INV-6 - every query audited"]
-    AUDIT --> ROUTER["Router LLM<br/>classify intent and route"]
-
-    ROUTER --> NAMED{"Product resolvable?"}
-    NAMED -- "none or several" --> CLARIFY["clarify<br/>return clickable options"]
-    NAMED -- "strategy ask" --> SCOPE["scope_warning<br/>report, never advise (INV-3)"]
-    NAMED -- "one product" --> RESOLVE["Resolve product, deterministic<br/>canonical name + application no."]
-
-    RESOLVE --> MATCH{"Name matches number?"}
-    MATCH -- "no" --> REFUSE1["refused<br/>refuse-over-guess (422)"]
-    MATCH -- "yes" --> RETRIEVE["Stage 1, vector top-k 50<br/>ingredient-filtered, current PSG version<br/>INV-9 - no cross-drug citation"]
+    AUTH -- "yes" --> ROUTE["Deterministic route + enforcement<br/>scope, capability, product, form, status"]
+    ROUTE -- "operational error" --> ERROR["error response<br/>no AI reroute"]
+    ROUTE -- "needs clarification or guidance" --> GUIDE["Router-role guidance planner<br/>select allowlisted next step + option IDs<br/>no display prose"]
+    ROUTE -- "resolved answer path" --> RETRIEVE["Stage 1, vector top-k 50<br/>product/form/current-version scoped<br/>INV-9 - no cross-drug citation"]
 
     RETRIEVE --> RERANK["Stage 2, rerank to top-k 8<br/>reranker optional"]
     RERANK --> PRECHK{"Top score above threshold?"}
-    PRECHK -- "no" --> REFUSE2["refused<br/>INV-2 - weak retrieval refuses"]
-    PRECHK -- "yes" --> SYNTH["Synthesize LLM<br/>grounded answer + inline citations"]
+    PRECHK -- "no - withhold weak passages" --> GUIDE
+    PRECHK -- "yes" --> SYNTH["Synthesizer LLM<br/>grounded structured claims"]
 
     SYNTH --> VALID{"Every claim cited to<br/>a retrievable source?"}
-    VALID -- "no" --> REFUSE3["refused<br/>INV-1 - cite or refuse"]
+    VALID -- "no" --> REFUSE["evidence gap / refused<br/>no second AI call<br/>INV-1 - cite or refuse"]
     VALID -- "yes" --> ANSWER["answer<br/>answer + citation chips"]
 
-    CLARIFY --> FINAL["Finalize audit row<br/>status, route, citations"]
-    SCOPE --> FINAL
-    REFUSE1 --> FINAL
-    REFUSE2 --> FINAL
-    REFUSE3 --> FINAL
+    GUIDE --> COPY["Application renders trusted copy<br/>and existing options"]
+    COPY --> FINAL["Finalize one audit row<br/>status, route, citations"]
+    ERROR --> FINAL
+    REFUSE --> FINAL
     ANSWER --> FINAL
 ```
 
@@ -224,7 +226,7 @@ These are enforced in code with tests — see [`tests/test_invariants.py`](tests
 | | Invariant | Where it's enforced |
 |---|---|---|
 | INV-1 | Every factual claim is traceable to a source + page | `process/extractor.py` quote-verbatim check; `generate/grounded_qa.py` citation validator |
-| INV-2 | If retrieval is weak, refuse — never guess | Two-layer refusal: pre-LLM (top score below `REFUSAL_SCORE_THRESHOLD`) and post-LLM (no valid citations) |
+| INV-2 | If retrieval is weak, refuse to answer — never guess | The score threshold blocks weak passages from the synthesizer and guidance planner; post-synthesis citation validation blocks unsupported claims |
 | INV-3 | Operational only — no authoring, no judgment | Prompt design + a structural check against `api/` for forbidden endpoints |
 | INV-4 | Never report a run that didn't happen | `watch/alerts.py` skips any match whose `psg_version` is not in the DB |
 | INV-5 | Verified provenance only | `WatchlistEntry` rejects sources outside `{drugsfda, anda_letter, manual}` |

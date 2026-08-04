@@ -4,8 +4,8 @@ A scope-warning decline (refused=True, status="scope_warning", citations=[]) is
 the load-bearing must-refuse asset for the eval gate (INV-2/INV-3). These tests
 pin the new behaviour: when the question resolves to a real product the refusal
 ALSO names the citable in-scope sub-questions and carries re-runnable ``related``
-pointers — WITHOUT weakening the refusal (citations stay [], refused stays True,
-the LLM is never called). When no product resolves (or the resolver fails) it
+pointers — WITHOUT weakening the refusal (citations stay [], refused stays True).
+One constrained guidance-planner call may prioritize the trusted actions. When no product resolves (or the resolver fails) it
 falls back to the generic canned decline with related == [].
 """
 
@@ -56,7 +56,7 @@ def _seed(names: list[str]) -> None:
 
 
 def _counting_llm(counter: dict[str, int]) -> Any:
-    """A provider factory that bumps a counter if business logic ever calls it."""
+    """A provider factory that records the constrained guidance call."""
 
     def _factory(*a: object, **k: object) -> Any:
         counter["n"] += 1
@@ -78,7 +78,7 @@ def _counting_llm(counter: dict[str, int]) -> Any:
 def test_scope_warning_resolvable_product_guides(monkeypatch: pytest.MonkeyPatch) -> None:
     """A scope-warning question that names an in-corpus product refuses AND names
     the citable sub-questions + carries re-runnable related pointers, with no
-    citations and no LLM call."""
+    citations and one constrained guidance call."""
     _seed(["metformin hydrochloride", "propranolol hydrochloride"])
     counter = {"n": 0}
     monkeypatch.setattr(qa_mod, "get_llm_provider", _counting_llm(counter))
@@ -104,15 +104,15 @@ def test_scope_warning_resolvable_product_guides(monkeypatch: pytest.MonkeyPatch
     for o in result.related:
         assert o.query  # a re-runnable query
         assert o.filters and o.filters.get("normalized_name") == "metformin hydrochloride"
-    # The LLM was never invoked (guidance is deterministic).
-    assert counter["n"] == 0
+    # The application owns the refusal and options; AI only selects a next step.
+    assert counter["n"] == 1
 
 
 def test_scope_warning_no_product_keeps_generic_refusal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A scope-warning question that names NO in-corpus product still refuses
-    (INV-2) with the generic canned decline, related == [], no LLM."""
+    (INV-2) with the generic decline, related == [], and one guidance attempt."""
     _seed(["metformin hydrochloride", "propranolol hydrochloride"])
     counter = {"n": 0}
     monkeypatch.setattr(qa_mod, "get_llm_provider", _counting_llm(counter))
@@ -125,7 +125,7 @@ def test_scope_warning_no_product_keeps_generic_refusal(
     assert result.citations == []
     assert result.related == []
     assert "cannot author submission strategy" in result.answer.lower()
-    assert counter["n"] == 0
+    assert counter["n"] == 1
 
 
 def test_scope_warning_resolver_failure_falls_back(
@@ -150,7 +150,7 @@ def test_scope_warning_resolver_failure_falls_back(
     assert result.citations == []
     assert result.related == []
     assert "cannot author submission strategy" in result.answer.lower()
-    assert counter["n"] == 0
+    assert counter["n"] == 1
 
 
 def test_scope_warning_pinned_filter_guides_without_resolver(
@@ -177,4 +177,4 @@ def test_scope_warning_pinned_filter_guides_without_resolver(
     assert result.citations == []
     assert result.related, "pinned product should enrich the scope_warning"
     assert "metformin" in result.answer.lower()
-    assert counter["n"] == 0
+    assert counter["n"] == 1

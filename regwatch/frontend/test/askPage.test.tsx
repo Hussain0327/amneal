@@ -235,6 +235,33 @@ describe("AskPage — run()/stop() orchestration", () => {
     act(() => stream.resolve?.(makeResponse()));
     await screen.findByText(ANSWER_TEXT);
   });
+
+  it.each([
+    ["refused", "low_top_score", "Evidence gap — see the reply"],
+    ["error", "provider_error", "Answer unavailable — see the reply"],
+    ["scope_warning", "scope_warning", "Out of scope — see the reply"],
+  ] as const)(
+    "announces a %s result with its specific outcome",
+    async (status, reason, expectedLabel) => {
+      const user = userEvent.setup();
+      askQueryStreamMock.mockResolvedValue(
+        makeResponse({
+          answer: "Here is a safer next step.",
+          status,
+          refused: true,
+          citations: [],
+          reason,
+        } as Partial<QueryResponse>),
+      );
+      const { container } = render(<AskPage />);
+
+      await submit(user, "help me with this question");
+      const liveRegion = container.querySelector('.sr-only[aria-live="polite"]');
+      await waitFor(() =>
+        expect(liveRegion).toHaveTextContent(`${expectedLabel}: Here is a safer next step.`),
+      );
+    },
+  );
 });
 
 describe("AskPage — session identity across switches", () => {
@@ -295,6 +322,80 @@ describe("AskPage — session identity across switches", () => {
 
     await waitFor(() => expect(ingredient).toHaveValue(""));
     expect(dosage).toHaveValue("");
+  });
+
+  it("clears the history-loading gate when the URL returns to the session already open", async () => {
+    const user = userEvent.setup();
+    askQueryStreamMock.mockResolvedValue(
+      makeResponse({ session_id: "sess-A" } as Partial<QueryResponse>),
+    );
+    getSessionMock.mockResolvedValue(makeSessionDetail("sess-A"));
+    urlSessionParam = "sess-A";
+    const view = render(<AskPage />);
+    await waitFor(() => expect(screen.queryByText(/Opening conversation/)).toBeNull());
+
+    // Switch to B, whose history never resolves, then come straight back to A.
+    // The effect cleanup cancels B's fetch, so its guarded .finally never fires
+    // and only the re-entry branch can clear the flag.
+    getSessionMock.mockImplementation((id) =>
+      id === "sess-B"
+        ? new Promise<SessionDetail>(() => {})
+        : Promise.resolve(makeSessionDetail(id)),
+    );
+    urlSessionParam = "sess-B";
+    view.rerender(<AskPage />);
+    await screen.findByText(/Opening conversation/);
+
+    urlSessionParam = "sess-A"; // re-entry: sessionIdRef still holds A
+    view.rerender(<AskPage />);
+
+    // Without the reset, busy stays true forever: the note stays on screen, the
+    // send button is disabled, run() returns at its busy guard, and no Stop
+    // button renders to escape it. A reload is the only way out.
+    await waitFor(() => expect(screen.queryByText(/Opening conversation/)).toBeNull());
+    await submit(user, "a follow-up");
+    await waitFor(() => expect(askQueryStreamMock).toHaveBeenCalledTimes(1));
+    expect(askQueryStreamMock.mock.calls[0][2]).toBe("sess-A");
+  });
+
+  it("drops the optimistic inquiry turn when a session switch aborts the query", async () => {
+    const user = userEvent.setup();
+    // Realistic: the abort rejects the in-flight stream, which makes run()'s catch
+    // return early WITHOUT undoing the optimistic turn -- only stop() does that.
+    askQueryStreamMock.mockImplementation(
+      (_q, _f, _s, _cb, signal) =>
+        new Promise<QueryResponse>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), {
+            once: true,
+          });
+        }),
+    );
+    getSessionMock.mockResolvedValue(makeSessionDetail("sess-A"));
+    urlSessionParam = "sess-A";
+    const view = render(<AskPage />);
+    await waitFor(() => expect(screen.queryByText(/Opening conversation/)).toBeNull());
+
+    await submit(user, "what dissolution method applies");
+    expect(await screen.findByText("what dissolution method applies")).toBeInTheDocument();
+
+    // Away mid-query and straight back. The re-entry branch keeps the in-memory
+    // thread, so a dangling question would still be sitting there unanswered --
+    // while the server, which does not abandon dispatched work, has already
+    // persisted both it and its answer. The transcript would disagree with the
+    // audit ledger until a hard reload.
+    getSessionMock.mockImplementation((id) =>
+      id === "sess-B"
+        ? new Promise<SessionDetail>(() => {})
+        : Promise.resolve(makeSessionDetail(id)),
+    );
+    urlSessionParam = "sess-B";
+    view.rerender(<AskPage />);
+    urlSessionParam = "sess-A";
+    view.rerender(<AskPage />);
+
+    await waitFor(() =>
+      expect(screen.queryByText("what dissolution method applies")).toBeNull(),
+    );
   });
 });
 
