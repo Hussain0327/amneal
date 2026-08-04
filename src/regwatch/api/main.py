@@ -422,7 +422,7 @@ def ready(response: Response) -> dict[str, Any]:
     Also fails CLOSED on row level security: boot deliberately tolerates a
     lock-contended `ALTER ... ENABLE ROW LEVEL SECURITY` (the 2026-06-18
     incident design), so this is where a still-unprotected public table -- which
-    on Supabase is anon-readable over the Data API -- stops being SILENT. No
+    is readable over a PostgREST-style Data API -- stops being SILENT. No
     extra DB round trip: the set is what the boot sweep recorded.
     """
     # Scope of the RLS gate, kept OUT of the docstring because docstrings are

@@ -9,13 +9,15 @@ HNSW cosine index. The table is created by the Postgres bootstrap and also
 self-heals here on first use (idempotent DDL), so the store works even when
 it is exercised before/without `store/db.py`'s init path.
 
-Supabase specifics: pgvector is preinstalled in the ``extensions`` schema, so
+Lakebase specifics: pgvector is preinstalled in the ``extensions`` schema, so
 extension creation prefers ``WITH SCHEMA extensions`` and falls back to the
 default schema for a vanilla Postgres (local docker), where it lands in
 ``public``. Either way the unqualified ``vector`` type resolves via the
-role's search_path. Row Level Security is enabled with no policies so
-Supabase's auto-generated Data API (anon/authenticated roles) cannot read the
-table; the app connects as ``postgres``, which bypasses RLS.
+role's search_path — on Lakebase that requires ``ALTER ROLE <role> SET
+search_path TO public, extensions``, since the server default omits
+``extensions``. Row Level Security is enabled with no policies so a
+PostgREST-style Data API caller cannot read the table; the app connects as
+``regwatch_app``, which holds BYPASSRLS.
 """
 
 from __future__ import annotations
@@ -161,9 +163,9 @@ def get_engine() -> Engine:
 
 
 def _ensure_extension(engine: Engine) -> None:
-    """Make the `vector` type available, Supabase-style first.
+    """Make the `vector` type available, `extensions`-schema style first.
 
-    Supabase ships pgvector preinstalled in the `extensions` schema, so the
+    Lakebase ships pgvector preinstalled in the `extensions` schema, so the
     existence check makes the whole call a no-op there. A vanilla Postgres
     (local docker) has no `extensions` schema — the `WITH SCHEMA` form fails
     and we fall back to the default schema (`public`), where the unqualified
@@ -237,8 +239,8 @@ def ensure_schema(engine: Engine) -> None:
                 error=str(getattr(exc, "orig", exc)),
             )
             break
-    # Deny-all for Supabase's auto-exposed Data API roles; the app's `postgres`
-    # role bypasses RLS. Mandatory per the K2 contract — but enabled OUT of the
+    # Deny-all for any Data API caller; the app's `regwatch_app` role holds
+    # BYPASSRLS. Mandatory per the K2 contract — but enabled OUT of the
     # DDL transaction above and only when not already on, so a first-query path
     # on a live corpus takes no ACCESS EXCLUSIVE lock on the hot `chunk` table
     # (the 2026-06-18 boot deadlock). See store/db.py:_enable_row_level_security.

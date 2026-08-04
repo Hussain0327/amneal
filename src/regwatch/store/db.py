@@ -6,7 +6,7 @@ fallback that once served dev/tests is gone (tests run against a disposable
 Postgres named by TEST_DATABASE_URL). ``init_db`` runs the fresh-Postgres
 bootstrap: ``create_all`` + ``alembic stamp head`` — NO history replay,
 because migrations 0001-0006 contain SQLite-specific batch ops from the
-pre-Supabase era.
+pre-Postgres era.
 """
 
 from __future__ import annotations
@@ -48,10 +48,12 @@ _unprotected_tables: tuple[str, ...] = ()
 # type comes from the pgvector extension); everything else mirrors the Chroma
 # metadata fields so the vector-store interface can dispatch transparently.
 # {vector_schema} is the schema the extension actually lives in — `extensions`
-# on Supabase, `public` on a local docker Postgres. Qualifying the type and
-# the opclass means the DDL works even when that schema isn't on the
-# connection's search_path (Supabase's default search_path does include
-# `extensions`, but we don't depend on it).
+# on Databricks Lakebase, `public` on a local docker Postgres. Qualifying the
+# type and the opclass means the DDL works even when that schema isn't on the
+# connection's search_path. Lakebase's DEFAULT search_path is `"$user", public`
+# and does NOT include `extensions`, so this qualification is load-bearing
+# there — the app role carries it via `ALTER ROLE ... SET search_path`, but
+# migrations and bootstrap DDL must not depend on that.
 _CHUNK_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS chunk (
     id TEXT PRIMARY KEY,
@@ -149,8 +151,8 @@ def _required_database_url() -> str:
         raise RuntimeError(
             "DATABASE_URL is empty — Postgres is the only datastore since R5 "
             "(the SQLite fallback is gone). Set DATABASE_URL to a "
-            "Postgres/Supabase URL; tests use TEST_DATABASE_URL (see "
-            "tests/conftest.py)."
+            "Postgres URL (Databricks Lakebase in prod); tests use "
+            "TEST_DATABASE_URL (see tests/conftest.py)."
         )
     return url
 
@@ -166,8 +168,9 @@ _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", ""})
 def _enforce_sslmode(database_url: str) -> URL:
     """Force TLS for remote Postgres; leave local/CI Postgres untouched.
 
-    The Supabase session pooler is reached over the PUBLIC internet
-    (aws-1-us-east-1.pooler.supabase.com), so the connection MUST be encrypted.
+    The Lakebase endpoint is reached over the PUBLIC internet
+    (ep-<id>.database.<region>.cloud.databricks.com), so the connection MUST be
+    encrypted.
     We add the libpq ``sslmode=require`` connection keyword to the URL query
     (psycopg v3 reads it natively) ONLY when:
       * the host is not loopback/local (CI service container, docker-compose),
@@ -190,9 +193,9 @@ def _enforce_sslmode(database_url: str) -> URL:
 def _pg_connect_args(s: Settings) -> dict[str, str | int]:
     """libpq connect args: per-connection GUC timeouts + the handshake timeout.
 
-    The app connects as the ``postgres`` role, which — unlike Supabase's
-    anon/authenticated roles — has NO server-side statement/lock/idle timeouts,
-    so a connection stalled mid-transaction would hold its locks indefinitely.
+    The app connects as a dedicated owner role (``regwatch_app`` on Lakebase),
+    which ships with NO server-side statement/lock/idle timeouts, so a
+    connection stalled mid-transaction would hold its locks indefinitely.
     On 2026-06-18 an idle-in-transaction chunk read blocked the boot-time
     ``ALTER TABLE chunk ENABLE RLS`` and wedged prod. Setting these per
     connection makes such a stall self-heal: Postgres terminates the idle
@@ -200,7 +203,7 @@ def _pg_connect_args(s: Settings) -> dict[str, str | int]:
     next checkout. Empty/``0`` values are omitted so a timeout can be disabled.
 
     ``connect_timeout`` (store-1) bounds the TCP/TLS handshake to the public
-    Supabase pooler. The GUC ``options`` only take effect AFTER a session
+    Lakebase endpoint. The GUC ``options`` only take effect AFTER a session
     exists, and ``pool_pre_ping`` opens a fresh connection on every checkout —
     so without this keyword a stalled handshake hangs the request thread
     forever. psycopg v3 honors the libpq ``connect_timeout`` keyword natively;
@@ -248,8 +251,9 @@ def get_engine() -> Engine:
         with _engine_lock:
             if _engine is None:
                 s = get_settings()
-                # Hosted Postgres (Supabase session pooler): small pool,
-                # pre-ping to survive pooler-side connection recycling, and
+                # Hosted Postgres (Lakebase DIRECT endpoint — never the
+                # `-pooler` host, which is PgBouncer transaction mode): small
+                # pool, pre-ping to survive server-side recycling, and
                 # per-connection timeouts (see _pg_connect_args) so a stalled
                 # transaction can never hold a lock indefinitely.
                 _engine = create_engine(
@@ -295,8 +299,8 @@ def _head_revision(cfg: Config) -> str:
 def _ensure_vector_extension(engine: Engine) -> None:
     """Idempotently enable pgvector.
 
-    Supabase ships pgvector pre-installed in the ``extensions`` schema, so
-    'CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions' is a no-op
+    Lakebase ships pgvector (0.8.0) pre-installed in the ``extensions`` schema,
+    so 'CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions' is a no-op
     there. A local docker Postgres has no ``extensions`` schema — the plain
     form installs the extension into ``public`` instead.
 
@@ -464,9 +468,11 @@ def _ensure_embedding_profile_objects(engine: Engine) -> None:
 def _enable_row_level_security(engine: Engine) -> None:
     """Enable deny-all RLS on public tables that don't already have it.
 
-    Supabase auto-exposes public tables over its Data API (PostgREST) to the
-    anon/authenticated roles; RLS-without-policies is deny-all for them. Our
-    API connects as the ``postgres`` role, which bypasses RLS.
+    Lakebase offers a PostgREST-compatible Data API over public tables;
+    RLS-without-policies is deny-all for any such caller. Our API connects as
+    ``regwatch_app``, which holds BYPASSRLS —
+    that attribute is REQUIRED, since a grant-only role connects fine and then
+    reads zero rows, booting healthy while refusing every question.
 
     Lock-safe and idempotent. ``ALTER TABLE`` takes an ACCESS EXCLUSIVE lock, so
     re-running it on already-protected tables under live read traffic is exactly
@@ -512,7 +518,7 @@ def _public_tables_without_rls(engine: Engine) -> list[str]:
 
     ONE definition shared by the sweep (its pending list) and the post-sweep
     verification, so the readiness gate can never disagree with what boot tried
-    to fix. The criteria mirror what Supabase actually exposes over PostgREST:
+    to fix. The criteria mirror what a PostgREST Data API actually exposes:
     schema ``public`` + ``relkind = 'r'`` (ordinary tables; views, partitioned
     parents and foreign tables are out of scope for both). Bookkeeping tables
     are NOT exempt -- ``alembic_version`` is a plain public table, so the sweep
@@ -543,7 +549,7 @@ def _record_unprotected_tables(engine: Engine) -> None:
     READINESS goes strict: a machine still carrying an anon-readable public
     table reports /ready not_ready until a later boot's ALTER lands, and an
     operator hears about it through the same explicit capture point the stamp
-    guard uses -- instead of the previous only-detection, a manual Supabase
+    guard uses -- instead of the previous only-detection, a manual dashboard
     Advisors check in the deploy smoke list. Note fly.toml checks /health, not
     /ready, so the Sentry capture below is the alerting path; /ready is the
     machine-level signal, not a Fly routing gate.
@@ -568,7 +574,7 @@ def _record_unprotected_tables(engine: Engine) -> None:
         RuntimeError(
             "public tables without row level security after the boot sweep: "
             + ", ".join(remaining)
-            + " -- readable by an anon-key holder over the Supabase Data API. "
+            + " -- readable by an unprivileged caller over the Data API. "
             "This machine reports /ready not_ready until a later boot's ALTER "
             "succeeds."
         )

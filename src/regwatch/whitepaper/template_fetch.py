@@ -1,11 +1,16 @@
-"""Fetch-and-cache the official CRA Word template from Supabase Storage.
+"""Fetch-and-cache the official CRA Word template from private object storage.
 
 Prod Fly machines have no persistent volume and the template is gitignored, so
 every prod docx render used to hit the from-scratch FALLBACK_MARKER path. The
-fix (design doc section 8): the template lives in a private Supabase Storage
-bucket and ``WHITEPAPER_TEMPLATE_URL`` (a long-lived signed URL, set as a Fly
-secret) lets the render path lazily fetch it on first use and cache it at
+fix (design doc section 8): the template lives in a private bucket and
+``WHITEPAPER_TEMPLATE_URL`` (a long-lived signed URL, set as a Fly secret) lets
+the render path lazily fetch it on first use and cache it at
 ``whitepaper_template_path``.
+
+The fetch is URL-generic -- it only needs a signed HTTPS URL, so re-homing the
+object to a Databricks Volume needs no code change here, just a new URL. As of
+2026-08-04 nothing is hosted: /health reports ``whitepaper_template: absent``
+and the setting is unset in prod, so this module is dormant.
 
 Failure discipline: ANY fetch problem (timeout, HTTP error, oversize body, not
 a docx, disk error) logs a structured warning and returns None, so the caller

@@ -98,11 +98,14 @@ func NewPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	}
 
 	// pgx's default QueryExecModeCacheStatement (server-side prepared
-	// statements) is safe ONLY because prod's DATABASE_URL is the Supabase
-	// SESSION pooler (each pooled conn keeps a dedicated backend). If that
-	// URL is ever repointed at the TRANSACTION pooler (port 6543), prepared
-	// statements break ("prepared statement does not exist") and this
-	// default must change to QueryExecModeExec.
+	// statements) is safe ONLY because prod's DATABASE_URL is the Lakebase
+	// DIRECT endpoint, where each conn keeps a dedicated backend. Verified
+	// against the live branch 2026-07-28. If that URL is ever repointed at
+	// the "-pooler" host (PgBouncer TRANSACTION mode), prepared statements
+	// break ("prepared statement does not exist") and this default must
+	// change to QueryExecModeExec. Nothing in this file detects that -- the
+	// failure surfaces as a total outage of the service holding the public
+	// edge, so treat the host suffix as a release-gate check.
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("store: create pool: %w", err)
@@ -112,7 +115,7 @@ func NewPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 
 // enforceSSLMode appends sslmode=require for non-local Postgres hosts unless
 // the operator already chose an sslmode -- db.py:_enforce_sslmode verbatim.
-// The Supabase pooler is reached over the public internet; an unencrypted
+// The Lakebase endpoint is reached over the public internet; an unencrypted
 // fallback there is not an acceptable failure mode.
 func enforceSSLMode(databaseURL string) (string, error) {
 	u, err := url.Parse(databaseURL)
