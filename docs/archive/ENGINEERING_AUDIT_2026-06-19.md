@@ -1,5 +1,10 @@
 # RegWatch Engineering Audit — 2026-06-19
 
+> **ARCHIVED** — all remediation batches are closed; residual items live in
+> `docs/ROADMAP.md`. Retained for the PERF-1 refutation: "HNSW disabled means a
+> brute-force scan of 10.7k chunks" is **wrong** — it is a bitmap-narrowed exact
+> scan. Adopt `hnsw.iterative_scan` only above ~100k rows or p95 > 50 ms.
+
 **System:** FDA regulatory-intelligence RAG (Python/FastAPI backend, Next.js 16 frontend, Postgres+pgvector via Supabase, Fly.io + Vercel, GitHub Actions CI/cron).
 **Method:** 16-agent workflow — 9 dimension experts (xhigh + ultrathink) + adversarial verification (2 skeptics per critical/high gap: one reproduces the evidence, one challenges severity) + synthesis.
 **Branch:** `main` · **Scope:** 9-dimension audit, verifier-adjudicated.

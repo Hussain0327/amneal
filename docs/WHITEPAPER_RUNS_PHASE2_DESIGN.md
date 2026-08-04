@@ -1,6 +1,9 @@
 # White-Paper Runs - Phase 2 design (persistence + analyst completion)
 
-**Status:** PROPOSED - design for review, no code written.
+**Status:** SHIPPED - migration 0013 (`whitepaper_run` / `whitepaper_input`) and all
+seven `/whitepaper/runs/*` routes are live. Retained as the only written record of
+the two-layer compliance model (saved run + attributed analyst overlay). The §11
+Phase-3 items are still open and are tracked in `ROADMAP.md`.
 **Date:** 2026-07-07
 **Depends on:** nothing in Phase 1 (can ship independently), but Phase 1's quality
 fixes (form-scoped PSG ask, RLD-labeler SPL pick) make the persisted output worth

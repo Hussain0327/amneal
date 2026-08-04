@@ -10,7 +10,7 @@ build plus the cross-service contract lane (`tests_contract/`, real compiled
 Go proxy + uvicorn + Postgres). This document tracks the remaining gaps.
 
 This is an active readiness checklist. Historical notes and original planning
-docs are archived in `docs/README.md`; when they conflict with this file, use
+docs live in `docs/archive/`; when they conflict with this file, use
 this file plus `README.md`, `docs/ARCHITECTURE.md`, and `docs/DEPLOY.md` as the
 current source of truth.
 

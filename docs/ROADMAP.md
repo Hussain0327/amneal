@@ -9,8 +9,8 @@ file plus [`PROD_READINESS.md`](PROD_READINESS.md) win.
   🟢 sections of [`PROD_READINESS.md`](PROD_READINESS.md). In short, live today:
   Router -> Handlers -> Synthesizer with INV-1..9 as tests; the seven FDA source
   handlers; cited conversational Q&A with token-delta SSE streaming; the White
-  Paper populator plus its runs automation; the unified Next.js four-surface
-  shell on Vercel; the Go edge holding all public traffic on Fly (native auth /
+  Paper populator plus its runs automation; the deficiency analyzer; the unified
+  Next.js shell on Vercel; the Go edge holding all public traffic on Fly (native auth /
   sessions / feedback / settings / products plus `POST /query` orchestration -
   polyglot steps 0-5); Supabase Postgres+pgvector as the only datastore (R5);
   prod LLM inference on Databricks-hosted `gpt-oss-20b` inside the company
@@ -20,8 +20,11 @@ file plus [`PROD_READINESS.md`](PROD_READINESS.md) win.
   (#1-#11) where applicable. This file additionally captures product/quality and
   future items that aren't strictly launch gates.
 
-_Status: 2026-07-29, against `main` after PR #138 (the D1 runtime served-model
-guard + migration 0016 `query_log.latency_ms`) auto-deployed - `main` == prod._
+_Status: 2026-08-04, against `feat/deficiency-mvp`. Since the 2026-07-29 stamp:
+the DefPredict deficiency analyzer shipped (migration 0019) and the structured
+turn contract replaced the per-sentence citation gate (`0a96f7e`). Prod query
+embeddings are still OpenAI — no `ACTIVE_EMBEDDING_PROFILE` secret is set on the
+Fly app, so the D1 blocker below remains fully open._
 
 Legend: 🔴 blocks external exposure · 🟡 should-have before launch · ⚪ decision needed · 🔵 future / optional
 
@@ -46,6 +49,15 @@ and the served model id allowlisted.
   [`OPEN_MODEL_ROLLOUT.md`](OPEN_MODEL_ROLLOUT.md).
 - Done when: no analyst-derived text leaves the tenant on any path and the
   boot + runtime residency guard is armed.
+- **Blocking sub-item — the dimension parity gap.** `.github/workflows/
+  watch-daily.yml` maps four `QWEN_*` secrets plus `ACTIVE_EMBEDDING_PROFILE`,
+  but **not** `QWEN_EMBEDDING_DIMENSION`, and its preflight does not require it.
+  `config/settings.py` defaults `qwen_embedding_dimension` to **1536** while the
+  deployed endpoint is **1024**-dim, and `process/embedder.py` raises on a
+  provider/profile mismatch. So the first FDA revision after a profile promotion
+  fails *after* the preflight has passed. Add the var to the workflow env block
+  **and** the preflight required-set, and add `WATCH_QWEN_EMBEDDING_DIMENSION`
+  to [`SECRETS_RUNBOOK.md`](SECRETS_RUNBOOK.md) §3.4, before flipping.
 
 ### Gateway / SSO + distributed rate limiting  (PROD_READINESS #1)
 App-layer auth is done (the Go edge owns cookie sessions, ownership checks,
@@ -176,6 +188,64 @@ The persist-and-cite + freshness pattern (OB/SPL provenance with
 **not** the Ask/Assemble read paths, which still query live HTTP without
 persisting source rows/freshness.
 - Where: `src/regwatch/sources/`, the Q&A/assemble handlers.
+
+### Deficiency analyzer (DefPredict) - close the precedent-KB gap
+Shipped and live behind no flag (migration 0019, `POST /deficiency/analyze`,
+`GET /deficiency/runs[/{id}]`, sidebar item 05 for every authenticated user).
+Two verified gaps:
+- **The precedent KB can never be populated today.** `store/deficiency_kb.py`
+  `add_entries` has **zero callers** in `src/`, `tests/`, or `scripts/` — its own
+  docstring calls it "the loader seam". `deficiency/precedents.py` therefore
+  short-circuits at `kb_count() == 0` and precedents are always absent.
+- **The moment it *is* loaded, every run hard-raises.** `precedents.py` builds
+  `get_embedding_provider("qwen3")` and raises unless `provider.dim == 1024`,
+  while `settings.py` defaults `qwen_embedding_dimension` to 1536 and no
+  `QWEN_EMBEDDING_BASE_URL` / `_TOKEN` Fly secret exists. Set the credentials and
+  `QWEN_EMBEDDING_DIMENSION=1024` **before** loading the KB.
+- Note for the D1 section above: the qwen3 provider is already reachable in
+  production through this path, which contradicts framing it as fully unwired.
+- Decide whether in-API-process PDF parsing survives past MVP (a durable queue is
+  the documented upgrade path).
+- Where: `src/regwatch/deficiency/`, `src/regwatch/store/deficiency_kb.py`.
+
+### Structured turn contract - the follow-ups `0a96f7e` deferred
+The commit that replaced the per-sentence citation gate with the `claims[]`
+envelope names these as explicitly not-in-scope:
+- Instrument `output_tokens` and re-size `SYNTHESIZER_MAX_TOKENS` from data. The
+  900 -> 1600 raise was a sized guess: a truncated JSON envelope is
+  *unparseable*, where truncated prose merely lost a sentence.
+- Narrow `MATERIALITY_WORDS` (a hand-written literal in `generate/turn_gate.py`)
+  using logged traffic.
+- `common/citations.py::filter_citations` is dead in production code — the prose
+  gate was its only caller — but `tests/test_citations.py` still imports and
+  exercises it. Retire the function and its tests together, or keep it
+  deliberately and say why.
+- Where: `src/regwatch/generate/turn_gate.py`, `turn_schema.py`,
+  `common/citations.py`.
+
+### Post-deploy smoke against the live stack
+On 2026-08-03 an answer-path regression reached production users — real queries
+refused with "not in corpus", copy describing a retrieval failure that never
+happened — and **the entire CI suite was blind to it**. `deploy.yml` has no step
+that asks one real question through the deployed stack and asserts
+`status == answer`. Every gate is offline or fixture-backed.
+- Done when: a post-deploy job queries the live app end-to-end and fails the
+  deploy (or alerts) on anything other than an answered, cited turn.
+- Where: `.github/workflows/deploy.yml`, `src/regwatch/eval/`.
+
+### Rescued from archived docs
+Small, real items that would otherwise have been lost when their source docs
+moved to [`archive/`](archive/):
+- **Supabase P1.1** — two dangling `auth.users` rows and an `auth.sessions` row
+  with `not_after = NULL` in the Supabase project. Live-DB state, not verifiable
+  from the repo; the original audit called it "a trap for the future".
+- **Supabase P2.4** — `REVOKE anon/authenticated ON SCHEMA public`, as
+  defense-in-depth beyond the RLS deny-all.
+- **Evidence drawer a11y** — the shell behind the drawer is not `inert`
+  (aria-modal and the scrim shipped). Appears in no other doc.
+- **White Paper phase 3** — batch populate, watch-driven staleness flagging,
+  run-to-run section diff, and overlay edit history
+  ([`WHITEPAPER_RUNS_PHASE2_DESIGN.md`](WHITEPAPER_RUNS_PHASE2_DESIGN.md) §11).
 
 ### Non-technical product / watchlist management UX
 Watchlist products and watched products are managed via API/CLI; there is no

@@ -1,7 +1,11 @@
 # Conversational refusal + meta-question split — plan
 
-Status: APPROVED to build Slices 1-3 (not started). Verified against the real Ask
-pipeline (grounding workflow w394n699g).
+> **ARCHIVED** — **SHIPPED** as `13907ed` (PR #30); all slices landed. The
+> LLM-phrased meta answer remains deliberately deferred: the meta gate stays
+> deterministic, because an LLM "is this meta?" classifier false-positive on a
+> drug question is a direct INV-1/INV-2 breach.
+
+Verified against the real Ask pipeline (grounding workflow w394n699g).
 Goal: stop the Ask refusal being a dead-end (#1), and answer tool/meta questions
 conversationally (#2) — WITHOUT weakening grounding invariants INV-1 (every answer
 grounded in retrieved corpus) / INV-2 (refuse-over-guess, never dress a refusal as an

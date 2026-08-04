@@ -441,7 +441,7 @@ Public endpoints:
   scope set (refuse over guess).
 - `POST /sources/search`
 - `POST /assemble`
-- `POST /whitepaper`, `POST /whitepaper/docx` — White Paper populate + export
+- `POST /whitepaper` (populate), `POST /whitepaper/runs/{id}/docx` (export a saved run)
 - `GET /watch/latest`
 - `GET /products`, `POST /products` (Go-served)
 - `GET /sessions`, `GET /sessions/{id}`, `DELETE /sessions/{id}` — per-user

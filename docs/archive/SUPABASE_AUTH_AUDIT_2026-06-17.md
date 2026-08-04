@@ -1,5 +1,12 @@
 # Supabase + Auth Audit — 2026-06-17
 
+> **ARCHIVED** — the auth split-brain this flagged was resolved by the Go auth
+> cutover (polyglot step 4); P1.2/P1.3/P2.5/P2.6 shipped. The live-DB appendix is
+> a 2026-06-17 snapshot taken at alembic head 0008; the head is now 0019, so do
+> not read it as current schema. Two items were carried into `docs/ROADMAP.md`
+> rather than closed: P1.1 (dangling `auth.users` rows) and P2.4 (`REVOKE
+> anon/authenticated ON SCHEMA public`).
+
 **Project:** `xvhbfmoynibkcghazzxc` (RegWatch / amneal production DB)
 **Method:** Live inspection via Supabase MCP (read-only queries against the running project) + an adversarially-verified static code audit of the connection, schema, RLS, and auth wiring.
 **Auditor note:** Read-only. No data was changed.

@@ -112,7 +112,7 @@ COPY --from=proxy-build /usr/local/bin/regwatch-proxy /usr/local/bin/regwatch-pr
 # deliberately NOT baked into the image. WHITEPAPER_TEMPLATE_PATH (set above)
 # defaults to a path under the mounted /app/data volume, so an operator drops
 # the official .docx at data/templates/cra_white_paper_template.docx to enable
-# real-template fill. Absent it, POST /whitepaper/docx still returns a
+# real-template fill. Absent it, POST /whitepaper/runs/{id}/docx still returns a
 # structurally-equivalent document stamped "(generated without the official CRA
 # template file)" — see docs/DEPLOY.md and src/regwatch/whitepaper/docx_writer.py.
 EXPOSE 8000

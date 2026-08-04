@@ -47,46 +47,64 @@ data-residency boundary); embeddings are mid-migration to the same plane.
 
 ## The docs, by purpose
 
+This is the only index of `docs/`. Every living doc appears exactly once below.
+
 **Start here**
 - [Project overview & quick start](../README.md)
 - [Non-technical guide](NON_TECH_GUIDE.md) — plain English for regulatory/business readers
+- [Simple technical guide](TECH_GUIDE_SIMPLE.md) — folder map and core flows
 
 **How it's built**
-- [Architecture](ARCHITECTURE.md) — canonical system design (Router → Handlers → Synthesizer, the four surfaces, INV-1..9)
+- [Architecture](ARCHITECTURE.md) — canonical system design (Router → Handlers → Synthesizer, the surfaces, INV-1..9)
 - [Graph-assisted adaptive retrieval](GRAPH_ASSISTED_RETRIEVAL.md) — proposed bounded graph traversal from citable chunks; Tier-1 graph storage is landed, runtime traversal is not
-- [Simple technical guide](TECH_GUIDE_SIMPLE.md) — folder map and core flows
 - [Polyglot target](POLYGLOT_TARGET_2026-07-10.md) - the TS/Go/Python/Rust strangler plan (steps 0-5 done)
 - [Go proxy rollout](GO_PROXY_ROLLOUT.md) - how Go took the public edge (complete)
-- [Go native query rollout](GO_NATIVE_QUERY_ROLLOUT.md) - the step-5 `/query` cutover runbook (flip live 2026-07-24)
-- [Project spec](PROJECT_SPEC.md) — the original build-ready spec
+- [Go native query rollout](GO_NATIVE_QUERY_ROLLOUT.md) - the step-5 `/query` cutover runbook (flip live 2026-07-24). `tests/test_go_native_query_pin.py` reads this file by path and pins its status line to `fly.toml` — do not move it or add a second status block
+- [Step-5 INV test mapping](STEP5_INV_TEST_MAPPING.md) - INV-by-INV test coverage across the Go/Python boundary
+- [Project spec](PROJECT_SPEC.md) — the original build-ready spec (current-state docs win where they conflict)
 - [Operating rules for Claude Code](CLAUDE.md) — hard rules + defaults
 
 **Models & data residency**
 - [Data residency D1](DATA_RESIDENCY_D1.md) - analyst queries must stay in-tenant; what leaks and the fix
 - [Databricks adoption](DATABRICKS_ADOPTION_2026-07-28.md) - inference-plane decision, cost model, incident log, rollout state
-- [Open-model rollout](OPEN_MODEL_ROLLOUT.md) - embedding profiles + open-weight providers (shipped dormant, now flipping)
+- [Open-model rollout](OPEN_MODEL_ROLLOUT.md) - embedding profiles + open-weight providers (shipped dormant; the embedding half is not yet flipped in prod)
 - [Evaluation status](EVAL_STATUS.md) - current gold-set counts, CI/live evidence, and the 0.917 correction
 - [Threshold validation](THRESHOLD_VALIDATION_2026-06-25.md) - the 0.30 refusal threshold's provisional status + sweep harness
 
 **The web app**
-- [Frontend README](../regwatch/frontend/README.md) — the Next.js shell, the four surfaces, the scope picker
+- [Frontend README](../regwatch/frontend/README.md) — the Next.js shell, the surfaces, the scope picker
 - [Conversational sessions](CONVERSATIONAL_SESSIONS.md) — chat sessions, follow-up context, audit rules
-- [Backend workspace](../regwatch/backend/README.md)
 
 **The White Paper**
 - [White-paper field-extraction schema](whitepaper_schema.md) — one row per template cell: {source, key, mode}
+- [White-paper runs, phase 2](WHITEPAPER_RUNS_PHASE2_DESIGN.md) — the saved-run + analyst-overlay compliance model (shipped)
 
 **Run & ship**
 - [Docker guide](DOCKER.md) — containers, services, data mounts
-- [Deploy runbook](DEPLOY.md) - Supabase + Fly + Vercel operations, rollback levers, restore drill
+- [Deploy runbook](DEPLOY.md) - Supabase + Fly + Vercel operations, rollback levers, restore procedure
 - [CI/CD pipeline](CI_CD.md) - every CI job mapped to its local command; read before pushing
 - [Secrets runbook](SECRETS_RUNBOOK.md) - where every secret lives and how to rotate it
 
 **Status & what's left**
 - [Production readiness](PROD_READINESS.md) — the prod gates, what's done vs remaining
 - [Roadmap](ROADMAP.md) — the consolidated list of open / not-yet-done work
+- [Refactor backlog](REFACTOR_BACKLOG_2026-07-09.md) — the 120-item working list
 - [Decisions](DECISIONS.md) — append-only log of what was picked and why
 - [Security policy](../SECURITY.md)
 
-**History (archived, point-in-time — not current)**
-- [June 8 work log](Jun8th.md) · [Codebase audit](audit_findings.md) · [Next.js migration plan](typescript-ui-replaces-streamlit-golden-pudding.md) · the `*.txt` planning notes
+**History** — [`archive/`](archive/): point-in-time audits, completed rollout plans, and
+superseded reviews. Each carries an `ARCHIVED` banner saying what replaced it. Never
+treat an archived blocker as open; `ROADMAP.md` and `PROD_READINESS.md` own open work.
+
+## Documentation rules
+
+- Keep `../README.md` concise. Detailed operational docs live here in `docs/`.
+- New architecture decisions go in `DECISIONS.md`, not only in chat.
+- If a doc says something is production-ready, include the verification that proves it.
+- If a change touches Docker, deploy, ingest, or source-handler behavior, update
+  `DOCKER.md` / `DEPLOY.md` / `TECH_GUIDE_SIMPLE.md` in the same change.
+- If you change `.github/workflows/ci.yml` (add/remove a job or step, change a gating
+  command, or add a vuln suppression), update `CI_CD.md` in the same change so the
+  pre-push checklist never drifts from the actual gate.
+- When a doc stops being true, move it to `archive/` with a banner. Do not leave a
+  stale plan sitting in `docs/` where it reads as current.

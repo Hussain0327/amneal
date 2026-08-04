@@ -147,19 +147,36 @@ combination.
 
 2. Secrets (never in `fly.toml`):
 
+   Comments go ABOVE the command, never on a continuation line: `\` followed by
+   spaces is an escaped space, not a line continuation, so a trailing `#` silently
+   truncates the command and every variable after it is never set.
+
    ```bash
+   # OPENAI_API_KEY       query + chunk embeddings, and the LLM rollback path
+   # LLM_PROVIDER         databricks; live since 2026-07-28
+   # LLM_MODEL            DISPLAY VALUE ONLY (GET /settings). Hand-sync it to
+   #                      DATABRICKS_LLM_MODEL -- nothing enforces that they agree.
+   # INTERNAL_RAG_TOKEN   Go proxy -> Python /internal/query/compute relay auth
+   # METRICS_TOKEN        optional bearer gate on GET /metrics; UNSET = world-readable
+   # SENTRY_DSN           error tracking (B4)
+   # OPENFDA_API_KEY      optional; raises the openFDA rate limit
    fly secrets set \
      DATABASE_URL="$SUPABASE_DB_URL" \
-     OPENAI_API_KEY="sk-..." \                        # embeddings + LLM rollback path
-     LLM_PROVIDER="databricks" \                      # live LLM since 2026-07-28
+     OPENAI_API_KEY="sk-..." \
+     LLM_PROVIDER="databricks" \
      DATABRICKS_LLM_BASE_URL="https://<workspace-host>/serving-endpoints" \
      DATABRICKS_LLM_TOKEN="..." \
      DATABRICKS_LLM_MODEL="workspace.default.regwatch" \
-     INTERNAL_RAG_TOKEN="..." \                       # Go proxy -> Python RAG relay auth
-     SENTRY_DSN="https://...ingest.sentry.io/..." \   # B4: error tracking
-     WHITEPAPER_TEMPLATE_URL="https://..." \          # signed Supabase Storage URL; see note below
-     OPENFDA_API_KEY="..."        # optional
+     LLM_MODEL="workspace.default.regwatch" \
+     INTERNAL_RAG_TOKEN="..." \
+     METRICS_TOKEN="..." \
+     SENTRY_DSN="https://...ingest.sentry.io/..." \
+     OPENFDA_API_KEY="..."
    ```
+
+   `WHITEPAPER_TEMPLATE_URL` is **not set in prod today**. Without it the `.docx`
+   writer falls back to marker output -- that is current behavior, not a
+   hypothetical; see the template note below.
 
    `D1_ENFORCED` / `D1_ALLOWED_LLM_MODELS` are STAGED, deliberately unset:
    they arm the runtime served-model residency guard and stay unarmed until
@@ -235,7 +252,7 @@ Notes:
       *private* overlay image (`FROM regwatch:... ; COPY
       cra_white_paper_template.docx /app/data/templates/`) so it never enters
       this public repo, or attach a Fly volume at `/app/data/templates`.
-  Absent the file, `/whitepaper/docx` returns a structurally-equivalent document
+  Absent the file, `/whitepaper/runs/{id}/docx` returns a structurally-equivalent document
   stamped `(generated without the official CRA template file)` and logs a
   `whitepaper_template_missing` warning — never a silent or failed render.
 - **`data/` inside the container is scratch** in Postgres mode (raw PDFs from
@@ -245,34 +262,17 @@ Notes:
   cron (the sole scheduler; Dagster was removed in R5). Configure
   `WATCH_DATABASE_URL`, `WATCH_OPENAI_API_KEY`, optional `OPENFDA_API_KEY`,
   optional `WATCH_HEALTHCHECK_URL` / `SLACK_WEBHOOK_URL`, and -- the moment a
-  non-legacy embedding profile is promoted in prod -- the five parity secrets
+  non-legacy embedding profile is promoted in prod -- the six parity secrets
   `WATCH_ACTIVE_EMBEDDING_PROFILE` and
-  `WATCH_QWEN_EMBEDDING_{BASE_URL,TOKEN,MODEL,REVISION}`, all per
+  `WATCH_QWEN_EMBEDDING_{BASE_URL,TOKEN,MODEL,REVISION,DIMENSION}`, all per
   `docs/SECRETS_RUNBOOK.md`. Keep ad hoc `regwatch watch` runs for break-glass
   recovery, not as the normal production schedule.
 
-### 3-alt. API on Railway (HISTORICAL -- does not match the current prod shape)
-
-This alternative predates the two-process-group deployment (Go proxy on the
-public edge + private app group) and the committed `fly.toml`: Railway would
-run the image CMD only -- uvicorn exposed directly, no Go edge, no
-`GO_NATIVE_QUERY` path, no proxy-tier login limiting. Kept for reference; prod
-is Fly.
-
-```bash
-railway init                       # link repo; Railway auto-detects the Dockerfile
-railway variables --set DATABASE_URL="$SUPABASE_DB_URL" \
-  --set OPENAI_API_KEY="sk-..." \
-  --set EMBEDDING_PROVIDER=openai \
-  --set AUTH_COOKIE_SECURE=true \
-  --set CORS_ALLOW_ORIGINS_CSV="https://amneal.vercel.app"
-railway up
-```
-
-In the Railway dashboard: service → **Settings → Networking → Generate
-Domain** (note the URL for `API_PROXY_TARGET`), and **Settings → Health
-check** → path `/health`. Build args: **Settings → Build** →
-`INSTALL_LOCAL_EMBEDDINGS=false` (the default).
+  > **Known gap, tracked in `ROADMAP.md`:** `watch-daily.yml` does not yet map
+  > `QWEN_EMBEDDING_DIMENSION`, and its preflight does not require it. The
+  > `qwen_embedding_dimension` default is 1536 while the deployed endpoint is
+  > 1024-dim, so the first FDA revision after a profile promotion fails *after*
+  > the preflight passes. Close this before flipping the profile.
 
 ## 4. Frontend on Vercel
 
@@ -291,9 +291,12 @@ just works: Vercel terminates TLS.
 4. Click **Deploy**. Note the production URL
    (`https://amneal.vercel.app` in prod).
 5. If the final Vercel URL differs from what you set in
-   `CORS_ALLOW_ORIGINS_CSV` in step 3, update it:
-   `fly secrets set` won't take env vars from `[env]` — edit `fly.toml` and
-   `fly deploy` (or `railway variables --set ... && railway up`).
+   `CORS_ALLOW_ORIGINS_CSV` in step 3, update it. A Fly secret of the same name
+   overrides `[env]` and applies immediately, so
+   `fly secrets set CORS_ALLOW_ORIGINS_CSV=... -a amneal` fixes it in ~60s with
+   no CI cycle. Make it durable afterwards by editing `fly.toml` and redeploying,
+   then `fly secrets unset` the override so the committed file stays the source
+   of truth.
 
 CLI alternative:
 
@@ -387,7 +390,7 @@ fly secrets set GO_NATIVE_QUERY=false -a amneal  # proxy relays POST /query to P
    > neutralize the pin first with `fly secrets set GO_NATIVE_QUERY=false -a
    > amneal` (lever 0 -- secrets override `[env]`).
 
-   (Railway: **Deployments → ⋮ → Redeploy** on the previous build.) The DB
+   The DB
    schema is alembic-stamped and verified on boot: an older app that expects
    an older head **refuses to start** rather than running against a newer
    schema. If the bad deploy also migrated the schema, an image rollback

@@ -1,5 +1,10 @@
 # Polyglot Architecture Review — 2026-06-17
 
+> **ARCHIVED** — the "no new language" verdict was **overruled** on 2026-07-10 by
+> `docs/POLYGLOT_TARGET_2026-07-10.md` as owner-level architecture policy, not on
+> measured performance. Retained because the §3 adopt-IF thresholds and the §6
+> four-gate framework are still the bar any future runtime must clear.
+
 **Question asked:** "Should RegWatch become more polyglot — where and what languages, for better system architecture and design?"
 
 **Method:** Grounded multi-agent analysis — 6 subsystem mappers read the actual code, each candidate "seam" was evaluated by a language *advocate* and a keep-it-in-Python *skeptic*, then reconciled by a lead architect. Findings are tied to real files/subsystems.

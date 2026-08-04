@@ -1,6 +1,10 @@
 # S1 — In-app Evidence Drawer (Ask citations)
 
-Status: implemented on `feat/ux-s1-evidence-drawer` (not yet merged).
+> **ARCHIVED** — **SHIPPED**, merged as PR #16 (`ff3f6a2`). The component lives at
+> `regwatch/frontend/components/EvidenceDrawer.tsx`. One item was carried into
+> `docs/ROADMAP.md` rather than closed: the full `inert` background for assistive
+> tech (aria-modal + scrim shipped; the shell behind the drawer is not `inert`).
+
 Part of the grounded UX 10x plan (slices S1–S9). This is S1: the first, smallest,
 zero-backend slice. North-star metric it moves: **time-to-defensible-deliverable** —
 keep the regulatory analyst on the cited passage instead of bouncing them out to a

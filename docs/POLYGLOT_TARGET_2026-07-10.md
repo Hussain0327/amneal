@@ -2,8 +2,8 @@
 
 Owner decision: all-Python is unacceptable; regwatch moves to a four-runtime
 architecture. This supersedes the "no new language" default of
-`POLYGLOT_ARCHITECTURE_REVIEW_2026-06-17.md` and the same-day conservative
-verdict in `POLYGLOT_ASSESSMENT_2026-07-10.md` as a matter of owner-level
+`archive/POLYGLOT_ARCHITECTURE_REVIEW_2026-06-17.md` and the same-day conservative
+verdict in `archive/POLYGLOT_ASSESSMENT_2026-07-10.md` as a matter of owner-level
 architecture policy (bus factor / control-plane rigor), not measured perf.
 The two docs remain the record of what is and is not a perf-driven move.
 

@@ -1,5 +1,14 @@
 # Polyglot Assessment - 2026-07-10 (follow-up to the 2026-06-17 review)
 
+> **ARCHIVED** — S1-S4 all shipped, and the conservative verdict was overruled the
+> same day by `docs/POLYGLOT_TARGET_2026-07-10.md`. Retained for the parked
+> adoption triggers (Rust PDF worker: uploads AND >1% crash rate; Go crawler:
+> >50k items/run; TS edge auth: public/multi-tenant + stateless tokens; realtime:
+> >1k concurrent subscribers).
+> **Correction:** §1's claim that the pgvector chunk table is "hard-locked to
+> vector(1536)" is no longer true — migration 0015 shipped the embedding-profile
+> machinery specifically to remove that lock.
+
 **Question:** "I want to make this a polyglot system - what can we do?"
 
 **Method:** 21-agent fleet against the live tree (branch `fix/assemble-audit`):
