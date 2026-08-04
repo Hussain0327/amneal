@@ -1,0 +1,1739 @@
+/* ============================================================================
+   COMPLIANCE STUDIO -- "the lights go down, the paper stays"
+   ----------------------------------------------------------------------------
+   A workbench for GMP-controlled CMC documents, set entirely in the parchment
+   palette the rest of RegWatch prints on. Not one value here is invented:
+   every colour below is a token from app/globals.css, used verbatim.
+
+   Going full parchment costs the studio the thing that used to separate the
+   document from its surroundings -- a dark chrome behind a light page. That
+   job now falls to a five-step surface ramp and a hairline on every boundary,
+   which is how the shipped app already builds .doc and .sidebar:
+
+     --paper-3  #efe7d3   the canvas the document rests on (deepest)
+     --paper-2  #f4eede   tree, top bar, panels, rail
+     --paper    #faf6ec   row hover, quiet fills
+     #fffdf8             raised cards, fields, and the document page (brightest)
+     --edge     #e4d9bf   the hairline doing the structural work
+
+   The page is a .doc card: brightest fill, edge hairline, --shadow-soft. It
+   lifts off the canvas by light and shadow rather than by inversion.
+
+   Colour vocabulary, held strictly:
+     gold, bounded  = grounded / sourced -- a citation chip, mono, hairline edge
+     gold, unbounded = the analyst's own hand -- a marker wash, a tracked change
+     oxblood        = a defect; weight encodes severity (solid > dashed)
+     ink-soft       = a note, nothing to fix
+   Severity is never a rainbow. One problem hue, varied by fill and weight --
+   the same solid-dot / hollow-ring vocabulary the White Paper cells already use.
+
+   Focus rings are navy, never gold: gold on cream is ~1.5:1 and would fail as
+   an indicator. globals.css made the same call for the same reason.
+
+   Everything is scoped under .studio so the parchment shell cannot be touched.
+   ========================================================================== */
+
+.studio {
+  /* --- surfaces, deepest to brightest ------------------------------------- */
+  --st-bg: #efe7d3; /* --paper-3: the canvas under the page */
+  --st-panel: #f4eede; /* --paper-2: tree, top bar, panels, rail */
+  --st-hover: #faf6ec; /* --paper:   row hover */
+  --st-raise: #fffdf8; /* raised cards and fields, as .doc / .field */
+  --st-edge: #e4d9bf; /* --edge */
+  --st-edge-soft: #efe7d3;
+
+  --st-text: #16213a; /* --ink */
+  --st-text-soft: #686d80; /* --ink-soft */
+  --st-text-faint: #6b6859; /* --ink-faint */
+
+  /* --- accents, all verbatim from globals.css ----------------------------- */
+  --st-gold: #f5b400;
+  --st-gold-deep: #c98a0c;
+  --st-gold-ink: #8a5b00;
+  --st-gold-wash: #fcefca;
+  --st-flag: #7a2e2e; /* --oxblood */
+  --st-flag-wash: #f3e3df; /* --oxblood-wash */
+  --st-clear: #3f7d54; /* the settled green of .confidence--high */
+
+  /* --- the document page -------------------------------------------------- */
+  --st-paper: #fffdf8;
+  --st-paper-2: #f4eede;
+  --st-paper-3: #efe7d3;
+  --st-paper-edge: #e4d9bf;
+  --st-ink: #16213a;
+  --st-ink-2: #283450;
+  --st-ink-soft: #686d80;
+  --st-oxblood: #7a2e2e;
+  --st-oxblood-wash: #f3e3df;
+
+  /* --- geometry ---------------------------------------------------------- */
+  --st-top-h: 44px;
+  --st-tree-w: 17rem;
+  --st-spine-w: 22px;
+  --st-panel-w: 23.5rem;
+  --st-rail-w: 48px;
+  --st-page-w: 44rem;
+
+  /* --shadow-soft / --shadow-lift, verbatim. Navy-tinted, never neutral black:
+     a shadow on parchment is ink pooling, not an absence of light. */
+  --st-shadow-soft:
+    0 1px 2px rgba(22, 33, 58, 0.05), 0 14px 34px -20px rgba(22, 33, 58, 0.28);
+  --st-shadow:
+    0 2px 4px rgba(22, 33, 58, 0.06), 0 22px 48px -24px rgba(22, 33, 58, 0.34);
+
+  /* The studio owns the viewport: it is a workbench, not a page. */
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--st-bg);
+  color: var(--st-text);
+  font-family: var(--font-body), ui-sans-serif, system-ui, sans-serif;
+  font-size: 14px;
+  overflow: hidden;
+}
+
+.studio *,
+.studio *::before,
+.studio *::after {
+  box-sizing: border-box;
+}
+
+/* Paper grain, matching body::before. The studio covers the viewport, so it has
+   to lay its own texture down or it would read as the one flat surface in an
+   app made of paper. */
+.studio::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  opacity: 0.035;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Navy, not gold: gold on cream is ~1.5:1 and fails as an indicator. globals.css
+   made the same call. :where() keeps specificity at zero so components override. */
+.studio
+  :where(a, button, summary, [tabindex], [contenteditable]):focus-visible {
+  outline: 2px solid var(--st-text);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.studio__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------------------------------------------------------------------------
+   Top bar: identity, breadcrumb, save state
+   ------------------------------------------------------------------------ */
+
+.st-top {
+  flex: none;
+  height: var(--st-top-h);
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0 0.85rem;
+  background: var(--st-panel);
+  border-bottom: 1px solid var(--st-edge);
+}
+
+.st-top__mark {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 5px;
+  background: linear-gradient(150deg, var(--st-gold), var(--st-gold-deep));
+  color: #2a1c00;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.62rem;
+  font-weight: 700;
+}
+
+.st-top__name {
+  font-weight: 600;
+  font-size: 0.85rem;
+  letter-spacing: -0.005em;
+  white-space: nowrap;
+}
+
+.st-top__crumb {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78rem;
+  color: var(--st-text-soft);
+}
+
+.st-top__crumb b {
+  font-weight: 500;
+  color: var(--st-text);
+}
+
+.st-top__state {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+  color: var(--st-text-faint);
+}
+
+.st-top__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--st-clear);
+}
+
+/* The tree is in flow on desktop, so its toggle only exists once the tree
+   becomes a slide-over. Scoped to .st-top on purpose: .st-icon-btn sets
+   display:inline-grid at equal specificity and is declared further down, so a
+   bare .st-top__menu would lose and the button would show at every width. */
+.st-top .st-top__menu {
+  display: none;
+}
+
+.st-top__exit {
+  flex: none;
+  color: var(--st-text-faint);
+  text-decoration: none;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.3rem 0.4rem;
+  transition: color 0.15s ease;
+}
+
+.st-top__exit:hover {
+  color: var(--st-text);
+}
+
+/* ---------------------------------------------------------------------------
+   Body: tree | spine | main | panel | rail
+   ------------------------------------------------------------------------ */
+
+.st-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* Only ever a real element below the breakpoint where the tree and panel float
+   over the page. On desktop they sit in flow and nothing needs dismissing. */
+.st-scrim {
+  display: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Repository tree
+   ------------------------------------------------------------------------ */
+
+.st-tree {
+  flex: none;
+  width: var(--st-tree-w);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--st-panel);
+  border-right: 1px solid var(--st-edge);
+}
+
+.st-tree__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.85rem 0.85rem 0.6rem;
+}
+
+.st-tree__title {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--st-text-faint);
+}
+
+.st-tree__actions {
+  margin-left: auto;
+  display: flex;
+  gap: 0.15rem;
+}
+
+.st-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--st-text-faint);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.st-icon-btn:hover:not(:disabled) {
+  background: var(--st-hover);
+  color: var(--st-text);
+}
+
+.st-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.st-search {
+  margin: 0 0.85rem 0.7rem;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.55rem;
+  background: var(--st-raise);
+  border: 1px solid var(--st-edge);
+  border-radius: 7px;
+  transition: border-color 0.15s ease;
+}
+
+.st-search:focus-within {
+  border-color: var(--st-gold-deep);
+}
+
+.st-search svg {
+  flex: none;
+  color: var(--st-text-faint);
+}
+
+.st-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--st-text);
+  font: inherit;
+  font-size: 0.8rem;
+  outline: none;
+}
+
+.st-search input::placeholder {
+  color: var(--st-text-faint);
+}
+
+.st-tree__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 0.45rem 0.85rem;
+}
+
+.st-tree__empty {
+  padding: 0.9rem 0.5rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--st-text-faint);
+}
+
+.st-node {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0.34rem 0.4rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--st-text-soft);
+  font: inherit;
+  font-size: 0.82rem;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.st-node:hover {
+  background: var(--st-hover);
+  color: var(--st-text);
+}
+
+.st-node--folder {
+  font-weight: 500;
+  color: var(--st-text);
+}
+
+.st-node--doc.is-active {
+  background: var(--st-raise);
+  color: var(--st-text);
+  box-shadow: inset 2px 0 0 var(--st-gold-deep);
+  /* Square off the left edge: an inset shadow follows the border radius, which
+     turns the marker into a curved sliver instead of a bar. */
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.st-node__caret {
+  flex: none;
+  color: var(--st-text-faint);
+  transition: transform 0.15s ease;
+}
+
+.st-node__caret--open {
+  transform: rotate(90deg);
+}
+
+.st-node__icon {
+  flex: none;
+  color: var(--st-text-faint);
+}
+
+.st-node--doc.is-active .st-node__icon {
+  color: var(--st-gold-deep);
+}
+
+.st-node__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st-node__badge {
+  flex: none;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.55rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--st-text-faint);
+  border: 1px solid var(--st-edge);
+  border-radius: 3px;
+  padding: 0.05rem 0.28rem;
+}
+
+/* Tri-state file glyph. Solid = checked and clean, clay ring = open findings,
+   hollow ring = never checked or edited since. Same vocabulary as the White
+   Paper cells, so a reader who knows one knows the other. */
+.st-glyph {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+
+.st-glyph--clean {
+  background: var(--st-clear);
+}
+
+.st-glyph--findings {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--st-flag);
+}
+
+.st-glyph--unchecked {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--st-ink-soft);
+}
+
+.st-glyph--checking {
+  background: var(--st-gold-deep);
+  animation: st-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes st-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Check action, pinned to the foot of the tree
+   ------------------------------------------------------------------------ */
+
+.st-check {
+  flex: none;
+  padding: 0.75rem 0.85rem 0.85rem;
+  border-top: 1px solid var(--st-edge);
+  background: var(--st-panel);
+}
+
+.st-check__btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.62rem 0.8rem;
+  border: 1px solid var(--st-edge);
+  border-radius: 8px;
+  background: var(--st-raise);
+  color: var(--st-text);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.st-check__btn:hover:not(:disabled) {
+  border-color: var(--st-gold-deep);
+  background: var(--st-hover);
+}
+
+.st-check__btn:disabled {
+  cursor: progress;
+  color: var(--st-text-soft);
+}
+
+.st-check__btn svg {
+  flex: none;
+  color: var(--st-gold-ink);
+}
+
+.st-check__note {
+  margin: 0.55rem 0 0;
+  font-size: 0.7rem;
+  line-height: 1.45;
+  color: var(--st-text-faint);
+}
+
+/* ---------------------------------------------------------------------------
+   THE SIGNATURE -- compliance spine
+   ----------------------------------------------------------------------------
+   An 18px column between the tree and the page carrying one tick per finding,
+   placed at that finding's measured position in the document. It answers
+   "where is this document weak, and how badly" without opening a panel, which
+   is the question a reviewer actually holds in their head while reading.
+   ------------------------------------------------------------------------ */
+
+.st-spine {
+  position: relative;
+  flex: none;
+  width: var(--st-spine-w);
+  background: var(--st-panel);
+  border-right: 1px solid var(--st-edge);
+  overflow: hidden;
+}
+
+/* Checked and clean: a quiet gold thread down the full length. The seal. */
+.st-spine--clear::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  transform: translateX(-50%);
+  background: linear-gradient(
+    180deg,
+    transparent,
+    var(--st-gold-deep) 18%,
+    var(--st-gold-deep) 82%,
+    transparent
+  );
+  opacity: 0.85;
+}
+
+.st-spine__tick {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  transform: translateY(-50%);
+  transition: filter 0.15s ease;
+}
+
+.st-spine__tick::before {
+  content: "";
+  display: block;
+  border-radius: 1px;
+}
+
+.st-spine__tick:hover::before,
+.st-spine__tick.is-active::before {
+  box-shadow: 0 0 0 1px var(--st-gold-deep);
+}
+
+/* Tick weight is the whole severity scale: solid clay reads at a glance from
+   across the desk, a dotted slate hairline is a footnote you have to look for. */
+.st-spine__tick--critical::before {
+  height: 7px;
+  background: var(--st-flag);
+}
+
+.st-spine__tick--major::before {
+  height: 6px;
+  background: var(--st-flag-wash);
+  box-shadow: inset 0 0 0 1.5px var(--st-flag);
+}
+
+.st-spine__tick--minor::before {
+  height: 4px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--st-ink-soft);
+}
+
+.st-spine__tick--info::before {
+  height: 2px;
+  background: var(--st-ink-soft);
+  opacity: 0.55;
+}
+
+.st-spine__tick.is-stale {
+  opacity: 0.3;
+}
+
+/* The scan: a gold hairline sweeping the spine while a check runs. The one
+   orchestrated moment on the surface; everything else is a 120-180ms fade. */
+.st-spine__scan {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 34%;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(245, 180, 0, 0.28),
+    transparent
+  );
+  border-top: 1px solid var(--st-gold-deep);
+  animation: st-scan 1.15s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@keyframes st-scan {
+  from {
+    top: -34%;
+  }
+  to {
+    top: 100%;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Main column: format toolbar + the page
+   ------------------------------------------------------------------------ */
+
+.st-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.st-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.15rem;
+  padding: 0.4rem 0.75rem;
+  background: var(--st-panel);
+  border-bottom: 1px solid var(--st-edge);
+}
+
+.st-bar__sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 0.4rem;
+  background: var(--st-edge);
+}
+
+.st-bar__spacer {
+  flex: 1;
+  min-width: 0.5rem;
+}
+
+/* An empty toolbar is a missed instruction. This one says what the page does. */
+.st-bar__hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.76rem;
+  color: var(--st-text-faint);
+}
+
+.st-bar__hint svg {
+  color: var(--st-gold-deep);
+}
+
+.st-bar__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 26px;
+  padding: 0.25rem 0.5rem;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--st-text-soft);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.st-bar__btn:hover:not(:disabled) {
+  background: var(--st-hover);
+  color: var(--st-text);
+}
+
+.st-bar__btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.st-bar__btn.is-on {
+  background: var(--st-raise);
+  color: var(--st-gold-ink);
+}
+
+.st-bar__btn--bold {
+  font-weight: 700;
+}
+
+.st-bar__btn--italic {
+  font-style: italic;
+}
+
+.st-bar__btn--underline {
+  text-decoration: underline;
+}
+
+.st-bar__style {
+  padding: 0.25rem 0.45rem;
+  border: 1px solid var(--st-edge);
+  border-radius: 5px;
+  background: var(--st-raise);
+  color: var(--st-text);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.st-bar__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.5rem;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--st-text-faint);
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: color 0.12s ease;
+}
+
+.st-bar__toggle:hover {
+  color: var(--st-text);
+}
+
+.st-bar__switch {
+  width: 22px;
+  height: 12px;
+  border-radius: 999px;
+  background: var(--st-edge);
+  position: relative;
+  transition: background 0.15s ease;
+}
+
+.st-bar__switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--st-text-faint);
+  transition:
+    transform 0.15s ease,
+    background 0.15s ease;
+}
+
+.st-bar__toggle.is-on {
+  color: var(--st-text);
+}
+
+.st-bar__toggle.is-on .st-bar__switch {
+  background: var(--st-gold-wash);
+}
+
+.st-bar__toggle.is-on .st-bar__switch::after {
+  transform: translateX(10px);
+  background: var(--st-gold-deep);
+}
+
+/* ---------------------------------------------------------------------------
+   The page
+   ------------------------------------------------------------------------ */
+
+.st-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1.6rem 1.5rem 5rem;
+  scroll-behavior: smooth;
+}
+
+.st-page {
+  max-width: var(--st-page-w);
+  margin: 0 auto;
+  padding: 3.2rem 3.4rem 4rem;
+  background: var(--st-paper);
+  color: var(--st-ink);
+  border: 1px solid var(--st-paper-edge);
+  border-radius: 3px;
+  box-shadow: var(--st-shadow-soft);
+}
+
+.st-page__stale {
+  max-width: var(--st-page-w);
+  margin: 0 auto 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.7rem;
+  border: 1px dashed var(--st-edge);
+  border-radius: 6px;
+  font-size: 0.75rem;
+  color: var(--st-text-soft);
+}
+
+.st-page__stale b {
+  font-weight: 600;
+  color: var(--st-text);
+}
+
+/* Document typography. Headings in the body sans at Word weight, prose in a
+   text serif: the artifact is a controlled printed record, and it should read
+   like one rather than like the app around it. */
+.st-blk {
+  margin: 0;
+  outline: none;
+}
+
+/* A caret in a block is an ordinary state, not an alert: a hairline says which
+   block is live without shouting over the prose it surrounds. */
+.st-blk[contenteditable]:focus-visible {
+  outline: 1px solid rgba(22, 33, 58, 0.45);
+  outline-offset: 5px;
+  border-radius: 2px;
+}
+
+.st-blk--title {
+  font-family: var(--font-body), sans-serif;
+  font-size: 1.62rem;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  margin-bottom: 1.1rem;
+}
+
+.st-blk--meta {
+  font-family: var(--font-serif), Georgia, serif;
+  font-size: 0.97rem;
+  line-height: 1.55;
+  color: var(--st-ink-2);
+  margin-bottom: 0.3rem;
+}
+
+.st-blk--h2 {
+  font-family: var(--font-body), sans-serif;
+  font-size: 1.06rem;
+  font-weight: 700;
+  line-height: 1.35;
+  margin: 1.85rem 0 0.7rem;
+}
+
+.st-blk--p {
+  font-family: var(--font-serif), Georgia, serif;
+  font-size: 1.02rem;
+  line-height: 1.72;
+  margin: 0 0 0.9rem;
+}
+
+.st-blk--table {
+  margin: 0.9rem 0 1.2rem;
+  overflow-x: auto;
+}
+
+.st-blk--table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-body), sans-serif;
+  font-size: 0.86rem;
+}
+
+.st-blk--table th,
+.st-blk--table td {
+  border: 1px solid var(--st-paper-edge);
+  padding: 0.5rem 0.7rem;
+  text-align: left;
+  vertical-align: top;
+  line-height: 1.45;
+}
+
+.st-blk--table th {
+  background: var(--st-paper-2);
+  font-weight: 600;
+}
+
+/* --- marks on paper -------------------------------------------------------
+   One problem hue. Weight, not colour, carries severity: a solid rule under a
+   solid wash is critical, a dashed rule under a faint wash is major, and a note
+   is slate and unfilled. A reader scanning the page can rank them without a
+   legend, and nobody has to distinguish two ambers. */
+
+.st-mark {
+  /* <mark> ships a yellow UA background; every severity sets its own or none. */
+  background: transparent;
+  color: inherit;
+  border-radius: 1px;
+  padding-bottom: 1px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.st-mark--critical {
+  background: rgba(122, 46, 46, 0.16);
+  border-bottom: 2px solid var(--st-oxblood);
+}
+
+.st-mark--major {
+  background: rgba(122, 46, 46, 0.08);
+  border-bottom: 1px dashed var(--st-oxblood);
+}
+
+.st-mark--minor {
+  border-bottom: 1px dashed var(--st-ink-soft);
+}
+
+.st-mark--info {
+  border-bottom: 1px dotted var(--st-ink-soft);
+  opacity: 0.8;
+}
+
+.st-mark--stale {
+  background: none;
+  border-bottom: 1px dotted var(--st-ink-soft);
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* Tracked change: gold-ink text under a solid rule. Both marks the analyst
+   makes by hand are gold, which is the rule this surface holds -- gold on paper
+   is the human's hand, oxblood is a defect, ink-soft is a note. A wash and a
+   recoloured underline are distinct enough to tell a highlight from an edit. */
+.st-mark--insert {
+  color: var(--st-gold-ink);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  border-bottom: 0;
+  cursor: text;
+}
+
+/* The analyst's own marker stroke, in --gold-wash's own hue. */
+.st-mark--highlight {
+  background: rgba(245, 180, 0, 0.3);
+  border-bottom: 0;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.st-mark.is-active {
+  background: rgba(122, 46, 46, 0.26);
+  animation: st-flash 0.85s ease-out;
+}
+
+@keyframes st-flash {
+  0% {
+    background: rgba(245, 180, 0, 0.55);
+  }
+  100% {
+    background: rgba(122, 46, 46, 0.26);
+  }
+}
+
+/* --- selection toolbar --------------------------------------------------- */
+
+.st-sel {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  padding: 0.25rem;
+  background: var(--st-raise);
+  border: 1px solid var(--st-edge);
+  border-radius: 9px;
+  box-shadow: var(--st-shadow);
+  animation: st-rise 0.12s ease-out;
+}
+
+@keyframes st-rise {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.st-sel__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  padding: 0.3rem 0.5rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--st-text-soft);
+  font: inherit;
+  font-size: 0.76rem;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.st-sel__btn:hover {
+  background: var(--st-hover);
+  color: var(--st-text);
+}
+
+.st-sel__btn--mark:hover {
+  color: var(--st-gold-ink);
+}
+
+.st-sel__sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 0.2rem;
+  background: var(--st-edge);
+}
+
+/* ---------------------------------------------------------------------------
+   Slide-out panel (findings / assistant)
+   ------------------------------------------------------------------------ */
+
+.st-panel {
+  flex: none;
+  width: 0;
+  overflow: hidden;
+  background: var(--st-panel);
+  transition: width 0.18s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.st-panel.is-open {
+  width: var(--st-panel-w);
+  border-left: 1px solid var(--st-edge);
+}
+
+/* Fixed inner width so content does not reflow while the panel animates. */
+.st-panel__inner {
+  width: var(--st-panel-w);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.st-panel__head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 0.85rem;
+  border-bottom: 1px solid var(--st-edge);
+}
+
+.st-panel__title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.st-panel__title svg {
+  color: var(--st-gold-ink);
+}
+
+.st-panel__close {
+  margin-left: auto;
+}
+
+.st-panel__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.85rem;
+}
+
+.st-panel__empty {
+  font-size: 0.82rem;
+  line-height: 1.6;
+  color: var(--st-text-soft);
+}
+
+.st-panel__empty b {
+  color: var(--st-text);
+  font-weight: 600;
+}
+
+.st-panel__foot {
+  flex: none;
+  padding: 0.6rem 0.85rem 0.75rem;
+  border-top: 1px solid var(--st-edge);
+}
+
+/* --- verdict ------------------------------------------------------------- */
+
+.st-verdict {
+  padding: 0.75rem 0.8rem;
+  border: 1px solid var(--st-edge);
+  border-radius: 8px;
+  background: var(--st-raise);
+  margin-bottom: 0.85rem;
+}
+
+.st-verdict__label {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.92rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.st-verdict--blocking .st-verdict__label {
+  color: var(--st-flag);
+}
+
+.st-verdict--review .st-verdict__label {
+  color: var(--st-text);
+}
+
+.st-verdict--clear .st-verdict__label {
+  color: var(--st-clear);
+}
+
+.st-verdict__counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.55rem;
+}
+
+.st-count {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.64rem;
+  letter-spacing: 0.04em;
+  color: var(--st-text-soft);
+  border: 1px solid var(--st-edge);
+  border-radius: 4px;
+  padding: 0.12rem 0.4rem;
+}
+
+.st-count--blocking {
+  color: var(--st-flag);
+  border-color: rgba(196, 100, 100, 0.5);
+  background: var(--st-flag-wash);
+}
+
+.st-verdict__against {
+  margin: 0.6rem 0 0;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  color: var(--st-text-faint);
+}
+
+/* --- finding card -------------------------------------------------------- */
+
+.st-find__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* The card is a list item, not a button: it holds two distinct actions (jump to
+   the span, ask why) and a button cannot legally contain another. */
+.st-find {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--st-edge);
+  border-left: 2px solid var(--st-edge);
+  border-radius: 0 7px 7px 0;
+  background: var(--st-raise);
+  color: inherit;
+  font: inherit;
+  padding: 0.7rem 0.75rem;
+  margin-bottom: 0.5rem;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+.st-find:hover {
+  background: var(--st-hover);
+}
+
+.st-find.is-active {
+  border-color: var(--st-gold-deep);
+}
+
+.st-find--critical {
+  border-left-color: var(--st-flag);
+}
+
+.st-find--major {
+  border-left-color: rgba(196, 100, 100, 0.5);
+}
+
+.st-find--minor {
+  border-left-color: var(--st-text-faint);
+}
+
+.st-find--info {
+  border-left-color: var(--st-edge);
+}
+
+.st-find.is-stale {
+  opacity: 0.55;
+}
+
+.st-find__main {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.st-find__ask {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  margin-top: 0.55rem;
+  padding: 0.22rem 0.5rem;
+  border: 1px solid var(--st-edge);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--st-text-soft);
+  font: inherit;
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.st-find__ask:hover {
+  border-color: var(--st-gold-deep);
+  color: var(--st-text);
+}
+
+.st-find__head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.st-sev {
+  flex: none;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.56rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+}
+
+.st-sev--critical {
+  color: var(--st-paper);
+  background: var(--st-flag);
+}
+
+.st-sev--major {
+  color: var(--st-flag);
+  box-shadow: inset 0 0 0 1px var(--st-flag);
+}
+
+.st-sev--minor {
+  color: var(--st-text-faint);
+  box-shadow: inset 0 0 0 1px var(--st-text-faint);
+}
+
+.st-sev--info {
+  color: var(--st-text-faint);
+  box-shadow: inset 0 0 0 1px var(--st-edge);
+}
+
+.st-find__title {
+  font-size: 0.84rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.st-find__detail {
+  margin: 0.4rem 0 0;
+  font-size: 0.79rem;
+  line-height: 1.55;
+  color: var(--st-text-soft);
+}
+
+.st-find__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.55rem;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.64rem;
+  color: var(--st-text-faint);
+}
+
+.st-find__meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+}
+
+.st-find__staletag {
+  display: inline-block;
+  margin-top: 0.5rem;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--st-text-faint);
+  border: 1px dashed var(--st-text-faint);
+  border-radius: 3px;
+  padding: 0.08rem 0.35rem;
+}
+
+/* --- assistant ----------------------------------------------------------- */
+
+.st-ctx {
+  margin: 0 0 0.85rem;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--st-text-faint);
+}
+
+.st-ctx b {
+  font-weight: 600;
+  color: var(--st-text-soft);
+}
+
+.st-msg {
+  margin-bottom: 0.85rem;
+}
+
+.st-msg--user {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.st-msg__user {
+  max-width: 85%;
+  padding: 0.45rem 0.7rem;
+  border-radius: 10px 10px 3px 10px;
+  background: var(--st-raise);
+  border: 1px solid var(--st-edge);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.st-msg__body {
+  font-size: 0.84rem;
+  line-height: 1.62;
+  color: var(--st-text);
+  white-space: pre-wrap;
+}
+
+.st-msg__caret {
+  display: inline-block;
+  width: 2px;
+  height: 0.85em;
+  margin-left: 1px;
+  vertical-align: -0.1em;
+  background: var(--st-gold-deep);
+  animation: st-pulse 1s steps(2) infinite;
+}
+
+/* Citations: square corners and mono, exactly as the Ask surface stamps them.
+   Gold on chrome means grounded. */
+.st-src {
+  margin-top: 0.55rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.st-src__item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.66rem;
+  line-height: 1.45;
+  color: var(--st-gold-ink);
+  padding-left: 0.5rem;
+  border-left: 2px solid var(--st-gold-deep);
+}
+
+.st-msg__nosrc {
+  margin-top: 0.5rem;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.64rem;
+  letter-spacing: 0.06em;
+  color: var(--st-text-faint);
+}
+
+.st-compose {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.4rem;
+  padding: 0.4rem 0.4rem 0.4rem 0.65rem;
+  background: var(--st-raise);
+  border: 1px solid var(--st-edge);
+  border-radius: 10px;
+  transition: border-color 0.15s ease;
+}
+
+.st-compose:focus-within {
+  border-color: var(--st-gold-deep);
+}
+
+.st-compose textarea {
+  flex: 1;
+  min-width: 0;
+  max-height: 7rem;
+  border: 0;
+  background: transparent;
+  color: var(--st-text);
+  font: inherit;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  padding: 0.3rem 0;
+  resize: none;
+  outline: none;
+}
+
+.st-compose textarea::placeholder {
+  color: var(--st-text-faint);
+}
+
+.st-compose__send {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--st-gold);
+  color: #2a1c00;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.st-compose__send:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.st-compose__send:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.st-foot-note {
+  margin: 0.5rem 0 0;
+  font-size: 0.68rem;
+  line-height: 1.45;
+  color: var(--st-text-faint);
+}
+
+/* ---------------------------------------------------------------------------
+   Activity rail
+   ------------------------------------------------------------------------ */
+
+.st-rail {
+  flex: none;
+  width: var(--st-rail-w);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.5rem 0;
+  background: var(--st-panel);
+  border-left: 1px solid var(--st-edge);
+}
+
+.st-rail__btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--st-text-faint);
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.st-rail__btn:hover {
+  background: var(--st-hover);
+  color: var(--st-text);
+}
+
+.st-rail__btn.is-on {
+  background: var(--st-raise);
+  color: var(--st-gold-ink);
+  box-shadow: inset 0 0 0 1px var(--st-edge);
+}
+
+.st-rail__count {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--st-flag);
+  color: var(--st-paper);
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.55rem;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+}
+
+/* The full-repository run, set vertically at the foot of the rail: a different
+   scale of action from the per-document check, and it reads that way. */
+.st-rail__full {
+  margin-top: auto;
+  writing-mode: vertical-rl;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.85rem 0.32rem;
+  border: 0;
+  border-radius: 7px;
+  background: linear-gradient(180deg, var(--st-gold), var(--st-gold-deep));
+  color: #2a1c00;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.st-rail__full:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.st-rail__full:disabled {
+  cursor: progress;
+  filter: saturate(0.4);
+}
+
+/* ---------------------------------------------------------------------------
+   Scrollbars: present but recessive
+   ------------------------------------------------------------------------ */
+
+.studio ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.studio ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.studio ::-webkit-scrollbar-thumb {
+  background: var(--st-edge);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+
+.studio ::-webkit-scrollbar-thumb:hover {
+  background: var(--st-gold-deep);
+  background-clip: content-box;
+}
+
+/* ---------------------------------------------------------------------------
+   Responsive. The studio is a desktop instrument; below the breakpoints it
+   degrades to the same three surfaces reached one at a time rather than
+   pretending a three-pane IDE fits on a phone.
+   ------------------------------------------------------------------------ */
+
+@media (max-width: 1180px) {
+  .studio {
+    --st-panel-w: 20rem;
+    --st-tree-w: 15rem;
+    --st-page-w: 40rem;
+  }
+
+  .st-page {
+    padding: 2.4rem 2.2rem 3rem;
+  }
+}
+
+@media (max-width: 920px) {
+  .st-top .st-top__menu {
+    display: grid;
+  }
+
+  .st-tree {
+    position: absolute;
+    left: 0;
+    top: var(--st-top-h);
+    bottom: 0;
+    z-index: 30;
+    width: 17rem;
+    transform: translateX(-100%);
+    transition: transform 0.18s cubic-bezier(0.2, 0.7, 0.2, 1);
+    box-shadow: var(--st-shadow);
+  }
+
+  .st-tree.is-open {
+    transform: translateX(0);
+  }
+
+  .st-panel {
+    position: absolute;
+    right: var(--st-rail-w);
+    top: var(--st-top-h);
+    bottom: 0;
+    z-index: 30;
+    width: var(--st-panel-w);
+    transform: translateX(calc(100% + var(--st-rail-w)));
+    transition: transform 0.18s cubic-bezier(0.2, 0.7, 0.2, 1);
+    border-left: 1px solid var(--st-edge);
+    box-shadow: var(--st-shadow);
+  }
+
+  .st-panel.is-open {
+    width: var(--st-panel-w);
+    transform: translateX(0);
+  }
+
+  .st-scrim {
+    display: block;
+    position: absolute;
+    inset: var(--st-top-h) 0 0;
+    z-index: 20;
+    background: rgba(22, 33, 58, 0.32);
+    border: 0;
+  }
+
+  .st-page {
+    padding: 1.9rem 1.5rem 2.5rem;
+  }
+}
+
+@media (max-width: 620px) {
+  .studio {
+    --st-rail-w: 44px;
+    font-size: 13px;
+  }
+
+  .st-spine {
+    display: none;
+  }
+
+  .st-top__crumb {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Reduced motion: the scan becomes a static gold field, everything else stops.
+   ------------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  .studio *,
+  .studio *::before,
+  .studio *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+
+  .st-scroll {
+    scroll-behavior: auto;
+  }
+
+  .st-spine__scan {
+    top: 0;
+    height: 100%;
+    animation: none;
+    background: var(--st-gold-wash);
+    border-top: 0;
+  }
+
+  .st-glyph--checking {
+    opacity: 1;
+  }
+}

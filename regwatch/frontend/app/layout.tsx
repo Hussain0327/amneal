@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Fraunces, IBM_Plex_Mono, Public_Sans, Yellowtail } from "next/font/google";
+import { Fraunces, IBM_Plex_Mono, Public_Sans, Source_Serif_4, Yellowtail } from "next/font/google";
 
 import { AuthProvider } from "@/components/AuthProvider";
 import "./globals.css";
@@ -24,6 +24,16 @@ const plexMono = IBM_Plex_Mono({
   variable: "--font-mono",
   weight: ["400", "500", "600"],
 });
+// Text serif for the document body in the Compliance Studio. The artifact under
+// review is a controlled printed record; setting it in a workhorse text serif
+// keeps it visually distinct from the app chrome around it. Fraunces is a
+// display face and does not hold up at 1rem across a full page of prose.
+const sourceSerif = Source_Serif_4({
+  subsets: ["latin"],
+  variable: "--font-serif",
+  weight: ["400", "600"],
+  style: ["normal", "italic"],
+});
 // The Amneal brush wordmark, kept as the brand mark.
 const yellowtail = Yellowtail({ subsets: ["latin"], variable: "--font-script", weight: "400" });
 
@@ -41,7 +51,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body
-        className={`${fraunces.variable} ${publicSans.variable} ${plexMono.variable} ${yellowtail.variable}`}
+        className={`${fraunces.variable} ${publicSans.variable} ${plexMono.variable} ${sourceSerif.variable} ${yellowtail.variable}`}
       >
         {/* The shell (sidebar + canvas) lives behind the auth gate. */}
         <AuthProvider>{children}</AuthProvider>
