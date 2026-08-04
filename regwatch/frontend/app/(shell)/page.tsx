@@ -8,7 +8,7 @@ import { StatusTicker } from "@/components/StatusTicker";
 import { AssistantTurn, ProvisionalDraft, UserTurn } from "@/components/Turns";
 import { useSessions } from "@/components/SessionsProvider";
 import { askQueryStream, getSession, STREAM_FALLBACK_STATUS, type Citation, type Suggestion } from "@/lib/api";
-import { assistantTurn, turnFromMessage, userTurn, type Turn } from "@/lib/turns";
+import { assistantTurn, nonAnswerLabel, turnFromMessage, userTurn, type Turn } from "@/lib/turns";
 import { syncTextareaHeight } from "@/lib/composer";
 
 // Example inquiries grouped by the KIND of question the corpus answers — the
@@ -140,10 +140,28 @@ function AskView() {
       return;
     }
     if (urlSession === sessionIdRef.current) {
+      // Back on the session we already hold. A prior run's history fetch may have
+      // been cancelled by the cleanup below, and its (guarded) finally then never
+      // clears the flag -- reset it here, same as the new-chat branch above, or
+      // the composer stays disabled with no Stop button to escape it.
+      setHistoryLoading(false);
       setActiveSessionId(urlSession);
       return;
     }
+    // A query in flight belongs to the session being left. Aborting makes run()'s
+    // catch return early WITHOUT undoing the optimistic inquiry turn (only stop()
+    // does that), so drop it here too: otherwise coming back to this session shows
+    // a dangling unanswered question while the server has already persisted both
+    // it and its answer. The question is deliberately NOT handed back to the
+    // composer the way stop() does -- the analyst navigated away, and that text
+    // belongs to the conversation being left.
+    const wasStreaming = controllerRef.current !== null;
     controllerRef.current?.abort();
+    if (wasStreaming) {
+      setTurns((prev) =>
+        prev.length && prev[prev.length - 1].role === "user" ? prev.slice(0, -1) : prev,
+      );
+    }
     // Close the drawer before swapping threads: browser back/forward changes
     // ?session without a click (the scrim only blocks in-page clicks), and the
     // previous conversation's evidence must not float over the next one.
@@ -262,11 +280,12 @@ function AskView() {
         setTurns((prev) => [...prev, assistantTurn(next)]);
         setActiveSessionId(next.session_id);
         refocusRef.current = true;
+        const nonAnswer = nonAnswerLabel(next.status, next.refused, next.reason ?? null);
         const label =
           next.status === "clarify"
             ? "Clarification requested"
-            : next.refused || next.status === "scope_warning"
-              ? "Request declined — see the reply"
+            : nonAnswer
+              ? `${nonAnswer} — see the reply`
               : next.status === "meta"
                 ? "Information ready"
                 : "Answer ready";

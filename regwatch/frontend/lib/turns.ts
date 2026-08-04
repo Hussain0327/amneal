@@ -75,12 +75,11 @@ export function turnFromMessage(m: ChatMessage): Turn {
 
 // Plain-language analyst copy for a backend reason code (QAResult.reason).
 // Keeps the WHY of a decline/clarify legible without leaking the code; an
-// unknown code falls back to the raw string so a new backend reason still shows
-// something rather than vanishing.
+// unknown code falls back to neutral copy so internal identifiers never leak.
 const REASON_COPY: Record<string, string> = {
   low_top_score:
     "No passage scored high enough to answer this confidently — try naming the product or adding a specific detail.",
-  no_product: "No product in the corpus matched this query.",
+  no_product: "The product could not be identified confidently from this query.",
   no_matching_psg: "No product-specific guidance matched this query.",
   did_you_mean: "The product name is close to a known one — pick the intended match.",
   multi_form: "This ingredient has several dosage forms — pick one.",
@@ -90,16 +89,44 @@ const REASON_COPY: Record<string, string> = {
   brand_lookup: "Looks like a brand name — confirm the active ingredient.",
   retrieval: "Retrieval could not find supporting passages.",
   spine_unresolved: "Could not resolve the product to a known FDA application.",
-  provider_error: "The model provider failed to respond.",
-  empty_completion: "The model returned no answer.",
+  provider_error: "The answer service did not respond.",
+  empty_completion: "The answer service returned no usable response.",
+  catalog_error: "The guidance catalog could not be checked right now.",
+  pipeline_error: "An internal processing step could not be completed.",
+  upstream_error: "The answer service could not be reached.",
+  audit_error: "The answer could not be safely recorded.",
+  malformed_structure: "The model response could not be validated.",
+  material_drop: "The draft omitted a material qualifier, so it was withheld.",
   model_refusal:
     "The retrieved passages didn't support a confident answer — try rephrasing or naming the product.",
-  no_valid_citations: "The draft answer had no citation backed by a real passage.",
+  no_valid_citations: "The draft could not be verified against the retrieved passages.",
 };
 
 export function reasonCopy(reason: string | null): string | null {
   if (!reason) return null;
-  return REASON_COPY[reason] ?? reason;
+  return REASON_COPY[reason] ?? "The request could not be completed as expected.";
+}
+
+// Neutral outcome labels for non-answer turns. A refused result means the
+// available evidence could not support an answer; status="error" (or one of
+// the known completion/provider failures) means the answer itself was not
+// available. Keep this shared by the visible turn and the Ask live-region so
+// sighted and screen-reader users receive the same distinction.
+const ANSWER_UNAVAILABLE_REASONS = new Set(["provider_error", "empty_completion"]);
+
+export type NonAnswerLabel = "Out of scope" | "Evidence gap" | "Answer unavailable";
+
+export function nonAnswerLabel(
+  status: QueryStatus | null,
+  refused: boolean,
+  reason: string | null,
+): NonAnswerLabel | null {
+  if (status === "scope_warning") return "Out of scope";
+  if (status === "error" || (reason != null && ANSWER_UNAVAILABLE_REASONS.has(reason))) {
+    return "Answer unavailable";
+  }
+  if (refused || status === "refused") return "Evidence gap";
+  return null;
 }
 
 // Coarse, honest confidence band from the best citation score. Answers only

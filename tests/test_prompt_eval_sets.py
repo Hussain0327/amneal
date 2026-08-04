@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
+from regwatch.eval import prompt_eval
 from regwatch.eval.prompt_eval import validate_prompt_sets
 from regwatch.generate import turn_gate as tg
-from regwatch.generate.prompts import generation_prompt_manifest
+from regwatch.generate.guidance import GUIDANCE_SCHEMA_MESSAGE, QUERY_GUIDANCE_PROMPT
+from regwatch.generate.llm import LLMResponse
+from regwatch.generate.prompt_identity import identify_prompt
+from regwatch.generate.prompts import (
+    QUERY_GUIDANCE_SYSTEM,
+    QUERY_GUIDANCE_USER,
+    generation_prompt_manifest,
+)
 from regwatch.retrieve.retriever import RetrievedPassage
 from tests.conftest import synth_turn_json
 
@@ -10,9 +22,24 @@ from tests.conftest import synth_turn_json
 def test_prompt_eval_sets_are_nonempty_unique_and_schema_valid() -> None:
     manifest = validate_prompt_sets()
 
-    assert set(manifest) == {"qa", "extraction", "changes"}
+    assert set(manifest) == {"qa", "guidance", "extraction", "changes"}
     assert all(item["count"] >= 3 for item in manifest.values())
+    assert manifest["guidance"]["count"] >= 7
     assert all(len(item["sha256"]) == 64 for item in manifest.values())
+
+
+def test_guidance_prompt_set_covers_non_answer_routes() -> None:
+    rows = prompt_eval._load_jsonl(prompt_eval._SET_FILES["guidance"]).rows
+
+    assert {
+        "no_product",
+        "low_top_score",
+        "vague_input",
+        "multi_form",
+        "ambiguous_product",
+        "scope_warning",
+        "meta",
+    }.issubset({row["reason"] for row in rows})
 
 
 def test_generation_prompt_manifest_is_versioned_and_hashed() -> None:
@@ -22,11 +49,161 @@ def test_generation_prompt_manifest_is_versioned_and_hashed() -> None:
     # contract while the extraction/change prompts did not, so one shared
     # literal would hide the next divergence.
     assert {prompt_id: item["version"] for prompt_id, item in manifest.items()} == {
-        "regwatch.grounded_qa": "3",
+        "regwatch.grounded_qa": "4",
+        "regwatch.query_guidance": "1",
         "regwatch.be_extraction": "2",
         "regwatch.change_summary": "2",
     }
     assert all(len(item["sha256"]) == 64 for item in manifest.values())
+
+
+def test_guidance_prompt_fingerprint_includes_the_output_schema() -> None:
+    with_schema = identify_prompt(
+        "regwatch.query_guidance",
+        "1",
+        QUERY_GUIDANCE_SYSTEM,
+        QUERY_GUIDANCE_USER,
+        GUIDANCE_SCHEMA_MESSAGE.content,
+    )
+    without_schema = identify_prompt(
+        "regwatch.query_guidance", "1", QUERY_GUIDANCE_SYSTEM, QUERY_GUIDANCE_USER
+    )
+
+    assert with_schema == QUERY_GUIDANCE_PROMPT
+    assert QUERY_GUIDANCE_PROMPT.sha256 != without_schema.sha256
+
+
+class _GuidanceProvider:
+    name = "guidance-stub"
+
+    def __init__(self, raw: str) -> None:
+        self.raw = raw
+        self.calls: list[tuple[list[object], dict[str, object]]] = []
+
+    def complete(self, messages: list[object], **kwargs: object) -> LLMResponse:
+        self.calls.append((messages, kwargs))
+        return LLMResponse(text=self.raw, model=self.name)
+
+
+def _guidance_eval_row() -> dict[str, object]:
+    return {
+        "id": "unit_guidance",
+        "question": "Which metformin product did you mean?",
+        "status": "clarify",
+        "reason": "ambiguous_product",
+        "product": None,
+        "clarify": [
+            {
+                "label": "Metformin hydrochloride",
+                "query": "What study is recommended for metformin hydrochloride?",
+                "filters": {"normalized_name": "metformin hydrochloride"},
+            },
+            {
+                "label": "Sitagliptin and metformin",
+                "query": "What study is recommended for sitagliptin and metformin?",
+                "filters": {"normalized_name": "sitagliptin and metformin"},
+            },
+        ],
+        "related": [],
+        "expected_next_steps": ["choose_product"],
+        "expected_first_option_ids": ["clarify:0"],
+    }
+
+
+def test_guidance_eval_uses_router_and_records_only_bounded_selections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _GuidanceProvider(
+        json.dumps({"next_step": "choose_product", "option_ids": ["clarify:0"]})
+    )
+    roles: list[str] = []
+
+    def _provider_for_role(*, role: str) -> _GuidanceProvider:
+        roles.append(role)
+        return provider
+
+    monkeypatch.setattr(prompt_eval, "get_llm_provider", _provider_for_role)
+
+    details = prompt_eval._run_guidance([_guidance_eval_row()])
+
+    assert roles == ["router"]
+    assert len(provider.calls) == 1
+    _messages, kwargs = provider.calls[0]
+    assert kwargs == {"temperature": 0.0, "max_tokens": 600, "response_format": "json"}
+    assert details == [
+        {
+            "id": "unit_guidance",
+            "passed": True,
+            "model": "guidance-stub",
+            "next_step": "choose_product",
+            "option_ids": ["clarify:0"],
+            "option_match": True,
+        }
+    ]
+    assert not ({"question", "response", "text", "prose"} & details[0].keys())
+
+
+def test_guidance_eval_scores_an_allowlisted_but_unexpected_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _guidance_eval_row()
+    row.update(
+        reason="low_top_score",
+        status="refused",
+        expected_next_steps=["narrow_source_topic"],
+    )
+    provider = _GuidanceProvider('{"next_step":"choose_dosage_form","option_ids":[]}')
+    monkeypatch.setattr(prompt_eval, "get_llm_provider", lambda *, role: provider)
+
+    details = prompt_eval._run_guidance([row])
+
+    assert details[0]["passed"] is False
+    assert details[0]["next_step"] == "choose_dosage_form"
+    assert "failure" not in details[0]
+
+
+def test_guidance_eval_scores_option_priority_not_only_the_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _GuidanceProvider('{"next_step":"choose_product","option_ids":["clarify:1"]}')
+    monkeypatch.setattr(prompt_eval, "get_llm_provider", lambda *, role: provider)
+
+    details = prompt_eval._run_guidance([_guidance_eval_row()])
+
+    assert details[0]["next_step"] == "choose_product"
+    assert details[0]["option_match"] is False
+    assert details[0]["passed"] is False
+
+
+@pytest.mark.parametrize(
+    ("raw", "failure"),
+    [
+        (
+            '{"next_step":"view_capabilities","option_ids":[]}',
+            "disallowed_guidance_step",
+        ),
+        (
+            '{"next_step":"choose_product","option_ids":["clarify:99"]}',
+            "unknown_guidance_option",
+        ),
+    ],
+)
+def test_guidance_eval_rejects_non_allowlisted_model_selections(
+    monkeypatch: pytest.MonkeyPatch, raw: str, failure: str
+) -> None:
+    provider = _GuidanceProvider(raw)
+    monkeypatch.setattr(prompt_eval, "get_llm_provider", lambda *, role: provider)
+
+    details = prompt_eval._run_guidance([_guidance_eval_row()])
+
+    assert details == [
+        {
+            "id": "unit_guidance",
+            "passed": False,
+            "model": "guidance-stub",
+            "failure": failure,
+        }
+    ]
 
 
 # ---------- the INV-1 properties the deleted segment splitter used to cover ----------

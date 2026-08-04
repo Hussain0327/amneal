@@ -81,15 +81,25 @@ _run_lock_conn: Any | None = None
 DEFAULT_PASSWORD = "correct-horse-battery-staple"
 
 # Wire literals the Go rewrite must keep emitting byte-for-byte. Hardcoded
-# (not imported from config.settings) on purpose: a contract test that reads
-# the constant from the implementation can never catch the implementation
-# changing it. Sources: config/settings.py refusal_text and
+# (not imported from config.settings or the guidance renderer) on purpose: a
+# contract test that reads a constant from the implementation can never catch
+# the implementation changing it. Sources: config/settings.py refusal_text,
+# src/regwatch/generate/guidance.py render_guidance_message, and
 # src/regwatch/generate/grounded_qa.py _SERVICE_UNAVAILABLE_TEXT (the \u2014
 # escape is that constant's em-dash, kept as an escape so this file stays
 # ASCII-only).
 REFUSAL_TEXT = (
     "I couldn't find this in the current FDA guidance corpus, "
     "and I won't guess on a regulatory question."
+)
+NO_PRODUCT_GUIDANCE_TEXT = (
+    "I couldn't identify the product confidently enough to search the right FDA "
+    "guidance. What generic ingredient should I use?"
+)
+LOW_SCORE_GUIDANCE_TEXT = (
+    "I found Albuterol Sulfate, but I couldn't verify that answer from the current FDA "
+    "passages. Can you narrow the question to study design, strengths, dissolution, "
+    "or dosage form?"
 )
 SERVICE_UNAVAILABLE_TEXT = (
     "The answer service is temporarily unavailable. Your question was "
@@ -138,11 +148,15 @@ RETRIEVED_ITEM_KEYS = frozenset(
     {"chunk_id", "score", "doc_id", "version_id", "page", "normalized_name", "short_name"}
 )
 ROUTE_JSON_KEYS = frozenset({"route", "filters", "reason", "context_applied", "response_mode"})
-# "turn" is the turn_gate ledger (what the model emitted, what was admitted,
-# what was dropped and why). It rides on every route that reached the claim
-# gate: the answer path AND the post-gate declines (model_refusal,
-# no_valid_citations, material_drop, audit_error). Pre-gate declines
-# (no_product, low_top_score, clarify, scope_warning, meta) keep the base keys.
+# Healthy pre-synthesis non-answer routes carry a constrained router-model
+# ledger. The model selects only an allowlisted next step and existing option
+# ids; it cannot write display prose or alter status, filters, or citations.
+GUIDED_ROUTE_JSON_KEYS = ROUTE_JSON_KEYS | frozenset({"prompt", "guidance"})
+# "turn" is the turn_gate ledger (what the synthesizer emitted, what was
+# admitted, what was dropped and why). It rides on every route that reached the
+# claim gate: the answer path AND the post-gate declines (model_refusal,
+# no_valid_citations, material_drop, audit_error). These routes do not also run
+# guidance: every healthy turn gets exactly one model path.
 ANSWER_ROUTE_JSON_KEYS = ROUTE_JSON_KEYS | frozenset({"prompt", "partial_evidence", "turn"})
 
 # The full status vocabulary (src/regwatch/generate/rag_contract.py).

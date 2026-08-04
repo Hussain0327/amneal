@@ -315,12 +315,31 @@ describe("DeficiencyPage -- upload, poll, report (surface 05)", () => {
     render(<DeficiencyPage />);
 
     const big = pdf("huge.pdf");
-    // A real 50MB+ fixture would be absurd in a unit test; the guard reads
+    // A real oversize fixture would be absurd in a unit test; the guard reads
     // File.size, so overriding it exercises exactly the same branch.
     Object.defineProperty(big, "size", { value: 60 * 1024 * 1024 });
     await user.upload(screen.getByLabelText("PDF file"), big);
 
-    expect(await screen.findByText("That file is 60.0 MB; the limit is 50 MB.")).toBeInTheDocument();
+    expect(await screen.findByText("That file is 60.0 MB; the limit is 20 MB.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Analyze" })).toBeDisabled();
+    expect(analyzeDeficiencyMock).not.toHaveBeenCalled();
+  });
+
+  // Pins the CAP, not just the copy. The 60MB case above would still pass if the
+  // limit were put back to 50, because 60 exceeds both. 30MB is the size measured
+  // to die at the Vercel rewrite with an unexplained 502 after ~14s, so it must be
+  // refused in the browser -- restoring a 50MB cap fails here, which is the point.
+  it("refuses a 30 MB PDF -- above the rewrite's measured ceiling, so it never leaves the browser", async () => {
+    const user = userEvent.setup();
+    listDeficiencyRunsMock.mockResolvedValue({ runs: [] });
+
+    render(<DeficiencyPage />);
+
+    const big = pdf("section-3-2-p.pdf");
+    Object.defineProperty(big, "size", { value: 30 * 1024 * 1024 });
+    await user.upload(screen.getByLabelText("PDF file"), big);
+
+    expect(await screen.findByText("That file is 30.0 MB; the limit is 20 MB.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Analyze" })).toBeDisabled();
     expect(analyzeDeficiencyMock).not.toHaveBeenCalled();
   });

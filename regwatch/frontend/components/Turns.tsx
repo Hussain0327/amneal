@@ -6,7 +6,7 @@ import { AnswerFeedback } from "@/components/AnswerFeedback";
 import { Markdown } from "@/components/Markdown";
 import { RecencyBadge } from "@/components/RecencyBadge";
 import type { Citation, Suggestion } from "@/lib/api";
-import { confidenceBand, reasonCopy, type Turn } from "@/lib/turns";
+import { confidenceBand, nonAnswerLabel, reasonCopy, type Turn } from "@/lib/turns";
 import { safeHref } from "@/lib/url";
 
 // Ask renders as a cited chat: the user's line as a bubble, the assistant as a
@@ -117,9 +117,18 @@ export const AssistantTurn = memo(function AssistantTurn({
 }) {
   if (turn.status === "clarify") {
     const why = reasonCopy(turn.reason);
+    const interpreted =
+      turn.interpretation && turn.interpretation.trim() !== turn.content.trim()
+        ? turn.interpretation.trim()
+        : null;
     return (
       <AssistantShell live={turn.live}>
-        <div className="msg__body">{turn.interpretation || turn.content}</div>
+        {interpreted && <p className="msg__interp">Interpreted as: {interpreted}</p>}
+        <div className="msg__body">
+          {/* Clarification copy may contain Markdown, but remains citation-incapable:
+              no citations/onCite props means no stamps. */}
+          <Markdown>{turn.content}</Markdown>
+        </div>
         {/* Why we asked instead of answered — plain-language, persisted across
             history. Text only, so INV-2 holds (no citation surface). */}
         {why && <p className="msg__reason code">{why}</p>}
@@ -168,17 +177,24 @@ export const AssistantTurn = memo(function AssistantTurn({
   // empties its citations, so still no chip, still no drawer. The chip (and
   // drawer trigger) exists ONLY where citations do.
   if (turn.status === "scope_warning" || turn.refused) {
-    const tag = turn.status === "scope_warning" ? "Out of scope" : "Declined · not in corpus";
+    const tag = nonAnswerLabel(turn.status, turn.refused, turn.reason) ?? "Answer unavailable";
     // Scope warnings always carry reason="scope_warning", which the "Out of
     // scope" tag already conveys — suppress the redundant caption so it never
-    // renders the raw code. The raw-string fallback in reasonCopy stays a net
-    // for unknown refusal codes on the declined-not-in-corpus path.
+    // renders an internal code. reasonCopy also maps unknown codes to neutral
+    // copy on the evidence-gap path.
     const why = turn.status === "scope_warning" ? null : reasonCopy(turn.reason);
+    const interpreted =
+      turn.interpretation && turn.interpretation.trim() !== turn.content.trim()
+        ? turn.interpretation.trim()
+        : null;
     return (
       <AssistantShell live={turn.live}>
+        {interpreted && <p className="msg__interp">Interpreted as: {interpreted}</p>}
         <div className="msg__body msg__declined">
           <span className="msg__declined-tag">{tag}</span>
-          <p>{turn.content}</p>
+          {/* Guidance/evidence-gap prose can retain useful lists and links, but
+              never receives citation props or access to the evidence drawer. */}
+          <Markdown>{turn.content}</Markdown>
           {/* Why it was declined — plain-language analyst copy under the tag,
               persisted across history. Text only (INV-2 holds). */}
           {why && <p className="msg__reason code">{why}</p>}

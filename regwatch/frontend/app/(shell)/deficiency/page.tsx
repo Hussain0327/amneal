@@ -17,10 +17,17 @@ import type {
   Tier,
 } from "@/lib/deficiency-types";
 
-// The server rejects anything larger with a 400; guarding here too means an
-// obviously-too-big file never spends the upload. Binary MB, matching the
-// usual "50MB" reading of a file-size cap.
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+// Deliberately STRICTER than the server's 50 MiB reject. The Vercel rewrite that
+// fronts the API drops the connection somewhere between 27 and 30 MB (measured
+// against prod: 27 MB reaches Fly, 30 MB returns a 502 carrying
+// x-vercel-error: ROUTER_EXTERNAL_TARGET_CONNECTION_ERROR_CD8 and no
+// fly-request-id). That is a connection failure rather than a clean 413, so the
+// boundary is not guaranteed stable across region or link speed -- cap well under
+// it and refuse locally, where the analyst gets an instant reason instead of a
+// dead multi-minute upload. INTERIM: raised back to the server cap once uploads
+// bypass the rewrite. MAX_UPLOAD_MB is the single source for every string below.
+const MAX_UPLOAD_MB = 20;
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 const POLL_INTERVAL_MS = 2500;
 // Ten minutes. Past this the page stops asking and says so -- the run is NOT
 // cancelled server-side, it is just no longer watched from here.
@@ -99,7 +106,7 @@ function rejectReason(file: File): string | null {
     return "That file is empty.";
   }
   if (file.size > MAX_UPLOAD_BYTES) {
-    return `That file is ${fmtMb(file.size)} MB; the limit is 50 MB.`;
+    return `That file is ${fmtMb(file.size)} MB; the limit is ${MAX_UPLOAD_MB} MB.`;
   }
   return null;
 }
@@ -298,7 +305,8 @@ export default function DeficiencyPage() {
           Upload
         </div>
         <p className="mt-3" style={{ color: "var(--ink-soft)", fontSize: "0.92rem", lineHeight: 1.55 }}>
-          One PDF, up to 50 MB. Nothing is filed or submitted anywhere; the document is read to
+          One PDF, up to {MAX_UPLOAD_MB} MB. Nothing is filed or submitted anywhere; the document
+          is read to
           produce the fault report below.
         </p>
         <div className="mt-4">

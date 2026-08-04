@@ -105,9 +105,9 @@ class SessionPatch:
 class AuditPayload:
     """Every argument the shell's ``log_query`` call needs, for every branch.
 
-    ``allow_skip`` carries the branch's failure semantics: the no-LLM-content
-    terminal paths (refuse/clarify/meta) audit via the defined-failure wrapper
-    (-1 on a failed write, answer still returned), while the validated-answer
+    ``allow_skip`` carries the branch's failure semantics: non-answer terminal
+    paths (refuse/clarify/meta) audit via the defined-failure wrapper (-1 on a
+    failed write, trusted fallback still returned), while the validated-answer
     path is STRICT -- no-audit-no-answer (INV-6) -- and degrades to
     ``failure_fallback`` (the fixed-copy status="error" refusal turn, itself
     skip-audited) when the write fails.
@@ -126,7 +126,8 @@ class AuditPayload:
     status: str
     route_json: dict[str, Any]
     # Token/cost columns (H3). None keeps them NULL -- log_query's own
-    # defaults -- so "no LLM call" and "unpriced model" stay NULL, never 0.
+    # defaults -- so an absent LLM call stays NULL and an unpriced model's cost
+    # stays NULL, never guessed.
     input_tokens: int | None = None
     output_tokens: int | None = None
     cost_usd: float | None = None

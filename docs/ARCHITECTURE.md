@@ -48,16 +48,18 @@ follows:
 
 > **Every claim is traceable to a retrieved FDA passage, or the system refuses.**
 
-This is enforced at three independent layers — at retrieval (a score threshold),
-at synthesis (citation validation against the exact passages sent to the LLM),
-and in the test suite (the INV-1..9 invariants, §15). REGWATCH is best understood
-as a RAG system where the *safety rails are first-class, tested invariants*, not
-prompt-engineering hopes.
+This is enforced at three independent layers — at retrieval (a score threshold
+keeps weak passages out of answer generation), at synthesis (citation validation
+against the exact passages sent to the synthesizer), and in the test suite (the
+INV-1..9 invariants, §15). REGWATCH is best understood as a RAG system where the
+*safety rails are first-class, tested invariants*, not prompt-engineering hopes.
 
 A second framing decision shapes the UX: responses are **not** an answer/refuse
-binary. The system distinguishes five outcomes — `answer`, `summary`, `clarify`,
-`scope_warning`, `refused` — so that when it knows the product but not the intent
-it **guides with clickable options** instead of guessing.
+binary. The system distinguishes grounded answers, summaries, clarifications,
+scope warnings, capability information, evidence gaps, and operational errors.
+When it cannot safely answer a healthy turn, a constrained AI planner can choose
+among application-approved next steps and existing options instead of dead-ending
+or guessing.
 
 ---
 
@@ -321,45 +323,71 @@ boot and the ingest service can seed.
 
 This is the architectural heart: `generate/grounded_qa.py`, function `ask()`. It
 is **not** "embed → LLM → return." It is a deterministic decision pipeline in
-which the LLM is the *last* resort and every branch writes exactly one audit row.
+which application code owns every safety decision and every branch writes exactly
+one audit row. Every healthy, valid Ask message gets exactly one AI role and
+contract: either grounded synthesis or constrained guidance, never both. The
+existing bounded retry may repeat that same structured completion after a
+truncation, but it never crosses roles.
 
 ### Flow
 
 ```
 question
    │
-   ├─ scope-warning phrases? ──────────────────► REFUSE  (won't author strategy/judgment, INV-3)
+   ├─ DETERMINISTIC ROUTE + POLICY
+   │     • scope/capability/vague input → fixed status/reason
+   │     • resolve product before semantic search
+   │     • ambiguous/unknown product   → application-built options or evidence gap
+   │     • enforce product and multi-form guards
    │
-   ├─ ENTITY RESOLUTION FIRST  (resolve_product)        ← pin the product BEFORE semantic search
-   │     • resolved   → pin normalized_name (canonicalized)
-   │     • ambiguous  → CLARIFY  (which of these products?)
-   │     • none       → did-you-mean (typo)? → brand→generic? → else REFUSE (no_product)
-   │                    …or carry product from session if this looks like a follow-up
-   │
-   ├─ vague input?  ("Hello" + a drug filter, bare drug name) ──► CLARIFY with question templates
-   │
-   ├─ MULTI-FORM GUARD (pre-retrieval): drug spans >1 (dosage_form, route)?
-   │     • question names the form unambiguously → pin it, proceed
-   │     • else                                  → CLARIFY (which form?)
+   ├─ pre-synthesis non-answer? ───────────────► ROUTER-ROLE GUIDANCE PLANNER
+   │     • receives question + trusted route/product context + existing options
+   │     • selects one allowlisted next step and up to three existing option IDs
+   │     • application validates the selection and renders trusted display copy
    │
    ├─ Stage 1: vector top-k   (VECTOR_TOP_K = 50), scoped to product (+ form)
-   ├─ Stage 2: rerank → trim  (RERANK_TOP_K = 8;  reranker off by default → just a slice)
+   ├─ Stage 2: rerank → trim  (RERANK_TOP_K = 8; reranker off by default → just a slice)
    │
-   ├─ top-1 score < REFUSAL_SCORE_THRESHOLD (0.30)? ──► REFUSE before any LLM call (INV-2)
+   ├─ top-1 score < REFUSAL_SCORE_THRESHOLD (0.30)?
+   │     └─ withhold ALL weak passages ─────────► ROUTER-ROLE GUIDANCE PLANNER
    │
    ├─ POST-RETRIEVAL GUARDS (defense in depth):
-   │     • passages span >1 product? ───► CLARIFY
-   │     • passages span >1 form?     ───► CLARIFY
+   │     • passages span >1 product? ───────────► ROUTER-ROLE GUIDANCE PLANNER
+   │     • passages span >1 form?    ───────────► ROUTER-ROLE GUIDANCE PLANNER
    │
-   ├─ LLM synthesis  (temperature 0.0, strict grounding system prompt,
-   │                  SYNTHESIZER_MAX_TOKENS budget - default 900, shared by a
-   │                  reasoning model's thought AND answer)
+   ├─ SYNTHESIZER LLM (temperature 0.0, strict grounding system prompt,
+   │                   SYNTHESIZER_MAX_TOKENS budget - default 900, shared by a
+   │                   reasoning model's thought AND answer)
    │
-   ├─ LLM returned the refusal sentinel? ──► REFUSE  (or CLARIFY if a drug was named by the user)
-   ├─ validate every [short_name, p.N] citation against the passages actually sent
-   ├─ body text but ZERO valid citations? ──► REFUSE  (INV-1: no ungrounded answers)
-   └─ strip any fabricated citation markers from the prose ──► ANSWER (with verified citations)
+   ├─ model returned NO_EVIDENCE? ─────────────► REFUSE / CLARIFY (no second AI call)
+   ├─ validate each structured claim's citations against the passages actually sent
+   ├─ ZERO valid cited claims? ────────────────► REFUSE (no second AI call; INV-1)
+   └─ render only admitted claims + verified citation markers ──► ANSWER
+
+Operational catalog, database, pipeline, and provider errors do not enter the
+guidance path. They return the existing audited error outcome without a fallback
+AI call.
 ```
+
+### One AI turn, two constrained contracts
+
+The deterministic pipeline decides which contract is available; the model does
+not choose its own authority:
+
+- **Grounded synthesis:** only an answerable, product/form/current-version-scoped
+  retrieval result above the score threshold reaches the synthesizer. The model
+  returns structured claims; claim and citation gates decide what can be shown.
+- **Query guidance:** pre-synthesis product, dosage-form, scope, capability,
+  vague-input, and weak-retrieval outcomes use the configured `router` role. Its
+  schema permits one server-allowlisted `next_step` and IDs for options that the
+  application already constructed. It cannot write display prose, change the
+  status, select a new product/form/filter, create an option, or supply a
+  citation. The server validates the plan and renders trusted copy.
+
+Weak retrieved text is supplied to neither contract: below-threshold passages
+stay in retrieval/audit data only. A synthesis failure also does not trigger a
+second model role. This preserves the one-turn authority boundary and prevents a
+real but irrelevant citation from laundering an unsupported claim.
 
 ### Why entity resolution precedes retrieval
 
@@ -416,9 +444,9 @@ routing context.
 |---|---|---|
 | `answer` | Grounded answer | ✅ validated |
 | `summary` | Grounded answer to a "summarize/overview" request | ✅ validated |
-| `clarify` | Product/form known-or-near but intent unclear → offer options | none (never fabricates) |
-| `scope_warning` | Asked for strategy/judgment → explain the boundary | none |
-| `refused` | Can't ground it (no product, low score, no valid citations) | none |
+| `clarify` | Product/form known-or-near but intent unclear → offer application-built options, optionally prioritized by the guidance planner | none (never fabricates) |
+| `scope_warning` | Asked for strategy/judgment → application enforces the boundary; planner selects a safe next action | none |
+| `refused` | Can't ground it (no product, low score, no valid citations) → explain the evidence gap with trusted copy | none |
 
 Every state runs through `_finish_turn`, which records the assistant message and
 (on answerable states) updates the session's product filter.
@@ -606,8 +634,10 @@ eligibility are never persisted (INV-3, no regulatory judgment).
 `did_you_mean`, `brand_lookup`, …) — so an analyst or the eval harness can tell
 not just *that* the system clarified/refused but *why*. Token/cost columns are
 `NULL` when no LLM call happened or the provider reported no usage — never a
-guessed number. Migration 0016 added `latency_ms` (per-turn wall clock), the
-measurement column for the router-latency verdict on the single-model plane.
+guessed number. Guidance attempts and whether a validated plan was applied are
+also recorded in `route_json`. Migration 0016 added `latency_ms` (per-turn wall
+clock), the measurement column for the router-latency verdict on the
+single-model plane.
 
 ---
 
@@ -718,7 +748,7 @@ They are the product's regulatory differentiator.
 | INV | Rule | Where enforced |
 |---|---|---|
 | INV-1 | **Grounding** — no answer without a valid citation | `_validate_citations`, "body text but no citations → refuse" |
-| INV-2 | **Refuse over guess** — weak retrieval refuses *before* the LLM | `top-1 score < 0.30` check |
+| INV-2 | **Refuse over guess** — weak retrieval cannot become an answer | `top-1 score < 0.30` blocks the synthesizer and withholds weak passages from the guidance planner |
 | INV-3 | **No regulatory judgment** — never author strategy / classify paragraphs | scope-warning guard; OB tables store raw rows only; White-Paper `manual` cells |
 | INV-4 | **No fabrication** — defensible change history | versioned `psg_version`; watch digests |
 | INV-5 | **Verified provenance** — every source allowlisted | `ALLOWED_SOURCES`; `source` enums |
@@ -743,8 +773,9 @@ form, clarify) that backstops any caller who bypassed the resolver.
 - **Health/uptime:** external pinger on `GET /health`; `PROD_HEALTH_URL` GitHub
   secret for CI smoke.
 - **Token/cost accounting:** `query_log.input_tokens` / `output_tokens` /
-  `cost_usd` capture the dominant (synthesizer) LLM call; `estimate_cost_usd`
-  prices it from a settings table, leaving the column `NULL` rather than guessing.
+  `cost_usd` capture the turn's single Ask model completion (synthesizer or
+  guidance planner); `estimate_cost_usd` prices it from a settings table,
+  leaving the column `NULL` rather than guessing.
 - **Runbook:** rollback one-liner, restore drill, and operations notes live in
   [`DEPLOY.md`](DEPLOY.md) §6.
 - **Docker:** the CRA template `.docx` is gitignored (internal), so it is never
@@ -837,9 +868,11 @@ re-sent to the very endpoint the guard fences off. See
 
 1. **Refuse-or-cite is the prime directive.** Enforced at retrieval (score
    threshold), at synthesis (citation validation), and in tests (invariants).
-2. **Deterministic before probabilistic.** Entity resolution, source routing,
-   and clarify logic are rules-based and unit-testable; the LLM only synthesizes
-   from pre-vetted, product-scoped passages.
+2. **Deterministic authority, bounded probabilistic help.** Entity resolution,
+   source routing, product/form/scope/status enforcement, citation gates, and
+   display copy are rules-based and unit-testable. The model either synthesizes
+   from pre-vetted, product-scoped passages or selects a server-allowlisted
+   guidance action; it cannot cross those contracts.
 3. **One datastore, one score convention.** Postgres + pgvector is the only
    backend (since R5); dev/CI run it against a disposable local/CI instance
    (never the cloud), and prod behaves identically because it's the same code
