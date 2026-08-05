@@ -89,4 +89,5 @@ def test_db_engine_is_built_with_connect_timeout(monkeypatch: Any) -> None:
     finally:
         # Leave no fake engine cached for other tests in this file/process.
         db._engine = None
-        db._initialized = False
+        db._schema_ready = False
+        db._provider_asserted = False
