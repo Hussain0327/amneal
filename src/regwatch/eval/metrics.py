@@ -5,6 +5,14 @@ later flip a flag — for now everything is mechanical):
 
   - recall@k            : 1 if any retrieved chunk's (doc_id, page) is in the
                           gold expected_sources, else 0. Average over questions.
+  - mrr                 : reciprocal of the rank of the FIRST expected source in
+                          the retrieved list (0 if absent). Average over
+                          questions. Recall says the evidence was somewhere in
+                          the top k; MRR says how far down. A chunker change that
+                          pushes the right passage from rank 1 to rank 7 leaves
+                          recall@8 untouched and halves MRR — and rank matters
+                          here because only the top `rerank_top_k` passages reach
+                          the prompt.
   - citation_precision  : fraction of an answer's citations that point at an
                           expected source.
   - faithfulness        : fraction of an answer's sentences that carry at
@@ -45,6 +53,7 @@ class GoldItem:
 class Scorecard:
     n: int = 0
     recall_at_k: float = 0.0
+    mrr: float = 0.0
     citation_precision: float = 0.0
     faithfulness: float = 0.0
     fact_recall: float = 0.0
@@ -80,6 +89,24 @@ def recall_at_k(retrieved: list[dict[str, Any]], expected: list[dict[str, Any]])
     if not expected:
         return 1
     return 1 if any(_match_source(r, expected) for r in retrieved) else 0
+
+
+def reciprocal_rank(retrieved: list[dict[str, Any]], expected: list[dict[str, Any]]) -> float:
+    """1/rank of the first expected source, 0.0 if none is retrieved.
+
+    `retrieved` MUST already be in the order retrieval returned (best first) —
+    it is, because grounded_qa records passages in retrieval order. Sorting or
+    de-duplicating it before calling this would silently change the metric.
+
+    Mirrors recall_at_k's empty-expected convention: nothing to find means a
+    perfect score, so fact-less or decision-only items never drag the average.
+    """
+    if not expected:
+        return 1.0
+    for i, r in enumerate(retrieved, start=1):
+        if _match_source(r, expected):
+            return 1.0 / i
+    return 0.0
 
 
 def citation_precision(
@@ -160,7 +187,7 @@ def evaluate(
     """Run the gold set through `ask_callable` and produce a Scorecard."""
     if not items:
         return Scorecard()
-    sums = {"recall": 0.0, "precision": 0.0, "faith": 0.0, "fact": 0.0}
+    sums = {"recall": 0.0, "rr": 0.0, "precision": 0.0, "faith": 0.0, "fact": 0.0}
     refusal_correct = 0
     clarify_correct = 0
     refused_incorrectly = 0
@@ -252,9 +279,11 @@ def evaluate(
 
         # Standard metrics
         r = recall_at_k(retrieved, it.expected_sources)
+        rr = reciprocal_rank(retrieved, it.expected_sources)
         p = citation_precision(citations, it.expected_sources)
         f = faithfulness(result.answer)
         sums["recall"] += r
+        sums["rr"] += rr
         sums["precision"] += p
         sums["faith"] += f
         if p < 1.0:
@@ -270,6 +299,7 @@ def evaluate(
             {
                 "q": it.question,
                 "recall": r,
+                "reciprocal_rank": rr,
                 "citation_precision": p,
                 "faithfulness": f,
                 "fact_recall": fr,
@@ -296,6 +326,10 @@ def evaluate(
     return Scorecard(
         n=n,
         recall_at_k=sums["recall"] / answerable,
+        # Same denominator as recall_at_k on purpose: a wrongly-refused
+        # answerable item contributes 0 to both, so over-refusal cannot inflate
+        # MRR by shrinking its own denominator.
+        mrr=sums["rr"] / answerable,
         citation_precision=sums["precision"] / answerable,
         faithfulness=sums["faith"] / answerable,
         fact_recall=sums["fact"] / max(1, fact_items),

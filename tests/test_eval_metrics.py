@@ -12,6 +12,7 @@ from regwatch.eval.metrics import (
     fact_recall,
     faithfulness,
     recall_at_k,
+    reciprocal_rank,
 )
 
 
@@ -54,6 +55,49 @@ def test_recall_at_k_miss() -> None:
     retrieved = [{"short_name": "PSG_001", "page": 7, "doc_id": 1}]
     expected = [{"short_name": "PSG_001", "page": 3}]
     assert recall_at_k(retrieved, expected) == 0
+
+
+def test_reciprocal_rank_first_position() -> None:
+    retrieved = [{"short_name": "PSG_001", "page": 3, "doc_id": 1}]
+    expected = [{"short_name": "PSG_001", "page": 3}]
+    assert reciprocal_rank(retrieved, expected) == 1.0
+
+
+def test_reciprocal_rank_third_position() -> None:
+    retrieved = [
+        {"short_name": "PSG_999", "page": 1, "doc_id": 9},
+        {"short_name": "PSG_999", "page": 2, "doc_id": 9},
+        {"short_name": "PSG_001", "page": 3, "doc_id": 1},
+    ]
+    expected = [{"short_name": "PSG_001", "page": 3}]
+    assert reciprocal_rank(retrieved, expected) == 1 / 3
+
+
+def test_reciprocal_rank_miss_is_zero() -> None:
+    retrieved = [{"short_name": "PSG_001", "page": 7, "doc_id": 1}]
+    expected = [{"short_name": "PSG_001", "page": 3}]
+    assert reciprocal_rank(retrieved, expected) == 0.0
+
+
+def test_reciprocal_rank_no_expected_is_one() -> None:
+    """Mirrors recall_at_k: nothing to find cannot be a miss."""
+    assert reciprocal_rank([{"short_name": "PSG_001", "page": 3}], []) == 1.0
+
+
+def test_reciprocal_rank_separates_rank_where_recall_cannot() -> None:
+    """The regression MRR exists to catch.
+
+    Both orderings put the expected passage inside the top k, so recall@k is
+    blind to the difference. Only rank 1 survives a top-3 prompt cut.
+    """
+    expected = [{"short_name": "PSG_001", "page": 3}]
+    hit = {"short_name": "PSG_001", "page": 3, "doc_id": 1}
+    noise = [{"short_name": "PSG_999", "page": i, "doc_id": 9} for i in range(1, 8)]
+    top = [hit, *noise]
+    bottom = [*noise, hit]
+    assert recall_at_k(top, expected) == recall_at_k(bottom, expected) == 1
+    assert reciprocal_rank(top, expected) == 1.0
+    assert reciprocal_rank(bottom, expected) == 1 / 8
 
 
 def test_citation_precision_partial() -> None:
@@ -180,6 +224,43 @@ def test_must_clarify_scored_only_for_multiform_clarify() -> None:
     assert sc.clarified_correctly == 1
     assert sc.refusal_accuracy == 1.0
     assert sc.skipped == 0
+
+
+def test_mrr_averages_over_answerable_including_wrong_refusals() -> None:
+    """A wrongly-refused answerable item scores 0 and stays in the denominator.
+
+    Otherwise over-refusal would raise MRR: refuse every question you would have
+    ranked badly and the average of what remains looks better.
+    """
+    gold = [
+        GoldItem(
+            question="q1",
+            expected_sources=[{"short_name": "PSG_001", "page": 3}],
+        ),
+        GoldItem(
+            question="q2",
+            expected_sources=[{"short_name": "PSG_001", "page": 3}],
+        ),
+    ]
+
+    def _ask(q: str) -> _FakeResult:
+        if q == "q1":
+            # Expected passage sits at rank 2 -> rr 0.5.
+            return _FakeResult(
+                answer="Foo [PSG_001, p.3].",
+                citations=[_FakeCit("PSG_001", 3)],
+                refused=False,
+                retrieved=[
+                    {"short_name": "PSG_999", "page": 1, "doc_id": 9},
+                    {"short_name": "PSG_001", "page": 3, "doc_id": 1},
+                ],
+            )
+        return _FakeResult(answer="refused", citations=[], refused=True)
+
+    sc = evaluate(gold, ask_callable=_ask)
+    # (0.5 + 0.0) / 2 answerable items.
+    assert sc.mrr == 0.25
+    assert sc.recall_at_k == 0.5
 
 
 def test_must_clarify_wrong_clarify_reason_not_counted() -> None:

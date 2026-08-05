@@ -11,7 +11,7 @@ from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # OpenAI dated-snapshot suffix: what follows "<alias>-" in the server-reported
@@ -176,6 +176,28 @@ class Settings(BaseSettings):
             return None
         value = str(v).strip()
         return value or None
+
+    @field_validator("qwen_embedding_model", "qwen_embedding_dimension", mode="before")
+    @classmethod
+    def _blank_env_falls_back_to_default(cls, v: object, info: ValidationInfo) -> object:
+        """An env var set to "" means "not configured", not "override with empty".
+
+        CI templating renders an unset value as the EMPTY STRING rather than
+        omitting the variable, so ``QWEN_EMBEDDING_DIMENSION: ${{ vars.X }}``
+        with no variable configured arrives here as ''. Without this, that
+        fails int parsing at IMPORT time and takes down every process that
+        imports settings -- including the whole test suite, whose failure
+        message says nothing about the workflow that caused it. The same shape
+        appears in any deploy template that interpolates optional config.
+
+        Deliberately opt-in per field rather than a blanket rule: this class
+        has fields where "" is MEANINGFUL, notably
+        ``databricks_reasoning_effort``, where blank documents "send no
+        parameter" and must stay distinct from its "low" default.
+        """
+        if isinstance(v, str) and not v.strip():
+            return cls.model_fields[str(info.field_name)].default
+        return v
 
     @field_validator("qwen_embedding_base_url", "databricks_llm_base_url")
     @classmethod

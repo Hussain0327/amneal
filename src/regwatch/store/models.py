@@ -473,6 +473,55 @@ class WatchRun(SQLModel, table=True):
     digest_date: str | None = None
 
 
+class EvalRun(SQLModel, table=True):
+    """One COMPLETED eval run -- the durable retrieval-quality ledger.
+
+    Third of the run ledgers, after ``WatchRun`` and ``DeficiencyRun``. It
+    exists because a scorecard is only evidence when it is comparable, and
+    until now a scorecard lived in terminal output plus an optional ``--out``
+    file on a CI run that ages out. "Did the chunker change hurt recall?" was
+    unanswerable from the repository.
+
+    ``gold_set_sha256`` is what keeps the ledger honest: two runs over
+    different gold sets are not comparable, and a trend line that silently
+    splices them is worse than no trend line. ``dirty`` records the same thing
+    for code -- a run from a dirty tree is not reproducible from its commit.
+
+    ``passed`` is stored rather than recomputed from the metric columns, so
+    changing a threshold later cannot retroactively rewrite which historical
+    runs are recorded as having cleared the gate.
+
+    This ledger only ever grows, one row per eval invocation, and is read as
+    "the last N runs for one arm" -- hence the (profile_id, created_at) index.
+    """
+
+    __tablename__ = "eval_run"
+
+    id: int | None = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    profile_id: str
+    commit_sha: str
+    dirty: bool
+    gold_set_sha256: str
+    n_items: int
+    corpus_chunks: int
+    corpus_docs: int
+    recall_at_k: float
+    mrr: float
+    citation_precision: float
+    faithfulness: float
+    fact_recall: float
+    refusal_accuracy: float
+    passed: bool
+    # Full provenance: fingerprint + prompt manifest + scorecard, including the
+    # per-question traces. Those are read by a human debugging one regression,
+    # never aggregated in SQL, so they stay in the document rather than earning
+    # a second table and a join.
+    artifact_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
+
+    __table_args__ = (Index("ix_eval_run_profile_created", "profile_id", "created_at"),)
+
+
 class DeficiencyRun(SQLModel, table=True):
     """One deficiency-analysis job over an uploaded submission PDF.
 
