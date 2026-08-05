@@ -30,7 +30,7 @@ from dataclasses import asdict, dataclass, field
 from time import perf_counter
 from typing import Any
 
-from config.settings import get_settings
+from config.settings import SYNTH_MAX_TOKENS_CEILING, get_settings
 from sqlalchemy import func
 from sqlmodel import select
 
@@ -226,8 +226,75 @@ _FOLLOW_UP_PREFIXES = (
     "does it",
     "what else",
     "can you also",
+    # Drill-down openers. These are what a user actually types after reading an
+    # analysis, and WITHOUT them the session product is dropped and the turn
+    # lands on the no_product refusal -- "why?" carries no pronoun from
+    # _FOLLOW_UP_PRONOUNS, so it never matched. That is the literal failure the
+    # conversational requirement describes.
+    #
+    # Safe to widen ONLY because two guards land in the same change:
+    #   * ask_core computes the "did you mean"/brand candidates BEFORE the
+    #     carry-over, so a question naming a DIFFERENT product breaks the chain
+    #     instead of inheriting the session's drug;
+    #   * _retrieval_query re-anchors a contentless follow-up on the prior
+    #     question, so "why?" is never embedded verbatim.
+    # Removing either guard makes this tuple a cross-product leak.
+    "why",
+    "what should",
+    "how do i",
+    "how would",
+    "how does that",
+    "would that",
+    "would this",
+    "is that",
+    "is it",
+    "tell me more",
+    "what if",
+    "explain",
+    "go on",
 )
 _FOLLOW_UP_PRONOUNS = frozenset({"it", "its", "this", "that", "same"})
+# Discourse vocabulary that carries conversational intent but NO retrieval
+# signal against a corpus of FDA product-specific guidance. Used only by
+# _carries_own_topic to decide whether a follow-up needs re-anchoring on the
+# prior question before it is embedded. Every word here must be one that would
+# never be a useful search term in this corpus -- adding a domain word
+# ("dissolution", "bioequivalence") would silently suppress a real query.
+_DRILL_DOWN_WORDS = frozenset(
+    {
+        "why",
+        "how",
+        "explain",
+        "elaborate",
+        "expand",
+        "more",
+        "detail",
+        "details",
+        "tell",
+        "go",
+        "again",
+        "further",
+        "that",
+        "this",
+        "it",
+        "its",
+        "should",
+        "change",
+        "fix",
+        "instead",
+        "if",
+        "then",
+        "so",
+        "but",
+        "ok",
+        "okay",
+        "yes",
+        "mean",
+        "means",
+        "say",
+        "said",
+    }
+)
 _SUMMARY_TERMS = frozenset({"summarize", "summary", "overview", "recap"})
 _SCOPE_WARNING_PHRASES = (
     "submission strategy",
@@ -272,10 +339,11 @@ _META_PHRASES = (
 # here, not an operator knob. The output cap is the operator knob
 # (SYNTHESIZER_MAX_TOKENS) and ask_core reads it ONCE per turn.
 _SYNTH_TEMPERATURE = 0.0
-# Hard ceiling on a single synthesis call, INDEPENDENT of the setting. The
-# truncation retry doubles the budget, so an operator who raises the setting
-# must not be able to make one turn cost an unbounded number of tokens.
-_SYNTH_MAX_TOKENS_CEILING = 4000
+# Hard ceiling on a single synthesis call, INDEPENDENT of the setting. Defined
+# in config.settings next to the setting it bounds, so the field validator can
+# refuse a budget at or above it at boot; re-exported under the private name
+# because callers and tests reference qa_mod._SYNTH_MAX_TOKENS_CEILING.
+_SYNTH_MAX_TOKENS_CEILING = SYNTH_MAX_TOKENS_CEILING
 
 
 def _looks_like_follow_up(question: str) -> bool:
@@ -413,6 +481,68 @@ def _looks_vague(question: str, normalized_name: str) -> bool:
         if t and t not in drug_tokens and t not in _FILLER
     ]
     return not residual
+
+
+def _carries_own_topic(question: str, normalized_name: str | None) -> bool:
+    """True when the question has a term worth embedding on its own.
+
+    Deliberately NOT ``not _looks_vague(...)``. The vague gate asks "is there
+    anything here besides the drug name and filler", and "why" is neither, so
+    it reads as a topic. For RETRIEVAL the question is different: "why" is pure
+    discourse and embeds to nothing useful. _DRILL_DOWN_WORDS is that
+    difference -- meta/discourse vocabulary that is never an FDA-guidance
+    retrieval term in this corpus.
+
+    Conservative on purpose: any survivor counts as a topic, so "what about
+    dissolution?" keeps its own embedding and today's working follow-ups are
+    untouched. The cost is that some phrasings ("what if the study fails?")
+    are not re-anchored; those behave exactly as they do today.
+    """
+    drug_tokens = (
+        {t for t in re.split(r"[^a-z0-9]+", normalized_name.lower()) if t}
+        if normalized_name
+        else set()
+    )
+    return any(
+        t
+        for t in re.split(r"[^a-z0-9]+", question.lower())
+        if t and t not in drug_tokens and t not in _FILLER and t not in _DRILL_DOWN_WORDS
+    )
+
+
+def _retrieval_query(
+    question: str,
+    *,
+    normalized_name: str | None,
+    prior_turns: list[PriorTurn],
+) -> str:
+    """The text to EMBED for this turn -- not necessarily the user's words.
+
+    A drill-down follow-up ("why?", "tell me more") carries no topical signal.
+    Embedded verbatim it scores near-zero against every passage, so the turn
+    dies on the ``low_top_score`` refusal even though the session context makes
+    the intent obvious. Re-anchor it on the most recent prior QUESTION so the
+    vector search sees the subject the user is still asking about.
+
+    RETRIEVAL ONLY. The synthesizer still receives the user's literal question
+    plus the conversation block, so the answer addresses what was actually
+    asked. INV-1 is untouched either way: ``admit_turn`` validates every
+    citation against THIS turn's passages, so how a passage was FOUND cannot
+    make an unsupported claim citable.
+
+    Falls through to the raw question whenever the rewrite would be a guess --
+    no product pinned, the question has a topic of its own, or there is no
+    prior turn to anchor on.
+    """
+    if not _looks_like_follow_up(question) or _carries_own_topic(question, normalized_name):
+        return question
+    prior = next((t.question.strip() for t in reversed(prior_turns) if t.question.strip()), "")
+    if not prior:
+        return question
+    # Same strip/cap as _format_recent: a stale "[PSG, p.4]" in the prior
+    # question is noise in an embedding, and an unbounded prior question would
+    # let one long turn dominate the vector.
+    return f"{strip_all_citations(prior).strip()[:400]} {question}".strip()
 
 
 def _doc_count(normalized_name: str) -> int:
@@ -632,6 +762,7 @@ def _complete_structured(
     messages: list[LLMMessage],
     *,
     max_tokens: int,
+    telemetry: dict[str, Any] | None = None,
 ) -> LLMResponse:
     """One buffered json-mode completion, with a single 2x truncation retry.
 
@@ -647,6 +778,8 @@ def _complete_structured(
     and never degrade into a parse failure.
     """
     capped = min(max_tokens, _SYNTH_MAX_TOKENS_CEILING)
+    if telemetry is not None:
+        telemetry["first_budget"] = capped
     try:
         return provider.complete(
             messages,
@@ -669,15 +802,60 @@ def _complete_structured(
         # faults (429/5xx/timeouts) are openai.APIError, NOT RuntimeError, so
         # they skip this branch entirely and land on the audited
         # provider_error path on the first failure.
-        if capped >= _SYNTH_MAX_TOKENS_CEILING:
+        # Compute the retry budget FIRST and let it speak for itself. The old
+        # form tested `capped >= CEILING` and left the reader to work out that
+        # the doubling below could not then produce anything larger. Identical
+        # behaviour -- `retry_budget <= capped` iff `capped >= CEILING`, since
+        # capped is already min()'d -- but the condition now states the actual
+        # reason: there is no bigger budget to escalate to, and re-issuing a
+        # byte-identical request at temperature 0.0 would only burn a call.
+        retry_budget = min(capped * 2, _SYNTH_MAX_TOKENS_CEILING)
+        if retry_budget <= capped:
             raise
-        log.warning("qa_synthesis_truncation_retry", old=capped, error=str(exc)[:200])
+        if telemetry is not None:
+            telemetry["synthesis_retried"] = True
+            telemetry["retry_budget"] = retry_budget
+        log.warning(
+            "qa_synthesis_truncation_retry",
+            old=capped,
+            new=retry_budget,
+            error=str(exc)[:200],
+        )
         return provider.complete(
             messages,
             temperature=_SYNTH_TEMPERATURE,
-            max_tokens=min(capped * 2, _SYNTH_MAX_TOKENS_CEILING),
+            max_tokens=retry_budget,
             response_format="json",
         )
+
+
+def _gate_failure_class(detail: str) -> str:
+    """Bucket a gate parse failure into a cause an operator can act on.
+
+    ``malformed_structure`` fuses four unrelated faults -- the model exceeded a
+    schema cap, it emitted invalid JSON, it emitted nothing extractable, or it
+    broke the schema some other way -- and the remedy differs for each (raise a
+    cap / change decoding / check the endpoint / fix the prompt). Today they are
+    indistinguishable in the DB, so the rate is uninterpretable.
+
+    Substring matching is acceptable ONLY because every input string is
+    produced by this repo's own turn_gate (the three GateFailure sites) or by
+    pydantic's ValidationError json. It must never be pointed at provider text.
+    """
+    d = detail.lower()
+    if "json decode failed" in d:
+        return "json_decode"
+    if "empty response after extraction" in d:
+        return "empty_extract"
+    # Match pydantic's error type EXACTLY. A plain `"too_long" in d` also
+    # matches "string_too_long", fusing "the model wrote 21 claims" with "the
+    # model wrote a 401-char claim" -- different faults with different fixes
+    # (raise the list cap vs. tighten the one-sentence instruction).
+    if '"type":"too_long"' in d:
+        return "list_too_long"
+    if '"type":"string_too_long"' in d:
+        return "text_too_long"
+    return "schema_other"
 
 
 def _gate_log_fields(admitted: AdmittedTurn) -> dict[str, Any]:
@@ -1239,6 +1417,21 @@ def ask_core(
             session_filters_memo = load_session_filters()
         return session_filters_memo
 
+    recent_turns_memo: list[PriorTurn] | None = None
+
+    def _recent_turns() -> list[PriorTurn]:
+        """History, loaded at most once per turn.
+
+        Two callers now need it -- the retrieval rewrite (before the vector
+        search) and the synthesizer's conversation block (after it) -- and
+        ``load_recent_turns`` is a DB read. Memoized so widening the follow-up
+        path does not double the per-turn query count.
+        """
+        nonlocal recent_turns_memo
+        if recent_turns_memo is None:
+            recent_turns_memo = load_recent_turns()
+        return recent_turns_memo
+
     resolved_by_name = False
     context_applied = False
     response_mode: QueryStatusLiteral = "summary" if _is_summary_request(question) else "answer"
@@ -1415,8 +1608,30 @@ def ask_core(
                 options=_options_from_names(resolution.candidates),
             )
         else:
+            # CROSS-PRODUCT GUARD. Both candidate lookups run BEFORE the
+            # carry-over, not inside its else-branch. resolve_product already
+            # returned "none", so no IN-corpus product is named; a fuzzy or
+            # brand hit is then the remaining evidence that the user changed
+            # subject, and inheriting the session's drug there would answer a
+            # question about product A using product B's guidance.
+            #
+            # This also closes the same hole on the pre-existing prefixes: today
+            # "what about propranlol?" inherits the session product outright.
+            # After this it offers the did-you-mean instead.
+            #
+            # Residual, unchanged and bounded: a drug ABSENT from the corpus
+            # (romidepsin scores ~60, under the 82 threshold) yields neither
+            # candidate, so a follow-up naming it still carries over. Closing
+            # that needs a drug-name detector the resolver does not have.
+            suggestions = suggest_products(question)
+            brand_matches = resolve_brand(question)
             session_filters = _session_filters()
-            if session_filters.get("normalized_name") and _looks_like_follow_up(question):
+            if (
+                session_filters.get("normalized_name")
+                and not suggestions
+                and not brand_matches
+                and _looks_like_follow_up(question)
+            ):
                 # Carry the product across turns (the chosen dosage_form/route are
                 # carried just below, after resolved_name is set, so the same logic
                 # also covers the single-product-corpus fallback path).
@@ -1429,7 +1644,6 @@ def ask_core(
                 # No product named. Offer a high-confidence "did you mean" for genuine
                 # typos, then a brand→generic lookup (Adderall → amphetamine); else
                 # refuse (e.g. romidepsin — absent, a deliberate must-refuse).
-                suggestions = suggest_products(question)
                 if suggestions:
                     return _decline(
                         _clarify,
@@ -1439,7 +1653,6 @@ def ask_core(
                         options=_options_from_names(suggestions),
                         related=_options_from_names(suggestions),
                     )
-                brand_matches = resolve_brand(question)
                 if brand_matches:
                     return _decline(
                         _clarify,
@@ -1489,7 +1702,21 @@ def ask_core(
     # ("Hello" with an Active-ingredient filter) never reaches the synthesizer
     # and comes back as a cited greeting. This deterministic guard owns the
     # options and status before the bounded guidance planner sees the turn.
-    if resolved_name and _looks_vague(question, resolved_name):
+    # A recognized drill-down ("tell me more", "why?") is EXEMPT once there is a
+    # prior turn to anchor on: it is topic-less by construction, so the vague
+    # gate would serve a clarify menu to a user who just asked to hear more
+    # about the thing they were already discussing. _retrieval_query re-anchors
+    # the embedding on that prior turn, which is what makes the exemption safe.
+    #
+    # The `_recent_turns()` conjunct is load-bearing, not belt-and-braces: with
+    # NO history there is nothing to re-anchor on, the rewrite is the identity,
+    # and exempting would trade today's useful clarify menu for a low_top_score
+    # refusal. A bare drug name still clarifies -- it matches no follow-up form.
+    if (
+        resolved_name
+        and _looks_vague(question, resolved_name)
+        and not (_looks_like_follow_up(question) and _recent_turns())
+    ):
         return _decline(
             _clarify,
             reason="vague_input",
@@ -1561,9 +1788,23 @@ def ask_core(
     )
     _emit("Searching the FDA guidance corpus…")
     _maybe_inject_fault("retrieve")
-    passages = retrieve(question, k=k, filters=active_filters)
-    # Stage 2: optional rerank, then trim to RERANK_TOP_K.
-    passages = rerank_passages(question, passages)
+    # Embed the RE-ANCHORED query, not necessarily the user's words: a
+    # contentless drill-down has no topical signal of its own. Identity for
+    # every question that carries its own topic, so single-turn behaviour and
+    # the offline eval are byte-identical.
+    search_query = _retrieval_query(
+        question, normalized_name=resolved_name, prior_turns=_recent_turns()
+    )
+    # Persist WHETHER the rewrite fired, never the rewritten text: the audit row
+    # must show that this turn searched on something other than the user's
+    # words, and M7 (follow-up miss rate) counts exactly this flag.
+    if search_query != question:
+        route_json["retrieval_query_rewritten"] = True
+    passages = retrieve(search_query, k=k, filters=active_filters)
+    # Stage 2: optional rerank, then trim to RERANK_TOP_K. Same rewritten query
+    # -- the reranker scores relevance against the search intent, not the
+    # literal keystrokes.
+    passages = rerank_passages(search_query, passages)
     passages = passages[: s.effective_rerank_top_k]
 
     # INV-2: weak passages never enter grounded synthesis. The constrained
@@ -1647,7 +1888,7 @@ def ask_core(
     # user row is excluded by turn_id (the shell bakes that into the loader).
     # With no usable history the block is "" so the prompt is byte-identical to
     # the single-turn form (protects the eval).
-    recent_block = _format_recent(load_recent_turns())
+    recent_block = _format_recent(_recent_turns())
     recent_context = (
         "Recent conversation (context ONLY — use it to resolve pronouns and "
         "ellipsis in the question; it is NOT a source and MUST NOT be cited or "
@@ -1673,9 +1914,20 @@ def ask_core(
         # the model reads and it never has to survive a .format() pass.
         TURN_SCHEMA_MESSAGE,
     ]
+    # What the synthesis call actually cost and whether it had to retry. Two
+    # facts that lived only in a structlog line (or, for the retry, nowhere
+    # durable at all), which is why "is our malformed_structure rate a token
+    # cap hit or a JSON syntax error?" is unanswerable from the DB today.
+    # synth_route holds the SAME dict object, not a copy: _complete_structured
+    # fills it in during the call, and every branch below reads it afterwards.
+    synth_telemetry: dict[str, Any] = {"max_output_tokens": s.synthesizer_max_tokens}
+    synth_route: dict[str, Any] = {"synthesis": synth_telemetry}
     try:
         response = _complete_structured(
-            provider, synth_messages, max_tokens=s.synthesizer_max_tokens
+            provider,
+            synth_messages,
+            max_tokens=s.synthesizer_max_tokens,
+            telemetry=synth_telemetry,
         )
     except Exception as exc:  # provider transport error (timeout / 429 / 5xx)
         # B2: a synthesizer failure must NOT return a naked 500 with no audit
@@ -1691,6 +1943,7 @@ def ask_core(
             passages=passages,
             status="error",
             answer_text=_SERVICE_UNAVAILABLE_TEXT,
+            route_extra=synth_route,
             guide=False,
         )
     answer = response.text.strip()
@@ -1727,6 +1980,13 @@ def ask_core(
             status="error",
             answer_text=_SERVICE_UNAVAILABLE_TEXT,
             usage=response.usage,
+            route_extra={
+                **synth_route,
+                "gate_failure": {
+                    "class": _gate_failure_class(admitted.detail),
+                    "detail": admitted.detail[:200],
+                },
+            },
             guide=False,
         )
 
@@ -1740,7 +2000,10 @@ def ask_core(
     # the DB -- the opposite of what turn_gate.ledger claims to provide. Built
     # once here so the answer and decline paths cannot drift.
     turn_route = {
-        "turn": tg.ledger(admitted, model=response.model, prompt_version=GROUNDED_QA_PROMPT.version)
+        **synth_route,
+        "turn": tg.ledger(
+            admitted, model=response.model, prompt_version=GROUNDED_QA_PROMPT.version
+        ),
     }
 
     if admitted.verdict == tg.VERDICT_NO_EVIDENCE:

@@ -550,7 +550,7 @@ Current state (this is implemented and deployed, not planned):
   model for all roles. This is the data-residency decision recorded in
   `docs/DATABRICKS_ADOPTION_2026-07-28.md`.
 - Two tuning knobs shipped 2026-07-29: `DATABRICKS_REASONING_EFFORT`
-  (default `low`) and `SYNTHESIZER_MAX_TOKENS` (default 900).
+  (default `low`) and `SYNTHESIZER_MAX_TOKENS` (default 3000).
 - Embeddings still use OpenAI `text-embedding-3-small` (1536-dim) - the
   remaining data-residency gap. A Databricks Qwen3-Embedding-0.6B endpoint
   (1024-dim, `workspace.default.regwatch-embed`) exists; app wiring is

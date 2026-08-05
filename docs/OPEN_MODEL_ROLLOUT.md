@@ -120,7 +120,7 @@ GEMMA_THINKING_ENABLED=false
 # "low" is the only reasoning level measured to finish under the 900-token cap
 # on gpt-oss-20b; the cap itself is now an operator knob.
 DATABRICKS_REASONING_EFFORT=low
-SYNTHESIZER_MAX_TOKENS=900
+SYNTHESIZER_MAX_TOKENS=3000
 
 # D1 runtime served-model guard (shipped in PR #138, deployed UNARMED).
 # When armed, _check_d1_enforcement (config/settings.py) refuses to boot unless
