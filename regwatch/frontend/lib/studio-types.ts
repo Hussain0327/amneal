@@ -9,6 +9,57 @@
 /** Severity of a compliance finding, most to least serious. */
 export type Severity = "critical" | "major" | "minor" | "info";
 
+/**
+ * How a reviewer closed a finding. Exactly one of these, or the finding is open.
+ *
+ * "fixed_elsewhere" is not a softer "fixed": it is the case where the remedy
+ * landed somewhere this finding does not point at -- a definitions table added
+ * before the section, a cross-reference added to a different document. Two of
+ * the checks in this repository name that path in their own text, and without a
+ * word for it the only way to close them is a false "not applicable".
+ */
+export type Disposition = "fixed" | "fixed_elsewhere" | "not_applicable" | "disputed";
+
+/** Why a disposition was refused. Rendered to the analyst, never swallowed. */
+export type DispositionError =
+  | "unknown_finding"
+  | "check_in_flight"
+  | "not_editable"
+  | "fix_not_evidenced"
+  | "justification_required"
+  | "justification_too_long";
+
+/** Why applying a suggested fix was refused. */
+export type ApplyError = "unknown_finding" | "no_suggestion" | "not_editable" | "anchor_moved";
+
+/** How long a justification may be. Enforced in canDispose, quoted in the error. */
+export const JUSTIFICATION_MAX = 600;
+
+/**
+ * One recorded judgement on a finding.
+ *
+ * Append-only: changing your mind writes a new entry rather than overwriting the
+ * last, so an earlier judgement can always be read back. That is the shape a
+ * controlled record has to have, and it is the shape the real endpoint will have
+ * to meet.
+ *
+ * What this is NOT: `at` is the client clock and `by` is whoever the browser
+ * session believes it is. There is no server timestamp and no electronic
+ * signature here, so a record built in this surface is a working note, not a
+ * 21 CFR Part 11 record. The panel says so in as many words.
+ */
+export interface FindingRecord {
+  disposition: Disposition;
+  /** Required for every disposition except "fixed". Trimmed at the boundary. */
+  justification: string;
+  /** Client clock, ISO-8601, injected by the caller. Never read from inside the model. */
+  at: string;
+  /** Who the surface believes recorded it. There is no authenticated session here. */
+  by: string;
+  /** The anchored text as the checker read it, copied from Finding.excerpt. */
+  excerpt: string;
+}
+
 /** Structural role of a document block. Drives typography, not semantics. */
 export type BlockType = "title" | "meta" | "h2" | "p" | "table";
 
@@ -63,6 +114,16 @@ export interface Block {
    * the released version rather than against the previous keystroke.
    */
   original?: string;
+  /**
+   * The text as the last check read it. Finding offsets are in THIS coordinate
+   * space, which is what makes the staleness rule exact rather than a guess.
+   *
+   * Deliberately not the same field as `original`. That one is text-at-open and
+   * serves tracked changes; this one is text-at-check and serves the evidence
+   * rule. They diverge the moment an analyst edits before running a check, so
+   * one field cannot do both jobs.
+   */
+  checkedText?: string;
 }
 
 /** A compliance finding anchored to a span of one block. */
@@ -81,9 +142,36 @@ export interface Finding {
   /** The standard or SOP the check ran against, e.g. "ICH Q10; 21 CFR 211.100". */
   standard: string;
   /**
-   * True once the analyst has edited the block this finding points at. The
-   * finding stays visible but stops counting toward the verdict: the text it
-   * described no longer exists.
+   * The exact text at [start, end) when the check ran. Recomputed by
+   * applyFindings from the block itself, so an API-supplied span can never
+   * disagree with the text it claims to quote, and an apply can tell whether it
+   * is still aimed at what the checker saw.
+   */
+  excerpt: string;
+  /**
+   * What to write instead, replacing [start, end).
+   *
+   * Absent when the fix needs a fact only the analyst has -- an approver name,
+   * an effective date, a validation report number. A fabricated suggestion in a
+   * GMP-controlled document is worse than no suggestion, so those findings carry
+   * none rather than something plausible.
+   */
+  suggestion?: string;
+  /** Every judgement recorded on this finding, oldest first. Current is the last. */
+  records?: FindingRecord[];
+  /**
+   * True when a check ran again and STILL reported this finding after it had
+   * been recorded fixed. The finding re-opens and the record is kept: dropping
+   * either side of that contradiction is the audit lie.
+   */
+  contested?: boolean;
+  /**
+   * True when the analyst's edits touched this finding's as-checked span.
+   *
+   * Derived, never set by hand: recomputed from Block.checkedText on every write,
+   * so typing an edit back out again clears it. It carries two meanings at once,
+   * and they are the same fact -- the claim no longer describes the text, and
+   * there is now evidence that a fix was attempted here.
    */
   stale?: boolean;
 }
@@ -101,6 +189,12 @@ export interface StudioDoc {
   checkState: CheckState;
   /** Standards this document is checked against. Shown on the findings header. */
   standards: string[];
+  /**
+   * Findings that carried a record and were not returned by the latest check.
+   * The defect is gone; the judgement that closed it still has to be printable,
+   * so it moves here rather than being dropped on the floor.
+   */
+  closed?: Finding[];
 }
 
 export interface TreeFolder {
@@ -126,7 +220,7 @@ export type TreeNode = TreeFolder | TreeDocRef;
  * measurement. Counts and a verdict are what a reviewer actually acts on.
  */
 export interface Verdict {
-  tone: "blocking" | "review" | "clear" | "unchecked";
+  tone: "blocking" | "review" | "clear" | "settled" | "unchecked";
   /** Short verdict for the panel header, e.g. "Not submission-ready". */
   label: string;
   /** Critical findings. Any one of these blocks submission. */
@@ -135,7 +229,9 @@ export interface Verdict {
   toResolve: number;
   /** Info findings. Observations, nothing to fix. */
   notes: number;
-  /** Findings whose anchored text was edited after the check ran. */
+  /** Findings closed by a recorded disposition. */
+  disposed: number;
+  /** Findings whose anchored text was edited after the check ran, and not recorded. */
   stale: number;
 }
 

@@ -20,6 +20,9 @@ const GLYPH_LABEL: Record<ReturnType<typeof docGlyph>, string> = {
   findings: "has open findings",
   unchecked: "not checked",
   checking: "checking now",
+  // Every finding has a recorded judgement, but not every one was fixed, so this
+  // is deliberately not the same state as clean.
+  settled: "every finding recorded",
 };
 
 /** Neither action has a document service behind it yet, so both say so on hover. */

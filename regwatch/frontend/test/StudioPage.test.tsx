@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, createEvent, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -97,7 +97,6 @@ describe("Compliance Studio", () => {
   it("invalidates the findings under text the analyst edits", async () => {
     render(<StudioPage />);
     await openPanel(/^Compliance results/);
-    expect(screen.queryByText("Text edited - recheck")).not.toBeInTheDocument();
 
     // The header block carries the major finding about the version control block.
     const block = document.querySelector('[data-block-id="ds-2"]') as HTMLElement;
@@ -105,11 +104,274 @@ describe("Compliance Studio", () => {
     block.textContent = "Document ID: CMC-DS-SPEC-0007  |  Version: 6.0  |  Approved by: J. Patel";
     fireEvent.input(block);
 
-    expect(screen.getByText("Text edited - recheck")).toBeInTheDocument();
     // A stale claim stops counting toward the verdict in either direction.
     expect(screen.getByText("1 stale")).toBeInTheDocument();
     expect(screen.getByText(/Edited since the last check/)).toBeInTheDocument();
     expect(screen.getByText(/Edited since last check - v5\.0/)).toBeInTheDocument();
+  });
+
+  it("opens the Fixed gate only once the anchored text really changed", async () => {
+    render(<StudioPage />);
+    await openPanel(/^Compliance results/);
+
+    const card = () =>
+      document.querySelector('[data-finding-card="ds-f1"]') as HTMLElement;
+    const fixed = () => within(card()).getByRole("button", { name: "Fixed" });
+
+    // Nothing edited yet: Fixed is refused, and it says why in visible text
+    // rather than going quietly grey.
+    expect(fixed()).toHaveAttribute("aria-disabled", "true");
+    const gateId = fixed().getAttribute("aria-describedby");
+    expect(gateId).toBeTruthy();
+    expect(document.getElementById(gateId!)?.textContent).toMatch(
+      /Fixed opens once you change the text this finding points at/,
+    );
+
+    const block = document.querySelector('[data-block-id="ds-2"]') as HTMLElement;
+    block.textContent = "Document ID: CMC-DS-SPEC-0007  |  Version: 5.0  |  Approved by: J. Patel";
+    fireEvent.input(block);
+
+    expect(fixed()).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("re-locks Fixed when the analyst types the edit back out again", async () => {
+    render(<StudioPage />);
+    await openPanel(/^Compliance results/);
+
+    const block = document.querySelector('[data-block-id="ds-2"]') as HTMLElement;
+    const original = block.textContent ?? "";
+    block.textContent = `${original}  |  Approved by: J. Patel`;
+    fireEvent.input(block);
+    const card = () => document.querySelector('[data-finding-card="ds-f1"]') as HTMLElement;
+    expect(within(card()).getByRole("button", { name: "Fixed" })).not.toHaveAttribute("aria-disabled");
+
+    // Typing it back is not a fix, and the gate has to notice.
+    block.textContent = original;
+    fireEvent.input(block);
+    expect(within(card()).getByRole("button", { name: "Fixed" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+  });
+
+  it("runs the whole loop: read, apply the suggested fix, mark it fixed", async () => {
+    render(<StudioPage />);
+    await openPanel(/^Compliance results/);
+
+    const card = () => document.querySelector('[data-finding-card="ds-f2"]') as HTMLElement;
+    // The abbreviation finding is the one with an honest suggestion behind it.
+    expect(within(card()).getByText("The limit of detection (LOD)")).toBeInTheDocument();
+    expect(within(card()).getByRole("button", { name: "Fixed" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+
+    await userEvent.click(within(card()).getByRole("button", { name: /Apply suggested fix/ }));
+
+    // The document now carries the replacement, and the gate has opened.
+    const block = document.querySelector('[data-block-id="ds-8"]') as HTMLElement;
+    expect(block.textContent).toContain("The limit of detection (LOD) is applied");
+    expect(within(card()).getByRole("button", { name: "Fixed" })).not.toHaveAttribute("aria-disabled");
+    // Applying twice would double the text, so the button becomes the way back.
+    expect(within(card()).queryByRole("button", { name: /Apply suggested fix/ })).not.toBeInTheDocument();
+
+    await userEvent.click(within(card()).getByRole("button", { name: "Fixed" }));
+
+    expect(within(card()).getByText("Fixed.")).toBeInTheDocument();
+    expect(screen.getByText("1 recorded")).toBeInTheDocument();
+    // Recorded findings stop counting as work: the rail badge drops to one.
+    expect(screen.getByRole("button", { name: "Compliance results, 1 open finding" })).toBeInTheDocument();
+  });
+
+  it("restores the checked text and takes the fix claim back with it", async () => {
+    render(<StudioPage />);
+    await openPanel(/^Compliance results/);
+    const card = () => document.querySelector('[data-finding-card="ds-f2"]') as HTMLElement;
+
+    await userEvent.click(within(card()).getByRole("button", { name: /Apply suggested fix/ }));
+    await userEvent.click(within(card()).getByRole("button", { name: /Restore the checked text/ }));
+
+    const block = document.querySelector('[data-block-id="ds-8"]') as HTMLElement;
+    expect(block.textContent).toContain("Option I. LOD is applied");
+    expect(within(card()).getByRole("button", { name: "Fixed" })).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("refuses a disposition with no justification and says what is missing", async () => {
+    render(<StudioPage />);
+    await openPanel(/^Compliance results/);
+    const card = () => document.querySelector('[data-finding-card="ds-f1"]') as HTMLElement;
+
+    await userEvent.click(within(card()).getByRole("button", { name: "Disputed" }));
+    const field = within(card()).getByRole("textbox", { name: /What does the check have wrong/ });
+    expect(field).toHaveAttribute("aria-required", "true");
+    expect(field).not.toHaveAttribute("aria-invalid");
+
+    // The Record button is never disabled: pressing it is how you find out.
+    await userEvent.click(within(card()).getByRole("button", { name: "Record" }));
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    expect(within(card()).getByText(/Enter a justification before you record this/)).toBeInTheDocument();
+    expect(screen.queryByText("1 recorded")).not.toBeInTheDocument();
+
+    await userEvent.type(field, "The header does carry an approver on page 2.");
+    await userEvent.click(within(card()).getByRole("button", { name: "Record" }));
+    expect(within(card()).getByText("Disputed.")).toBeInTheDocument();
+    expect(within(card()).getByText("The header does carry an approver on page 2.")).toBeInTheDocument();
+  });
+
+  it("keeps a half-typed justification through a document switch and back", async () => {
+    render(<StudioPage />);
+    await openPanel(/^Compliance results/);
+    const card = () => document.querySelector('[data-finding-card="ds-f1"]') as HTMLElement;
+
+    await userEvent.click(within(card()).getByRole("button", { name: "Not applicable" }));
+    await userEvent.type(
+      within(card()).getByRole("textbox", { name: /Why is this not applicable/ }),
+      "Draft in progress",
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /3\.2\.P\.5\.1 Specification\.docx/ }));
+    await userEvent.click(screen.getByRole("button", { name: /3\.2\.S\.4\.1 Specification\.docx/ }));
+
+    await userEvent.click(within(card()).getByRole("button", { name: "Not applicable" }));
+    expect(within(card()).getByRole("textbox", { name: /Why is this not applicable/ })).toHaveValue(
+      "Draft in progress",
+    );
+  });
+
+  it("moves between open findings with F8 and skips the recorded ones", async () => {
+    render(<StudioPage />);
+    await openPanel(/^Compliance results/);
+
+    await userEvent.keyboard("{F8}");
+    expect(document.querySelector('[data-finding-card="ds-f1"]')).toHaveClass("is-active");
+    await userEvent.keyboard("{F8}");
+    expect(document.querySelector('[data-finding-card="ds-f2"]')).toHaveClass("is-active");
+    // ds-f3 is informational: an observation is not work, so traversal skips it.
+    await userEvent.keyboard("{F8}");
+    expect(document.querySelector('[data-finding-card="ds-f1"]')).toHaveClass("is-active");
+  });
+
+  it("leaves F8 alone while a justification has focus", async () => {
+    render(<StudioPage />);
+    await openPanel(/^Compliance results/);
+    const card = () => document.querySelector('[data-finding-card="ds-f1"]') as HTMLElement;
+
+    await userEvent.click(within(card()).getByRole("button", { name: "Disputed" }));
+    const field = within(card()).getByRole("textbox", { name: /What does the check have wrong/ });
+    field.focus();
+    await userEvent.keyboard("{F8}");
+    expect(document.activeElement).toBe(field);
+  });
+
+  it("keeps every recorded disposition when the check runs again", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<StudioPage />);
+    await openPanel(/^Compliance results/);
+    const card = () => document.querySelector('[data-finding-card="ds-f1"]') as HTMLElement;
+
+    await user.click(within(card()).getByRole("button", { name: "Not applicable" }));
+    await user.type(
+      within(card()).getByRole("textbox", { name: /Why is this not applicable/ }),
+      "Superseded by QA-018 rev 9.2.",
+    );
+    await user.click(within(card()).getByRole("button", { name: "Record" }));
+    expect(within(card()).getByText("Not applicable.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Check this document" }));
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+
+    // A re-check that wiped the dispositions would destroy the reason the
+    // document is in the state it is.
+    expect(within(card()).getByText("Not applicable.")).toBeInTheDocument();
+    expect(within(card()).getByText("Superseded by QA-018 rev 9.2.")).toBeInTheDocument();
+  });
+
+  it("re-opens a fixed finding the checker still reports, keeping the record", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<StudioPage />);
+    await openPanel(/^Compliance results/);
+    const card = () => document.querySelector('[data-finding-card="ds-f2"]') as HTMLElement;
+
+    await user.click(within(card()).getByRole("button", { name: /Apply suggested fix/ }));
+    await user.click(within(card()).getByRole("button", { name: "Fixed" }));
+    expect(within(card()).getByText("Fixed.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Check this document" }));
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+
+    expect(within(card()).getByText(/The check ran again and still reports this/)).toBeInTheDocument();
+    expect(within(card()).getByRole("button", { name: "Disputed" })).toBeInTheDocument();
+  });
+
+  it("shows the record as selectable text when the clipboard never answers", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    // Chrome queues a clipboard write until the document regains focus, so a
+    // reviewer who clicks Copy and switches window can leave this pending
+    // forever. A dead button is not an acceptable outcome for the one control
+    // that gets their record out of the tool.
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText: () => new Promise(() => {}) } });
+
+    render(<StudioPage />);
+    await openPanel(/^Compliance results/);
+    const card = () => document.querySelector('[data-finding-card="ds-f1"]') as HTMLElement;
+    await user.click(within(card()).getByRole("button", { name: "Disputed" }));
+    await user.type(
+      within(card()).getByRole("textbox", { name: /What does the check have wrong/ }),
+      "Stated on page 2.",
+    );
+    await user.click(within(card()).getByRole("button", { name: "Record" }));
+    await user.click(screen.getByRole("button", { name: /Copy record/ }));
+
+    await act(async () => {
+      vi.advanceTimersByTime(2500);
+    });
+
+    const fallback = screen.getByRole("textbox", { name: "Copy this text" }) as HTMLTextAreaElement;
+    expect(fallback.value).toContain("disputed");
+    expect(fallback.value).toContain("Stated on page 2.");
+    expect(fallback.value).toContain("Not a controlled record");
+  });
+
+  it("swallows Enter rather than welding two paragraphs together", () => {
+    render(<StudioPage />);
+    const block = document.querySelector('[data-block-id="ds-4"]') as HTMLElement;
+    const event = createEvent.keyDown(block, { key: "Enter" });
+    fireEvent(block, event);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("names each editable block by position, so typing does not rename it", async () => {
+    render(<StudioPage />);
+    const block = document.querySelector('[data-block-id="ds-4"]') as HTMLElement;
+    const before = block.getAttribute("aria-label");
+    expect(before).toBe("Paragraph 4 of 10");
+    block.textContent = "Assay 97.0% only.";
+    fireEvent.input(block);
+    expect(block.getAttribute("aria-label")).toBe(before);
+  });
+
+  it("carries the working-record caveat wherever a record can be made", async () => {
+    render(<StudioPage />);
+    await openPanel(/^Compliance results/);
+    const card = () => document.querySelector('[data-finding-card="ds-f1"]') as HTMLElement;
+
+    await userEvent.click(within(card()).getByRole("button", { name: "Disputed" }));
+    await userEvent.type(
+      within(card()).getByRole("textbox", { name: /What does the check have wrong/ }),
+      "Stated on page 2.",
+    );
+    await userEvent.click(within(card()).getByRole("button", { name: "Record" }));
+
+    expect(
+      screen.getByText(/Not a controlled record and not an electronic signature/),
+    ).toBeInTheDocument();
   });
 
   it("answers in the assistant with its sources, and says it does not write", async () => {

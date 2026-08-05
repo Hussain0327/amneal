@@ -1,17 +1,27 @@
 "use client";
 
-// The compliance spine: an 18px column of ticks, one per finding, each sitting
-// at that finding's measured position in the document. It answers "where is this
-// document weak, and how badly" without opening a panel.
+// The compliance spine: a 22px column carrying one tick per finding, each at
+// that finding's measured position in the document.
 //
-// Positions are measured from the live DOM rather than derived from block index,
-// because a two-line heading and a six-row table are not the same distance apart
-// on the page, and a tick that points at the wrong place is worse than no tick.
+// It answers two questions without opening a panel. How weak is this document,
+// and how much of that is still yours to answer. An open finding is a solid
+// mark at full width; a recorded one drops to a hairline across the left half
+// only. Working a document closes the spine down, and when every actionable
+// finding was genuinely FIXED the column resolves to a single gold thread.
+//
+// Disposition is carried by geometry, not by fading. A faded tick on parchment
+// lands under the 3:1 contrast floor a non-text indicator owes, and half-width
+// versus full-width survives greyscale, 8px, and both common colour-blindnesses.
+//
+// Positions are measured from the live DOM against the PAGE box rather than the
+// scroll container: the container carries 5rem of bottom padding, so measuring
+// against it would squash every tick upward by a fixed percentage and quietly
+// misstate where the document actually ends.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { docGlyph, sortFindings } from "@/lib/studio-marks";
-import type { Block, Finding, Severity, StudioDoc } from "@/lib/studio-types";
+import { SEVERITY_RANK, currentRecord, isDisposed, isSealed, isStale, sortFindings } from "@/lib/studio-marks";
+import type { Block, Disposition, Finding, Severity, StudioDoc } from "@/lib/studio-types";
 
 /** How each severity is named in a tick's accessible label. */
 const SEVERITY_WORD: Record<Severity, string> = {
@@ -20,6 +30,18 @@ const SEVERITY_WORD: Record<Severity, string> = {
   minor: "Minor",
   info: "Info",
 };
+
+const DISPOSITION_WORD: Record<Disposition, string> = {
+  fixed: "Fixed",
+  fixed_elsewhere: "Fixed elsewhere",
+  not_applicable: "Not applicable",
+  disputed: "Disputed",
+};
+
+/** A judgement the reviewer argued rather than one the text now answers. */
+function isArgued(d: Disposition): boolean {
+  return d === "not_applicable" || d === "disputed";
+}
 
 function clamp01(n: number): number {
   return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
@@ -57,17 +79,24 @@ function samePositions(a: Record<string, number>, b: Record<string, number>): bo
   return keys.every((k) => a[k] === b[k]);
 }
 
-function tickLabel(f: Finding): string {
-  const word = SEVERITY_WORD[f.severity];
-  // Staleness is carried visually by opacity alone, so it has to be said here.
-  return f.stale
-    ? `Stale ${word.toLowerCase()} finding at ${f.location}: ${f.title}`
-    : `${word} finding at ${f.location}: ${f.title}`;
+/**
+ * The tick's whole meaning in words. Disposition leads, because a recorded tick
+ * is a hairline carrying no severity weight at all -- a screen reader user would
+ * otherwise hear an open finding where the eye sees a closed one.
+ */
+function tickLabel(f: Finding, block: Block | undefined): string {
+  const severity = SEVERITY_WORD[f.severity];
+  const where = `${severity} finding at ${f.location}: ${f.title}`;
+  const record = currentRecord(f);
+  if (record && isDisposed(f)) return `${DISPOSITION_WORD[record.disposition]}. ${where}`;
+  if (f.contested) return `Contested, recorded fixed and still reported. ${where}`;
+  if (isStale(block, f)) return `Text edited, no disposition recorded. ${where}`;
+  return where;
 }
 
 interface ComplianceSpineProps {
   doc: StudioDoc;
-  /** The document's scroll container. Ticks are measured against its content. */
+  /** The document's scroll container. Ticks are measured against the page inside it. */
   scrollRef: React.RefObject<HTMLDivElement>;
   activeFindingId: string | null;
   onSelect: (id: string) => void;
@@ -80,17 +109,18 @@ export function ComplianceSpine({ doc, scrollRef, activeFindingId, onSelect }: C
 
   const measure = useCallback(() => {
     const container = scrollRef.current;
+    const page = container?.querySelector<HTMLElement>(".st-page") ?? null;
     const next: Record<string, number> = {};
+
+    // Both rects are viewport-relative, so their difference is a layout offset
+    // and needs no scrollTop correction.
+    const frame = page?.getBoundingClientRect();
 
     for (const f of findings) {
       const el = container ? blockElement(container, f.blockId) : null;
-      // scrollHeight is 0 until layout; dividing by it would stack every tick at
-      // the top, which is a claim about the document that is not true.
-      if (container && el && container.scrollHeight > 0) {
+      if (frame && frame.height > 0 && el) {
         const box = el.getBoundingClientRect();
-        const frame = container.getBoundingClientRect();
-        const centre = box.top - frame.top + container.scrollTop + box.height / 2;
-        next[f.id] = clamp01(centre / container.scrollHeight);
+        next[f.id] = clamp01((box.top - frame.top + box.height / 2) / frame.height);
       } else {
         next[f.id] = fallbackPct(blocks, f.blockId);
       }
@@ -115,43 +145,60 @@ export function ComplianceSpine({ doc, scrollRef, activeFindingId, onSelect }: C
     return () => observer.disconnect();
   }, [measure, scrollRef]);
 
-  // Paint order, not reading order: sortFindings leads with the most serious for
-  // the panel, so the spine walks it backwards and the worst tick lands on top
-  // when two findings resolve to the same height.
-  const painted = useMemo(() => [...sortFindings(doc)].reverse(), [doc]);
+  // DOM order is document order, which is also tab order. Paint order is handled
+  // by z-index instead, so the most serious tick still wins an overlap without
+  // sending a keyboard user through the column backwards.
+  const ordered = useMemo(() => {
+    const at = new Map(doc.blocks.map((b, i) => [b.id, i]));
+    return [...doc.findings].sort(
+      (a, b) => (at.get(a.blockId) ?? 0) - (at.get(b.blockId) ?? 0) || a.start - b.start,
+    );
+  }, [doc.blocks, doc.findings]);
+
+  const byBlock = useMemo(() => new Map(doc.blocks.map((b) => [b.id, b])), [doc.blocks]);
 
   const checking = doc.checkState === "checking";
-  // Same rule as the tree glyph, deliberately: checked with nothing open. The
-  // quiet gold thread and a solid file dot must never disagree.
-  const isClear = docGlyph(doc) === "clean";
+  const sealed = isSealed(doc);
+  const openCount = sortFindings(doc).filter((f) => !isDisposed(f) && f.severity !== "info").length;
 
   const status = checking
     ? "Checking this document."
     : doc.checkState === "unchecked"
       ? "Not checked yet. Run a check to place findings here."
-      : painted.length === 0
+      : doc.findings.length === 0
         ? "No findings in this document."
-        : `${painted.length} finding${painted.length === 1 ? "" : "s"} on this document.`;
+        : `${openCount} of ${doc.findings.length} findings still open.`;
 
   return (
-    <div className={`st-spine${isClear ? " st-spine--clear" : ""}`} role="group" aria-label="Compliance spine">
+    <div className={`st-spine${sealed ? " st-spine--clear" : ""}`} role="group" aria-label="Compliance spine">
       {checking && <div className="st-spine__scan" aria-hidden="true" />}
       <p className="studio__sr">{status}</p>
 
-      {painted.map((f) => {
+      {ordered.map((f) => {
         const pct = positions[f.id] ?? fallbackPct(blocks, f.blockId);
-        const active = f.id === activeFindingId;
+        const block = byBlock.get(f.blockId);
+        const record = currentRecord(f);
+        const disposed = isDisposed(f);
+        const state = disposed
+          ? ` is-recorded${record && isArgued(record.disposition) ? " is-argued" : ""}`
+          : f.contested
+            ? " is-contested"
+            : isStale(block, f)
+              ? " is-stale"
+              : "";
         return (
           <button
             key={f.id}
             type="button"
-            className={`st-spine__tick st-spine__tick--${f.severity}${f.stale ? " is-stale" : ""}${
-              active ? " is-active" : ""
+            className={`st-spine__tick st-spine__tick--${f.severity}${state}${
+              f.id === activeFindingId ? " is-active" : ""
             }`}
-            style={{ top: `${pct * 100}%` }}
+            // Recorded ticks sit under every open one, and the most serious open
+            // tick wins any overlap. Paint order only; DOM order stays document order.
+            style={{ top: `${pct * 100}%`, zIndex: disposed ? 1 : 10 - SEVERITY_RANK[f.severity] }}
             title={f.title}
-            aria-label={tickLabel(f)}
-            aria-current={active ? "true" : undefined}
+            aria-label={tickLabel(f, block)}
+            aria-current={f.id === activeFindingId ? "true" : undefined}
             onClick={() => onSelect(f.id)}
           />
         );

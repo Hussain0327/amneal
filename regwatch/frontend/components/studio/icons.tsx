@@ -30,6 +30,28 @@ export function CaretIcon({ size = 12, className }: IconProps) {
   return svg(size, className, <path d="M6 3.5 10.5 8 6 12.5" />);
 }
 
+/** A recorded judgement. Used on the collapsed row, never on the Fixed button. */
+export function CheckIcon({ size = 12, className }: IconProps) {
+  return svg(size, className, <path d="M3 8.5 6.25 11.75 13 4.5" />);
+}
+
+/** Copy the disposition record out to the clipboard. */
+export function CopyIcon({ size = 12, className }: IconProps) {
+  return svg(
+    size,
+    className,
+    <>
+      <rect x="5.25" y="5.25" width="8" height="8" rx="1.25" />
+      <path d="M10.75 5.25v-1.5a1.25 1.25 0 0 0-1.25-1.25H3.75A1.25 1.25 0 0 0 2.5 3.75v5.75a1.25 1.25 0 0 0 1.25 1.25h1.5" />
+    </>,
+  );
+}
+
+/** Move to the previous or next finding. Rotated by CSS for the other direction. */
+export function ArrowIcon({ size = 12, className }: IconProps) {
+  return svg(size, className, <path d="M8 3.25v9.5M4.25 9 8 12.75 11.75 9" />);
+}
+
 export function FolderIcon({ size = 14, className }: IconProps) {
   return svg(size, className, <path d="M1.75 4.25h4l1.25 1.5h7.25v6.5a.75.75 0 0 1-.75.75H2.5a.75.75 0 0 1-.75-.75z" />);
 }

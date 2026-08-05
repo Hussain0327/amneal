@@ -463,6 +463,14 @@
   animation: st-pulse 1.4s ease-in-out infinite;
 }
 
+/* Every finding has a recorded judgement, but they were not all fixed. A half
+   glyph, because the document is half of the way to a seal: settled by a
+   reviewer, not yet confirmed by a checker. */
+.st-glyph--settled {
+  background: linear-gradient(90deg, var(--st-clear) 50%, transparent 50%);
+  box-shadow: inset 0 0 0 1.5px var(--st-clear);
+}
+
 @keyframes st-pulse {
   0%,
   100% {
@@ -528,12 +536,23 @@
 }
 
 /* ---------------------------------------------------------------------------
-   THE SIGNATURE -- compliance spine
+   THE SIGNATURE -- compliance spine, as a closure gauge
    ----------------------------------------------------------------------------
-   An 18px column between the tree and the page carrying one tick per finding,
-   placed at that finding's measured position in the document. It answers
-   "where is this document weak, and how badly" without opening a panel, which
-   is the question a reviewer actually holds in their head while reading.
+   A 22px column between the tree and the page carrying one tick per finding at
+   that finding's measured position. It answers two questions without opening a
+   panel: how weak is this document, and how much of that is still yours to
+   answer.
+
+   Severity is weight. Disposition is WIDTH: an open finding runs the full
+   column, a recorded one drops to a hairline across the left half only. Working
+   a document visibly closes the spine down, and the gap that opens on the right
+   is the reward for doing it.
+
+   Disposition is not carried by opacity, and the reason is measurable: the
+   0.3 fade this file used to put on a stale tick lands around 1.2:1 against
+   --st-panel, well under the 3:1 a non-text indicator owes (WCAG 1.4.11). Width
+   survives greyscale, 8px, protanopia and deuteranopia; a fade survives none of
+   them. Every opacity that used to encode meaning here is gone.
    ------------------------------------------------------------------------ */
 
 .st-spine {
@@ -545,7 +564,10 @@
   overflow: hidden;
 }
 
-/* Checked and clean: a quiet gold thread down the full length. The seal. */
+/* The seal. Granted only by isSealed(): every actionable finding closed by an
+   actual fix. A document that was argued with rather than corrected never wears
+   it. --st-gold-ink, not --st-gold-deep: 5.1:1 against the panel where the
+   brighter gold manages 2.2:1 and reads as a smudge. */
 .st-spine--clear::after {
   content: "";
   position: absolute;
@@ -557,38 +579,43 @@
   background: linear-gradient(
     180deg,
     transparent,
-    var(--st-gold-deep) 18%,
-    var(--st-gold-deep) 82%,
+    var(--st-gold-ink) 18%,
+    var(--st-gold-ink) 82%,
     transparent
   );
-  opacity: 0.85;
 }
 
+/* A 24px hit box (WCAG 2.5.8) around a mark that stays as fine as it looks:
+   the button is the target, the ::before is the drawing. */
 .st-spine__tick {
   position: absolute;
-  left: 3px;
-  right: 3px;
+  left: 0;
+  right: 0;
+  height: 24px;
+  display: grid;
+  place-items: center;
   padding: 0;
   border: 0;
   background: transparent;
   cursor: pointer;
   transform: translateY(-50%);
-  transition: filter 0.15s ease;
 }
 
 .st-spine__tick::before {
   content: "";
   display: block;
+  width: calc(100% - 6px);
   border-radius: 1px;
+  transition: width 0.15s ease;
 }
 
 .st-spine__tick:hover::before,
 .st-spine__tick.is-active::before {
-  box-shadow: 0 0 0 1px var(--st-gold-deep);
+  box-shadow: 0 0 0 1px var(--st-gold-ink);
 }
 
 /* Tick weight is the whole severity scale: solid clay reads at a glance from
-   across the desk, a dotted slate hairline is a footnote you have to look for. */
+   across the desk, a slate hairline is a footnote you have to look for. */
 .st-spine__tick--critical::before {
   height: 7px;
   background: var(--st-flag);
@@ -609,11 +636,40 @@
 .st-spine__tick--info::before {
   height: 2px;
   background: var(--st-ink-soft);
-  opacity: 0.55;
 }
 
-.st-spine__tick.is-stale {
-  opacity: 0.3;
+/* Edited under, nothing recorded yet: the claim is suspended, so the tick keeps
+   its full width but loses its severity weight. Still owed a judgement. */
+.st-spine__tick.is-stale::before {
+  height: 1px;
+  background: var(--st-text-faint);
+  box-shadow: none;
+}
+
+/* Recorded. Half width, and the right half of the column goes quiet. */
+.st-spine__tick.is-recorded::before {
+  /* Exactly the left half of the run an open tick draws, sharing its left edge:
+     an auto margin beats justify-items in grid, so the mark parks at the start
+     instead of staying centred. */
+  width: calc(50% - 3px);
+  margin-left: 3px;
+  margin-right: auto;
+  height: 1px;
+  background: var(--st-text-faint);
+  box-shadow: none;
+}
+
+/* Closed by argument rather than by a change to the text. The pip is the
+   difference between "we fixed it" and "we explained it", and it is a shape,
+   not a shade. */
+.st-spine__tick.is-argued::before {
+  box-shadow: 4px 0 0 0 var(--st-oxblood);
+}
+
+/* Recorded fixed, and the checker still reports it. It reads as open again,
+   because it is. */
+.st-spine__tick.is-contested::before {
+  box-shadow: inset 0 0 0 1.5px var(--st-flag), 4px 0 0 0 var(--st-oxblood);
 }
 
 /* The scan: a gold hairline sweeping the spine while a check runs. The one
@@ -1161,6 +1217,12 @@
   color: var(--st-clear);
 }
 
+/* Every finding answered, not every finding fixed. Deliberately ink and not the
+   settled green: a document argued down to zero is not a clean document. */
+.st-verdict--settled .st-verdict__label {
+  color: var(--st-text);
+}
+
 .st-verdict__counts {
   display: flex;
   flex-wrap: wrap;
@@ -1176,6 +1238,12 @@
   border: 1px solid var(--st-edge);
   border-radius: 4px;
   padding: 0.12rem 0.4rem;
+}
+
+/* Recorded, in the settled green the White Paper already uses for a closed cell. */
+.st-count--done {
+  color: var(--st-clear);
+  border-color: var(--st-clear);
 }
 
 .st-count--blocking {
@@ -1243,27 +1311,39 @@
   border-left-color: var(--st-edge);
 }
 
+/* Edited under, nothing recorded. Not faded: the card still holds required
+   controls, and a 0.55 wash on a control is a legibility problem, not emphasis.
+   The left rule going dashed is what says "suspended". */
 .st-find.is-stale {
-  opacity: 0.55;
+  border-left-style: dashed;
 }
 
-.st-find__main {
-  display: block;
-  width: 100%;
-  padding: 0;
-  border: 0;
+/* Recorded and out of the way. This one may fade: everything inside it is
+   settled text plus a single Change button that keeps full contrast. */
+.st-find.is-disposed {
   background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
 }
 
-.st-find__ask {
+.st-find.is-disposed .st-find__detail,
+.st-find.is-disposed .st-find__meta {
+  display: none;
+}
+
+/* The card is a list item and never a button. It holds several controls, and a
+   button may not legally contain them -- which the previous cut did, wrapping a
+   <p> and two <div>s in a role=button whose aria-label then hid all of it from
+   a screen reader. */
+.st-find__tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+
+.st-find__tool {
   display: inline-flex;
   align-items: center;
   gap: 0.32rem;
-  margin-top: 0.55rem;
   padding: 0.22rem 0.5rem;
   border: 1px solid var(--st-edge);
   border-radius: 5px;
@@ -1277,9 +1357,341 @@
     color 0.15s ease;
 }
 
-.st-find__ask:hover {
+.st-find__tool:hover {
   border-color: var(--st-gold-deep);
   color: var(--st-text);
+}
+
+/* --- suggested fix ------------------------------------------------------- */
+
+.st-fix {
+  margin-top: 0.6rem;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid var(--st-edge);
+  border-radius: 6px;
+  background: var(--st-hover);
+}
+
+.st-fix__label {
+  margin: 0;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--st-text-faint);
+}
+
+/* The replacement is set in the document's own serif, because that is what it
+   will look like once it lands. */
+.st-fix__text {
+  margin: 0.35rem 0 0;
+  font-family: var(--font-serif), Georgia, serif;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--st-text);
+}
+
+.st-fix__apply {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  margin-top: 0.5rem;
+  padding: 0.28rem 0.6rem;
+  border: 1px solid var(--st-gold-deep);
+  border-radius: 5px;
+  background: var(--st-gold-wash);
+  color: var(--st-gold-ink);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.st-fix__apply:hover {
+  background: var(--st-raise);
+}
+
+/* --- disposition --------------------------------------------------------- */
+
+/* Two by two, not a wrapping row. Four labels of uneven length reflow into a
+   3+1 that reads as a mistake, and the pairing is meaningful anyway: the two
+   fixes on top, the two arguments underneath. */
+.st-disp {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.32rem;
+  margin-top: 0.6rem;
+}
+
+.st-disp__btn {
+  padding: 0.28rem 0.55rem;
+  border: 1px solid var(--st-edge);
+  border-radius: 5px;
+  background: var(--st-raise);
+  color: var(--st-text);
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+.st-disp__btn:hover {
+  border-color: var(--st-gold-deep);
+}
+
+.st-disp__btn.is-on {
+  border-color: var(--st-text);
+  background: var(--st-hover);
+  font-weight: 600;
+}
+
+/* aria-disabled, never the disabled attribute: a disabled control is skipped by
+   assistive tech and by the keyboard, so the one person who most needs the gate
+   explained could never reach the explanation. It stays focusable and still
+   answers when pressed. */
+.st-disp__btn.is-blocked {
+  border-style: dashed;
+  color: var(--st-text-faint);
+  cursor: not-allowed;
+}
+
+.st-disp__gate {
+  margin: 0.45rem 0 0;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--st-text-faint);
+}
+
+/* --- justification ------------------------------------------------------- */
+
+.st-just {
+  margin-top: 0.6rem;
+  padding: 0.6rem;
+  border: 1px solid var(--st-edge);
+  border-radius: 6px;
+  background: var(--st-raise);
+}
+
+.st-just__label {
+  display: block;
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+.st-just__help {
+  margin: 0.25rem 0 0.4rem;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  color: var(--st-text-faint);
+}
+
+.st-just__field {
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--st-edge);
+  border-radius: 5px;
+  background: var(--st-paper);
+  color: var(--st-text);
+  font: inherit;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.st-just__field:focus-visible {
+  outline: 2px solid var(--st-text);
+  outline-offset: 1px;
+}
+
+.st-just__field[aria-invalid="true"] {
+  border-color: var(--st-flag);
+}
+
+/* Errors say what happened and what to do next. No apology, no "oops". */
+.st-just__error {
+  margin: 0.4rem 0 0;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--st-flag);
+}
+
+.st-just__actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.st-just__record,
+.st-just__cancel {
+  padding: 0.28rem 0.7rem;
+  border-radius: 5px;
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+/* Never disabled on an empty field: pressing it is how the analyst finds out
+   what is missing, and a dead button explains nothing. */
+.st-just__record {
+  border: 1px solid var(--st-text);
+  background: var(--st-text);
+  color: var(--st-paper);
+  font-weight: 600;
+}
+
+.st-just__cancel {
+  border: 1px solid var(--st-edge);
+  background: transparent;
+  color: var(--st-text-soft);
+}
+
+/* --- the recorded judgement ---------------------------------------------- */
+
+.st-find__record {
+  margin-top: 0.5rem;
+}
+
+.st-find__recorded {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--st-text-soft);
+}
+
+.st-find__recorded b {
+  color: var(--st-text);
+  font-weight: 600;
+}
+
+.st-find__just {
+  margin: 0.35rem 0 0;
+  padding-left: 0.6rem;
+  border-left: 2px solid var(--st-edge);
+  font-size: 0.74rem;
+  line-height: 1.5;
+  color: var(--st-text-soft);
+}
+
+.st-find__earlier {
+  margin: 0.35rem 0 0;
+  font-size: 0.68rem;
+  color: var(--st-text-faint);
+}
+
+.st-find__change {
+  margin-top: 0.45rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--st-edge);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--st-text-soft);
+  font: inherit;
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.st-find__change:hover {
+  border-color: var(--st-gold-deep);
+  color: var(--st-text);
+}
+
+/* A contradiction the surface must not resolve on its own. */
+.st-find__flag {
+  margin: 0.5rem 0 0;
+  padding: 0.4rem 0.5rem;
+  border-left: 2px solid var(--st-flag);
+  background: var(--st-flag-wash);
+  font-size: 0.73rem;
+  line-height: 1.5;
+  color: var(--st-text);
+}
+
+/* --- moving between findings --------------------------------------------- */
+
+.st-step {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 0.75rem;
+}
+
+.st-step__btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--st-edge);
+  border-radius: 5px;
+  background: var(--st-raise);
+  color: var(--st-text-soft);
+  font: inherit;
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.st-step__btn:hover {
+  border-color: var(--st-gold-deep);
+  color: var(--st-text);
+}
+
+.st-step__up {
+  transform: rotate(180deg);
+}
+
+/* --- the exported record ------------------------------------------------- */
+
+.st-record__copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.28rem 0.6rem;
+  border: 1px solid var(--st-edge);
+  border-radius: 5px;
+  background: var(--st-raise);
+  color: var(--st-text);
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.st-record__copy:hover {
+  border-color: var(--st-gold-deep);
+}
+
+.st-record__fallback-label {
+  display: block;
+  margin-top: 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.st-record__fallback {
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.35rem 0.45rem;
+  border: 1px solid var(--st-edge);
+  border-radius: 5px;
+  background: var(--st-paper);
+  color: var(--st-text);
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.64rem;
+  resize: vertical;
+}
+
+/* The honesty line. Nothing recorded in this surface is a controlled record,
+   and the panel has to say so where the record is made, not in a tooltip. */
+.st-record__note {
+  margin: 0.5rem 0 0;
+  font-size: 0.68rem;
+  line-height: 1.5;
+  color: var(--st-text-faint);
 }
 
 .st-find__head {
@@ -1347,20 +1759,6 @@
   display: inline-flex;
   align-items: center;
   gap: 0.28rem;
-}
-
-.st-find__staletag {
-  display: inline-block;
-  margin-top: 0.5rem;
-  font-family: var(--font-mono), ui-monospace, monospace;
-  font-size: 0.6rem;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--st-text-faint);
-  border: 1px dashed var(--st-text-faint);
-  border-radius: 3px;
-  padding: 0.08rem 0.35rem;
 }
 
 /* --- assistant ----------------------------------------------------------- */

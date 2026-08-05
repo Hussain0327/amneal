@@ -89,9 +89,21 @@ interface DocBlockProps {
   findings: Finding[];
   activeFindingId: string | null;
   tracked: boolean;
+  /** 1-based position and total, for a name that does not change as you type. */
+  position: number;
+  total: number;
   onEditBlock: (blockId: string, text: string) => void;
   onSelectFinding: (id: string | null) => void;
 }
+
+/** What each block type is called when a screen reader announces the textbox. */
+const BLOCK_ROLE: Record<Block["type"], string> = {
+  title: "Title",
+  meta: "Header line",
+  h2: "Heading",
+  p: "Paragraph",
+  table: "Table",
+};
 
 /** Props shared by the three editable tags; only the tag itself differs. */
 type EditableProps = HTMLAttributes<HTMLElement> & {
@@ -104,11 +116,16 @@ function EditableBlock({
   findings,
   activeFindingId,
   tracked,
+  position,
+  total,
   onEditBlock,
   onSelectFinding,
 }: DocBlockProps) {
   const node = useRef<HTMLElement | null>(null);
   const written = useRef<string | null>(null);
+  // The last text this block reported upward. Anything else arriving in the
+  // model came from somewhere other than these keystrokes.
+  const emitted = useRef<string | null>(null);
   const [focused, setFocused] = useState(false);
 
   const html = useMemo(
@@ -123,21 +140,29 @@ function EditableBlock({
   }, []);
 
   // The element is written imperatively and never given React children. Setting
-  // innerHTML under a live caret collapses it to the start of the block, so a
-  // write only happens while the analyst is somewhere else; blurring is what
-  // re-applies the marks around whatever they typed.
+  // innerHTML under a live caret collapses it to the start of the block, so the
+  // block's own typing is echoed back silently; blurring is what re-applies the
+  // marks around whatever they typed.
+  //
+  // The exception is text that arrived from somewhere else -- a suggested fix
+  // being applied, a block being restored. That has to land even under a live
+  // caret, or Apply would appear to do nothing whenever the analyst happened to
+  // be standing in the block it edits.
   useEffect(() => {
     const el = node.current;
-    if (!el || focused || written.current === html) return;
+    if (!el) return;
+    const ownEcho = focused && emitted.current === block.text;
+    if (ownEcho || written.current === html) return;
     el.innerHTML = html;
     written.current = html;
-  }, [html, focused]);
+  }, [html, focused, block.text]);
 
   function handleBlur() {
     // contentEditable leaves markup of its own behind (a split <mark>, an
     // inserted <div>), and an edit that nets out to the same text produces the
     // same html. Dropping the record forces one resync from the model.
     written.current = null;
+    emitted.current = null;
     setFocused(false);
   }
 
@@ -149,8 +174,6 @@ function EditableBlock({
     if (id) onSelectFinding(id);
   };
 
-  const preview = block.text.length > 60 ? `${block.text.slice(0, 60).trimEnd()}...` : block.text;
-
   const props: EditableProps = {
     ref: attach,
     className: `st-blk st-blk--${block.type}`,
@@ -158,8 +181,23 @@ function EditableBlock({
     contentEditable: true,
     role: "textbox",
     "aria-multiline": true,
-    "aria-label": preview ? `Edit: ${preview}` : "Edit: empty block",
-    onInput: (event) => onEditBlock(block.id, event.currentTarget.textContent ?? ""),
+    // Positional, not derived from the text. A name built from the content
+    // renames the focused textbox on every keystroke, and a screen reader
+    // announces the rename over what the analyst is trying to hear.
+    "aria-label": `${BLOCK_ROLE[block.type]} ${position} of ${total}`,
+    onInput: (event) => {
+      const text = event.currentTarget.textContent ?? "";
+      emitted.current = text;
+      onEditBlock(block.id, text);
+    },
+    onKeyDown: (event) => {
+      // onInput reads textContent, which yields no separator for the <div> or
+      // <br> that contentEditable inserts on Enter -- so an accepted Enter
+      // silently welds two paragraphs together in a GMP-controlled document.
+      // There is no block-splitting model to do this properly, so it is refused
+      // rather than allowed to corrupt the text.
+      if (event.key === "Enter") event.preventDefault();
+    },
     onFocus: () => setFocused(true),
     onBlur: handleBlur,
     onClick: handleClick,
@@ -245,6 +283,8 @@ interface Props {
   activeFindingId: string | null;
   /** Show tracked-change spans. On unless a caller turns the switch off. */
   tracked?: boolean;
+  /** Honour prefers-reduced-motion when scrolling a finding into view. */
+  reduceMotion?: boolean;
   onEditBlock: (blockId: string, text: string) => void;
   onSelectFinding: (id: string | null) => void;
   onSelectionChange: (s: StudioSelection | null) => void;
@@ -255,6 +295,7 @@ export function DocumentCanvas({
   scrollRef,
   activeFindingId,
   tracked = true,
+  reduceMotion = false,
   onEditBlock,
   onSelectFinding,
   onSelectionChange,
@@ -317,14 +358,22 @@ export function DocumentCanvas({
   useEffect(() => {
     const root = scrollRef.current;
     if (!activeFindingId || !root) return;
-    const target = Array.from(root.querySelectorAll("[data-finding-id]")).find(
-      (el) => el.getAttribute("data-finding-id") === activeFindingId,
-    );
+    const finding = doc.findings.find((f) => f.id === activeFindingId);
+    const target =
+      Array.from(root.querySelectorAll("[data-finding-id]")).find(
+        (el) => el.getAttribute("data-finding-id") === activeFindingId,
+      ) ??
+      // A recorded or replaced finding has no mark left in the text. Falling back
+      // to its block is what stops a click on it scrolling silently nowhere.
+      (finding ? root.querySelector(`[data-block-id="${CSS.escape(finding.blockId)}"]`) : null);
+
     // jsdom has no layout and so no scrollIntoView.
     if (target && typeof target.scrollIntoView === "function") {
-      target.scrollIntoView({ block: "center", behavior: "smooth" });
+      // An explicit "smooth" overrides the element's computed scroll-behavior, so
+      // the reduced-motion rule in the stylesheet cannot help here on its own.
+      target.scrollIntoView({ block: "center", behavior: reduceMotion ? "auto" : "smooth" });
     }
-  }, [activeFindingId, scrollRef]);
+  }, [activeFindingId, doc.findings, reduceMotion, scrollRef]);
 
   return (
     <div className="st-scroll" ref={scrollRef}>
@@ -341,13 +390,15 @@ export function DocumentCanvas({
       {/* Keyed on the document: block ids are only unique within one, and a
           stale innerHTML would otherwise survive a switch. */}
       <article className="st-page" key={doc.id}>
-        {doc.blocks.map((block) => (
+        {doc.blocks.map((block, i) => (
           <DocBlock
             key={block.id}
             block={block}
             findings={doc.findings}
             activeFindingId={activeFindingId}
             tracked={tracked}
+            position={i + 1}
+            total={doc.blocks.length}
             onEditBlock={onEditBlock}
             onSelectFinding={onSelectFinding}
           />
