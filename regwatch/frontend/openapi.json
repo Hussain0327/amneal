@@ -494,13 +494,18 @@
       },
       "HealthEmbeddingComponent": {
         "properties": {
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
           "provider": {
             "title": "Provider",
             "type": "string"
           }
         },
         "required": [
-          "provider"
+          "provider",
+          "profile"
         ],
         "title": "HealthEmbeddingComponent",
         "type": "object"

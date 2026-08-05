@@ -67,10 +67,85 @@ def test_health() -> None:
     assert components["vector_store"]["ok"] is True
     assert components["vector_store"]["corpus_count"] == 0
     assert components["llm"] == {"provider": "echo", "key_present": True}
-    assert components["embedding"] == {"provider": "echo"}
+    assert components["embedding"] == {"provider": "echo", "profile": "legacy"}
     assert body["allow_test_providers"] is True  # conftest opt-in
     assert any("empty" in w for w in body["warnings"])
     assert any("echo" in w for w in body["warnings"])
+
+
+def test_health_reports_the_profile_arm_not_the_legacy_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The prod bug this fixes: /health answered "openai" while queries were in
+    fact embedded by the Databricks-hosted profile model.
+
+    Retrieval branches on ACTIVE_EMBEDDING_PROFILE and only the "legacy" arm
+    ever reads EMBEDDING_PROVIDER, so with a profile active the raw setting is
+    inert -- and reporting it inverts the residency answer an operator came for.
+    """
+    import config.settings as cs
+
+    from regwatch.api import main as api_main
+
+    profile_id = "ep_" + "a" * 32
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
+    monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", profile_id)
+    # Non-echo LLM so the echo warning below can only come from the embedding
+    # side -- otherwise the LLM arm masks what this test is checking.
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    cs.get_settings.cache_clear()
+
+    class _Profile:
+        provider = "qwen3"
+
+    monkeypatch.setattr(
+        "regwatch.store.embedding_profiles.get_embedding_profile",
+        lambda _pid: _Profile(),
+    )
+    try:
+        body = _open().get("/health").json()
+        assert body["components"]["embedding"] == {"provider": "qwen3", "profile": profile_id}
+        # The stale setting must not leak back in under any key.
+        assert "echo" not in str(body["components"]["embedding"])
+        # EMBEDDING_PROVIDER=echo is INERT while a profile is active, so it must
+        # not raise the degraded-quality warning about a provider nothing uses.
+        assert not any("echo" in w for w in body["warnings"])
+    finally:
+        cs.get_settings.cache_clear()
+        assert api_main is not None
+
+
+def test_health_embedding_component_degrades_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unresolvable profile must degrade to a reported value, never a 500.
+
+    Note the probe still 503s here, but NOT because of this component: an
+    unknown profile also breaks the corpus count, and vector_store is one of the
+    two components that legitimately flip the status. The point of this test is
+    that the embedding lookup contributes a truthful degraded value rather than
+    propagating an exception out of the handler.
+    """
+    import config.settings as cs
+
+    profile_id = "ep_" + "b" * 32
+    monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", profile_id)
+    cs.get_settings.cache_clear()
+
+    def _boom(_pid: str) -> None:
+        raise KeyError("unknown embedding profile")
+
+    monkeypatch.setattr("regwatch.store.embedding_profiles.get_embedding_profile", _boom)
+    try:
+        r = _open().get("/health")
+        assert r.status_code in (200, 503)
+        assert r.json()["components"]["embedding"] == {
+            "provider": "unresolved",
+            "profile": profile_id,
+        }
+    finally:
+        cs.get_settings.cache_clear()
 
 
 def test_health_no_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
