@@ -123,6 +123,7 @@ def _load_gold(path: Path) -> list[GoldItem]:
                     category=str(row.get("category") or ""),
                     must_refuse=bool(row.get("must_refuse", False)),
                     must_clarify=bool(row.get("must_clarify", False)),
+                    forbidden=row.get("forbidden") or [],
                 )
             )
     return items
