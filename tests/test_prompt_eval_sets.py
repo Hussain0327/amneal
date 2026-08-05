@@ -53,7 +53,11 @@ def test_generation_prompt_manifest_is_versioned_and_hashed() -> None:
     # contract while the extraction/change prompts did not, so one shared
     # literal would hide the next divergence.
     assert {prompt_id: item["version"] for prompt_id, item in manifest.items()} == {
-        "regwatch.grounded_qa": "4",
+        # Bumped 4 -> 5 with the claims cap 10 -> 20. The schema is inside the
+        # prompt hash, so the sha256 moves on its own; the version literal is
+        # bumped deliberately because it is the only greppable cohort key an
+        # operator has when comparing two materially different answer shapes.
+        "regwatch.grounded_qa": "5",
         "regwatch.query_guidance": "1",
         "regwatch.be_extraction": "2",
         "regwatch.change_summary": "2",
@@ -86,15 +90,20 @@ def test_grounded_qa_prompt_fingerprint_includes_the_turn_schema() -> None:
     route_json["prompt"] byte-identical -- so a before/after cohort could not be
     separated in the audit trail at all.
     """
+    # Self-referential on the version: this test is about what feeds the HASH,
+    # not about which version string is current. Pinning the literal here would
+    # make an unrelated version bump look like a fingerprint regression, and
+    # the manifest test above already pins the version deliberately.
+    version = GROUNDED_QA_PROMPT.version
     with_schema = identify_prompt(
         "regwatch.grounded_qa",
-        "4",
+        version,
         GROUNDED_QA_SYSTEM,
         GROUNDED_QA_USER,
         TURN_SCHEMA_MESSAGE.content,
     )
     without_schema = identify_prompt(
-        "regwatch.grounded_qa", "4", GROUNDED_QA_SYSTEM, GROUNDED_QA_USER
+        "regwatch.grounded_qa", version, GROUNDED_QA_SYSTEM, GROUNDED_QA_USER
     )
 
     assert with_schema == GROUNDED_QA_PROMPT
