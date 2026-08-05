@@ -22,18 +22,20 @@ jobs:
     runs-on: ubuntu-latest
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      # Databricks arm for the live eval gate. Absent secrets leave these empty,
-      # which the "resolve live eval arm" step below treats as "arm not
-      # available" rather than failing the job. DATABASE_URL is deliberately NOT
-      # set here: pytest must keep using TEST_DATABASE_URL, so only the eval
-      # steps that need it declare it.
+      # Only what the "resolve live eval arm" step needs to decide which arm is
+      # available. Every one of these is a string where empty means "not
+      # configured", so an absent secret cannot change how pytest behaves.
+      #
+      # The typed provider settings (model names, dimension) are deliberately
+      # NOT here: an unset `vars.X` renders as the EMPTY STRING, and an empty
+      # QWEN_EMBEDDING_DIMENSION at job scope failed int parsing while pydantic
+      # was importing, which broke conftest and every test with an error that
+      # named none of this. They are declared on the eval steps that use them.
+      #
+      # DATABASE_URL is likewise absent on purpose: pytest must keep using
+      # TEST_DATABASE_URL.
       QWEN_EMBEDDING_BASE_URL: ${{ secrets.QWEN_EMBEDDING_BASE_URL }}
       QWEN_EMBEDDING_TOKEN: ${{ secrets.QWEN_EMBEDDING_TOKEN }}
-      QWEN_EMBEDDING_MODEL: ${{ vars.QWEN_EMBEDDING_MODEL }}
-      QWEN_EMBEDDING_DIMENSION: ${{ vars.QWEN_EMBEDDING_DIMENSION }}
-      DATABRICKS_LLM_BASE_URL: ${{ secrets.DATABRICKS_LLM_BASE_URL }}
-      DATABRICKS_LLM_TOKEN: ${{ secrets.DATABRICKS_LLM_TOKEN }}
-      DATABRICKS_LLM_MODEL: ${{ vars.DATABRICKS_LLM_MODEL }}
       # A repo VARIABLE, not a secret, and deliberately stable: it is part of
       # the embedding-profile fingerprint, so a per-run value would mint a new
       # profile id every build and break the eval_run trend line.
@@ -144,6 +146,10 @@ jobs:
         if: steps.eval_arm.outputs.arm == 'databricks'
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          # Both feed the profile fingerprint. Left unset, settings' committed
+          # defaults apply; an empty value is treated as unset, not as "".
+          QWEN_EMBEDDING_MODEL: ${{ vars.QWEN_EMBEDDING_MODEL }}
+          QWEN_EMBEDDING_DIMENSION: ${{ vars.QWEN_EMBEDDING_DIMENSION }}
         run: |
           set -euo pipefail
           PROFILE_ID=$(uv run regwatch embedding-profile-register \
@@ -155,6 +161,8 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
           EMBEDDING_PROVIDER: qwen3
+          QWEN_EMBEDDING_MODEL: ${{ vars.QWEN_EMBEDDING_MODEL }}
+          QWEN_EMBEDDING_DIMENSION: ${{ vars.QWEN_EMBEDDING_DIMENSION }}
         # ACTIVE_EMBEDDING_PROFILE is exported here rather than in the `env:`
         # block above because EVAL_PROFILE_ID is produced by a previous step via
         # $GITHUB_ENV; exporting it in the shell keeps the dependency obvious.
@@ -176,7 +184,12 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
           EMBEDDING_PROVIDER: qwen3
+          QWEN_EMBEDDING_MODEL: ${{ vars.QWEN_EMBEDDING_MODEL }}
+          QWEN_EMBEDDING_DIMENSION: ${{ vars.QWEN_EMBEDDING_DIMENSION }}
           LLM_PROVIDER: databricks
+          DATABRICKS_LLM_BASE_URL: ${{ secrets.DATABRICKS_LLM_BASE_URL }}
+          DATABRICKS_LLM_TOKEN: ${{ secrets.DATABRICKS_LLM_TOKEN }}
+          DATABRICKS_LLM_MODEL: ${{ vars.DATABRICKS_LLM_MODEL }}
         run: |
           uv run python -m regwatch.eval.run_eval \
             --profile "$EVAL_PROFILE_ID" --check-thresholds --out eval-scorecard.json
