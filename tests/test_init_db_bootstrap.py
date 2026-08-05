@@ -23,10 +23,12 @@ import os
 import re
 
 import pytest
+from config.settings import get_settings
 from sqlalchemy import text
 from typer.testing import CliRunner
 
 from regwatch.cli import app
+from regwatch.store.embedding_profiles import EmbeddingProfileSpec
 
 TEST_DATABASE_URL = (os.environ.get("TEST_DATABASE_URL") or "").strip()
 
@@ -35,6 +37,26 @@ runner = CliRunner()
 # ep_ + sha256[:32]; the register command's --id-only output must be exactly this
 # and nothing else, because CI captures it with PROFILE_ID=$(...).
 _PROFILE_ID_RE = re.compile(r"^ep_[0-9a-f]{32}$")
+
+
+def _ci_spec() -> EmbeddingProfileSpec:
+    """The spec CI registers, built from committed defaults."""
+    from regwatch.process.chunker import CHUNKING_VERSION
+    from regwatch.process.embedder import QWEN3_DOCUMENT_PREPROCESSING_VERSION
+
+    settings = get_settings()
+    return EmbeddingProfileSpec(
+        provider="qwen3",
+        model=settings.qwen_embedding_model,
+        revision=settings.qwen_embedding_revision,
+        dimension=settings.qwen_embedding_dimension,
+        dtype="float32",
+        normalization="l2",
+        query_instruction_version=settings.qwen_embedding_query_instruction_version,
+        preprocessing_version=QWEN3_DOCUMENT_PREPROCESSING_VERSION,
+        chunking_version=CHUNKING_VERSION,
+        serving_runtime_version="databricks-model-service-2026-07-29",
+    )
 
 
 def test_bootstrap_skips_the_assert_without_suppressing_it_for_later_callers(
@@ -158,6 +180,54 @@ def test_register_succeeds_with_the_default_provider(monkeypatch: pytest.MonkeyP
         )
         assert again.exit_code == 0, again.output
         assert again.stdout.strip() == printed
+    finally:
+        cs.get_settings.cache_clear()
+        db.reset_for_tests()
+        pgvector_store.reset_for_tests()
+
+
+@pytest.mark.skipif(not TEST_DATABASE_URL, reason="TEST_DATABASE_URL is not set")
+def test_empty_profile_with_a_built_index_is_activatable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The invariant CI's step ordering rests on.
+
+    `regwatch seed` runs with the profile ACTIVE, so its init_db() calls
+    assert_profile_ready_for_activation -- which wants a valid HNSW index. CI
+    therefore builds the index BEFORE seeding, against an empty corpus. That is
+    only sound because coverage of 0/0 counts as complete
+    (ProfileEmbeddingCoverage.complete is total == embedded).
+
+    Tighten `complete` to require total > 0 and CI breaks in the seed step with
+    an error naming coverage, three steps away from the change that caused it.
+    This test fails at the actual cause instead.
+    """
+    import config.settings as cs
+
+    from regwatch.store import db, pgvector_store
+    from regwatch.store.embedding_profiles import assert_profile_ready_for_activation
+    from regwatch.store.vector_store import ensure_profile_hnsw_index, register_embedding_profile
+
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "local-bge-small")
+    monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", "legacy")
+    cs.get_settings.cache_clear()
+    db.reset_for_tests()
+    pgvector_store.reset_for_tests()
+
+    engine = db.get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+    try:
+        db.init_db(assert_provider=False)
+        profile = register_embedding_profile(_ci_spec())
+        # concurrently=False: a CONCURRENTLY build cannot run inside the
+        # transaction this test's engine hands out, and the distinction is
+        # irrelevant to what is being asserted.
+        ensure_profile_hnsw_index(profile.profile_id, concurrently=False)
+
+        # No chunks exist. This must still pass, or CI's index-before-seed
+        # ordering is unsound.
+        assert_profile_ready_for_activation(profile.profile_id)
     finally:
         cs.get_settings.cache_clear()
         db.reset_for_tests()
