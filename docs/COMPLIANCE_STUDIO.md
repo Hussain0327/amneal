@@ -1,0 +1,237 @@
+# Compliance Studio (`/studio`)
+
+> A workbench for reviewing the company's **own** CMC documents against ICH, USP,
+> 21 CFR and internal SOPs. Every other regwatch surface reads *public FDA*
+> material; this one reads *our* drafts. That is the difference that shapes it.
+>
+> Status: **UI and domain model only.** The document service, the compliance
+> pipeline and the assistant are fixtures behind typed seams. Nothing here talks
+> to the API yet, and nothing survives a page refresh.
+>
+> Related: [ARCHITECTURE.md](ARCHITECTURE.md) §3 (product surfaces),
+> [ROADMAP.md](ROADMAP.md) (what is queued next).
+
+---
+
+## 1. What we are building towards
+
+A reviewer opens the studio and can, in one place:
+
+- **Find the document.** The left rail is the document repository for a
+  product — the CTD modules, the specifications, the method SOPs.
+- **Read it, or have it summarized.** The middle is the document itself. Select
+  any passage and ask the assistant to summarize or explain it, with citations.
+- **Check it for compliance.** Run the document against the guidelines and get
+  findings anchored to the exact text that triggered them.
+- **See whether it has gone out of date.** Both senses: stale relative to the
+  analyst's own edits, and stale relative to the guidance it was written
+  against.
+
+The last of those is two different features wearing one word, and only the first
+is built. See §6.
+
+**Where this is heading (owner direction, 2026-08-05).** The product should end
+up as two surfaces: Ask for conversation, and Studio as the document workspace,
+with Assemble, Watch, White Paper and Deficiency folded in — generators that
+produce documents into the tree, and checks that run against documents already
+there. Nothing has moved yet, and the prerequisites are real: Studio has no
+backend, no persistence and no product scope, so it cannot receive a working
+surface until those exist. The sequencing lives in [`ROADMAP.md`](ROADMAP.md).
+
+## 2. What exists today
+
+| Piece | State |
+|---|---|
+| Repository tree, live filter, per-document check glyphs | Built, fixture-backed |
+| Document canvas: contentEditable blocks, span-anchored marks, tracked changes | Built |
+| Compliance findings anchored to `(blockId, start, end)` | Built, fixture-backed |
+| Suggested fix, apply, restore | Built (3 of 11 fixture findings carry one) |
+| Disposition record: fixed / fixed elsewhere / not applicable / disputed | Built |
+| Compliance spine (the closure gauge) | Built |
+| Cited assistant panel | Built, canned replies |
+| Upload, new folder | Disabled, needs a document service |
+| Persistence of any kind | **Not built.** Refresh destroys everything. |
+
+## 3. The anchoring idea
+
+**A finding is not a report line, it is a span of the document.**
+
+Every finding carries `(blockId, start, end)` plus the `excerpt` those offsets
+resolved to. That is what lets it highlight in place, tick the spine at its
+measured position, and be invalidated when the analyst edits the text underneath
+it. Anything that cannot be anchored is not a finding; it is a note about the
+document as a whole.
+
+`Finding.start/end` is the immutable **as-checked** anchor and is never remapped.
+`Mark.start/end` is the current render position and *is* remapped on every edit.
+Keeping those separate is what stops an edit from silently relocating a claim.
+
+## 4. The disposition loop
+
+Read a finding → apply its suggested fix → mark it fixed.
+
+A reviewer is not clearing a checklist, they are building a record. Every
+finding ends in exactly one of four dispositions, or stays open:
+
+| Disposition | Evidence required |
+|---|---|
+| **Fixed** | The diff. No words needed. |
+| **Fixed elsewhere** | Written justification — the remedy landed in a block, document or change record this finding does not point at. |
+| **Not applicable** | Written justification — the condition that puts it out of scope, and where that is documented. |
+| **Disputed** | Written justification — what the document says, and the requirement it was read against. |
+
+Records are **append-only**. Changing your mind writes a second entry; the first
+stays readable.
+
+### 4.1 The evidence gate, and why its predicate is what it is
+
+**"Fixed" is refused until the analyst has changed the text the finding points
+at.** A reviewer must not be able to assert a fix that did not happen, or the
+record is worthless.
+
+The obvious predicate for that is a "this block was edited" flag, and it does not
+work. The original `staleFindings` set such a flag on any edit anywhere in the
+block and never cleared it, which meant:
+
+- typing one character and deleting it left the flag set with the text
+  byte-identical — the gate was defeatable in two keystrokes;
+- editing an assay limit unlocked a finding about a word two sentences away.
+
+So staleness is **derived, not stored**:
+
+- `Block.checkedText` is the text as the checker last read it.
+- `changedRegion(block)` localises what moved, in `checkedText` offsets.
+- `isStale(block, finding)` is true only when that region touches
+  `[finding.start, finding.end]`, inclusive at both ends.
+
+Reverting an edit re-locks Fixed. Editing elsewhere in the block never unlocks
+it. An insertion flush to either end of the span counts, because appending an
+approver immediately after `"Version: 5.0"` is exactly how that finding gets
+fixed.
+
+The gate is deliberately strict, and **"fixed elsewhere" is the escape hatch** —
+it demands words instead of a diff rather than loosening the rule. That matters
+because two of the shipped fixture findings name a remedy that lands outside
+their own span ("or add a definitions table", "or the cross-reference"), and
+without a word for that the only way to close them would be a false
+"not applicable".
+
+### 4.2 Two baselines, and why one field cannot do both
+
+| Field | Means | Serves |
+|---|---|---|
+| `Block.original` | text when the analyst **opened** the document | tracked changes |
+| `Block.checkedText` | text when the checker last **read** the block | the evidence rule |
+
+They diverge the moment anyone edits before running a check.
+
+### 4.3 Suggested fixes
+
+A finding may carry a `suggestion` — replacement text for its own span. Applying
+it splices the text, which makes the finding stale, which unlocks Fixed.
+
+Only 3 of the 11 fixture findings carry one, and **that ratio is the point.** A
+suggestion is offered when the remedy is carried entirely in the words. It is
+withheld whenever the fix needs a fact only the analyst holds: an approver, an
+effective date, a validation report number, a sampling interval. A fabricated
+suggestion in a GMP-controlled document is worse than no suggestion.
+
+`applySuggestion` refuses unless the block is unchanged since the check *and* the
+span still holds the quoted excerpt, so the same fix can never be written twice.
+`revertBlock` restores `checkedText` and is the whole of undo.
+
+### 4.4 Re-checking never loses a judgement
+
+`applyFindings` carries records forward by finding id. A finding that comes back
+still reported after being recorded **fixed** is marked `contested` and re-opens
+with its record kept — silently dropping either side of that contradiction would
+be the audit lie. A recorded finding the checker no longer reports moves to
+`StudioDoc.closed`, because the defect is gone but the judgement that closed it
+still has to be printable.
+
+### 4.5 This is not a controlled record
+
+`FindingRecord.at` is the client clock and `by` is `"studio session"`. There is
+no server timestamp, no authenticated attribution and no electronic signature, so
+nothing recorded here is a 21 CFR Part 11 record. The panel says exactly that
+where the record is made, and the exported TSV repeats it in a provenance
+trailer. **Do not** dress this up with a real analyst name until there is a
+server behind it.
+
+## 5. The spine
+
+A 22px column carrying one tick per finding at its measured position.
+
+- **Severity is weight.** Critical is solid clay, info is a slate hairline.
+- **Disposition is width.** An open finding runs the full column; a recorded one
+  drops to a hairline across the left half only. Working a document visibly
+  closes the spine down.
+- Not encoded by fading. The `0.3` opacity previously used on stale ticks
+  measures about **1.2:1** against the panel, well under the 3:1 a non-text
+  indicator owes (WCAG 1.4.11). Width survives greyscale, 8px, protanopia and
+  deuteranopia; a fade survives none of them.
+- The **gold thread** is granted by `isSealed()` — every actionable finding
+  closed by an actual fix. A document argued down to zero shows "All findings
+  recorded" and never the seal.
+
+## 6. "Old or stale" means two different things
+
+Only the first is built, and conflating them in the UI would be a lie.
+
+1. **Stale relative to the analyst's edits.** Built. The check ran, then the text
+   under a finding changed, so the claim no longer describes the document.
+   Carried by `isStale` / `checkState: "stale"`.
+2. **Out of date relative to current FDA guidance.** *Not built.* "This
+   specification was written against ICH Q1A(R2); a revision has since
+   published." That is the Watch layer pointed at our own documents instead of
+   the pipeline, and it needs the document corpus, a guidance-version link per
+   document, and a real pipeline before it can mean anything.
+
+## 7. Deliberately not built
+
+- **Persistence.** `docs` is `useState`; a refresh destroys every disposition.
+  `localStorage` for GMP dispositions would be worse than nothing — a record with
+  no server, no audit trail and no way to reconcile two tabs. The honest fix is
+  the backend.
+- **Tables are read-only.** Cell-level offsets need an editor engine. A finding
+  anchored to a table block can therefore never be marked Fixed, only fixed
+  elsewhere / not applicable / disputed. No fixture finding does this; an API
+  might.
+- **Enter is refused inside a block.** `onInput` reads `textContent`, which
+  yields no separator for the `<div>` contentEditable inserts, so an accepted
+  Enter would silently weld two paragraphs together in a controlled document.
+  Refused until there is a block-splitting model.
+- **Risk acceptance** (`accepted` / `rejected` dispositions) needs an
+  authenticated QA role and a countersignature. Recording it here would let one
+  analyst clear a critical finding.
+- **A compliance score.** No 0-100 scale exists in CMC review and inventing one
+  presents a guess as a measurement. The panel reports a verdict, counts, and the
+  standards checked against.
+
+## 8. The contract a real backend has to meet
+
+The fixture shapes in `lib/studio-fixtures.ts` are the contract, not a sketch.
+An endpoint replacing `CHECK_RESULTS` must return findings that:
+
+- anchor to `(blockId, start, end)` in the **same block text the service handed
+  back**, with `excerpt` matching that slice (`applyFindings` recomputes it and
+  will overwrite a disagreeing one);
+- carry a stable `id` across re-checks, since records merge by id;
+- omit `suggestion` rather than invent one when the fix needs an external fact.
+
+## 9. Where the code is
+
+| Path | What |
+|---|---|
+| `app/studio/page.tsx` | container: state, F8 traversal, live region, clipboard |
+| `app/studio/studio.css` | every colour a token from `globals.css`, used verbatim |
+| `lib/studio-types.ts` | domain types + `JUSTIFICATION_MAX` |
+| `lib/studio-marks.ts` | **all** pure logic: splice, staleness, dispositions, verdict |
+| `lib/studio-fixtures.ts` | stand-in repository + `CHECK_RESULTS` + canned assistant |
+| `components/studio/*.tsx` | tree, canvas, spine, findings panel, assistant, rails |
+| `test/studioMarks.test.ts` | 109 tests on the pure layer |
+| `test/StudioPage.test.tsx` | 27 page tests, including the whole loop |
+
+Keyboard: `F8` / `Shift+F8` move between open findings, behind visible
+Previous/Next buttons. A letter or `Alt+Arrow` would collide with typing in the
+contentEditable document.

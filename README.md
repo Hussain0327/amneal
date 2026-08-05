@@ -18,7 +18,8 @@ never acts on its own — a person makes every regulatory decision.
 
 ## What it does
 
-Four surfaces, one shared "product under review":
+Five surfaces share one "product under review". A sixth, the Compliance Studio,
+sits apart from them and is described below.
 
 - **Ask** — Plain-language Q&A over the guidance corpus, as a cited chat. Every
   claim carries an inline `[source, p.N]` citation you can click to read the
@@ -37,10 +38,28 @@ Four surfaces, one shared "product under review":
   locator + when it was fetched). Cells the system can't determine
   deterministically — patents, BE strategy, every required-studies judgment —
   are left for an analyst with the evidence attached, never auto-answered.
+- **Deficiency** — Analyze a submission for the deficiencies an FDA reviewer is
+  likely to raise, with the evidence behind each one.
 
-All four share one **current product**, set from the scope-bar picker, a Watch
+All five share one **current product**, set from the scope-bar picker, a Watch
 row, or a White Paper run. The product is held in the URL (`?rp=&appl=`) so a
 view is shareable and survives reload.
+
+### Compliance Studio (`/studio`)
+
+Every surface above reads **public FDA material**. The Compliance Studio reads
+**our own drafts**: an IDE-style workbench where a reviewer opens a CMC document,
+reads it or has the assistant summarize a passage, runs it against ICH / USP /
+21 CFR / internal SOPs, and records what they decided about each finding.
+
+A finding is not a report line, it is a span of the document — so it highlights
+in place, and editing the text underneath it invalidates the claim. "Fixed"
+cannot be recorded until the anchored text has actually changed.
+
+It sits outside the shared shell (it takes the whole viewport and has no product
+scope bar yet). **It is UI and domain model only**: the document service, the
+compliance pipeline and the assistant are fixtures behind typed seams, and
+nothing survives a refresh. See [docs/COMPLIANCE_STUDIO.md](docs/COMPLIANCE_STUDIO.md).
 
 ## The core rule: cite or refuse
 
@@ -205,8 +224,8 @@ flowchart LR
 | Layer | Choice |
 |---|---|
 | Edge / control plane | **Go** proxy (`go/`, module `github.com/Hussain0327/amneal/go`) holds the public port. Since the step-4 polyglot cutover it serves auth, sessions, feedback, settings, and product CRUD natively (sqlc over the same Postgres) and applies rate limiting + `Fly-Client-IP` handling; since the step-5 cutover it also orchestrates `POST /query` natively (persists the audit row, calls Python's internal RAG compute endpoint), and relays the remaining endpoints to Python. Migration plan: [`docs/POLYGLOT_TARGET_2026-07-10.md`](docs/POLYGLOT_TARGET_2026-07-10.md) |
-| Backend (RAG core) | Python 3.11+ (managed by `uv`), FastAPI — the stateless retrieval / synthesis / refusal core behind the proxy: Ask, Assemble, White Paper, Watch, and query orchestration |
-| Frontend | Next.js 16 (App Router, TypeScript) + React 18 in `regwatch/frontend/`. All four surfaces render in one `(shell)` route group — one sidebar, one product-scope bar. Talks to the API through a same-origin `/api` proxy |
+| Backend (RAG core) | Python 3.11+ (managed by `uv`), FastAPI — the stateless retrieval / synthesis / refusal core behind the proxy: Ask, Assemble, White Paper, Watch, Deficiency, and query orchestration |
+| Frontend | Next.js 16 (App Router, TypeScript) + React 18 in `regwatch/frontend/`. The five scoped surfaces render in one `(shell)` route group — one sidebar, one product-scope bar; the Compliance Studio (`/studio`) sits outside it and is fixture-backed. Talks to the API through a same-origin `/api` proxy |
 | LLM | **Databricks-hosted `gpt-oss-20b`** in prod (`LLM_PROVIDER=databricks`): one small open-weight model on the Model Serving endpoint `workspace.default.regwatch` serves ALL roles (router, synthesizer, extractor), keeping analyst questions inside the company tenant (D1). A runtime served-model guard (`D1_ENFORCED` + `D1_ALLOWED_LLM_MODELS`) refuses any response served by an off-perimeter model once armed. Pluggable behind `LLMProvider`: `openai` (Responses API; router `gpt-5-nano`, synthesizer + extractor `gpt-5.4-nano`) is the tested rollback path; `anthropic` and a test-only `echo` also ship |
 | Embeddings | Pluggable AND profile-versioned. Prod today: OpenAI `text-embedding-3-small` (1536-dim, matching the `vector(1536)` chunk column) - the last D1 gap, since every analyst question is embedded before retrieval. Staged replacement: Databricks-hosted `Qwen3-Embedding-0.6B` (1024-dim, endpoint `workspace.default.regwatch-embed`) via the embedding-profiles machinery (`ACTIVE_EMBEDDING_PROFILE`; blue/green re-embed into a named profile, never in-place). Local `BAAI/bge-small-en-v1.5` (384-dim) remains for offline tooling only -- the K6 dim assert refuses it against the app datastore |
 | Vector store | **pgvector** in the same Postgres, everywhere (Supabase in prod, a disposable local/CI Postgres otherwise). No other vector backend since R5 |
@@ -364,7 +383,7 @@ src/regwatch/
   common/                 logging, audit, citations, text_normalize, conversation, ratelimit
 migrations/               Alembic migration history (the single schema authority)
 go/                       Go proxy: public edge + native auth/sessions/feedback/settings/products + native /query orchestration (sqlc store)
-regwatch/frontend/        Next.js (App Router, TS) UI — one (shell) for all four surfaces
+regwatch/frontend/        Next.js (App Router, TS) UI — one (shell) for the five scoped surfaces, plus /studio outside it
 tests/                    smoke, invariants, eval gate, per-module
 tests_contract/           cross-service contract suite: real Go proxy + uvicorn + Postgres
 ```

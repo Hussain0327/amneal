@@ -120,7 +120,7 @@ src/regwatch/
 
 regwatch/
   backend/                 backend workspace docs; source stays in src/regwatch
-  frontend/                Next.js (App Router, TypeScript) UI — all four surfaces (Ask / Assemble / Watch / White Paper) in one (shell) route group
+  frontend/                Next.js (App Router, TypeScript) UI — five scoped surfaces in one (shell) route group, plus /studio outside it
 tests/                     unit, integration, invariant, eval-gate tests
 tests_contract/            cross-service contract suite over real Go + uvicorn + Postgres
 docs/                      specs, decisions, plans, onboarding docs
@@ -458,12 +458,14 @@ per source IP. CORS is allow-listed with credentials via
 ### `regwatch/frontend/` (Next.js, TypeScript)
 
 The production UI is the Next.js App Router app in `regwatch/frontend/`. All
-**four surfaces** (Ask / Assemble / Watch / White Paper) render inside one
-`(shell)` route-group layout — one sidebar, one set of design tokens, and a
-shared **"Under review" product-scope bar** across all four surfaces.
+**five scoped surfaces** (Ask / Assemble / Watch / White Paper / Deficiency)
+render inside one `(shell)` route-group layout — one sidebar, one set of design
+tokens, and a shared **"Under review" product-scope bar** across all of them.
+The **Compliance Studio** (`/studio`) sits outside that shell: it reads our own
+CMC drafts rather than public FDA material, and is fixture-backed.
 
 - The current product is **URL-scoped** (`?rp=&appl=`) so it is shareable and
-  survives reload; all four surfaces read it.
+  survives reload; all five shell surfaces read it.
 - Product scope is settable from three places — the bar's resolve-backed
   picker, a successful White Paper populate, and a Watch row — each writing the
   canonical `{normalized_name, six-digit application number}`.

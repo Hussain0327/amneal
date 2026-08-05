@@ -10,8 +10,8 @@ Status: v1.0, build-ready. Rename the codename freely.
 >
 > - **UI:** now a **Next.js** App Router app in `regwatch/frontend/` — Streamlit is
 >   fully retired (the `ui/app.py` and "Streamlit / three pages" references below
->   no longer reflect reality). The four surfaces (Ask, Assemble, Watch, White
->   Paper) render inside one unified shell with a URL-scoped CurrentProduct
+>   no longer reflect reality). The five surfaces (Ask, Assemble, Watch, White
+>   Paper, Deficiency) render inside one unified shell with a URL-scoped CurrentProduct
 >   (`?rp=&appl=`) and a shared "Under review" product-scope bar. **Ask** is a
 >   cited conversational chat (citation chips, clarify pills, bottom-pinned
 >   composer), not the editorial/three-page layout described below.

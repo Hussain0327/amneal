@@ -86,15 +86,17 @@ Each item notes where it lives in the tree so the work is actionable cold.
 - **Where:** Next.js App Router UI at [`regwatch/frontend/`](../regwatch/frontend/)
   (Streamlit fully retired); Python backend source remains
   [`src/regwatch/`](../src/regwatch/).
-- **Now in place:** all four surfaces — Ask, Assemble, Watch, White Paper —
-  render inside one App Router `(shell)` route group with one sidebar and one
-  set of design tokens (commit 2720f1b). A URL-scoped `CurrentProduct`
-  (`?rp=&appl=`) is shareable, survives reload, and is read by all four
-  surfaces. Ask is rebuilt as a cited conversational chat (right-aligned user
+- **Now in place:** the scoped surfaces — Ask, Assemble, Watch, White Paper,
+  and since 4600441 Deficiency — render inside one App Router `(shell)` route
+  group with one sidebar and one set of design tokens (commit 2720f1b). A
+  URL-scoped `CurrentProduct` (`?rp=&appl=`) is shareable, survives reload, and
+  is read by all of them. The Compliance Studio (`/studio`, 639f0a3) sits
+  outside the shell and is **not** production-relevant yet: it is fixture-backed
+  with no endpoint and no persistence. Ask is rebuilt as a cited conversational chat (right-aligned user
   bubbles, gold RW avatar, citation chips that link to FDA sources with full
   snippets behind a Sources disclosure, clarify option pills, a bottom-pinned
   composer, Enter-to-send — commit f30eaef). An "Under review" product-scope
-  bar runs across all four surfaces as the front-door setter via a resolve-
+  bar runs across all five scoped surfaces as the front-door setter via a resolve-
   backed picker (commits f30eaef, c5e7f93). Plus: login, per-user sessions,
   same-origin `/api` proxying, Sentry opt-in, and frontend CI (`npm ci`, lint,
   build, plus a frontend docker build). The Vercel + Fly/Railway deploy path is

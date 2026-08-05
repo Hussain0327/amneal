@@ -3,9 +3,12 @@ import type { Metadata } from "next";
 import "./studio.css";
 
 // The studio sits outside the (shell) group on purpose: it takes the whole
-// viewport and runs its own dark token set, so it must not inherit the
-// parchment sidebar or the canvas padding. Auth is still enforced upstream by
-// <AuthProvider> in the root layout.
+// viewport, so it must not inherit the sidebar or the canvas padding. It is set
+// in the same parchment palette as the rest of the app -- every colour in
+// studio.css is a token from globals.css, used verbatim -- and it carries no
+// product scope bar, which is the gap to close before it can hold documents for
+// "the product under review". Auth is still enforced upstream by <AuthProvider>
+// in the root layout.
 
 export const metadata: Metadata = {
   title: "Compliance Studio | Amneal REGWATCH",

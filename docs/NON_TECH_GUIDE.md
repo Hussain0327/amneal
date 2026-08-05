@@ -293,8 +293,10 @@ the code behaves the same way in production as it does in testing.
 
 ## How The Web App Is Organized
 
-The web app (built with Next.js) puts all four surfaces — Ask, Assemble, Watch,
-and White Paper — inside one shell, with a single sidebar and a shared design.
+The web app (built with Next.js) puts five surfaces — Ask, Assemble, Watch,
+White Paper, and Deficiency — inside one shell, with a single sidebar and a
+shared design. A sixth, the Compliance Studio, opens on its own full screen and
+is described at the end of this section.
 
 A few things to know as a user:
 
@@ -311,6 +313,41 @@ A few things to know as a user:
   the White Paper (after a successful build) or from a Watch row.
 - The picker is backed by a deterministic resolver. If your product can't be
   matched to a single FDA application, it declines rather than guessing.
+
+### The Compliance Studio
+
+Everything above reads **public FDA material**. The Compliance Studio is the one
+place that reads **our own draft documents** instead.
+
+It looks like a document editor. Your documents are listed on the left, the one
+you are reading fills the middle, and two panels slide in from the right: the
+compliance findings, and an assistant you can ask about any passage you select.
+
+What a reviewer does there:
+
+1. Open a CMC document and read it, or select a passage and ask the assistant to
+   summarize or explain it.
+2. Run the compliance check. Findings come back attached to the exact sentence
+   that triggered them, highlighted in the text rather than listed away from it.
+3. Fix each one, and record what you decided: **Fixed**, **Fixed elsewhere**,
+   **Not applicable**, or **Disputed**. The last three ask you to write down why.
+4. Copy the resulting record out to paste into the comment-resolution log.
+
+Two things are deliberate and worth knowing:
+
+- **You cannot mark something "Fixed" until you have actually changed the text
+  it points at.** If you have not edited it, the button explains why it is
+  unavailable and offers "Fixed elsewhere" instead, which asks where the fix
+  landed. This is so the record cannot claim a fix that never happened.
+- **What you record here is a working note, not a controlled record.** There is
+  no electronic signature behind it and the timestamp comes from your own
+  computer. The panel says so, and the exported record repeats it. It is meant to
+  be copied into a system that *is* controlled.
+
+**It is a working prototype.** The documents in it are samples, the compliance
+check is a stand-in rather than a real analysis, and **nothing is saved** — close
+the tab and your work is gone. It is there to agree on how the tool should feel
+before the machinery behind it is built.
 
 ## Important Current Limitations
 
