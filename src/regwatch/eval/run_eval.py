@@ -120,6 +120,7 @@ def _load_gold(path: Path) -> list[GoldItem]:
                     question=row["question"],
                     expected_sources=row.get("expected_sources") or [],
                     expected_facts=row.get("expected_facts") or [],
+                    category=str(row.get("category") or ""),
                     must_refuse=bool(row.get("must_refuse", False)),
                     must_clarify=bool(row.get("must_clarify", False)),
                 )
@@ -158,6 +159,33 @@ def _print_scorecard(sc: Scorecard) -> None:
         f"refused_incorrectly={sc.refused_incorrectly}  "
         f"cited_ungrounded={sc.cited_ungrounded}"
     )
+    if sc.by_category:
+        # The aggregate says quality moved; this says where. A re-chunk that
+        # regresses only table questions is invisible in the headline number
+        # until the table category is large enough to drag it, by which point
+        # the cause is much harder to attribute.
+        breakdown = Table(title="by category")
+        breakdown.add_column("category", style="bold")
+        breakdown.add_column("n", justify="right")
+        breakdown.add_column("recall", justify="right")
+        breakdown.add_column("mrr", justify="right")
+        breakdown.add_column("cite prec", justify="right")
+        breakdown.add_column("decision", justify="right")
+        for cat in sorted(sc.by_category):
+            row = sc.by_category[cat]
+
+            def _fmt(key: str, r: dict[str, float] = row) -> str:
+                return f"{r[key]:.3f}" if key in r else "—"
+
+            breakdown.add_row(
+                cat,
+                f"{int(row['n'])}",
+                _fmt("recall_at_k"),
+                _fmt("mrr"),
+                _fmt("citation_precision"),
+                _fmt("decision_accuracy"),
+            )
+        console.print(breakdown)
     if sc.skipped:
         # Loud, explicit — never a silent pass. These items asserted multi-form
         # clarify behavior on a product the seeded corpus does not contain.
@@ -188,6 +216,26 @@ def _print_fingerprint(fp: run_fingerprint.RunFingerprint) -> None:
             "[yellow]working tree has uncommitted tracked changes: this run is "
             "not reproducible from its commit alone[/yellow]"
         )
+
+
+def _verify_gold(items: list[GoldItem]) -> None:
+    """Refuse to score a gold set that disagrees with the corpus.
+
+    A scorecard produced against mis-pinned expectations is not evidence, it is
+    noise wearing a number. Verifying BEFORE the run also means the failure costs
+    no LLM calls. See eval/verify_gold.py for the 25%-defect-rate incident that
+    motivated this.
+    """
+    from regwatch.eval.verify_gold import verify_items
+
+    defects = verify_items(items)
+    if not defects:
+        return
+    console = Console()
+    console.print(f"[red]gold set does not match the corpus ({len(defects)} defect(s)):[/red]")
+    for defect in defects:
+        console.print(f"  [red]-[/red] {defect}")
+    raise SystemExit(2)
 
 
 def _persist(
@@ -277,6 +325,7 @@ def run(
         return
 
     items = _load_gold(gold)
+    _verify_gold(items)
     # Built before the run so the artifact describes the configuration the
     # questions actually executed under, not one a later flip could rewrite.
     fingerprint = run_fingerprint.build(profile, THRESHOLDS)

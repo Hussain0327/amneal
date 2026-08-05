@@ -35,12 +35,41 @@ from regwatch.common.citations import has_citation, strip_sources_trailer
 
 _SENT_RE = re.compile(r"(?<=[.!?])\s+")
 
+# The question kinds the gold set is stratified across. Canonical list lives here
+# so the loader, the reporting breakdown and the integrity gate cannot drift.
+#
+# Stratified rather than sampled in proportion to query volume: the categories
+# that break quietly (an exception clause dropped from a chunk, a superseded
+# version bleeding into an answer) are rare in real traffic and catastrophic in
+# a regulatory answer, so they are deliberately over-represented.
+#
+# "historical_comparison" is deliberately ABSENT. It is untestable on any corpus,
+# not merely on the CI seed: ingest deletes a document's superseded chunks on every
+# revision (pipeline._cleanup_stale_chunks), and production measures 0 of 5,494
+# chunks sitting on a superseded version. There is no retrievable evidence of a
+# prior version to compare against, so any row in that bucket would silently score
+# as a refusal. The current-version invariant it would have tested is covered
+# directly, as a synthetic fixture, by tests/test_current_version_retrieval.py.
+GOLD_CATEGORIES = (
+    "current_version",
+    "exact_identifier",
+    "table",
+    "exception",
+    "refusal",
+    "clarification",
+    "duplicate_boilerplate",
+)
+
 
 @dataclass
 class GoldItem:
     question: str
     expected_sources: list[dict[str, Any]]
     expected_facts: list[str] = field(default_factory=list)
+    # Which failure mode this item exists to catch. Empty is tolerated by the
+    # loader (a malformed asset should fail on shape, not on policy) and
+    # rejected by tests/test_gold_set_integrity.py, which owns the policy.
+    category: str = ""
     must_refuse: bool = False
     # A must_clarify item is correct iff the system asks (status "clarify") rather
     # than guessing — e.g. a multi-form drug that must not blend dosage forms. It
@@ -67,6 +96,11 @@ class Scorecard:
     # the denominator with a notice rather than counted as a wrong decision. Never
     # a silent pass — the offline gate still hard-gates the clarify behavior.
     skipped: int = 0
+    # Per-category breakdown. An aggregate says quality moved; only this says
+    # WHERE, and that is the difference between "the re-chunk regressed" and
+    # "the re-chunk regressed table questions specifically". Categories absent
+    # from the gold set are absent here rather than reported as zero.
+    by_category: dict[str, dict[str, float]] = field(default_factory=dict)
     details: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -134,9 +168,17 @@ def faithfulness(answer_text: str) -> float:
     return cited / len(sentences)
 
 
-def _normalize_for_fact(text: str) -> str:
+def normalize_for_fact(text: str) -> str:
     """Lowercase, de-hyphenate, collapse whitespace — tolerant matching so
-    'single-dose' matches 'single dose' and casing/spacing never causes a miss."""
+    'single-dose' matches 'single dose' and casing/spacing never causes a miss.
+
+    PUBLIC because eval/verify_gold.py must apply the IDENTICAL rule when it
+    checks that an expected_fact is present in its cited evidence. A verifier
+    stricter than the scorer rejects rows that would have scored fine (measured:
+    a fact of "non smoking" against text reading "non-smoking"); a looser one
+    admits rows the scorer will fail. Either drift is a silent trap, so there is
+    exactly one implementation.
+    """
     return re.sub(r"\s+", " ", (text or "").lower().replace("-", " ")).strip()
 
 
@@ -149,8 +191,8 @@ def fact_recall(answer_text: str, expected_facts: list[str]) -> float:
     """
     if not expected_facts:
         return 1.0
-    hay = _normalize_for_fact(answer_text)
-    matched = sum(1 for f in expected_facts if _normalize_for_fact(f) in hay)
+    hay = normalize_for_fact(answer_text)
+    matched = sum(1 for f in expected_facts if normalize_for_fact(f) in hay)
     return matched / len(expected_facts)
 
 
@@ -308,6 +350,12 @@ def evaluate(
             }
         )
 
+    # Every branch above appends exactly one details entry per item, so the two
+    # lists are positionally aligned. Stamping the category here (rather than in
+    # five separate append sites) keeps that invariant in one place.
+    for it, detail in zip(items, details, strict=True):
+        detail["category"] = it.category
+
     n = len(items)
     decision_expected = sum(1 for it in items if it.must_refuse or it.must_clarify)
     # Denominate content metrics over ALL answerable items (those that should be
@@ -339,5 +387,47 @@ def evaluate(
         refused_incorrectly=refused_incorrectly,
         cited_ungrounded=cited_ungrounded,
         skipped=skipped,
+        by_category=_by_category(items, details),
         details=details,
     )
+
+
+def _by_category(
+    items: list[GoldItem],
+    details: list[dict[str, Any]],
+) -> dict[str, dict[str, float]]:
+    """Break the scorecard down by question category.
+
+    Denominators mirror the aggregate exactly, so a category's numbers can never
+    tell a different story from the headline:
+      - content metrics average over ANSWERABLE items, counting a wrongly-refused
+        one as 0 (it has no "recall" key), so over-refusal cannot hide;
+      - decision accuracy counts a correct refuse/clarify/answer alike, and
+        excludes corpus-absent skipped items from its denominator.
+    """
+    out: dict[str, dict[str, float]] = {}
+    for cat in {it.category for it in items if it.category}:
+        pairs = [(it, d) for it, d in zip(items, details, strict=True) if it.category == cat]
+        answerable = [d for it, d in pairs if not it.must_refuse and not it.must_clarify]
+        scored = [d for _it, d in pairs if not d.get("skipped")]
+        correct = sum(
+            1
+            for it, d in pairs
+            if not d.get("skipped")
+            and (
+                (it.must_refuse and d.get("refused"))
+                or (it.must_clarify and d.get("status") == "clarify" and d.get("form_pinned"))
+                or (not it.must_refuse and not it.must_clarify and "recall" in d)
+            )
+        )
+        entry: dict[str, float] = {"n": float(len(pairs))}
+        if answerable:
+            entry["recall_at_k"] = sum(d.get("recall", 0.0) for d in answerable) / len(answerable)
+            entry["mrr"] = sum(d.get("reciprocal_rank", 0.0) for d in answerable) / len(answerable)
+            entry["citation_precision"] = sum(
+                d.get("citation_precision", 0.0) for d in answerable
+            ) / len(answerable)
+        if scored:
+            entry["decision_accuracy"] = correct / len(scored)
+        out[cat] = entry
+    return out

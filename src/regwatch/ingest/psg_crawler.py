@@ -304,12 +304,29 @@ def parse_listings(html: str) -> list[PsgListing]:
 # so FDA naming quirks (e.g. "albuterol" matching "levalbuterol") can never change
 # the corpus. Drug names below are for reference only. Romidepsin is intentionally
 # absent — it has no PSG and is carried as a watchlist must-refuse case instead.
+# This list is a TEST FIXTURE and is deliberately fixed: it is what the CI eval
+# gate seeds, and the gold set pins page numbers inside these documents. It is NOT
+# a watchlist -- which products a user monitors is a separate, per-user concern and
+# must never be sourced from here.
 SEED_APPL_NOS = [
     "020503",  # albuterol sulfate — inhalation aerosol, metered
     "214070",  # albuterol sulfate; budesonide — inhalation aerosol (combo)
     "207921",  # beclomethasone dipropionate — inhalation aerosol, metered
     "020911",  # beclomethasone dipropionate — inhalation aerosol, metered
     "021730",  # levalbuterol tartrate — inhalation aerosol, metered
+    # Added 2026-08-05 so the eval gate can exercise branches the five inhalation
+    # aerosols above structurally cannot. Each earns its place; total 46 -> 66 chunks.
+    "017853",  # albuterol sulfate — TABLET, ORAL. Gives an already-seeded ingredient
+    #            a second (dosage_form, route), which is the only way the multi-form
+    #            clarification guard can fire. With one combo it never does.
+    "020929",  # budesonide — inhalation SUSPENSION. The one genuinely rendered
+    #            numeric grid in the catalog; the other seeds share a single
+    #            appendix table copied five times. Also the NDA every other seeded
+    #            PSG cross-references, so those citations resolve.
+    "206439",  # donepezil; memantine — capsule, extended release, ORAL. Real
+    #            dissolution specifications, and the only non-inhalation content,
+    #            which makes dosage-form-scoped refusals genuinely hard rather than
+    #            trivially out-of-domain.
 ]
 
 

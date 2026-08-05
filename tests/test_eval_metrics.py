@@ -226,6 +226,95 @@ def test_must_clarify_scored_only_for_multiform_clarify() -> None:
     assert sc.skipped == 0
 
 
+def test_by_category_localizes_a_regression() -> None:
+    """The point of stratifying: say WHICH kind of question broke.
+
+    Both categories have one answerable item; only the table one misses. The
+    aggregate reports 0.5 and names nothing.
+    """
+    gold = [
+        GoldItem(
+            question="table q",
+            expected_sources=[{"short_name": "PSG_001", "page": 3}],
+            category="table",
+        ),
+        GoldItem(
+            question="exception q",
+            expected_sources=[{"short_name": "PSG_001", "page": 9}],
+            category="exception",
+        ),
+    ]
+
+    def _ask(q: str) -> _FakeResult:
+        page = 7 if q == "table q" else 9  # the table question retrieves the wrong page
+        return _FakeResult(
+            answer=f"Foo [PSG_001, p.{page}].",
+            citations=[_FakeCit("PSG_001", page)],
+            refused=False,
+            retrieved=[{"short_name": "PSG_001", "page": page, "doc_id": 1}],
+        )
+
+    sc = evaluate(gold, ask_callable=_ask)
+    assert sc.recall_at_k == 0.5
+    assert sc.by_category["table"]["recall_at_k"] == 0.0
+    assert sc.by_category["exception"]["recall_at_k"] == 1.0
+    assert sc.by_category["table"]["n"] == 1
+
+
+def test_by_category_counts_a_wrong_refusal_as_zero_not_absent() -> None:
+    """Denominators must mirror the aggregate, or over-refusal hides per category."""
+    gold = [
+        GoldItem(
+            question="q1",
+            expected_sources=[{"short_name": "PSG_001", "page": 3}],
+            category="table",
+        ),
+        GoldItem(
+            question="q2",
+            expected_sources=[{"short_name": "PSG_001", "page": 3}],
+            category="table",
+        ),
+    ]
+
+    def _ask(q: str) -> _FakeResult:
+        if q == "q1":
+            return _FakeResult(answer="refused", citations=[], refused=True)
+        return _FakeResult(
+            answer="Foo [PSG_001, p.3].",
+            citations=[_FakeCit("PSG_001", 3)],
+            refused=False,
+            retrieved=[{"short_name": "PSG_001", "page": 3, "doc_id": 1}],
+        )
+
+    sc = evaluate(gold, ask_callable=_ask)
+    assert sc.by_category["table"]["recall_at_k"] == 0.5
+    assert sc.by_category["table"]["decision_accuracy"] == 0.5
+
+
+def test_by_category_reports_decision_accuracy_for_refusals() -> None:
+    """A refusal category has no content metrics, only a decision."""
+    gold = [GoldItem(question="oos", expected_sources=[], category="refusal", must_refuse=True)]
+    sc = evaluate(gold, ask_callable=lambda _q: _FakeResult("", [], refused=True))
+    entry = sc.by_category["refusal"]
+    assert entry["decision_accuracy"] == 1.0
+    assert "recall_at_k" not in entry
+
+
+def test_by_category_omits_uncategorized_items() -> None:
+    """An uncategorized row must not invent a category bucket."""
+    gold = [GoldItem(question="q", expected_sources=[{"short_name": "PSG_001", "page": 3}])]
+    sc = evaluate(
+        gold,
+        ask_callable=lambda _q: _FakeResult(
+            answer="Foo [PSG_001, p.3].",
+            citations=[_FakeCit("PSG_001", 3)],
+            refused=False,
+            retrieved=[{"short_name": "PSG_001", "page": 3, "doc_id": 1}],
+        ),
+    )
+    assert sc.by_category == {}
+
+
 def test_mrr_averages_over_answerable_including_wrong_refusals() -> None:
     """A wrongly-refused answerable item scores 0 and stays in the denominator.
 
