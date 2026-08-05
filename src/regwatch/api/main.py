@@ -277,6 +277,39 @@ def _vector_store_component() -> dict[str, Any]:
         return {"ok": False, "error": "unreachable"}
 
 
+def _embedding_component() -> dict[str, Any]:
+    """What ACTUALLY embeds a query -- not what EMBEDDING_PROVIDER claims.
+
+    Retrieval picks its arm from ACTIVE_EMBEDDING_PROFILE (retrieve/retriever.py);
+    only the "legacy" arm ever reads EMBEDDING_PROVIDER. Reporting the raw
+    setting made this probe answer "openai" while queries were in fact embedded
+    by the Databricks-hosted profile model -- the exact inverse of the data
+    residency question an operator opens /health to answer.
+
+    The profile ID is reported because the provider NAME alone cannot identify
+    which vector geometry is live when several profiles share a provider. The
+    profile's model name is deliberately NOT reported: /health is the one
+    anonymous-reachable endpoint, and an internal serving-endpoint name is a
+    disclosure this probe does not need to make.
+    """
+    s = get_settings()
+    profile_id = (s.active_embedding_profile or "legacy").strip()
+    if profile_id == "legacy":
+        return {"provider": s.embedding_provider, "profile": "legacy"}
+    try:
+        from regwatch.store.embedding_profiles import get_embedding_profile
+
+        provider = get_embedding_profile(profile_id).provider
+    except Exception as exc:
+        # An unresolvable profile must not fail the probe: the ID is still the
+        # truthful answer to "which arm is live", and only the provider name
+        # needed the lookup. Same disclosure rule as _db_component.
+        log.warning("health_embedding_profile_unresolved", profile=profile_id, error=str(exc))
+        capture_exception(exc)
+        return {"provider": "unresolved", "profile": profile_id}
+    return {"provider": provider, "profile": profile_id}
+
+
 def _llm_key_present(s: Settings) -> bool:
     if s.llm_provider == "openai":
         return bool(s.openai_api_key)
@@ -313,6 +346,10 @@ class HealthLlmComponent(BaseModel):
 
 class HealthEmbeddingComponent(BaseModel):
     provider: str
+    # The ACTIVE_EMBEDDING_PROFILE arm ("legacy", or an ep_ profile ID). Two
+    # profiles can share a provider name, so the ID is what actually pins the
+    # vector geometry a query is embedded into.
+    profile: str
 
 
 class HealthComponents(BaseModel):
@@ -340,10 +377,14 @@ def health(response: Response) -> dict[str, Any]:
     s = get_settings()
     db = _db_component()
     vector_store = _vector_store_component()
+    embedding = _embedding_component()
     warnings: list[str] = []
     if vector_store["ok"] and vector_store["corpus_count"] == 0:
         warnings.append("corpus is empty — run `regwatch seed` (or the compose ingest profile)")
-    if s.embedding_provider == "echo" or s.llm_provider == "echo":
+    # The EFFECTIVE embedding provider, not the raw setting: with a profile
+    # active, EMBEDDING_PROVIDER=echo is inert and warning about it would be
+    # noise, while an echo PROFILE would previously have gone unwarned.
+    if embedding["provider"] == "echo" or s.llm_provider == "echo":
         warnings.append("test-grade 'echo' provider in use — retrieval quality is degraded")
     body: dict[str, Any] = {
         "status": "ok",
@@ -353,7 +394,7 @@ def health(response: Response) -> dict[str, Any]:
             # ops probe reading the old key must update (see DEPLOY.md).
             "vector_store": vector_store,
             "llm": {"provider": s.llm_provider, "key_present": _llm_key_present(s)},
-            "embedding": {"provider": s.embedding_provider},
+            "embedding": embedding,
         },
         # Pure path/config inspection (no I/O beyond a stat, never raises), so a
         # prod stack silently rendering FALLBACK_MARKER documents is visible at

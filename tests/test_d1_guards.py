@@ -9,7 +9,7 @@ the https check, which is unconditional.
 from __future__ import annotations
 
 import pytest
-from config.settings import Settings
+from config.settings import Settings, d1_model_rejection
 from pydantic import ValidationError
 
 
@@ -163,3 +163,57 @@ def test_d1_accepts_the_unflipped_openai_deployment() -> None:
     """Armed before the cutover: neither half moved, which is consistent."""
     s = _settings(d1_enforced=True, llm_provider="openai", active_embedding_profile="legacy")
     assert s.d1_enforced is True
+
+
+# The live gpt-oss-120b deployment. DATABRICKS_LLM_MODEL is the Unity Catalog
+# Model Service alias `workspace.default.regwatch`, whose routing was repointed
+# from system.ai.gpt-oss-20b to system.ai.gpt-oss-120b on 2026-08-05. The alias
+# is what the boot check inspects; the served id is what the endpoint reports
+# per response, so the allowlist must carry BOTH.
+_PROD_ALIAS = "workspace.default.regwatch"
+_PROD_SERVED_120B = "gpt-oss-120b-080525"
+_PROD_SERVED_20B = "gpt-oss-20b-080525"
+_PROD_ALLOWLIST = [_PROD_ALIAS, _PROD_SERVED_120B, _PROD_SERVED_20B]
+
+
+def test_d1_accepts_the_live_gpt_oss_120b_allowlist() -> None:
+    """Arming D1 against the deployed config must not refuse to boot.
+
+    Without this, the first `D1_ENFORCED=true` would be discovered to be a boot
+    crash in production rather than in CI, on every machine at once.
+    """
+    s = _settings(
+        d1_enforced=True,
+        llm_provider="databricks",
+        active_embedding_profile="ep_2e7368b354d911ea3a013c3125e276c2",
+        databricks_llm_model=_PROD_ALIAS,
+        d1_allowed_llm_models=_PROD_ALLOWLIST,
+    )
+    assert s.d1_enforced is True
+
+
+@pytest.mark.parametrize("served", [_PROD_SERVED_120B, _PROD_SERVED_20B])
+def test_d1_accepts_both_served_ids_so_an_alias_rollback_stays_safe(served: str) -> None:
+    """The per-response check runs on the SERVED id, not the alias.
+
+    Repointing the Model Service back to 20b is a no-deploy rollback, so the id
+    it would then report has to already be allowlisted or the rollback would
+    fail every turn while looking like an outage.
+    """
+    assert d1_model_rejection(served, _PROD_ALLOWLIST) is None
+
+
+def test_the_raw_120b_endpoint_name_is_still_refused() -> None:
+    """Pins WHY the alias is used instead of the endpoint name directly.
+
+    `databricks-gpt-oss-120b` is open-weight and in-perimeter, but it collides
+    with the `databricks-gpt` partner prefix, which is checked even for an
+    allowlisted name. Switching DATABRICKS_LLM_MODEL to it would make arming D1
+    impossible without amending the guard. If that prefix rule is ever narrowed
+    to exempt the open-weight `-oss` family, this test is the one to revisit --
+    deliberately, not by accident.
+    """
+    endpoint_name = "databricks-gpt-oss-120b"
+    reason = d1_model_rejection(endpoint_name, [endpoint_name])
+    assert reason is not None
+    assert "partner-hosted" in reason

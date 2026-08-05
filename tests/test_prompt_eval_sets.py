@@ -11,10 +11,14 @@ from regwatch.generate.guidance import GUIDANCE_SCHEMA_MESSAGE, QUERY_GUIDANCE_P
 from regwatch.generate.llm import LLMResponse
 from regwatch.generate.prompt_identity import identify_prompt
 from regwatch.generate.prompts import (
+    GROUNDED_QA_PROMPT,
+    GROUNDED_QA_SYSTEM,
+    GROUNDED_QA_USER,
     QUERY_GUIDANCE_SYSTEM,
     QUERY_GUIDANCE_USER,
     generation_prompt_manifest,
 )
+from regwatch.generate.turn_schema import TURN_SCHEMA_MESSAGE
 from regwatch.retrieve.retriever import RetrievedPassage
 from tests.conftest import synth_turn_json
 
@@ -71,6 +75,30 @@ def test_guidance_prompt_fingerprint_includes_the_output_schema() -> None:
 
     assert with_schema == QUERY_GUIDANCE_PROMPT
     assert QUERY_GUIDANCE_PROMPT.sha256 != without_schema.sha256
+
+
+def test_grounded_qa_prompt_fingerprint_includes_the_turn_schema() -> None:
+    """The schema pins the answer SHAPE, so it must move the fingerprint.
+
+    Claim.text's length cap and the claims-per-turn cap live in
+    TURN_SCHEMA_MESSAGE, not in the prose templates. While it sat outside the
+    hash, editing either one changed what the model was told and left
+    route_json["prompt"] byte-identical -- so a before/after cohort could not be
+    separated in the audit trail at all.
+    """
+    with_schema = identify_prompt(
+        "regwatch.grounded_qa",
+        "4",
+        GROUNDED_QA_SYSTEM,
+        GROUNDED_QA_USER,
+        TURN_SCHEMA_MESSAGE.content,
+    )
+    without_schema = identify_prompt(
+        "regwatch.grounded_qa", "4", GROUNDED_QA_SYSTEM, GROUNDED_QA_USER
+    )
+
+    assert with_schema == GROUNDED_QA_PROMPT
+    assert GROUNDED_QA_PROMPT.sha256 != without_schema.sha256
 
 
 class _GuidanceProvider:

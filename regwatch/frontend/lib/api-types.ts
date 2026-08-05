@@ -626,6 +626,8 @@ export interface components {
         };
         /** HealthEmbeddingComponent */
         HealthEmbeddingComponent: {
+            /** Profile */
+            profile: string;
             /** Provider */
             provider: string;
         };

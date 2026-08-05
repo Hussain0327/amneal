@@ -59,7 +59,9 @@ def test_real_providers_with_seeded_corpus_boot(monkeypatch: pytest.MonkeyPatch)
         r = c.get("/health")
         assert r.status_code == 200
         body = r.json()
-        assert body["components"]["embedding"] == {"provider": "openai"}
+        # "legacy" is the only arm that actually reads EMBEDDING_PROVIDER, so
+        # the provider reported here is genuinely the one in use.
+        assert body["components"]["embedding"] == {"provider": "openai", "profile": "legacy"}
         assert body["components"]["llm"]["key_present"] is False
         assert "allow_test_providers" not in body
 

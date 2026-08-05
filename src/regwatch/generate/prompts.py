@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from textwrap import dedent
 
-from regwatch.generate.prompt_identity import identify_prompt
+from regwatch.generate.prompt_identity import PromptIdentity, identify_prompt
 
 # ---------- Grounded Q&A ----------
 # UNFORMATTED on purpose. The template used to carry a {refusal} placeholder and
@@ -222,9 +222,31 @@ CHANGE_SUMMARY_USER = dedent("""\
     """)
 
 
-GROUNDED_QA_PROMPT = identify_prompt(
-    "regwatch.grounded_qa", "4", GROUNDED_QA_SYSTEM, GROUNDED_QA_USER
-)
+# TURN_SCHEMA_MESSAGE is part of the contract even though it is not part of this
+# module's prose: it is sent as a trailing system message on every synthesis call
+# and it is what actually pins the answer's SHAPE (Claim.text length, how many
+# claims, which turn_types exist). Leaving it out of the hash meant a schema edit
+# changed what the model was told and changed NOTHING in the audit trail, so two
+# cohorts with materially different answer shapes were indistinguishable in
+# route_json["prompt"]. Mirrors QUERY_GUIDANCE_PROMPT, which already folds its
+# generated schema in (see generate/guidance.py).
+#
+# Imported inside the call rather than at module scope purely to keep this
+# module's import graph flat: turn_schema imports generate.llm, and prompts.py is
+# imported by callers that have no reason to pull the provider stack in with it.
+def _grounded_qa_identity() -> PromptIdentity:
+    from regwatch.generate.turn_schema import TURN_SCHEMA_MESSAGE
+
+    return identify_prompt(
+        "regwatch.grounded_qa",
+        "4",
+        GROUNDED_QA_SYSTEM,
+        GROUNDED_QA_USER,
+        TURN_SCHEMA_MESSAGE.content,
+    )
+
+
+GROUNDED_QA_PROMPT = _grounded_qa_identity()
 BE_EXTRACTION_PROMPT = identify_prompt(
     "regwatch.be_extraction", "2", BE_EXTRACTION_SYSTEM, BE_EXTRACTION_USER
 )
