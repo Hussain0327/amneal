@@ -123,6 +123,120 @@ def test_trace_is_recorded_for_refused_items_too() -> None:
     assert trace["retrieved"] == []
 
 
+def _run_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    *,
+    scorecard: Any,
+    check_thresholds: bool = True,
+    persist: bool = True,
+) -> Any:
+    """Drive the real CLI entry point with the corpus and the LLM stubbed out.
+
+    Everything downstream of `evaluate` is the real code path: fingerprint,
+    artifact assembly, ledger write, threshold exit.
+    """
+    from regwatch.eval import ledger
+
+    gold = tmp_path / "gold.jsonl"
+    gold.write_text(
+        '{"question": "q?", "expected_sources": [{"short_name": "PSG_1", "page": 4}]}\n'
+    )
+
+    monkeypatch.setattr(run_eval, "init_db", lambda: None)
+    monkeypatch.setattr(run_eval, "collection_size", lambda: 5)
+    monkeypatch.setattr(run_eval, "evaluate", lambda *_a, **_k: scorecard)
+
+    before = len(ledger.recent_eval_runs("legacy", limit=100))
+    try:
+        run_eval.run(
+            gold=gold,
+            check_thresholds=check_thresholds,
+            out=None,
+            persist=persist,
+            profile="legacy",
+        )
+        code = 0
+    except SystemExit as exc:
+        code = int(exc.code or 0)
+    return code, before, ledger.recent_eval_runs("legacy", limit=100)
+
+
+def test_cli_records_a_passing_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    from regwatch.eval.metrics import Scorecard
+
+    sc = Scorecard(
+        n=1,
+        recall_at_k=1.0,
+        mrr=1.0,
+        citation_precision=1.0,
+        faithfulness=1.0,
+        fact_recall=1.0,
+        refusal_accuracy=1.0,
+    )
+    code, before, after = _run_cli(monkeypatch, tmp_path, scorecard=sc)
+    assert code == 0
+    assert len(after) == before + 1
+    assert after[0]["passed"] is True
+    assert after[0]["mrr"] == 1.0
+
+
+def test_cli_records_a_failing_run_and_still_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The row a regression investigation needs must survive the gate failing."""
+    from regwatch.eval.metrics import Scorecard
+
+    sc = Scorecard(
+        n=1,
+        recall_at_k=0.0,
+        mrr=0.0,
+        citation_precision=0.0,
+        faithfulness=1.0,
+        fact_recall=1.0,
+        refusal_accuracy=0.0,
+    )
+    code, before, after = _run_cli(monkeypatch, tmp_path, scorecard=sc)
+    assert code == 2
+    assert len(after) == before + 1
+    assert after[0]["passed"] is False
+
+
+def test_cli_no_persist_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    from regwatch.eval.metrics import Scorecard
+
+    sc = Scorecard(n=1, recall_at_k=1.0, mrr=1.0, citation_precision=1.0, refusal_accuracy=1.0)
+    _code, before, after = _run_cli(monkeypatch, tmp_path, scorecard=sc, persist=False)
+    assert len(after) == before
+
+
+def test_cli_ledger_failure_does_not_change_the_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Bookkeeping must not be able to turn a red gate green, or a green gate red."""
+    from regwatch.eval.metrics import Scorecard
+
+    def _boom(**_kw: Any) -> int:
+        raise RuntimeError("ledger down")
+
+    monkeypatch.setattr("regwatch.eval.ledger.record_eval_run", _boom)
+    passing = Scorecard(
+        n=1,
+        recall_at_k=1.0,
+        mrr=1.0,
+        citation_precision=1.0,
+        faithfulness=1.0,
+        fact_recall=1.0,
+        refusal_accuracy=1.0,
+    )
+    code, _before, _after = _run_cli(monkeypatch, tmp_path, scorecard=passing)
+    assert code == 0
+
+    failing = Scorecard(n=1, recall_at_k=0.0, mrr=0.0, citation_precision=0.0, refusal_accuracy=0.0)
+    code, _before, _after = _run_cli(monkeypatch, tmp_path, scorecard=failing)
+    assert code == 2
+
+
 def test_apply_profile_legacy_configures_the_process(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", "ep_stale_value")
     get_settings.cache_clear()

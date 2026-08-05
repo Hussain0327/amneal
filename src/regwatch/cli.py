@@ -181,8 +181,21 @@ def cmd_embedding_profile_register(
     normalization: str = typer.Option("l2", "--normalization"),
     preprocessing_version: str = typer.Option("", "--preprocessing-version"),
     chunking_version: str = typer.Option("", "--chunking-version"),
+    id_only: bool = typer.Option(
+        False,
+        "--id-only",
+        help=(
+            "Print ONLY the profile id, unformatted, for shell capture. The "
+            "default output is rich-formatted and not safe to parse."
+        ),
+    ),
 ) -> None:
-    """Register one immutable Qwen embedding profile and print its ID."""
+    """Register one immutable Qwen embedding profile and print its ID.
+
+    Registration is content-addressed and idempotent: the id is a hash of the
+    spec, so re-running with identical arguments returns the same id and writes
+    nothing new. That is what lets CI call this on every run.
+    """
     from dataclasses import asdict
 
     from regwatch.process.chunker import CHUNKING_VERSION
@@ -205,6 +218,11 @@ def cmd_embedding_profile_register(
     )
     init_db()
     profile = register_embedding_profile(spec)
+    if id_only:
+        # Plain stdout, no rich markup or wrapping: this is consumed by
+        # `PROFILE_ID=$(... --id-only)` in CI.
+        typer.echo(profile.profile_id)
+        return
     rprint({"profile": asdict(profile)})
 
 

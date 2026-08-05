@@ -136,6 +136,10 @@ def _print_scorecard(sc: Scorecard) -> None:
     table.add_column("status")
     for key in (
         "recall_at_k",
+        # No threshold: MRR is reported to make rank movement visible, not to
+        # gate on it. Gating a rank metric before the gold set is large enough
+        # to make it stable would block releases on noise.
+        "mrr",
         "citation_precision",
         "faithfulness",
         "fact_recall",
@@ -186,6 +190,40 @@ def _print_fingerprint(fp: run_fingerprint.RunFingerprint) -> None:
         )
 
 
+def _persist(
+    fingerprint: run_fingerprint.RunFingerprint,
+    sc: Scorecard,
+    gold: Path,
+    artifact: dict[str, object],
+) -> None:
+    """Record the run, reporting the outcome either way. Never raises.
+
+    The measurement is the product; the ledger is bookkeeping on top of it. A
+    DB hiccup must not turn a green gate red -- nor abort before the threshold
+    check and turn a red gate into no gate at all. A failed write is printed,
+    never swallowed silently.
+    """
+    from regwatch.eval.ledger import record_eval_run
+
+    console = Console()
+    try:
+        # Round-trip through JSON so a non-serializable provenance value
+        # (a Path, an enum) degrades to its string form here rather than
+        # failing the INSERT with the scorecard already on screen.
+        payload = json.loads(json.dumps(artifact, default=str))
+        run_id = record_eval_run(
+            fingerprint=fingerprint,
+            scorecard=sc,
+            thresholds=THRESHOLDS,
+            gold_path=gold,
+            artifact=payload,
+        )
+    except Exception as exc:
+        console.print(f"[yellow]eval_run ledger write failed ({exc}); scorecard stands[/yellow]")
+        return
+    console.print(f"[dim]recorded eval_run id={run_id}[/dim]")
+
+
 @app.command()
 def run(
     gold: Path = typer.Option(
@@ -199,6 +237,14 @@ def run(
         help="Exit non-zero if any metric is below the spec §12 target.",
     ),
     out: Path | None = typer.Option(None, "--out", help="Write scorecard JSON to this path."),
+    persist: bool = typer.Option(
+        True,
+        "--persist/--no-persist",
+        help=(
+            "Record this run in the eval_run ledger so scorecards are comparable "
+            "across runs. --no-persist for a throwaway local run."
+        ),
+    ),
     profile: str = typer.Option(
         run_fingerprint.LEGACY,
         "--profile",
@@ -237,24 +283,27 @@ def run(
     sc = evaluate(items, ask_callable=ask)
     _print_scorecard(sc)
     _print_fingerprint(fingerprint)
+    # Both halves of the provenance story, neither dropped: the fingerprint
+    # says which corpus/arm/config produced the run, the prompt manifest says
+    # which prompts did. Built unconditionally now because the ledger stores it
+    # too, so --out and --persist can never disagree about what this run was.
+    artifact = {
+        "artifact_schema_version": 2,
+        "fingerprint": fingerprint.to_dict(),
+        "prompts": generation_prompt_manifest(),
+        "scorecard": asdict(sc),
+    }
     if out:
-        # Both halves of the provenance story, neither dropped: the fingerprint
-        # says which corpus/arm/config produced the run, the prompt manifest
-        # says which prompts did. default=str keeps non-JSON fingerprint values
-        # (paths, enums) from failing the write.
-        out.write_text(
-            json.dumps(
-                {
-                    "artifact_schema_version": 2,
-                    "fingerprint": fingerprint.to_dict(),
-                    "prompts": generation_prompt_manifest(),
-                    "scorecard": asdict(sc),
-                },
-                indent=2,
-                default=str,
-            )
-        )
+        # default=str keeps non-JSON fingerprint values (paths, enums) from
+        # failing the write.
+        out.write_text(json.dumps(artifact, indent=2, default=str))
 
+    if persist:
+        _persist(fingerprint, sc, gold, artifact)
+
+    # AFTER the ledger write on purpose: a run that fails the gate is a real
+    # measurement and is exactly the row a later investigation needs. Exiting
+    # first would record only the passing runs.
     if check_thresholds:
         violations = [
             (k, getattr(sc, k), thr) for k, thr in THRESHOLDS.items() if getattr(sc, k) < thr
