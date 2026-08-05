@@ -505,3 +505,34 @@ def test_ledger_records_the_draft_the_gate_rejected() -> None:
     assert kept["passage_overlap"] > 0
     # JSON-serializable: it is persisted verbatim inside route_json.
     assert json.loads(json.dumps(led))["verdict"] == tg.VERDICT_PARTIAL
+
+
+def test_ledger_records_the_whole_claim_not_a_window_of_it() -> None:
+    """A material_drop must stay investigable six weeks later (INV-6).
+
+    The ledger used to store text[:200] while Claim.text allows 400, so a drop
+    could name the materiality word in `material_word` and truncate away the
+    clause that contained it -- recording THAT something material was dropped
+    but not WHAT, which is the single question the ledger exists to answer.
+    The prefix is asserted against the schema cap so the two cannot drift.
+    """
+    from regwatch.generate.turn_schema import Claim
+
+    schema_cap = Claim.model_fields["text"].metadata[0].max_length
+    # One sentence, no markup, > 200 chars, ending in a materiality word so the
+    # tail is exactly the part an investigation would need.
+    long_claim = (
+        "The applicant must conduct a single-dose fasting two-way crossover study "
+        "comparing the test product against the reference listed drug under the "
+        "conditions described in the guidance, and a fed study is also required "
+        "unless a waiver applies"
+    )
+    assert 200 < len(long_claim) <= schema_cap
+
+    turn = _admit(synth_turn_json([(long_claim, [("PSG_020503", 3)])]))
+    led = tg.ledger(turn, model="stub-model", prompt_version="4")
+
+    recorded = led["claims"][0]["text_prefix"]
+    assert recorded == long_claim, "the full claim must survive into the ledger"
+    assert recorded.endswith("unless a waiver applies")
+    assert schema_cap == tg._LEDGER_TEXT_CHARS

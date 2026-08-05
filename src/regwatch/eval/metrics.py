@@ -32,8 +32,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from regwatch.common.citations import has_citation, strip_sources_trailer
+from regwatch.common.sentences import split_sentences
 
-_SENT_RE = re.compile(r"(?<=[.!?])\s+")
+# Sentence splitting is shared with the turn gate on purpose: the gate admits a
+# claim only when it is ONE sentence by this definition, and this metric then
+# asserts every sentence carries a citation. Two definitions would let a claim be
+# admitted as one sentence and scored as two. See common/sentences.py.
 
 # The question kinds the gold set is stratified across. Canonical list lives here
 # so the loader, the reporting breakdown and the integrity gate cannot drift.
@@ -161,7 +165,7 @@ def faithfulness(answer_text: str) -> float:
     # Strip a trailing "Sources" list so we don't penalize bullet citations
     # (shared with grounded_qa's memory-context strip via strip_sources_trailer).
     text = strip_sources_trailer(text)
-    sentences = [s.strip() for s in _SENT_RE.split(text) if s.strip()]
+    sentences = [s.strip() for s in split_sentences(text) if s.strip()]
     if not sentences:
         return 1.0
     cited = sum(1 for s in sentences if has_citation(s))

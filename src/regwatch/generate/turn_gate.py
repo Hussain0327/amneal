@@ -47,6 +47,7 @@ from pydantic import ValidationError
 
 from regwatch.common.citations import strip_all_citations
 from regwatch.common.logging import get_logger
+from regwatch.common.sentences import sentence_count
 from regwatch.common.structured_json import extract_json_blob
 from regwatch.generate.rag_contract import Citation
 from regwatch.generate.turn_schema import GroundedTurn
@@ -134,16 +135,29 @@ _UNSUPPORTED_LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 /,()'&-]*")
 
 # The SAME sentence split eval/metrics.py uses for faithfulness. Sharing it is
 # what makes "one claim = one rendered sentence" and "faithfulness == 1.0 for an
-# all-admitted turn" the same statement.
-_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+# all-admitted turn" the same statement -- now shared by IMPORT rather than by
+# two identical literals kept in step by hand (see common/sentences.py).
 
 # Structural markdown a claim slot may never carry: a heading, a link, or a bare
 # URL. The answer is rendered through a markdown component with GFM autolinking,
 # so any of these would render as chrome or as a clickable off-corpus pointer
 # sitting beside real citation stamps.
 _MARKUP_RE = re.compile(r"(?:^\s*#)|(?:\]\()|(?:\bhttps?://)|(?:\bwww\.)", re.IGNORECASE)
-_LEADING_BULLET_RE = re.compile(r"^[-*+]\s+")
+# Numbered forms ("1. ", "2) ") are stripped alongside the dash/star/plus bullets
+# because a surviving "1." reads as a sentence terminator to _SENT_SPLIT: the
+# claim then counts as two sentences and is dropped for DROP_MULTI_SENTENCE, even
+# though the model wrote exactly one. List STRUCTURE is a renderer decision built
+# from the admitted claims, so no ordinal a model authored is ever load-bearing.
+_LEADING_BULLET_RE = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 _WORD_RE = re.compile(r"[a-z0-9]+")
+
+# Matches Claim.text's schema cap (turn_schema.py), so the ledger records the
+# WHOLE claim rather than a window of it. At 200 a material_drop row could name
+# the materiality word while truncating away the clause that contained it --
+# recording that something material was dropped but not what, which is the one
+# question the ledger exists to answer (INV-6). The schema bounds the field, so
+# this cannot grow unboundedly.
+_LEDGER_TEXT_CHARS = 400
 
 
 @dataclass(frozen=True)
@@ -243,7 +257,7 @@ def _sanitize_claim_text(raw: str) -> str:
 
 
 def _sentence_count(text: str) -> int:
-    return len([s for s in _SENT_SPLIT.split(text) if s.strip()])
+    return sentence_count(text)
 
 
 def _tokens(text: str) -> set[str]:
@@ -546,7 +560,7 @@ def ledger(turn: AdmittedTurn, *, model: str, prompt_version: str) -> dict[str, 
                 "index": claim.index,
                 "admitted": True,
                 "drop_reason": None,
-                "text_prefix": claim.text[:200],
+                "text_prefix": claim.text[:_LEDGER_TEXT_CHARS],
                 "cites": [f"{s},p.{p}" for s, p in claim.pairs],
                 "bad_cites": [],
                 "material_word": None,
@@ -559,7 +573,7 @@ def ledger(turn: AdmittedTurn, *, model: str, prompt_version: str) -> dict[str, 
                 "index": claim.index,
                 "admitted": False,
                 "drop_reason": claim.reason,
-                "text_prefix": claim.text[:200],
+                "text_prefix": claim.text[:_LEDGER_TEXT_CHARS],
                 "cites": [f"{s},p.{p}" for s, p in claim.cites],
                 "bad_cites": [f"{s},p.{p}" for s, p in claim.bad_cites],
                 "material_word": claim.material_word,
