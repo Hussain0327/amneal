@@ -154,10 +154,10 @@ app. All intelligence and all secrets live server-side. `lib/api.ts` is the fetc
 wrapper; `lib/turns.ts` models a conversation turn. (Streamlit is fully retired;
 this Next.js app is the only UI.)
 
-All **four** product surfaces (Ask, Assemble, Watch, White Paper) render inside a
-single `app/(shell)/` App Router route-group — **one sidebar, one canvas, one set
-of design tokens, one scoped-product context**. The bare routes (`login`,
-`fixtures`) sit *outside* the group and never inherit the shell.
+**Five** product surfaces (Ask, Assemble, Watch, White Paper, Deficiency) render
+inside a single `app/(shell)/` App Router route-group — **one sidebar, one canvas,
+one set of design tokens, one scoped-product context**. The bare routes (`login`,
+`fixtures`, `studio`) sit *outside* the group and never inherit the shell.
 
 | Route (`app/`) | Backend endpoint(s) | Purpose |
 |---|---|---|
@@ -165,6 +165,8 @@ of design tokens, one scoped-product context**. The bare routes (`login`,
 | `(shell)/assemble/page.tsx` | `POST /assemble` | Cited dossier for a target product |
 | `(shell)/whitepaper/page.tsx` | `POST /whitepaper`, `POST /whitepaper/docx` | CRA White Paper populator → filled `.docx` |
 | `(shell)/watch/page.tsx` | `GET /watch/latest` | Recent change-detection alerts |
+| `(shell)/deficiency/page.tsx` | `POST /deficiency/analyze` (202 + background), `GET /deficiency/runs`, `GET /deficiency/runs/{id}` | Predicted submission deficiencies with evidence |
+| `studio/page.tsx` | **none yet** (fixtures) | Compliance Studio — review our own CMC documents (outside the shell) |
 | `login/page.tsx` | `POST /auth/login` | Cookie-session login gate (outside the shell) |
 | `fixtures/page.tsx` | (static) | Demo/fixture inputs for testing (outside the shell) |
 
@@ -173,9 +175,38 @@ document/ledger cards: right-aligned user bubbles, a gold RW assistant avatar,
 citation chips that link to the FDA sources (full snippets behind a Sources
 disclosure), clarify-option pills, a bottom-pinned composer, and Enter-to-send.
 
+### 3.1 Compliance Studio — the one surface that reads our own documents
+
+Every surface in the table above reads **public FDA material**. `/studio` reads
+**our drafts**, and that inversion is why it sits outside the shell: it takes the
+whole viewport, and it has no scoped-product context yet.
+
+It is **UI and domain model only.** `lib/studio-fixtures.ts` stands in for the
+document service, the compliance pipeline and the assistant, and nothing survives
+a refresh. The fixture shapes are the contract a real endpoint has to meet, not a
+sketch.
+
+The one idea worth carrying into the backend: **a finding is a span, not a report
+line.** Findings anchor to `(blockId, start, end)` plus the `excerpt` those
+offsets resolved to, which is what lets them highlight in place and be
+invalidated when the analyst edits underneath. `Finding.start/end` is the
+immutable as-checked anchor; `Mark.start/end` is the current render position and
+is remapped on every edit.
+
+Full design record, including the evidence gate behind "Fixed" and what is
+deliberately not built: [`COMPLIANCE_STUDIO.md`](COMPLIANCE_STUDIO.md).
+
+> **Direction (not built, not yet sequenced).** The intent is to consolidate the
+> product to **two** surfaces: Ask as the conversational one, and Studio as the
+> document workspace absorbing Assemble, Watch, White Paper and Deficiency —
+> generators that produce documents into the tree, and checks that run against
+> them. Nothing has moved yet. Studio has no backend, no persistence and no
+> product scoping, so it cannot receive a working surface until those exist; see
+> [`ROADMAP.md`](ROADMAP.md) for the prerequisites.
+
 ### URL-scoped CurrentProduct + the "Under review" scope bar
 
-A single reference product is scoped across all four surfaces and mirrored into
+A single reference product is scoped across all five shell surfaces and mirrored into
 the URL query (`?rp=<reference product name>&appl=<application number>`), so the
 scope is **shareable and survives reload**. `components/CurrentProductProvider.tsx`
 is the state of record (the URL itself); every surface reads it, and any surface

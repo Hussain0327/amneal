@@ -20,13 +20,56 @@ file plus [`PROD_READINESS.md`](PROD_READINESS.md) win.
   (#1-#11) where applicable. This file additionally captures product/quality and
   future items that aren't strictly launch gates.
 
-_Status: 2026-08-04, against `feat/deficiency-mvp`. Since the 2026-07-29 stamp:
-the DefPredict deficiency analyzer shipped (migration 0019) and the structured
-turn contract replaced the per-sentence citation gate (`0a96f7e`). Prod query
-embeddings are still OpenAI — no `ACTIVE_EMBEDDING_PROFILE` secret is set on the
-Fly app, so the D1 blocker below remains fully open._
+_Status: 2026-08-05, against `main`. Since the 2026-08-04 stamp: the Compliance
+Studio disposition loop shipped (`639f0a3`, UI + domain model only — see the
+consolidation section below). Prod query embeddings are still OpenAI — no
+`ACTIVE_EMBEDDING_PROFILE` secret is set on the Fly app, so the D1 blocker below
+remains fully open._
 
 Legend: 🔴 blocks external exposure · 🟡 should-have before launch · ⚪ decision needed · 🔵 future / optional
+
+---
+
+## ⚪ Product shape - consolidate to two surfaces
+
+**Owner direction, 2026-08-05: the product should end up as two surfaces — Ask
+(the conversational one) and Studio (the document workspace) — with Assemble,
+Watch, White Paper and Deficiency folded into Studio.**
+
+The coherent reading of that: Studio becomes a document workspace, where
+Assemble and White Paper are **generators** that produce documents into the tree,
+and Watch, Deficiency and the compliance check are **checks** that run against
+documents already in it. "Is this document out of date?" is then just Watch
+pointed at our own drafts.
+
+**Nothing has moved, and nothing should until the prerequisites below land.** The
+four surfaces being folded in all have working backends; Studio does not. Folding
+a working surface into a fixture-backed one would trade shipped functionality for
+a mockup.
+
+Prerequisites, in order:
+
+1. **Studio needs a backend at all.** Today `CHECK_RESULTS` plus a 1.5s timer
+   stands in for the compliance pipeline, and the document service and assistant
+   are equally fictional. The fixture shapes in `lib/studio-fixtures.ts` are the
+   contract (see [`COMPLIANCE_STUDIO.md`](COMPLIANCE_STUDIO.md) §8).
+2. **Studio needs persistence.** A refresh currently destroys every recorded
+   disposition. `localStorage` is not an acceptable answer for GMP dispositions.
+3. **Studio needs the product scope.** It sits outside `app/(shell)/` and never
+   sees `CurrentProductProvider`, so its repository tree cannot yet be "the
+   documents for the product under review".
+4. **Decide what a "document" is.** White Paper cells carry their own
+   provenance model and are not spans in a block; Watch alerts are not documents
+   at all. Each fold needs its data model reconciled with the Studio's
+   `(blockId, start, end)` anchor, or an explicit decision that it stays separate.
+5. **Decide what happens to the shell.** If only Ask and Studio remain, the
+   `(shell)` route group, the sidebar and the scope bar are all in question.
+
+- **Where:** `regwatch/frontend/app/studio/`, `app/(shell)/`,
+  [`COMPLIANCE_STUDIO.md`](COMPLIANCE_STUDIO.md), [`ARCHITECTURE.md`](ARCHITECTURE.md) §3.
+- **Open question:** whether Deficiency folds in as a *check* on an open document
+  or stays a whole-submission upload. It takes a PDF today, not a document from a
+  tree.
 
 ---
 

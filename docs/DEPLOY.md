@@ -322,7 +322,8 @@ Do these in order; stop at the first failure.
 5. Wrong-password login → "invalid email or password"; no cookie set.
 6. **Analyst logs in** (provisioned user) → lands inside the unified shell with
    the Ask chat in view (one sidebar, the "Under review" product-scope bar
-   across all four surfaces — Ask, Assemble, Watch, White Paper); reload keeps
+   across all five shell surfaces — Ask, Assemble, Watch, White Paper,
+   Deficiency); reload keeps
    the session (cookie survives).
 7. **Sets product scope**: from the "Under review" bar's picker, resolve an RLD
    name + application number (POST `/resolve`) → the scope pins to the canonical

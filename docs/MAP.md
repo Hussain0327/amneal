@@ -4,10 +4,14 @@
 living doc grouped by purpose. (Open the graph view — this note is the center.)
 
 REGWATCH watches FDA Product-Specific Guidances and other public FDA sources, and
-lets a CRA analyst **ask cited questions, assemble dossiers, watch for changes, and
-populate the CRA White Paper** — all scoped to **one product under review**. It
-**surfaces, organizes, compares, and cites; it never authors, decides, or files**
-(the INV-1..9 invariants, enforced as tests).
+lets a CRA analyst **ask cited questions, assemble dossiers, watch for changes,
+populate the CRA White Paper, and predict submission deficiencies** — all scoped
+to **one product under review**. It **surfaces, organizes, compares, and cites;
+it never authors, decides, or files** (the INV-1..9 invariants, enforced as
+tests).
+
+A sixth surface, the **Compliance Studio**, inverts the input: it reads our own
+CMC drafts rather than public FDA material. It is UI and domain model only.
 
 ## How it connects
 
@@ -19,9 +23,12 @@ flowchart TB
     Assemble["Assemble<br/>dossier"]
     Watch["Watch<br/>change feed"]
     WP["White Paper<br/>populate + cite"]
+    Def["Deficiency<br/>predicted findings"]
   end
+  Studio["Compliance Studio · /studio<br/>OUR CMC drafts, not FDA material<br/>fixtures only, no backend yet"]
   Scope{{"Under review: ONE product<br/>scoped in the URL, shareable"}}
   Scope -.scopes.-> UI
+  Studio -.->|"not scoped, outside the shell"| Scope
 
   UI -->|"same-origin /api proxy"| EDGE["Go proxy · go/ (public port)<br/>auth · sessions · rate limits<br/>native /query orchestration + audit"]
   EDGE -->|"6PN relay"| API["FastAPI · src/regwatch/api<br/>stateless RAG core · INV-1..9"]
@@ -56,6 +63,7 @@ This is the only index of `docs/`. Every living doc appears exactly once below.
 
 **How it's built**
 - [Architecture](ARCHITECTURE.md) — canonical system design (Router → Handlers → Synthesizer, the surfaces, INV-1..9)
+- [Compliance Studio](COMPLIANCE_STUDIO.md) — `/studio`: the span-anchored finding model, the disposition record, the evidence gate behind "Fixed", and what is deliberately not built
 - [Graph-assisted adaptive retrieval](GRAPH_ASSISTED_RETRIEVAL.md) — proposed bounded graph traversal from citable chunks; Tier-1 graph storage is landed, runtime traversal is not
 - [Polyglot target](POLYGLOT_TARGET_2026-07-10.md) - the TS/Go/Python/Rust strangler plan (steps 0-5 done)
 - [Go proxy rollout](GO_PROXY_ROLLOUT.md) - how Go took the public edge (complete)

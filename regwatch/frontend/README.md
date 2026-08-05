@@ -1,10 +1,15 @@
 # REGWATCH Frontend Workspace
 
-Next.js (App Router, TypeScript) UI for RegWatch on the Amneal brand. All four
-surfaces (Ask / Assemble / Watch / White Paper) render inside one shared App
-Router shell — one sidebar, one set of design tokens, one URL-scoped current
-product. (The earlier Streamlit POC is fully retired.) It is a thin client over
-the FastAPI backend; all logic and compliance live in the API.
+Next.js (App Router, TypeScript) UI for RegWatch on the Amneal brand. Five
+surfaces (Ask / Assemble / Watch / White Paper / Deficiency) render inside one
+shared App Router shell — one sidebar, one set of design tokens, one URL-scoped
+current product. The **Compliance Studio** (`/studio`) sits outside that shell
+and is the one surface that reads our own CMC drafts rather than public FDA
+material. (The earlier Streamlit POC is fully retired.)
+
+It is a thin client over the FastAPI backend; all logic and compliance live in
+the API — with the single exception of the Studio, which is still fixture-backed
+and carries its domain model in `lib/studio-marks.ts`.
 
 ## Run
 
@@ -53,17 +58,22 @@ cloudflared tunnel --url http://localhost:3000          # 3) public link
 
 ## Shell & current product
 
-All four surfaces live in one App Router route-group layout
+All five shell surfaces live in one App Router route-group layout
 (`app/(shell)/layout.tsx`): a single sidebar, one canvas, and a slim sticky
 **"Under review"** product-scope bar (`components/ProductScopeBar.tsx`) across
-the top of every page. The login and fixtures routes sit outside the group and
-never see it.
+the top of every page. The login, fixtures and studio routes sit outside the
+group and never see it.
 
 The scoped current product is URL-encoded (`?rp=<reference product>&appl=<six-
 digit application number>`), so it is shareable, survives reload, and is read by
-all four surfaces. It is settable from three places — the scope-bar picker,
+all five shell surfaces. It is settable from three places — the scope-bar picker,
 White Paper on a successful populate, and a Watch row — each writing the same
 canonical `{normalized_name, application_number}`.
+
+**The Studio is not scoped to a product.** It sits outside the shell, so it never
+sees the scope bar and its repository tree is a fixture rather than a query for
+the current product's documents. Wiring it into `CurrentProductProvider` is a
+prerequisite for folding any other surface into it.
 
 Pinning a product is **not** an LLM turn. The scope-bar picker calls
 `POST /resolve` (`resolveProduct` in `lib/api.ts`), the backend's deterministic
@@ -96,6 +106,15 @@ text.
   set the current product scope.
 - **White Paper** (`/whitepaper`) — CRA White Paper population + `.docx`
   download from the reviewed result; a successful populate sets the scope.
+- **Deficiency** (`/deficiency`) — upload a submission and get the deficiencies
+  an FDA reviewer is likely to raise, each with its evidence. `POST
+  /deficiency/analyze` returns 202 and the run completes in the background.
+- **Compliance Studio** (`/studio`) — outside the shell. Repository tree on the
+  left, the document in the middle, findings and a cited assistant sliding in
+  from the right. A finding anchors to a span of the document, so it highlights
+  in place and goes stale when the analyst edits underneath it; "Fixed" cannot be
+  recorded until that has actually happened. **Fixtures only** — no endpoint, no
+  persistence. See [`docs/COMPLIANCE_STUDIO.md`](../../docs/COMPLIANCE_STUDIO.md).
 
 ## Error monitoring (Sentry, opt-in)
 
