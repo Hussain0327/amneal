@@ -7,6 +7,16 @@
 //
 // Content is representative CMC material for a generic ER tablet. It is sample
 // data, not an Amneal submission.
+//
+// Only three of the eleven findings carry a `suggestion`, and that ratio is the
+// point rather than an omission. A suggestion is offered when the remedy is
+// carried entirely in the words -- expand an abbreviation, name the staged
+// procedure, state the shelf life that another document in this repository
+// already proposes. It is withheld whenever the fix needs a fact only the
+// analyst holds: an approver, an effective date, a validation report number, a
+// sampling interval, a scale-up justification. Inventing any of those would put
+// a plausible falsehood into a GMP-controlled record, which is worse than
+// leaving the analyst to type it.
 
 import type { Block, Finding, StudioDoc, TreeNode } from "./studio-types";
 
@@ -20,12 +30,19 @@ import type { Block, Finding, StudioDoc, TreeNode } from "./studio-types";
  * the needle is missing, which turns a silent mis-anchored highlight into an
  * immediate, obvious failure.
  */
-function anchor(blocks: Block[], blockId: string, needle: string): { blockId: string; start: number; end: number } {
+function anchor(
+  blocks: Block[],
+  blockId: string,
+  needle: string,
+): { blockId: string; start: number; end: number; excerpt: string } {
   const block = blocks.find((b) => b.id === blockId);
   if (!block) throw new Error(`studio-fixtures: no block "${blockId}"`);
   const start = block.text.indexOf(needle);
   if (start < 0) throw new Error(`studio-fixtures: "${needle}" not found in block "${blockId}"`);
-  return { blockId, start, end: start + needle.length };
+  // The needle IS the excerpt, so a span and the text it claims to quote cannot
+  // disagree here by construction. applyFindings recomputes it for API findings,
+  // where that guarantee has to be enforced rather than assumed.
+  return { blockId, start, end: start + needle.length, excerpt: needle };
 }
 
 function block(id: string, type: Block["type"], text: string, rows?: Block["rows"]): Block {
@@ -84,6 +101,10 @@ const dsSpecFindings: Finding[] = [
       "LOD appears here with no expansion and the document has no definitions section. Expand it on first use or add a definitions table.",
     location: "Section 3",
     standard: "Internal SOP QA-018",
+    // Expanding on first use is one of the two remedies the finding itself
+    // names; the other one (a definitions table) lands in a block this finding
+    // does not point at, which is what "fixed elsewhere" is for.
+    suggestion: "The limit of detection (LOD)",
     ...anchor(dsSpecBlocks, "ds-8", "LOD"),
   },
   {
@@ -142,6 +163,8 @@ const dpSpecFindings: Finding[] = [
       "The criterion states a single stage. USP <711> expects the S1/S2/S3 evaluation to be stated or explicitly cross-referenced; without it a reviewer cannot confirm how an out-of-stage result is handled.",
     location: "Section 2",
     standard: "USP <711>; ICH Q6A Decision Tree #7",
+    suggestion:
+      "The acceptance criterion is Q = 80% at 60 min, evaluated by the staged S1/S2/S3 procedure of USP <711>.",
     ...anchor(dpSpecBlocks, "dp-8", "The acceptance criterion is Q = 80% at 60 min."),
   },
   {
@@ -162,6 +185,10 @@ const dpSpecFindings: Finding[] = [
       "The scope binds this specification to the shelf life without stating it or pointing at 3.2.P.8.1. Add the proposed shelf life or the cross-reference.",
     location: "Section 1",
     standard: "ICH Q1A(R2); Internal SOP QA-018",
+    // 24 months is not invented: it is what 3.2.P.8.1 in this same repository
+    // proposes (block st-6). A suggestion that made up a shelf life would be
+    // exactly the kind of plausible fabrication this surface must not produce.
+    suggestion: "throughout the proposed 24-month shelf life (see 3.2.P.8.1)",
     ...anchor(dpSpecBlocks, "dp-5", "throughout the proposed shelf life"),
   },
 ];
