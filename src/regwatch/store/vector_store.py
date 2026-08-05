@@ -116,6 +116,13 @@ def chunks_exist(doc_id: int, version_id: int) -> bool:
     return pgvector_store.chunks_exist(doc_id, version_id)
 
 
+def chunk_texts_at(short_name: str, page: int) -> list[str]:
+    """Every chunk's text at one (short_name, page). Used to verify gold-set pins."""
+    from regwatch.store import pgvector_store
+
+    return pgvector_store.chunk_texts_at(short_name, page)
+
+
 def distinct_metadata_values(key: str) -> set[str]:
     """All distinct non-empty string values of one metadata `key` across chunks.
 

@@ -146,6 +146,11 @@ def _run_cli(
     monkeypatch.setattr(run_eval, "init_db", lambda: None)
     monkeypatch.setattr(run_eval, "collection_size", lambda: 5)
     monkeypatch.setattr(run_eval, "evaluate", lambda *_a, **_k: scorecard)
+    # These cases are about the ledger and the threshold exit, not about gold-set
+    # correctness. The verifier needs a real corpus to check quotes against, and it
+    # has its own dedicated coverage (test_verify_gold.py, plus
+    # test_cli_refuses_to_score_a_gold_set_that_does_not_match_the_corpus below).
+    monkeypatch.setattr(run_eval, "_verify_gold", lambda _items: None)
 
     before = len(ledger.recent_eval_runs("legacy", limit=100))
     try:
@@ -160,6 +165,39 @@ def _run_cli(
     except SystemExit as exc:
         code = int(exc.code or 0)
     return code, before, ledger.recent_eval_runs("legacy", limit=100)
+
+
+def test_cli_refuses_to_score_a_gold_set_that_does_not_match_the_corpus(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A scorecard from a mis-pinned gold set is noise wearing a number.
+
+    Verification runs BEFORE evaluate(), so a broken asset costs zero LLM calls --
+    and cannot silently produce a number someone then trusts.
+    """
+    import regwatch.store.vector_store as vs
+    from regwatch.eval.metrics import Scorecard
+
+    gold = tmp_path / "gold.jsonl"
+    gold.write_text(
+        '{"question": "q?", "category": "current_version", "expected_sources": '
+        '[{"short_name": "PSG_1", "page": 6, "quote": "two-way crossover"}]}\n'
+    )
+    # The corpus has that phrase on page 4, not the page the row claims.
+    monkeypatch.setattr(
+        vs, "chunk_texts_at", lambda s, p: ["two-way crossover"] if p == 4 else ["other text"]
+    )
+    monkeypatch.setattr(run_eval, "init_db", lambda: None)
+    monkeypatch.setattr(run_eval, "collection_size", lambda: 5)
+
+    def _must_not_run(*_a: Any, **_k: Any) -> Scorecard:
+        raise AssertionError("evaluate() must not run against an unverified gold set")
+
+    monkeypatch.setattr(run_eval, "evaluate", _must_not_run)
+
+    with pytest.raises(SystemExit) as exc:
+        run_eval.run(gold=gold, check_thresholds=True, out=None, persist=True, profile="legacy")
+    assert exc.value.code == 2
 
 
 def test_cli_records_a_passing_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:

@@ -494,15 +494,29 @@ def cmd_seed() -> None:
     from regwatch.ingest.pipeline import ingest_listings
     from regwatch.ingest.psg_crawler import (
         SEED_APPL_NOS,
-        fetch_index_html,
+        fetch_all_listings,
         filter_listings,
-        parse_listings,
     )
 
     init_db()
-    html = fetch_index_html()
-    listings = filter_listings(parse_listings(html), appl_numbers=SEED_APPL_NOS)
+    # fetch_all_listings (A-Z letter routes), NOT fetch_index_html: the PSG index
+    # landing page server-renders only a small recent slice. Measured 2026-08-05
+    # it returned 15 rows containing NONE of SEED_APPL_NOS, so this command
+    # matched 0 listings, ingested nothing, and exited 0 -- leaving the live eval
+    # gate to run against an empty store. The letter routes return the full
+    # ~1,795-row catalog and match all 5.
+    listings = filter_listings(fetch_all_listings(), appl_numbers=SEED_APPL_NOS)
     rprint(f"[cyan]matched {len(listings)} listing(s)[/cyan]")
+    # A partial match is worse than a loud failure: the gold set pins pages in
+    # specific documents, so seeding 3 of 5 makes the missing documents' items
+    # unanswerable and reads as a retrieval regression rather than a bad seed.
+    missing = sorted(set(SEED_APPL_NOS) - {row.appl_no for row in listings})
+    if missing:
+        rprint(
+            f"[red]seed incomplete: {len(missing)} of {len(SEED_APPL_NOS)} pinned "
+            f"application(s) absent from the FDA catalog: {missing}[/red]"
+        )
+        raise typer.Exit(code=2)
     stats = ingest_listings(listings)
     rprint(
         {

@@ -654,6 +654,28 @@ def chunks_exist(doc_id: int, version_id: int) -> bool:
     return found is not None
 
 
+def chunk_texts_at(short_name: str, page: int) -> list[str]:
+    """Every chunk's text at one (short_name, page), for gold-set verification.
+
+    A page can hold several chunks (the sliding window splits within a page), so
+    this returns all of them and the caller decides whether its quote appears in
+    ANY. Returns [] when the pair does not exist at all, which the caller must
+    distinguish from "exists but the quote is absent" -- the first means the gold
+    set points at a document/page the corpus does not have, the second means the
+    page number is wrong.
+    """
+    _ensure_ready()
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            sa_text(
+                "SELECT text FROM chunk WHERE short_name = :short_name "
+                "AND page = :page ORDER BY ordinal"
+            ),
+            {"short_name": short_name, "page": page},
+        ).scalars()
+        return [r for r in rows if r]
+
+
 def distinct_metadata_values(key: str) -> set[str]:
     """Distinct non-empty values of one text metadata column.
 
