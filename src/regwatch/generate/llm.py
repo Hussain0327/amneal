@@ -680,6 +680,44 @@ class DatabricksProvider:
             request.append({"role": message.role, "content": content})
         return request
 
+    # Appended to a USER turn when JSON mode is requested and no user turn
+    # already says "json". Short and true: it repeats what the schema message
+    # already instructs, so it cannot pull a model off-task.
+    _JSON_USER_DIRECTIVE = "Respond with a single JSON object."
+
+    @staticmethod
+    def _ensure_user_json_token(request: list[dict[str, str]]) -> list[dict[str, str]]:
+        """Satisfy the endpoint's json_object precondition at the wire seam.
+
+        Databricks rejects `response_format={"type":"json_object"}` with
+        400 BAD_REQUEST unless the word "json" appears in the messages, and
+        live probing (issue #162) showed a SYSTEM message does not count at any
+        casing -- it must be a user turn. `_request_messages` folds every system
+        message into one system turn, so the schema instruction that every
+        structured caller sends (GUIDANCE_SCHEMA_MESSAGE, TURN_SCHEMA_MESSAGE,
+        the deficiency schema message) never reaches a user turn on its own.
+
+        Fixing it here rather than in any one prompt is deliberate: this is the
+        single choke point every structured caller passes through (router
+        guidance, synthesis, BE extraction, change summary, all deficiency
+        structured calls), and it leaves the prompt texts -- and therefore the
+        audited prompt-identity hashes -- byte-identical.
+
+        Appends to the LAST user turn rather than adding one, so turn structure
+        is unchanged; only a caller that sends no user turn at all gets a new
+        one. AnthropicProvider does the same thing for the same reason.
+        """
+        if any("json" in m.get("content", "").lower() for m in request if m["role"] == "user"):
+            return request
+        for message in reversed(request):
+            if message["role"] == "user":
+                message["content"] = (
+                    f"{message['content']}\n\n{DatabricksProvider._JSON_USER_DIRECTIVE}"
+                )
+                return request
+        request.append({"role": "user", "content": DatabricksProvider._JSON_USER_DIRECTIVE})
+        return request
+
     def _request_kwargs(
         self,
         messages: list[LLMMessage],
@@ -692,9 +730,12 @@ class DatabricksProvider:
         # JSON is used by extraction/routing and must never spend or expose a
         # thought channel, even if a synthesizer provider is reused manually.
         allow_thinking = self.thinking_enabled and response_format != "json"
+        request = self._request_messages(messages, allow_thinking=allow_thinking)
+        if response_format == "json":
+            request = self._ensure_user_json_token(request)
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "messages": self._request_messages(messages, allow_thinking=allow_thinking),
+            "messages": request,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }

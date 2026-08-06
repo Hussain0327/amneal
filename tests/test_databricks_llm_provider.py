@@ -673,3 +673,97 @@ def test_factory_fails_loudly_for_missing_databricks_config(
 
     with pytest.raises(RuntimeError, match=expected_env):
         get_llm_provider()
+
+
+# --- json_object precondition (issue #162) ------------------------------------
+#
+# The endpoint 400s with `"messages" must contain the word "json" in some form,
+# to use "response_format" of type json_object` unless a USER turn carries the
+# word. Live probing established a system message does not satisfy it at any
+# casing, and _request_messages folds every system message into one system turn
+# -- so the schema instruction that structured callers send never counts. These
+# tests hold the wire-level invariant for every structured caller at once.
+
+
+def _json_call_messages(messages: list[LLMMessage]) -> list[dict[str, str]]:
+    completions = _Completions(_response('{"ok": true}'))
+    _provider(completions).complete(messages, response_format="json")
+    return completions.calls[-1]["messages"]
+
+
+def _has_user_json(messages: list[dict[str, str]]) -> bool:
+    return any("json" in m["content"].lower() for m in messages if m["role"] == "user")
+
+
+def test_json_mode_puts_the_word_json_in_a_user_turn() -> None:
+    """The exact shape of the live 400: regwatch.query_guidance.
+
+    System messages mention JSON (QUERY_GUIDANCE_SYSTEM, GUIDANCE_SCHEMA_MESSAGE)
+    and the user turn is a serialized context blob that does not.
+    """
+    wire = _json_call_messages(
+        [
+            LLMMessage("system", "You route questions."),
+            LLMMessage("user", '{"untrusted_question":"washout period?","route":"refused"}'),
+            LLMMessage("system", "Return ONLY a JSON object matching this schema."),
+        ]
+    )
+    assert _has_user_json(wire)
+
+
+def test_the_directive_lands_on_the_last_user_turn_not_a_new_one() -> None:
+    """Turn structure is preserved: no synthetic trailing user message."""
+    before = [
+        LLMMessage("system", "sys"),
+        LLMMessage("user", "first"),
+        LLMMessage("assistant", "reply"),
+        LLMMessage("user", "second"),
+    ]
+    wire = _json_call_messages(before)
+    assert [m["role"] for m in wire] == ["system", "user", "assistant", "user"]
+    assert wire[1]["content"] == "first", "an earlier turn must not be rewritten"
+    assert wire[-1]["content"].startswith("second")
+    assert _has_user_json(wire)
+
+
+def test_a_user_turn_that_already_says_json_is_left_alone() -> None:
+    """grounded_qa synthesis already ends with 'Return the JSON object now'.
+
+    That path works live and must stay byte-identical -- the fix is for the
+    callers that lack it, not a rewrite of every structured prompt.
+    """
+    user = "Answer the question. Return the JSON object now."
+    wire = _json_call_messages([LLMMessage("system", "sys"), LLMMessage("user", user)])
+    assert [m["content"] for m in wire if m["role"] == "user"] == [user]
+
+
+def test_prose_mode_never_injects_the_directive() -> None:
+    """Only json_object mode has the precondition; prose turns are untouched."""
+    completions = _Completions(_response("plain prose"))
+    _provider(completions).complete([LLMMessage("system", "sys"), LLMMessage("user", "hello")])
+    assert [m["content"] for m in completions.calls[-1]["messages"] if m["role"] == "user"] == [
+        "hello"
+    ]
+
+
+def test_a_system_only_json_mention_does_not_satisfy_the_endpoint() -> None:
+    """The probed asymmetry, pinned.
+
+    This is the whole bug: the word was present, in a system message, and the
+    endpoint still rejected the request. A caller whose only JSON mention is
+    system-side must still come out with a user-side one.
+    """
+    wire = _json_call_messages(
+        [
+            LLMMessage("system", "Return ONLY a JSON object. No prose."),
+            LLMMessage("user", "Extract the study design from the excerpt."),
+        ]
+    )
+    assert _has_user_json(wire)
+
+
+def test_a_caller_with_no_user_turn_still_gets_one() -> None:
+    """Degenerate but reachable: everything system-side."""
+    wire = _json_call_messages([LLMMessage("system", "Return ONLY a JSON object.")])
+    assert _has_user_json(wire)
+    assert wire[-1]["role"] == "user"

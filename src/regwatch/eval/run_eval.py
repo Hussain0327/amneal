@@ -48,15 +48,28 @@ app = typer.Typer(
 # is a ratchet, not a quality bar. Raise these as quality improves; never
 # lower one without recording why.
 #
-# refusal_accuracy is deliberately ABSENT. Its measured 0.710 is derived from
-# 16 gold rows whose labels are not yet trustworthy -- they name real seeded
-# products (so they reach vector search and produce a cosine score, which is
-# what makes threshold calibration possible at all), and the system responds by
-# CLARIFYING rather than refusing. That may well be the better behavior, which
-# would make the label wrong rather than the system. Gating on a number derived
-# from labels under dispute would bake the dispute into CI. It is still
-# measured, still printed, and still recorded in eval_run; it just does not
-# block. See docs/EVAL_STATUS.md and the refusal-adjudication follow-up (issue #161).
+# refusal_accuracy is BLOCKING again as of 2026-08-06 (issue #161). Its earlier
+# 0.710 was not a defect measurement: it scored a must_refuse row on whether the
+# reply wore the "refused" status, and the 12 seeded-product rows come back as
+# "clarify" with ZERO citations and no claim about the question -- a withheld
+# answer, which is exactly what the label asserts. Adjudicated by re-scoring the
+# two recorded scorecard artifacts row by row (2026-08-05 and 2026-08-06 CI
+# runs): under the withhold policy every refusal row is correct in both, 16/16
+# and 15/15, and NO gold row needed relabelling. See metrics.withheld_answer and
+# docs/EVAL_STATUS.md.
+#
+# refusal_accuracy is UN-GATED again as of 2026-08-06, by owner decision, and
+# this time not because its labels are disputed: the product is moving to a
+# conversational Ask layer that is not meant to refuse. Gating a system on how
+# often it declines, while deliberately teaching it to stop declining, would
+# fail the build for doing the new thing correctly. The metric and its 16 gold
+# rows are slated for removal from the codebase once that direction lands; it
+# stays measured, printed and persisted until then so the transition is visible
+# rather than silent.
+#
+# The adjudication that made it briefly blockable still stands and is still
+# enforced by metrics.withheld_answer and its tests -- what changed is whether
+# the number should stop a build, not what it means. See docs/EVAL_STATUS.md.
 THRESHOLDS = {
     "recall_at_k": 0.80,
     "citation_precision": 0.74,
@@ -73,6 +86,14 @@ TARGETS = {
     "citation_precision": 0.95,
     "refusal_accuracy": 0.95,
 }
+
+# Above this share of transport-failed turns, --check-thresholds exits 3 instead
+# of scoring: the run did not measure the system. 10% of the 62-row gold set is
+# ~6 turns. The 2026-08-06 rate-limit run lost 5 (8%) and is the case this is
+# calibrated to let through WITH its metrics intact, since excluding those five
+# returns every metric to its recorded baseline. A worse outage must not be able
+# to pass the gate on a shrunken denominator.
+MAX_UNMEASURED_FRACTION = 0.10
 
 
 def _apply_profile(profile: str) -> str:
@@ -245,6 +266,16 @@ def _print_scorecard(sc: Scorecard) -> None:
             f"seeded corpus (excluded from refusal_accuracy; still hard-gated "
             f"offline in the deterministic eval gate): {absent}[/yellow]"
         )
+    if sc.errored:
+        # Also loud: these rows left EVERY denominator because their transport
+        # failed, so all metrics above are measured over fewer items than the
+        # gold set has. A rising count means the provider is failing, not that
+        # the system improved.
+        broke = [(d.get("errored"), d["q"]) for d in sc.details if d.get("errored")]
+        console.print(
+            f"[yellow]{sc.errored}/{sc.n} turn(s) failed in transport and are excluded "
+            f"from every metric (they measured nothing): {broke}[/yellow]"
+        )
 
 
 def _print_fingerprint(fp: run_fingerprint.RunFingerprint) -> None:
@@ -404,6 +435,22 @@ def run(
     # measurement and is exactly the row a later investigation needs. Exiting
     # first would record only the passing runs.
     if check_thresholds:
+        # "Could not measure" and "measured badly" are different build failures,
+        # and reporting the first as the second is what sent two PRs red on
+        # 2026-08-06. Transport-failed turns leave the denominators (see
+        # metrics.unmeasured_turn), so without this a provider outage could
+        # shrink the gate to a handful of lucky rows and pass. Checked BEFORE
+        # the thresholds so the message names the real problem.
+        if sc.n and sc.errored / sc.n > MAX_UNMEASURED_FRACTION:
+            console = Console()
+            console.print(
+                f"[red]{sc.errored}/{sc.n} turns failed in transport "
+                f"({sc.errored / sc.n:.0%} > {MAX_UNMEASURED_FRACTION:.0%} allowed). "
+                "This run did not measure the system -- the metrics above are "
+                "computed over too few rows to mean anything. Fix the provider, "
+                "then re-run; do NOT read this as a quality regression.[/red]"
+            )
+            sys.exit(3)
         violations = [
             (k, getattr(sc, k), thr) for k, thr in THRESHOLDS.items() if getattr(sc, k) < thr
         ]

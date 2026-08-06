@@ -406,7 +406,13 @@ def test_git_state_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _sc(**over: float) -> Any:
-    """A scorecard at the recorded 2026-08-05 baseline, overridable per case."""
+    """A scorecard at the recorded 2026-08-05 baseline, overridable per case.
+
+    refusal_accuracy is that run's number RE-SCORED under the withhold policy
+    (issue #161): the recorded scorecard artifact says 0.710 because it scored
+    the status string, and re-scoring its 62 rows with metrics.withheld_answer
+    gives 0.903. Same run, same replies -- only the predicate changed.
+    """
     from regwatch.eval.metrics import Scorecard
 
     base = {
@@ -416,7 +422,7 @@ def _sc(**over: float) -> Any:
         "citation_precision": 0.756,
         "faithfulness": 0.826,
         "fact_recall": 0.622,
-        "refusal_accuracy": 0.710,
+        "refusal_accuracy": 0.903,
     }
     base.update(over)
     return Scorecard(**base)  # type: ignore[arg-type]
@@ -462,21 +468,33 @@ def test_a_regression_below_any_blocking_floor_trips(
     assert code == 2, f"{field}={value} is below its floor and must fail the build"
 
 
-def test_refusal_accuracy_is_measured_but_not_blocking(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
-    """Deliberate, and deliberately pinned so it cannot lapse by accident.
+def test_refusal_accuracy_is_measured_but_not_blocking() -> None:
+    """Un-gated 2026-08-06 by owner decision, and deliberately pinned.
 
-    The 16 refusal rows' labels are under dispute (docs/EVAL_STATUS.md), so the
-    metric is computed, printed and persisted but does not fail the build. When
-    the rows are adjudicated and refusal_accuracy is reintroduced to THRESHOLDS,
-    THIS TEST SHOULD FAIL -- that is the intended signal to delete it.
+    Not the earlier "labels are disputed" reason -- that was settled (issue
+    #161) and metrics.withheld_answer still enforces it. The product is moving
+    to a conversational Ask layer that is not meant to refuse, so gating on how
+    often it declines would fail the build for doing the new thing correctly.
+    The metric and its 16 gold rows are slated for removal; until then it stays
+    measured, printed and persisted so the transition is visible.
+
+    If refusal_accuracy is ever reintroduced to THRESHOLDS, THIS TEST SHOULD
+    FAIL -- that is the intended signal to delete it and record why.
     """
     from regwatch.eval.run_eval import TARGETS, THRESHOLDS
 
     assert "refusal_accuracy" not in THRESHOLDS
     assert TARGETS["refusal_accuracy"] == 0.95
 
+
+def test_a_collapsed_refusal_score_no_longer_fails_the_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The un-gating, driven through the real CLI exit path.
+
+    0.0 is the extreme: every decision wrong. It must still exit 0, because the
+    number is reported rather than enforced.
+    """
     code, _, _ = _run_cli(monkeypatch, tmp_path, scorecard=_sc(refusal_accuracy=0.0), persist=False)
     assert code == 0
 
@@ -490,3 +508,46 @@ def test_every_blocking_floor_sits_below_its_target(_unused: None = None) -> Non
         assert (
             floor <= TARGETS[metric]
         ), f"{metric} gate {floor} exceeds its target {TARGETS[metric]}"
+
+
+def test_a_run_that_could_not_measure_fails_differently_from_one_that_measured_badly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Exit 3, not 2, and not a pass.
+
+    Transport-failed turns leave every denominator, so without this guard a
+    provider outage could shrink the gate to a few lucky rows and report a
+    green build. "Could not measure" and "measured badly" are different
+    failures and CI must be able to tell them apart -- conflating them is what
+    sent two PRs red on 2026-08-06 with no code regression behind it.
+    """
+    from regwatch.eval.run_eval import MAX_UNMEASURED_FRACTION
+
+    assert MAX_UNMEASURED_FRACTION == 0.10
+
+    # 5/62 = 8%: the recorded rate-limit run. Under the cap, so its metrics
+    # stand and the gate scores them normally.
+    ok, _, _ = _run_cli(monkeypatch, tmp_path, scorecard=_sc(errored=5), persist=False)
+    assert ok == 0
+
+    # 7/62 = 11%: over the cap. The metrics are meaningless, so refuse to score.
+    broken, _, _ = _run_cli(monkeypatch, tmp_path, scorecard=_sc(errored=7), persist=False)
+    assert broken == 3, "an unmeasurable run must not exit 0 (pass) or 2 (regression)"
+
+
+def test_the_unmeasured_guard_outranks_a_threshold_miss(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """When both are true the message must name the real problem.
+
+    A run this broken has metrics computed over too few rows to mean anything,
+    so reporting "recall regressed" would send someone hunting a retrieval bug
+    that is not there.
+    """
+    code, _, _ = _run_cli(
+        monkeypatch,
+        tmp_path,
+        scorecard=_sc(errored=20, recall_at_k=0.0, citation_precision=0.0),
+        persist=False,
+    )
+    assert code == 3
