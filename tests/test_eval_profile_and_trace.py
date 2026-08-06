@@ -406,7 +406,13 @@ def test_git_state_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _sc(**over: float) -> Any:
-    """A scorecard at the recorded 2026-08-05 baseline, overridable per case."""
+    """A scorecard at the recorded 2026-08-05 baseline, overridable per case.
+
+    refusal_accuracy is that run's number RE-SCORED under the withhold policy
+    (issue #161): the recorded scorecard artifact says 0.710 because it scored
+    the status string, and re-scoring its 62 rows with metrics.withheld_answer
+    gives 0.903. Same run, same replies -- only the predicate changed.
+    """
     from regwatch.eval.metrics import Scorecard
 
     base = {
@@ -416,7 +422,7 @@ def _sc(**over: float) -> Any:
         "citation_precision": 0.756,
         "faithfulness": 0.826,
         "fact_recall": 0.622,
-        "refusal_accuracy": 0.710,
+        "refusal_accuracy": 0.903,
     }
     base.update(over)
     return Scorecard(**base)  # type: ignore[arg-type]
@@ -453,6 +459,9 @@ def test_broken_retrieval_still_fails_the_build(
         # Just under each blocking floor: the smallest regression that must trip.
         ("recall_at_k", 0.79),
         ("citation_precision", 0.73),
+        # Two refusal rows answering instead of withholding scores 0.869-0.871
+        # on the recorded runs, which is what this floor exists to catch.
+        ("refusal_accuracy", 0.87),
     ],
 )
 def test_a_regression_below_any_blocking_floor_trips(
@@ -462,23 +471,37 @@ def test_a_regression_below_any_blocking_floor_trips(
     assert code == 2, f"{field}={value} is below its floor and must fail the build"
 
 
-def test_refusal_accuracy_is_measured_but_not_blocking(
+def test_refusal_accuracy_blocks_again_after_adjudication() -> None:
+    """Replaces the deliberate not-blocking sentinel, deleted 2026-08-06.
+
+    The predecessor asserted refusal_accuracy was ABSENT from THRESHOLDS while
+    the 16 refusal rows' labels were disputed, and was written to fail the day
+    they were adjudicated. They were (issue #161): the labels held, no row was
+    relabelled, and the scorer changed instead. This pins the outcome so the
+    gate cannot quietly lapse a second time.
+    """
+    from regwatch.eval.run_eval import THRESHOLDS
+
+    assert THRESHOLDS["refusal_accuracy"] == 0.88
+
+
+def test_a_refusal_row_that_answers_is_what_the_floor_catches(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    """Deliberate, and deliberately pinned so it cannot lapse by accident.
+    """The failure this gate exists for, at the measured scale.
 
-    The 16 refusal rows' labels are under dispute (docs/EVAL_STATUS.md), so the
-    metric is computed, printed and persisted but does not fail the build. When
-    the rows are adjudicated and refusal_accuracy is reintroduced to THRESHOLDS,
-    THIS TEST SHOULD FAIL -- that is the intended signal to delete it.
+    62 rows, so one row is ~1.6 points. The recorded runs measure 0.902/0.903:
+    one row flipping from withheld to answered still passes (drift), two do not.
     """
-    from regwatch.eval.run_eval import TARGETS, THRESHOLDS
+    passes, _, _ = _run_cli(
+        monkeypatch, tmp_path, scorecard=_sc(refusal_accuracy=0.885), persist=False
+    )
+    assert passes == 0, "one flipped row is LLM drift and must not fail the build"
 
-    assert "refusal_accuracy" not in THRESHOLDS
-    assert TARGETS["refusal_accuracy"] == 0.95
-
-    code, _, _ = _run_cli(monkeypatch, tmp_path, scorecard=_sc(refusal_accuracy=0.0), persist=False)
-    assert code == 0
+    fails, _, _ = _run_cli(
+        monkeypatch, tmp_path, scorecard=_sc(refusal_accuracy=0.869), persist=False
+    )
+    assert fails == 2, "two refusal rows answering is a regression and must fail"
 
 
 def test_every_blocking_floor_sits_below_its_target(_unused: None = None) -> None:

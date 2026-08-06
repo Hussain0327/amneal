@@ -20,8 +20,11 @@ later flip a flag — for now everything is mechanical):
   - fact_recall         : fraction of an item's expected_facts present in the
                           answer (tolerant substring) — scores answer CONTENT,
                           not just which pages were cited.
-  - refusal_accuracy    : fraction of items whose refuse/answer decision was
-                          correct.
+  - refusal_accuracy    : fraction of items whose withhold/answer decision was
+                          correct. A must_refuse item is correct when the answer
+                          was WITHHELD (no claims, no citations) in any shape --
+                          see withheld_answer(). Turns that errored made no
+                          decision and leave the denominator.
 """
 
 from __future__ import annotations
@@ -100,6 +103,15 @@ class Scorecard:
     # the denominator with a notice rather than counted as a wrong decision. Never
     # a silent pass — the offline gate still hard-gates the clarify behavior.
     skipped: int = 0
+    # Decision-expecting items whose turn ENDED IN AN ERROR (provider transport
+    # failure, malformed structure, catalog error). An error is not a judgment:
+    # the system never got to choose, so counting it either way is a lie. It was
+    # counted as a CORRECT refusal before this — `_refuse` sets refused=True on
+    # the error paths — which is how a provider 400 raised the measured refusal
+    # score between two runs of identical code (0.710 -> 0.726, eval_run
+    # 2026-08-05 vs 2026-08-06). Excluded from the decision denominator and
+    # printed, never silently dropped.
+    errored: int = 0
     # Per-category breakdown. An aggregate says quality moved; only this says
     # WHERE, and that is the difference between "the re-chunk regressed" and
     # "the re-chunk regressed table questions specifically". Categories absent
@@ -200,6 +212,43 @@ def fact_recall(answer_text: str, expected_facts: list[str]) -> float:
     return matched / len(expected_facts)
 
 
+def withheld_answer(result: Any) -> bool:
+    """Did the system decline to answer the question it was asked?
+
+    This is the LABELLING POLICY for `must_refuse` rows, adjudicated 2026-08-06
+    (issue #161) and documented in docs/EVAL_STATUS.md. The gold flag asserts
+    "the system must not answer this", which is an INV-1 property of the reply --
+    no claims, no citations -- not a demand for one particular status string.
+
+    Withholding therefore covers three shapes:
+      - "refused"       -- the hard refusal
+      - "scope_warning" -- refuses to advise (INV-3 operational-advice rows)
+      - "clarify" with ZERO citations -- the model declined and the pipeline
+        offered next steps instead. Measured over all 12 seeded-product refusal
+        rows: citations [] and an answer that names the product and asks what the
+        user wants, containing no claim about the question. That is a withheld
+        answer wearing a more useful affordance, and scoring it wrong was
+        measuring the affordance rather than the invariant.
+
+    A clarify that carries citations is NOT withholding: citations are claims
+    about the corpus, and a must_refuse row that produces them is the exact
+    INV-1 failure this metric exists to catch. `status == "error"` is not
+    withholding either -- it is not a decision at all, and is excluded from the
+    denominator by the caller rather than scored here.
+    """
+    status = getattr(result, "status", None)
+    if status in ("refused", "scope_warning"):
+        return True
+    if status == "clarify":
+        return not (getattr(result, "citations", None) or [])
+    return False
+
+
+def _errored(result: Any) -> bool:
+    """The turn ended in a system error, so no decision was ever made."""
+    return getattr(result, "status", None) == "error"
+
+
 _TRACE_PASSAGE_KEYS = ("chunk_id", "doc_id", "version_id", "page", "short_name", "score")
 _TRACE_CITATION_KEYS = ("short_name", "page", "chunk_id", "doc_id", "version_id", "score")
 
@@ -239,6 +288,7 @@ def evaluate(
     refused_incorrectly = 0
     cited_ungrounded = 0
     skipped = 0  # must_clarify items whose product is absent from the corpus
+    errored = 0  # decision-expecting items whose turn ended in a system error
     fact_items = 0  # answered items that actually carry expected_facts
     details: list[dict[str, Any]] = []
 
@@ -254,19 +304,49 @@ def evaluate(
         # Decision accounting (refuse/clarify items don't contribute to
         # recall/precision/faithfulness — they assert WHICH decision is correct).
         if it.must_refuse:
-            if result.refused:
+            # Scored on whether the answer was WITHHELD, not on which status
+            # string carried it -- see withheld_answer() and docs/EVAL_STATUS.md.
+            if _errored(result):
+                errored += 1
+                details.append(
+                    {
+                        "q": it.question,
+                        "must_refuse": True,
+                        "refused": result.refused,
+                        "errored": getattr(result, "reason", None) or "error",
+                        "trace": trace,
+                    }
+                )
+                continue
+            held = withheld_answer(result)
+            if held:
                 refusal_correct += 1
             details.append(
                 {
                     "q": it.question,
                     "must_refuse": True,
                     "refused": result.refused,
+                    "withheld": held,
                     "trace": trace,
                 }
             )
             continue
         if it.must_clarify:
             reason = getattr(result, "reason", None)
+            # Same rule as must_refuse: an errored turn made no decision.
+            if _errored(result):
+                errored += 1
+                details.append(
+                    {
+                        "q": it.question,
+                        "must_clarify": True,
+                        "status": result.status,
+                        "reason": reason,
+                        "errored": reason or "error",
+                        "trace": trace,
+                    }
+                )
+                continue
             # Corpus-membership gate: a must_clarify item asserts multi-form behavior
             # on a specific product. If that product is absent from the seeded corpus
             # the resolver refuses with reason "no_product" — the item is not testable
@@ -369,11 +449,12 @@ def evaluate(
     # (Skipped items are must_clarify, so they are already outside `answerable`.)
     answerable = max(1, n - decision_expected)
     correct_non_refusals = (n - decision_expected) - refused_incorrectly
-    # refusal_accuracy is the decision-accuracy bucket: a must_refuse that refused,
-    # a must_clarify that clarified, and an answerable item that answered all count.
-    # Corpus-absent must_clarify items are excluded from the denominator (they are
-    # not scorable here), so they neither pass nor fail the gate.
-    scored = max(1, n - skipped)
+    # refusal_accuracy is the decision-accuracy bucket: a must_refuse that WITHHELD
+    # an answer, a must_clarify that clarified, and an answerable item that answered
+    # all count. Corpus-absent must_clarify items are excluded from the denominator
+    # (they are not scorable here) and so are decision items whose turn errored (no
+    # decision was made), so neither passes nor fails the gate.
+    scored = max(1, n - skipped - errored)
     refusal_accuracy = (refusal_correct + clarify_correct + correct_non_refusals) / scored
     return Scorecard(
         n=n,
@@ -391,6 +472,7 @@ def evaluate(
         refused_incorrectly=refused_incorrectly,
         cited_ungrounded=cited_ungrounded,
         skipped=skipped,
+        errored=errored,
         by_category=_by_category(items, details),
         details=details,
     )
@@ -406,20 +488,22 @@ def _by_category(
     tell a different story from the headline:
       - content metrics average over ANSWERABLE items, counting a wrongly-refused
         one as 0 (it has no "recall" key), so over-refusal cannot hide;
-      - decision accuracy counts a correct refuse/clarify/answer alike, and
-        excludes corpus-absent skipped items from its denominator.
+      - decision accuracy counts a correct withhold/clarify/answer alike, and
+        excludes corpus-absent skipped items and errored turns from its
+        denominator exactly as the aggregate does.
     """
     out: dict[str, dict[str, float]] = {}
     for cat in {it.category for it in items if it.category}:
         pairs = [(it, d) for it, d in zip(items, details, strict=True) if it.category == cat]
         answerable = [d for it, d in pairs if not it.must_refuse and not it.must_clarify]
-        scored = [d for _it, d in pairs if not d.get("skipped")]
+        scored = [d for _it, d in pairs if not d.get("skipped") and not d.get("errored")]
         correct = sum(
             1
             for it, d in pairs
             if not d.get("skipped")
+            and not d.get("errored")
             and (
-                (it.must_refuse and d.get("refused"))
+                (it.must_refuse and d.get("withheld"))
                 or (it.must_clarify and d.get("status") == "clarify" and d.get("form_pinned"))
                 or (not it.must_refuse and not it.must_clarify and "recall" in d)
             )

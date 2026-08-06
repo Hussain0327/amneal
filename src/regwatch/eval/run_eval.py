@@ -48,18 +48,24 @@ app = typer.Typer(
 # is a ratchet, not a quality bar. Raise these as quality improves; never
 # lower one without recording why.
 #
-# refusal_accuracy is deliberately ABSENT. Its measured 0.710 is derived from
-# 16 gold rows whose labels are not yet trustworthy -- they name real seeded
-# products (so they reach vector search and produce a cosine score, which is
-# what makes threshold calibration possible at all), and the system responds by
-# CLARIFYING rather than refusing. That may well be the better behavior, which
-# would make the label wrong rather than the system. Gating on a number derived
-# from labels under dispute would bake the dispute into CI. It is still
-# measured, still printed, and still recorded in eval_run; it just does not
-# block. See docs/EVAL_STATUS.md and the refusal-adjudication follow-up (issue #161).
+# refusal_accuracy is BLOCKING again as of 2026-08-06 (issue #161). Its earlier
+# 0.710 was not a defect measurement: it scored a must_refuse row on whether the
+# reply wore the "refused" status, and the 12 seeded-product rows come back as
+# "clarify" with ZERO citations and no claim about the question -- a withheld
+# answer, which is exactly what the label asserts. Adjudicated by re-scoring the
+# two recorded scorecard artifacts row by row (2026-08-05 and 2026-08-06 CI
+# runs): under the withhold policy every refusal row is correct in both, 16/16
+# and 15/15, and NO gold row needed relabelling. See metrics.withheld_answer and
+# docs/EVAL_STATUS.md.
+#
+# The floor is 0.88 against a measurement of 0.903/0.902 on those two runs. One
+# refusal row flipping to a real answer scores 0.885-0.887 and still passes (LLM
+# drift); two score 0.869-0.871 and fail. That is the tolerance this ratchet is
+# meant to have -- it catches the system starting to ANSWER what it must not.
 THRESHOLDS = {
     "recall_at_k": 0.80,
     "citation_precision": 0.74,
+    "refusal_accuracy": 0.88,
 }
 
 # ASPIRATIONAL targets. Reported beside each value, never blocking.
@@ -243,6 +249,15 @@ def _print_scorecard(sc: Scorecard) -> None:
             f"[yellow]skipped {sc.skipped} must_clarify item(s) absent from the "
             f"seeded corpus (excluded from refusal_accuracy; still hard-gated "
             f"offline in the deterministic eval gate): {absent}[/yellow]"
+        )
+    if sc.errored:
+        # Also loud: these rows left the denominator because the turn errored, so
+        # refusal_accuracy is measured over fewer items than the gold set has. A
+        # rising count means the provider is failing, not that judgment improved.
+        broke = [(d.get("errored"), d["q"]) for d in sc.details if d.get("errored")]
+        console.print(
+            f"[yellow]{sc.errored} decision item(s) ended in a system error and are "
+            f"excluded from refusal_accuracy (an error is not a decision): {broke}[/yellow]"
         )
 
 
