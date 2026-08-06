@@ -42,7 +42,7 @@ corpus 66 chunks / 8 documents, digest `2b58b032e512`, `vector_top_k=50`,
 |---|---:|---:|---:|
 | `recall_at_k` | 0.814 | 0.80 | 0.90 |
 | `citation_precision` | 0.756 | 0.74 | 0.95 |
-| `refusal_accuracy` | 0.710 as recorded / **0.903 re-scored** | 0.88 | 0.95 |
+| `refusal_accuracy` | 0.710 as recorded / **0.903 re-scored** | *not gated* | 0.95 |
 | `mrr` | 0.506 | — | — |
 | `faithfulness` | 0.826 | — | — |
 | `fact_recall` | 0.622 | — | — |
@@ -114,19 +114,54 @@ is a withheld answer. Scoring it wrong was measuring the affordance.
 **Outcome: no gold row was relabelled.** The labels were right; the scorer was
 measuring the wrong property. Under the policy both runs score the refusal
 category **16/16 and 15/15** and `refusal_accuracy` **0.903 / 0.902** (versus
-the 0.710 / 0.726 the artifacts recorded), and `refusal_accuracy` is blocking
-again at a floor of **0.88**.
+the 0.710 / 0.726 the artifacts recorded). It blocked at a floor of 0.88 for
+part of that day; see the next section for why it no longer does.
 
-### Why the floor is 0.88
+### `refusal_accuracy` is measured but NOT gated (owner decision, 2026-08-06)
 
-62 rows, so one row is worth ~1.6 points. Against a measurement of 0.902:
+It blocked briefly at 0.88 and was un-gated the same day — **not** for the
+earlier "the labels are disputed" reason, which is settled and still enforced by
+`metrics.withheld_answer`. The product is moving to a conversational Ask layer
+that is not meant to refuse. Gating a system on how often it declines while
+deliberately teaching it to decline less would fail the build for doing the new
+thing correctly.
 
-- one refusal row flipping to a real answer → 0.885–0.887, still passes (this is
-  the live-LLM drift the ratchet is meant to absorb);
-- two → 0.869–0.871, fails.
+The metric and its 16 refusal gold rows are slated for removal from the codebase
+once that direction lands. Until then it stays measured, printed and persisted,
+so the transition shows up in the record instead of vanishing.
 
-That is the intended sensitivity: the gate catches the system starting to
-**answer** what it must not, and does not flake on a single drifting turn.
+**Read the name carefully before drawing conclusions from it.** `refusal_accuracy`
+is decision accuracy over the *whole* gold set, not a refusal rate: 16
+`must_refuse` rows + 3 `must_clarify` rows + **43 answerable rows that are
+correct only when they actually answer**. Roughly two-thirds of its weight is
+answerable rows. On the 2026-08-06 main run it read 0.887 with all 16 refusal
+rows correct — the entire shortfall was 7 of 43 answerable rows producing no
+answer.
+
+### A synthesis crash is not a retrieval failure
+
+`recall_at_k` and `mrr` are scored from **what retrieval returned**, on every
+answerable row — including rows the system then declined or failed to
+synthesize. Retrieval either found the expected page or it did not; what
+happened afterwards belongs to a different metric.
+
+This was a live red build on main, not a hypothetical. On 2026-08-06 two rows
+came back `malformed_structure` **after** retrieving the expected page at rank
+1 (`PSG_021730 p.1` at 0.848, `PSG_214070 p.1` at 0.849, 8 and 7 passages each).
+The scorer had no `recall` key for those rows, so they counted 0, and
+`recall_at_k` reported **0.791** against its 0.80 floor. Scored from the
+retrieved lists that were sitting in the trace the whole time, the same run
+reads **0.837**. `citation_precision` moves 0.744 → 0.780 for the matching
+reason: a turn that crashed cited nothing because it never finished, so it
+leaves that denominator rather than being scored as having cited wrongly.
+
+The floor was not lowered to fix this — the attribution was. The same run that
+failed at 0.791 passes at 0.837 against the unchanged 0.80.
+
+**Over-refusal still cannot hide.** It is charged where it belongs: a genuine
+decline stays in the `citation_precision` denominator at 0, and lands in
+`refused_incorrectly`. A system that refused every row would score
+`citation_precision` 0 and fail.
 
 ### A turn that failed in transport measured nothing
 

@@ -459,9 +459,6 @@ def test_broken_retrieval_still_fails_the_build(
         # Just under each blocking floor: the smallest regression that must trip.
         ("recall_at_k", 0.79),
         ("citation_precision", 0.73),
-        # Two refusal rows answering instead of withholding scores 0.869-0.871
-        # on the recorded runs, which is what this floor exists to catch.
-        ("refusal_accuracy", 0.87),
     ],
 )
 def test_a_regression_below_any_blocking_floor_trips(
@@ -471,37 +468,35 @@ def test_a_regression_below_any_blocking_floor_trips(
     assert code == 2, f"{field}={value} is below its floor and must fail the build"
 
 
-def test_refusal_accuracy_blocks_again_after_adjudication() -> None:
-    """Replaces the deliberate not-blocking sentinel, deleted 2026-08-06.
+def test_refusal_accuracy_is_measured_but_not_blocking() -> None:
+    """Un-gated 2026-08-06 by owner decision, and deliberately pinned.
 
-    The predecessor asserted refusal_accuracy was ABSENT from THRESHOLDS while
-    the 16 refusal rows' labels were disputed, and was written to fail the day
-    they were adjudicated. They were (issue #161): the labels held, no row was
-    relabelled, and the scorer changed instead. This pins the outcome so the
-    gate cannot quietly lapse a second time.
+    Not the earlier "labels are disputed" reason -- that was settled (issue
+    #161) and metrics.withheld_answer still enforces it. The product is moving
+    to a conversational Ask layer that is not meant to refuse, so gating on how
+    often it declines would fail the build for doing the new thing correctly.
+    The metric and its 16 gold rows are slated for removal; until then it stays
+    measured, printed and persisted so the transition is visible.
+
+    If refusal_accuracy is ever reintroduced to THRESHOLDS, THIS TEST SHOULD
+    FAIL -- that is the intended signal to delete it and record why.
     """
-    from regwatch.eval.run_eval import THRESHOLDS
+    from regwatch.eval.run_eval import TARGETS, THRESHOLDS
 
-    assert THRESHOLDS["refusal_accuracy"] == 0.88
+    assert "refusal_accuracy" not in THRESHOLDS
+    assert TARGETS["refusal_accuracy"] == 0.95
 
 
-def test_a_refusal_row_that_answers_is_what_the_floor_catches(
+def test_a_collapsed_refusal_score_no_longer_fails_the_build(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    """The failure this gate exists for, at the measured scale.
+    """The un-gating, driven through the real CLI exit path.
 
-    62 rows, so one row is ~1.6 points. The recorded runs measure 0.902/0.903:
-    one row flipping from withheld to answered still passes (drift), two do not.
+    0.0 is the extreme: every decision wrong. It must still exit 0, because the
+    number is reported rather than enforced.
     """
-    passes, _, _ = _run_cli(
-        monkeypatch, tmp_path, scorecard=_sc(refusal_accuracy=0.885), persist=False
-    )
-    assert passes == 0, "one flipped row is LLM drift and must not fail the build"
-
-    fails, _, _ = _run_cli(
-        monkeypatch, tmp_path, scorecard=_sc(refusal_accuracy=0.869), persist=False
-    )
-    assert fails == 2, "two refusal rows answering is a regression and must fail"
+    code, _, _ = _run_cli(monkeypatch, tmp_path, scorecard=_sc(refusal_accuracy=0.0), persist=False)
+    assert code == 0
 
 
 def test_every_blocking_floor_sits_below_its_target(_unused: None = None) -> None:

@@ -58,14 +58,21 @@ app = typer.Typer(
 # and 15/15, and NO gold row needed relabelling. See metrics.withheld_answer and
 # docs/EVAL_STATUS.md.
 #
-# The floor is 0.88 against a measurement of 0.903/0.902 on those two runs. One
-# refusal row flipping to a real answer scores 0.885-0.887 and still passes (LLM
-# drift); two score 0.869-0.871 and fail. That is the tolerance this ratchet is
-# meant to have -- it catches the system starting to ANSWER what it must not.
+# refusal_accuracy is UN-GATED again as of 2026-08-06, by owner decision, and
+# this time not because its labels are disputed: the product is moving to a
+# conversational Ask layer that is not meant to refuse. Gating a system on how
+# often it declines, while deliberately teaching it to stop declining, would
+# fail the build for doing the new thing correctly. The metric and its 16 gold
+# rows are slated for removal from the codebase once that direction lands; it
+# stays measured, printed and persisted until then so the transition is visible
+# rather than silent.
+#
+# The adjudication that made it briefly blockable still stands and is still
+# enforced by metrics.withheld_answer and its tests -- what changed is whether
+# the number should stop a build, not what it means. See docs/EVAL_STATUS.md.
 THRESHOLDS = {
     "recall_at_k": 0.80,
     "citation_precision": 0.74,
-    "refusal_accuracy": 0.88,
 }
 
 # ASPIRATIONAL targets. Reported beside each value, never blocking.

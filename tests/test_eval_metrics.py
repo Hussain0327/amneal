@@ -610,3 +610,82 @@ def test_malformed_structure_on_a_must_refuse_row_is_a_withhold() -> None:
     )
     assert sc.errored == 0
     assert sc.refused_correctly == 1
+
+
+def test_a_declined_answerable_row_scores_the_retrieval_that_actually_ran() -> None:
+    """A synthesis crash is not a retrieval failure (main went red on this).
+
+    Two rows crashed with malformed_structure AFTER retrieving the expected page
+    at rank 1, and recall_at_k reported 0.791 against its 0.80 floor instead of
+    0.837. Retrieval either found the page or it did not; what synthesis did
+    next belongs to a different metric.
+    """
+    gold = [
+        GoldItem(
+            question="crashed",
+            expected_sources=[{"short_name": "PSG_001", "page": 3}],
+            category="current_version",
+        )
+    ]
+    sc = evaluate(
+        gold,
+        ask_callable=lambda _q: _FakeResult(
+            answer="",
+            citations=[],
+            refused=True,
+            status="error",
+            reason="malformed_structure",
+            retrieved=[{"short_name": "PSG_001", "page": 3, "doc_id": 1}],
+        ),
+    )
+    assert sc.recall_at_k == 1.0, "retrieval found the expected page; say so"
+    assert sc.mrr == 1.0
+    # It still failed to deliver: that is charged to the decision bucket.
+    assert sc.refused_incorrectly == 1
+    assert sc.refusal_accuracy == 0.0
+    assert sc.by_category["current_version"]["decision_accuracy"] == 0.0
+
+
+def test_a_crashed_turn_leaves_the_citation_denominator_but_a_decline_does_not() -> None:
+    """The boundary between "produced nothing to judge" and "declined to answer".
+
+    A crashed turn cited nothing because it never finished -- scoring that as
+    "cited the wrong things" is not a measurement. A deliberate decline stays in
+    the denominator at 0, which is how over-refusal keeps failing the build.
+    """
+    retrieved = [{"short_name": "PSG_001", "page": 3, "doc_id": 1}]
+    expected = [{"short_name": "PSG_001", "page": 3}]
+
+    def _gold(q: str) -> list[GoldItem]:
+        return [
+            GoldItem(question=q, expected_sources=expected, category="table"),
+            GoldItem(question="answered", expected_sources=expected, category="table"),
+        ]
+
+    def _make(status: str, reason: str) -> Any:
+        def _ask(q: str) -> _FakeResult:
+            if q == "answered":
+                return _FakeResult(
+                    answer="Foo [PSG_001, p.3].",
+                    citations=[_FakeCit("PSG_001", 3)],
+                    refused=False,
+                    retrieved=retrieved,
+                )
+            return _FakeResult(
+                answer="",
+                citations=[],
+                refused=True,
+                status=status,
+                reason=reason,
+                retrieved=retrieved,
+            )
+
+        return _ask
+
+    crashed = evaluate(_gold("crashed"), ask_callable=_make("error", "malformed_structure"))
+    declined = evaluate(_gold("declined"), ask_callable=_make("refused", "low_top_score"))
+
+    assert crashed.citation_precision == 1.0, "the crashed row has no answer to judge"
+    assert declined.citation_precision == 0.5, "a decline cited nothing and is scored for it"
+    # Retrieval is measured identically in both: it ran and it worked.
+    assert crashed.recall_at_k == declined.recall_at_k == 1.0
