@@ -394,3 +394,99 @@ def test_git_state_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     sha, dirty = run_fingerprint.git_state()
     assert sha == "unknown"
     assert dirty is False
+
+
+# --- The ratchet has teeth --------------------------------------------------
+#
+# THRESHOLDS was lowered on 2026-08-05 from aspirational figures (0.90/0.95/0.95,
+# written against echo embeddings) to a ratchet just under the first real
+# measurement. A lowered gate is only defensible if it still fails on a real
+# regression, so these drive the actual CLI exit path with the REAL THRESHOLDS
+# dict -- not a copy -- so editing that dict re-runs these assertions against it.
+
+
+def _sc(**over: float) -> Any:
+    """A scorecard at the recorded 2026-08-05 baseline, overridable per case."""
+    from regwatch.eval.metrics import Scorecard
+
+    base = {
+        "n": 62,
+        "recall_at_k": 0.814,
+        "mrr": 0.506,
+        "citation_precision": 0.756,
+        "faithfulness": 0.826,
+        "fact_recall": 0.622,
+        "refusal_accuracy": 0.710,
+    }
+    base.update(over)
+    return Scorecard(**base)  # type: ignore[arg-type]
+
+
+def test_recorded_baseline_passes_the_ratchet(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Green today -- but see the tests below for why that is not vacuous."""
+    code, _, _ = _run_cli(monkeypatch, tmp_path, scorecard=_sc(), persist=False)
+    assert code == 0
+
+
+def test_broken_retrieval_still_fails_the_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The case the gate exists for: retrieval returns nothing relevant.
+
+    This is C1's acceptance criterion and the reason the ratchet is a ratchet
+    rather than a removal. If this ever exits 0, the eval has become decorative.
+    """
+    code, _, _ = _run_cli(
+        monkeypatch,
+        tmp_path,
+        scorecard=_sc(recall_at_k=0.0, citation_precision=0.0, mrr=0.0),
+        persist=False,
+    )
+    assert code == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        # Just under each blocking floor: the smallest regression that must trip.
+        ("recall_at_k", 0.79),
+        ("citation_precision", 0.73),
+    ],
+)
+def test_a_regression_below_any_blocking_floor_trips(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, field: str, value: float
+) -> None:
+    code, _, _ = _run_cli(monkeypatch, tmp_path, scorecard=_sc(**{field: value}), persist=False)
+    assert code == 2, f"{field}={value} is below its floor and must fail the build"
+
+
+def test_refusal_accuracy_is_measured_but_not_blocking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Deliberate, and deliberately pinned so it cannot lapse by accident.
+
+    The 16 refusal rows' labels are under dispute (docs/EVAL_STATUS.md), so the
+    metric is computed, printed and persisted but does not fail the build. When
+    the rows are adjudicated and refusal_accuracy is reintroduced to THRESHOLDS,
+    THIS TEST SHOULD FAIL -- that is the intended signal to delete it.
+    """
+    from regwatch.eval.run_eval import TARGETS, THRESHOLDS
+
+    assert "refusal_accuracy" not in THRESHOLDS
+    assert TARGETS["refusal_accuracy"] == 0.95
+
+    code, _, _ = _run_cli(monkeypatch, tmp_path, scorecard=_sc(refusal_accuracy=0.0), persist=False)
+    assert code == 0
+
+
+def test_every_blocking_floor_sits_below_its_target(_unused: None = None) -> None:
+    """A gate above its own target would be incoherent."""
+    from regwatch.eval.run_eval import TARGETS, THRESHOLDS
+
+    for metric, floor in THRESHOLDS.items():
+        assert metric in TARGETS, f"blocking metric {metric} has no recorded target"
+        assert (
+            floor <= TARGETS[metric]
+        ), f"{metric} gate {floor} exceeds its target {TARGETS[metric]}"
