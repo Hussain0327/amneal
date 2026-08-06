@@ -156,7 +156,7 @@ def test_evaluate_runs_through() -> None:
                 refused=False,
                 retrieved=[{"short_name": "PSG_001", "page": 3, "doc_id": 1}],
             )
-        return _FakeResult(answer="refused", citations=[], refused=True)
+        return _FakeResult(answer="refused", citations=[], refused=True, status="refused")
 
     sc = evaluate(gold, ask_callable=_ask)
     assert sc.n == 2
@@ -294,7 +294,7 @@ def test_by_category_counts_a_wrong_refusal_as_zero_not_absent() -> None:
 def test_by_category_reports_decision_accuracy_for_refusals() -> None:
     """A refusal category has no content metrics, only a decision."""
     gold = [GoldItem(question="oos", expected_sources=[], category="refusal", must_refuse=True)]
-    sc = evaluate(gold, ask_callable=lambda _q: _FakeResult("", [], refused=True))
+    sc = evaluate(gold, ask_callable=lambda _q: _FakeResult("", [], refused=True, status="refused"))
     entry = sc.by_category["refusal"]
     assert entry["decision_accuracy"] == 1.0
     assert "recall_at_k" not in entry
@@ -403,3 +403,210 @@ def test_must_clarify_absent_product_is_skipped() -> None:
     assert sc.clarified_correctly == 0
     # Skipped item is out of the denominator: only the answered item scores.
     assert sc.refusal_accuracy == 1.0
+
+
+# --- The withhold policy for must_refuse rows (issue #161, 2026-08-06) --------
+#
+# A must_refuse row asserts "the system must not answer this". These tests pin
+# what does and does not satisfy that, because the whole adjudication turns on
+# it: the metric must measure the INV-1 property of the reply, not which status
+# string carried it. See metrics.withheld_answer and docs/EVAL_STATUS.md.
+
+
+def _refusal_gold() -> list[GoldItem]:
+    return [GoldItem(question="oos", expected_sources=[], category="refusal", must_refuse=True)]
+
+
+def test_clarify_without_citations_is_a_withheld_answer() -> None:
+    """The shape all 12 seeded-product refusal rows actually return.
+
+    The model declined, the pipeline offered next steps, and the reply carries
+    zero citations and no claim about the question. Scoring this as a failed
+    refusal was measuring the affordance instead of the invariant.
+    """
+    sc = evaluate(
+        _refusal_gold(),
+        ask_callable=lambda _q: _FakeResult(
+            answer="You're asking about Budesonide. What would you like to know?",
+            citations=[],
+            refused=False,
+            status="clarify",
+            reason="model_refusal",
+        ),
+    )
+    assert sc.refused_correctly == 1
+    assert sc.refusal_accuracy == 1.0
+    assert sc.by_category["refusal"]["decision_accuracy"] == 1.0
+
+
+def test_a_clarify_that_cites_is_not_withholding() -> None:
+    """The INV-1 failure the metric exists to catch, and the policy's boundary.
+
+    Citations are claims about the corpus. A must_refuse row that produces them
+    has answered, whatever its status says, and must score zero.
+    """
+    sc = evaluate(
+        _refusal_gold(),
+        ask_callable=lambda _q: _FakeResult(
+            answer="The limit is 80-125% [PSG_001, p.3].",
+            citations=[_FakeCit("PSG_001", 3)],
+            refused=False,
+            status="clarify",
+            reason="model_refusal",
+        ),
+    )
+    assert sc.refused_correctly == 0
+    assert sc.refusal_accuracy == 0.0
+    assert sc.by_category["refusal"]["decision_accuracy"] == 0.0
+
+
+def test_an_answer_to_a_must_refuse_row_scores_zero() -> None:
+    sc = evaluate(
+        _refusal_gold(),
+        ask_callable=lambda _q: _FakeResult(
+            answer="Yes, 80.00-125.00%.",
+            citations=[_FakeCit("PSG_001", 3)],
+            refused=False,
+            status="answer",
+        ),
+    )
+    assert sc.refused_correctly == 0
+    assert sc.refusal_accuracy == 0.0
+
+
+def test_scope_warning_is_a_withheld_answer() -> None:
+    """The two INV-3 operational-advice rows refuse to advise, not to retrieve."""
+    sc = evaluate(
+        _refusal_gold(),
+        ask_callable=lambda _q: _FakeResult(
+            answer="I can't advise on submission strategy.",
+            citations=[],
+            refused=True,
+            status="scope_warning",
+            reason="scope_warning",
+        ),
+    )
+    assert sc.refused_correctly == 1
+    assert sc.refusal_accuracy == 1.0
+
+
+def test_a_transport_failure_is_not_scored_as_a_correct_refusal() -> None:
+    """The regression that made the metric non-deterministic.
+
+    The error paths build their reply with `_refuse`, so `refused` is True and a
+    provider 429 used to count as correct judgment -- which is why the same code
+    measured 0.710 on 2026-08-05 and 0.726 on 2026-08-06. A transport failure is
+    not a decision: it leaves the denominator and is reported instead.
+    """
+    gold = [
+        *_refusal_gold(),
+        GoldItem(
+            question="answerable",
+            expected_sources=[{"short_name": "PSG_001", "page": 3}],
+            category="exception",
+        ),
+    ]
+
+    def _ask(q: str) -> _FakeResult:
+        if q == "oos":
+            return _FakeResult(
+                answer="",
+                citations=[],
+                refused=True,
+                status="error",
+                reason="provider_error",
+            )
+        return _FakeResult(
+            answer="Foo [PSG_001, p.3].",
+            citations=[_FakeCit("PSG_001", 3)],
+            refused=False,
+            retrieved=[{"short_name": "PSG_001", "page": 3, "doc_id": 1}],
+        )
+
+    sc = evaluate(gold, ask_callable=_ask)
+    assert sc.errored == 1
+    assert sc.refused_correctly == 0, "a transport failure must not be banked as a refusal"
+    # Denominator is 2 - 1 errored = 1: only the answered item scores.
+    assert sc.refusal_accuracy == 1.0
+    dropped = [d for d in sc.details if d.get("errored")]
+    assert len(dropped) == 1 and dropped[0]["errored"] == "provider_error"
+    assert "refusal" not in sc.by_category or "decision_accuracy" not in sc.by_category["refusal"]
+
+
+def test_a_transport_failure_on_an_answerable_row_leaves_the_content_denominators() -> None:
+    """The 2026-08-06 rate-limit run, in miniature.
+
+    Five turns came back 429 on ANSWERABLE rows. Each scored recall 0 inside a
+    denominator of 43, dragging recall 0.814 -> 0.721 and turning a provider
+    outage into what looked like a retrieval regression. Excluding them restores
+    the real number -- here, a clean 1.0 over the one row that actually ran.
+    """
+    gold = [
+        GoldItem(
+            question="ran",
+            expected_sources=[{"short_name": "PSG_001", "page": 3}],
+            category="exception",
+        ),
+        GoldItem(
+            question="rate_limited",
+            expected_sources=[{"short_name": "PSG_002", "page": 1}],
+            category="exception",
+        ),
+    ]
+
+    def _ask(q: str) -> _FakeResult:
+        if q == "rate_limited":
+            return _FakeResult(
+                answer="", citations=[], refused=True, status="error", reason="provider_error"
+            )
+        return _FakeResult(
+            answer="Foo [PSG_001, p.3].",
+            citations=[_FakeCit("PSG_001", 3)],
+            refused=False,
+            retrieved=[{"short_name": "PSG_001", "page": 3, "doc_id": 1}],
+        )
+
+    sc = evaluate(gold, ask_callable=_ask)
+    assert sc.errored == 1
+    assert sc.recall_at_k == 1.0, "the 429 row must not score recall 0"
+    assert sc.citation_precision == 1.0
+    assert sc.refused_incorrectly == 0, "a transport failure is not an over-refusal"
+    assert sc.by_category["exception"]["recall_at_k"] == 1.0
+
+
+def test_malformed_structure_still_counts_against_the_run() -> None:
+    """The boundary: only TRANSPORT failures leave the denominator.
+
+    malformed_structure is the model emitting output the claim gate could not
+    admit -- a real quality defect, live at ~12% of production turns. Excluding
+    it would hide exactly the thing worth catching, so an answerable row that
+    ends this way still scores 0 inside the denominator.
+    """
+    gold = [
+        GoldItem(
+            question="q",
+            expected_sources=[{"short_name": "PSG_001", "page": 3}],
+            category="exception",
+        )
+    ]
+    sc = evaluate(
+        gold,
+        ask_callable=lambda _q: _FakeResult(
+            answer="", citations=[], refused=True, status="error", reason="malformed_structure"
+        ),
+    )
+    assert sc.errored == 0, "malformed_structure is a measurement, not a lost turn"
+    assert sc.recall_at_k == 0.0
+    assert sc.refused_incorrectly == 1
+
+
+def test_malformed_structure_on_a_must_refuse_row_is_a_withhold() -> None:
+    """It made no claim and cited nothing, which is what the row asserts."""
+    sc = evaluate(
+        _refusal_gold(),
+        ask_callable=lambda _q: _FakeResult(
+            answer="", citations=[], refused=True, status="error", reason="malformed_structure"
+        ),
+    )
+    assert sc.errored == 0
+    assert sc.refused_correctly == 1

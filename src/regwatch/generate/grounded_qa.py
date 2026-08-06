@@ -1754,6 +1754,15 @@ def ask_core(
                 _clarify,
                 reason="model_refusal",
                 response_mode="clarify",
+                # Post-retrieval decline: keep the passages that the model saw
+                # and judged insufficient. These are the only scored negatives
+                # the system produces -- a real product resolved, retrieval ran,
+                # and the evidence still did not support an answer -- so without
+                # them the audit row cannot say WHAT was weak, and
+                # REFUSAL_SCORE_THRESHOLD (0.30, never calibrated) has no
+                # observations to be calibrated against. Same rationale as the
+                # mixed_products / multi_form backstops below.
+                passages=passages,
                 model_name=response.model,
                 interpretation=_interpretation_for(resolved_name),
                 options=build_options(resolved_name),
