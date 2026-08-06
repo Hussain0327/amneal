@@ -36,7 +36,13 @@ _engine_lock = Lock()
 # A SEPARATE lock from _engine_lock — init_db calls get_engine(), which takes
 # _engine_lock, so reusing it here would deadlock (Lock is not reentrant).
 _init_lock = Lock()
-_initialized = False
+# Two flags, not one. The schema work and the provider assert are memoized
+# SEPARATELY so a bootstrap caller that opts out of the assert
+# (init_db(assert_provider=False)) cannot mark the process "initialized" and
+# thereby suppress the assert for a later serving-path caller in the same
+# process. Collapsing these back into one flag reintroduces that hole.
+_schema_ready = False
+_provider_asserted = False
 # Public tables observed WITHOUT row level security after the last RLS sweep.
 # Boot deliberately TOLERATES a skipped ALTER (see _enable_row_level_security),
 # so this is how that skip stops being silent: /ready fails closed while this is
@@ -718,30 +724,46 @@ def _init_postgres(engine: Engine) -> None:
     _ensure_rls_event_trigger(engine)
 
 
-def init_db() -> None:
+def init_db(*, assert_provider: bool = True) -> None:
     """Apply/verify the Postgres schema for the active database.
 
     Memoized per process (reset by ``reset_for_tests``): the schema work is
     idempotent but not free, and ingest calls init_db once per listing.
+
+    ``assert_provider=False`` applies the schema WITHOUT the K6 serving-path
+    provider check. It exists for the two bootstrap commands that necessarily
+    run before a serving-ready provider can exist:
+
+      * ``embedding-profile-register`` mints the profile id, so it cannot name
+        an ACTIVE_EMBEDDING_PROFILE that does not exist yet; with the default
+        provider it trips the dimension branch, and with EMBEDDING_PROVIDER=qwen3
+        it trips the "Qwen3 cannot write into the legacy space" branch instead.
+      * ``embedding-profile-index`` BUILDS the HNSW index that
+        assert_profile_ready_for_activation requires be already built.
+
+    Neither writes vectors, so neither needs a dimension-compatible provider.
+    Every other caller keeps the fail-fast: pass this flag only for a command
+    that provably does no embedding or vector search.
     """
-    global _initialized
-    if _initialized:
+    global _schema_ready, _provider_asserted
+    if _schema_ready and (_provider_asserted or not assert_provider):
         return
     # get_engine() takes _engine_lock; call it BEFORE acquiring _init_lock.
     engine = get_engine()
     with _init_lock:
-        if _initialized:
-            return
-        _init_postgres(engine)
+        if not _schema_ready:
+            _init_postgres(engine)
+            _schema_ready = True
         # K6 fail-fast: the embedding provider's dimension must match the
         # chunk table's vector(1536) AT STARTUP, not on first vector-store
         # use. Every entry point funnels through init_db (API lifespan,
         # `regwatch init-db`), so a misconfigured provider refuses to boot
         # instead of 500-ing on the first query/ingest.
-        from regwatch.store.pgvector_store import assert_embedding_provider_dim
+        if assert_provider and not _provider_asserted:
+            from regwatch.store.pgvector_store import assert_embedding_provider_dim
 
-        assert_embedding_provider_dim()
-        _initialized = True
+            assert_embedding_provider_dim()
+            _provider_asserted = True
 
 
 @contextmanager
@@ -759,11 +781,14 @@ def session_scope() -> Iterator[Session]:
 
 def reset_for_tests() -> None:
     """Tests use this to swap in a temp DB. Resets the cached engine."""
-    global _engine, _initialized, _unprotected_tables
+    global _engine, _schema_ready, _provider_asserted, _unprotected_tables
     if _engine is not None:
         _engine.dispose()
     _engine = None
-    _initialized = False
+    # BOTH flags: leaving _provider_asserted set would carry an assertion made
+    # against the previous database into the next one.
+    _schema_ready = False
+    _provider_asserted = False
     # The recorded set belongs to the database being swapped out; carrying it
     # into the next one would gate /ready on a finding from a different DB.
     _unprotected_tables = ()

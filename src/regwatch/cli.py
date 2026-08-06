@@ -216,7 +216,11 @@ def cmd_embedding_profile_register(
         chunking_version=chunking_version or CHUNKING_VERSION,
         serving_runtime_version=serving_runtime_version,
     )
-    init_db()
+    # Schema only: registration writes a metadata row and no vectors. The K6
+    # provider assert cannot be satisfied here -- this command MINTS the profile
+    # id, so there is nothing to point ACTIVE_EMBEDDING_PROFILE at yet, and with
+    # the default provider the legacy dimension check fails instead.
+    init_db(assert_provider=False)
     profile = register_embedding_profile(spec)
     if id_only:
         # Plain stdout, no rich markup or wrapping: this is consumed by
@@ -338,7 +342,10 @@ def cmd_embedding_profile_index(
         profile_embedding_coverage,
     )
 
-    init_db()
+    # Schema only: this command BUILDS the HNSW index that the K6 assert's
+    # activation-readiness check requires already exist, so asserting first is
+    # circular. It reads coverage counts and issues DDL; it embeds nothing.
+    init_db(assert_provider=False)
     coverage = profile_embedding_coverage(profile_id)
     if not coverage.complete:
         rprint(

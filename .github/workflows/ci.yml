@@ -156,6 +156,21 @@ jobs:
             --serving-runtime-version "$DATABRICKS_SERVING_RUNTIME_VERSION" --id-only)
           echo "EVAL_PROFILE_ID=$PROFILE_ID" >> "$GITHUB_ENV"
 
+      # Index BEFORE seed, not after. `regwatch seed` runs with the profile
+      # ACTIVE, so its init_db() calls assert_profile_ready_for_activation,
+      # which demands a valid HNSW index. Seeding first is therefore circular:
+      # the index the assert wants would not exist until the step after the one
+      # that needs it. Building it against an empty chunk_embedding is legal --
+      # coverage is 0/0, which counts as complete, and pgvector maintains an
+      # HNSW index on insert -- so ordering it here satisfies both this step's
+      # own assert and the seed step's. run_eval also refuses an arm without a
+      # ready index, so this is a gate prerequisite either way.
+      - name: index databricks eval arm
+        if: steps.eval_arm.outputs.arm == 'databricks'
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: uv run regwatch embedding-profile-index "$EVAL_PROFILE_ID"
+
       - name: seed vector store (databricks arm)
         if: steps.eval_arm.outputs.arm == 'databricks'
         env:
@@ -170,14 +185,6 @@ jobs:
           set -euo pipefail
           export ACTIVE_EMBEDDING_PROFILE="$EVAL_PROFILE_ID"
           uv run regwatch seed
-
-      # run_eval refuses an arm without a ready HNSW index, so this is a gate
-      # prerequisite rather than a performance tweak.
-      - name: index databricks eval arm
-        if: steps.eval_arm.outputs.arm == 'databricks'
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-        run: uv run regwatch embedding-profile-index "$EVAL_PROFILE_ID"
 
       - name: eval (databricks arm)
         if: steps.eval_arm.outputs.arm == 'databricks'
