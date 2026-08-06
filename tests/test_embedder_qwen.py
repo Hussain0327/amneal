@@ -19,6 +19,7 @@ from regwatch.process.embedder import (
     get_embedding_provider,
 )
 from regwatch.retrieve import retriever as retriever_module
+from regwatch.retrieve.mode import RetrievalMode
 
 DIM = 32
 
@@ -299,8 +300,10 @@ def test_retriever_routes_named_active_profile_without_legacy_search(
         *,
         k: int,
         where: dict[str, Any] | None,
+        mode: Any = None,
     ) -> list[Any]:
         seen["search"] = (selected_profile_id, vector, k, where)
+        seen["mode"] = mode
         return []
 
     monkeypatch.setattr(
@@ -347,6 +350,9 @@ def test_retriever_routes_named_active_profile_without_legacy_search(
         3,
         {"version_id": {"$in": [7]}},
     )
+    # The current-version clause is NOT a product scope, so an unfiltered
+    # question is EXACT_CORPUS -- and never the approximate path.
+    assert seen["mode"] is RetrievalMode.EXACT_CORPUS
 
 
 def test_pipeline_uses_document_semantics_without_mutating_text(

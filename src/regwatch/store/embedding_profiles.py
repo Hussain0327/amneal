@@ -33,6 +33,13 @@ from sqlalchemy import Engine, ForeignKey, Index, Table
 from sqlalchemy import text as sa_text
 from sqlmodel import SQLModel
 
+from regwatch.retrieve.mode import (
+    RetrievalMode,
+    RetrievalScope,
+    assert_mode_permitted,
+    default_mode_for_scope,
+)
+
 if TYPE_CHECKING:
     from sqlalchemy.engine import Connection
 
@@ -705,22 +712,126 @@ def _distance_expression(*, schema: str, dtype: str, dimension: int, alias: str)
     )
 
 
+# Ties are real here: 90 groups of byte-identical chunk text exist in the
+# corpus (the FDA PSG template, repeated once per drug), so equal distances are
+# reachable -- measured at 8% of gold queries inside the top 8, and 3% straddling
+# the k cutoff. Postgres does not promise an order among equal sort keys, so
+# WHICH drug's document is cited would otherwise be free to change under a heap
+# reorder or a plan change. chunk.id is the primary key, hence a total order.
+_TIEBREAK = ", c.id"
+
+
+def _where_filter_keys(where: dict[str, Any] | None) -> dict[str, Any]:
+    """Flatten a Chroma-style ``where`` back to {field: marker}.
+
+    Only the KEYS matter for scope classification -- the values already persist
+    in ``route_json['filters']``. Used when a caller does not pass an explicit
+    scope, so an unscoped call still classifies correctly instead of defaulting
+    to the compliance-sensitive label.
+    """
+    flat: dict[str, Any] = {}
+    for key, value in (where or {}).items():
+        if key == "$and" and isinstance(value, list):
+            for sub in value:
+                if isinstance(sub, dict):
+                    flat.update(_where_filter_keys(sub))
+        elif not key.startswith("$"):
+            flat[key] = value
+    return flat
+
+
+def build_search_sql(
+    *,
+    mode: RetrievalMode,
+    profile_predicate: str,
+    select_cols: str,
+    clause: str,
+    schema: str,
+    dimension: int,
+    index_dtype: str,
+    k: int,
+) -> tuple[str, list[str], dict[str, Any]]:
+    """Pure SQL builder: (sql, session statements, extra bind params).
+
+    Dispatched on the MODE, never on whether a filter happens to exist. Kept
+    free of I/O so the mode/SQL contract is unit-testable without Postgres.
+    """
+    full_distance = _distance_expression(
+        schema=schema, dtype="vector", dimension=dimension, alias="ce"
+    )
+    if mode.is_exact:
+        where_sql = (
+            f"{profile_predicate} AND {clause.removeprefix(' WHERE ')}"
+            if clause
+            else profile_predicate
+        )
+        sql = (
+            f"SELECT {select_cols}, {full_distance} AS distance "  # noqa: S608
+            "FROM chunk_embedding ce JOIN chunk c ON c.id = ce.chunk_id "
+            f"WHERE {where_sql} "
+            f"ORDER BY {full_distance}{_TIEBREAK} LIMIT :k"
+        )
+        # An exact mode must not be satisfiable by the approximate index. This
+        # is a cost penalty rather than a prohibition, so the mode is also
+        # recorded on the audit row instead of being inferred from the plan.
+        return sql, ["SET LOCAL enable_indexscan = off"], {}
+
+    # ANN_RERANKED: bounded HNSW candidate pool, then an exact full-precision
+    # rerank. The INNER ordering must stay a bare distance operator matching the
+    # indexed expression -- adding the tiebreak there would make the index
+    # unusable and quietly turn this into a sequential scan.
+    candidate_distance = _distance_expression(
+        schema=schema, dtype=index_dtype, dimension=dimension, alias="ce"
+    )
+    candidate_k = max(int(k) * 4, 50)
+    sql = (
+        "WITH candidates AS MATERIALIZED ("  # noqa: S608
+        "SELECT ce.chunk_id FROM chunk_embedding ce "
+        f"WHERE {profile_predicate} "
+        f"ORDER BY {candidate_distance} LIMIT :candidate_k"
+        ") "
+        f"SELECT {select_cols}, {full_distance} AS distance "
+        "FROM candidates candidate "
+        "JOIN chunk_embedding ce "
+        f"ON {profile_predicate} AND ce.chunk_id = candidate.chunk_id "
+        "JOIN chunk c ON c.id = ce.chunk_id "
+        f"ORDER BY {full_distance}{_TIEBREAK} LIMIT :k"
+    )
+    # ef_search bounds the pool HNSW is willing to explore; leaving it below
+    # candidate_k (the old fixed 100 against a candidate_k of 200) means the
+    # requested candidate pool can never be filled.
+    ef_search = max(100, candidate_k)
+    return sql, [f"SET LOCAL hnsw.ef_search = {ef_search}"], {"candidate_k": candidate_k}
+
+
 def similarity_search_profile(
     profile_id: str,
     query_embedding: list[float],
     *,
     k: int = 8,
     where: dict[str, Any] | None = None,
+    mode: RetrievalMode | None = None,
 ) -> list[Hit]:
-    """Search exactly one immutable profile; rows from others cannot participate."""
+    """Search exactly one immutable profile; rows from others cannot participate.
+
+    ``mode`` selects the algorithm EXPLICITLY. It used to be inferred from
+    ``bool(clause)`` -- the presence of a metadata filter silently decided
+    exact-vs-approximate. Omitted, it defaults from the scope, and always to one
+    of the EXACT modes; the approximate path is opt-in only.
+    """
     from regwatch.store import pgvector_store
     from regwatch.store.vector_store import Hit
+
+    scope = RetrievalScope.from_filters(_where_filter_keys(where))
+    if mode is None:
+        mode = default_mode_for_scope(scope)
+    assert_mode_permitted(mode, scope)
 
     if k <= 0:
         return []
     profile = get_embedding_profile(profile_id)
-    _validate_embedding(query_embedding, profile.dimension)
     spec = _index_spec(profile, concurrently=False)
+    _validate_embedding(query_embedding, profile.dimension)
     engine = _engine()
     schema = _vector_extension_schema(engine)
     clause, params = pgvector_store._where_clause(where, table_alias="c")
@@ -746,67 +857,21 @@ def similarity_search_profile(
     select_cols = ", ".join(
         f"c.{column}" for column in ("id", "text", *pgvector_store._METADATA_COLUMNS)
     )
-    full_distance = _distance_expression(
+    sql, session_statements, extra_params = build_search_sql(
+        mode=mode,
+        profile_predicate=profile_predicate,
+        select_cols=select_cols,
+        clause=clause,
         schema=schema,
-        dtype="vector",
         dimension=profile.dimension,
-        alias="ce",
+        index_dtype=spec.index_dtype,
+        k=int(k),
     )
-
-    if clause:
-        # Exact search over a metadata-narrowed set preserves the existing
-        # cross-drug/current-version safety behavior.
-        sql = (
-            f"SELECT {select_cols}, {full_distance} AS distance "  # noqa: S608
-            "FROM chunk_embedding ce JOIN chunk c ON c.id = ce.chunk_id "
-            f"WHERE {profile_predicate} AND {clause.removeprefix(' WHERE ')} "
-            f"ORDER BY {full_distance} LIMIT :k"
-        )
-        with engine.begin() as conn:
-            conn.execute(sa_text("SET LOCAL enable_indexscan = off"))
-            rows = conn.execute(sa_text(sql), params).mappings().all()
-    elif spec.uses_halfvec:
-        # HNSW candidates use the half-precision expression index; final score
-        # and rank use the stored full-precision vector.
-        candidate_distance = _distance_expression(
-            schema=schema,
-            dtype="halfvec",
-            dimension=profile.dimension,
-            alias="ce",
-        )
-        params["candidate_k"] = max(int(k) * 4, 50)
-        sql = (
-            "WITH candidates AS MATERIALIZED ("  # noqa: S608
-            "SELECT ce.chunk_id FROM chunk_embedding ce "
-            f"WHERE {profile_predicate} "
-            f"ORDER BY {candidate_distance} LIMIT :candidate_k"
-            ") "
-            f"SELECT {select_cols}, {full_distance} AS distance "
-            "FROM candidates candidate "
-            "JOIN chunk_embedding ce "
-            f"ON {profile_predicate} AND ce.chunk_id = candidate.chunk_id "
-            "JOIN chunk c ON c.id = ce.chunk_id "
-            f"ORDER BY {full_distance} LIMIT :k"
-        )
-        with engine.begin() as conn:
-            conn.execute(sa_text("SET LOCAL hnsw.ef_search = 100"))
-            rows = conn.execute(sa_text(sql), params).mappings().all()
-    else:
-        distance = _distance_expression(
-            schema=schema,
-            dtype="vector",
-            dimension=profile.dimension,
-            alias="ce",
-        )
-        sql = (
-            f"SELECT {select_cols}, {distance} AS distance "  # noqa: S608
-            "FROM chunk_embedding ce JOIN chunk c ON c.id = ce.chunk_id "
-            f"WHERE {profile_predicate} "
-            f"ORDER BY {distance} LIMIT :k"
-        )
-        with engine.begin() as conn:
-            conn.execute(sa_text("SET LOCAL hnsw.ef_search = 100"))
-            rows = conn.execute(sa_text(sql), params).mappings().all()
+    params.update(extra_params)
+    with engine.begin() as conn:
+        for statement in session_statements:
+            conn.execute(sa_text(statement))
+        rows = conn.execute(sa_text(sql), params).mappings().all()
 
     hits: list[Hit] = []
     for row in rows:
