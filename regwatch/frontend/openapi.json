@@ -613,6 +613,129 @@
         "title": "HealthVectorComponent",
         "type": "object"
       },
+      "PsgDocumentListResponse": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/PsgLibraryDoc"
+            },
+            "title": "Documents",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "count",
+          "total",
+          "limit",
+          "offset",
+          "documents"
+        ],
+        "title": "PsgDocumentListResponse",
+        "type": "object"
+      },
+      "PsgLibraryDoc": {
+        "description": "One psg_document catalog row for the reference-library rail.\n\n``stripped_name`` is derived at read time (text_normalize.stripped_name) so\nthe client can salt-collapse (\"albuterol sulfate\" -> \"albuterol\") without\nshipping the salt-token table. ``psg_type`` stays a plain str (house\nprecedent: AlertRecord's listing fields) -- the crawler only ever writes\n\"draft\"/\"final\", and a str never 500s on a legacy row.",
+        "properties": {
+          "active_ingredient": {
+            "title": "Active Ingredient",
+            "type": "string"
+          },
+          "appl_no": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Appl No"
+          },
+          "dosage_form": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dosage Form"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "normalized_name": {
+            "title": "Normalized Name",
+            "type": "string"
+          },
+          "psg_type": {
+            "title": "Psg Type",
+            "type": "string"
+          },
+          "recommended_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommended Date"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
+          },
+          "source_url": {
+            "title": "Source Url",
+            "type": "string"
+          },
+          "stripped_name": {
+            "title": "Stripped Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "active_ingredient",
+          "normalized_name",
+          "stripped_name",
+          "dosage_form",
+          "route",
+          "appl_no",
+          "psg_type",
+          "recommended_date",
+          "source_url"
+        ],
+        "title": "PsgLibraryDoc",
+        "type": "object"
+      },
       "QueryCitation": {
         "properties": {
           "chunk_id": {
@@ -2107,6 +2230,181 @@
           }
         },
         "summary": "Metrics"
+      }
+    },
+    "/psg/documents": {
+      "get": {
+        "operationId": "psg_documents_psg_documents_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 2000,
+              "maximum": 5000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PsgDocumentListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Psg Documents"
+      }
+    },
+    "/psg/documents/{doc_id}/pdf": {
+      "get": {
+        "description": "Stream one PSG PDF inline: local cache first, else fetch from fda.gov.\n\nThe remote branch reuses the crawler's hardened ``download_pdf`` (polite\npause, streamed byte cap, %PDF validation, write-through cache in ingest's\nown naming scheme) under a tighter per-request timeout budget. Error\ndetails never include the upstream URL.",
+        "operationId": "psg_document_pdf_psg_documents__doc_id__pdf_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "doc_id",
+            "required": true,
+            "schema": {
+              "title": "Doc Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Psg Document Pdf"
+      },
+      "head": {
+        "description": "Availability probe for the Studio's PDF pane.\n\nAnswers from the DB row plus at most two stat() calls -- never fda.gov,\nnever the rate budget -- so the frontend can distinguish \"this document\ncan be served\" from a transport failure before mounting the iframe.\nFastAPI does not auto-answer HEAD for GET routes, so this handler is\nload-bearing, not decoration.",
+        "operationId": "psg_document_pdf_head_psg_documents__doc_id__pdf_head",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "doc_id",
+            "required": true,
+            "schema": {
+              "title": "Doc Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Psg Document Pdf Head"
       }
     },
     "/query": {

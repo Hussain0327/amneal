@@ -38,6 +38,9 @@ NO_JSON_BODY_ROUTES = {
     ("POST", "/query/stream"),
     ("POST", "/whitepaper/runs/{run_id}/docx"),
     ("GET", "/metrics"),
+    # Raw PDF bytes; the iframe consumes them, not the typed client. (The
+    # sibling HEAD probe needs no entry: HEAD is excluded from the sweep.)
+    ("GET", "/psg/documents/{doc_id}/pdf"),
 }
 
 # Internal-only routes: NOT part of the public wire contract (include_in_schema

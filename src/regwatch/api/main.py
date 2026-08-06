@@ -20,6 +20,9 @@ Endpoints (per spec §10.16):
     GET    /deficiency/runs - org-shared deficiency analysis runs (auth)
     GET    /deficiency/runs/{id} - one run + its fault report (auth)
     GET    /watch/latest   — recent alerts (auth)
+    GET    /psg/documents  - PSG reference-library catalog for the Studio rail (auth)
+    GET    /psg/documents/{id}/pdf - stream one PSG PDF inline (auth)
+    HEAD   /psg/documents/{id}/pdf - availability probe, DB row only (auth)
     GET    /health         — liveness + component diagnostics (open)
     GET    /ready          - readiness: db + vector store + LLM constructable (open)
     GET    /metrics        - Prometheus counters from the query_log audit
@@ -40,9 +43,11 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from datetime import UTC, date, datetime
 from functools import partial
+from pathlib import Path
 from typing import Any, Literal
 
 import anyio.to_thread
+import httpx
 from config.settings import Settings, get_settings
 from fastapi import (
     APIRouter,
@@ -72,9 +77,17 @@ from regwatch.common.conversation import SESSION_FILTER_KEYS, SessionOwnershipEr
 from regwatch.common.logging import configure_logging, get_logger
 from regwatch.common.observability import capture_exception, init_sentry
 from regwatch.common.ratelimit import query_limiter
+from regwatch.common.text_normalize import stripped_name
 from regwatch.deficiency.runner import run_deficiency_analysis
 from regwatch.generate.grounded_qa import QAResult, QueryStatusLiteral, ask, compute_turn
 from regwatch.generate.rag_contract import AuditPayload, RagOutcome, SessionPatch
+from regwatch.ingest.psg_crawler import (
+    BROWSER_UA,
+    PdfInvalidError,
+    PdfTooLargeError,
+    _RetryableHTTP,
+    download_pdf,
+)
 from regwatch.process.embedder import assert_embedding_runtime_available
 from regwatch.sources.router import search_sources
 from regwatch.sources.types import SourceKind, SourceQuery
@@ -87,7 +100,12 @@ from regwatch.store.models import (
     User,
     WhitepaperRun,
 )
-from regwatch.store.queries import fetch_citation_recency
+from regwatch.store.queries import (
+    count_psg_documents,
+    fetch_citation_recency,
+    fetch_psg_pdf_source,
+    list_psg_documents,
+)
 from regwatch.store.vector_store import collection_size
 from regwatch.watch.alerts import count_digest_records, latest_digest_records
 from regwatch.watch.runs import latest_watch_run
@@ -1861,6 +1879,281 @@ def watch_latest(
         # ever a run that actually happened, never inferred).
         "last_run": latest_watch_run(),
     }
+
+
+# ---------- /psg (reference library for the Compliance Studio rail) ----------
+class PsgLibraryDoc(BaseModel):
+    """One psg_document catalog row for the reference-library rail.
+
+    ``stripped_name`` is derived at read time (text_normalize.stripped_name) so
+    the client can salt-collapse ("albuterol sulfate" -> "albuterol") without
+    shipping the salt-token table. ``psg_type`` stays a plain str (house
+    precedent: AlertRecord's listing fields) -- the crawler only ever writes
+    "draft"/"final", and a str never 500s on a legacy row.
+    """
+
+    id: int
+    active_ingredient: str
+    normalized_name: str
+    stripped_name: str
+    dosage_form: str | None
+    route: str | None
+    appl_no: str | None
+    psg_type: str
+    recommended_date: str | None
+    source_url: str
+
+
+class PsgDocumentListResponse(BaseModel):
+    count: int
+    total: int
+    limit: int
+    offset: int
+    documents: list[PsgLibraryDoc]
+
+
+@protected.get("/psg/documents", response_model=PsgDocumentListResponse)
+def psg_documents(
+    # One-shot by design: the rail buckets the whole catalog A-Z, and a partial
+    # page cannot bucket correctly. Today's FDA index is ~1,795 PSGs (hard
+    # ceiling ~2,400), so the default covers it in one call; offset stays as
+    # the safety valve if the catalog ever outgrows the cap.
+    limit: int = Query(2000, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    rows = list_psg_documents(limit=limit, offset=offset)
+    total = count_psg_documents()
+    return {
+        "count": len(rows),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "documents": [
+            {
+                "id": r.id,
+                "active_ingredient": r.active_ingredient,
+                "normalized_name": r.normalized_name,
+                "stripped_name": stripped_name(r.active_ingredient),
+                "dosage_form": r.dosage_form,
+                "route": r.route,
+                "appl_no": r.appl_no,
+                "psg_type": r.psg_type,
+                "recommended_date": r.recommended_date,
+                "source_url": r.source_url,
+            }
+            for r in rows
+        ],
+    }
+
+
+# Digits-only guard so a corrupted appl_no can never reach Content-Disposition
+# (same discipline as the docx route's application-number check).
+_PSG_APPL_NO_RE = re.compile(r"\d{1,6}")
+# source_url is server-ingested (the crawler builds it from the validated PSG
+# template), but validate at the boundary anyway: this route must never be a
+# generic fetch proxy.
+_PSG_FDA_URL_PREFIX = "https://www.accessdata.fda.gov/"
+
+
+def _psg_pdf_headers(*, appl_no: str | None, doc_id: int, etag: str) -> dict[str, str]:
+    name = (
+        f"PSG_{appl_no}.pdf"
+        if appl_no and _PSG_APPL_NO_RE.fullmatch(appl_no)
+        else f"psg-{doc_id}.pdf"
+    )
+    # `private`: authed content behind a cookie; ETag revalidation makes repeat
+    # opens of the same PSG effectively free.
+    return {
+        "Content-Disposition": f'inline; filename="{name}"',
+        "ETag": etag,
+        "Cache-Control": "private, max-age=3600",
+    }
+
+
+def _etag_matches(if_none_match: str | None, etag: str) -> bool:
+    """Lenient If-None-Match: tolerate weak validators and comma lists."""
+    if not if_none_match:
+        return False
+    for candidate in if_none_match.split(","):
+        value = candidate.strip()
+        if value.startswith("W/"):
+            value = value[2:]
+        if value == etag or value == "*":
+            return True
+    return False
+
+
+def _psg_proxy_client() -> httpx.Client:
+    """Tighter budget than the crawler's ingest client: this fetch runs inside
+    an interactive request holding an anyio threadpool token."""
+    return httpx.Client(
+        timeout=httpx.Timeout(20.0, connect=5.0, read=20.0),
+        headers={"User-Agent": BROWSER_UA, "Accept": "application/pdf,*/*"},
+        follow_redirects=True,
+    )
+
+
+def _psg_local_candidates(
+    pdf_path: str | None, appl_no: str | None, content_hash: str
+) -> list[Path]:
+    """Where a cached copy could live on this machine.
+
+    Candidate 1 is the stored ``pdf_path`` (often an absolute path from the
+    ingest machine -- expect misses on Fly's ephemeral disk). Candidate 2
+    recomputes the crawler's own cache name, which is only derivable when
+    ``appl_no`` is present (a NULL would build a "PSG_None_*" name that no
+    crawler ever wrote).
+    """
+    candidates: list[Path] = []
+    if pdf_path:
+        candidates.append(Path(pdf_path))
+    if appl_no:
+        candidates.append(get_settings().raw_pdf_dir / f"PSG_{appl_no}_{content_hash[:8]}.pdf")
+    return candidates
+
+
+def _psg_local_pdf(pdf_path: str | None, appl_no: str | None, content_hash: str) -> bytes | None:
+    """The VERIFIED cached bytes on this machine, or None.
+
+    Reads and hash-checks the candidate before serving: an ETag derived from
+    ``content_hash`` must never vouch for a truncated or foreign file sitting
+    at the expected path. Unreadable paths and mismatched digests are misses,
+    never raises -- the remote branch is the recovery path.
+    """
+    for candidate in _psg_local_candidates(pdf_path, appl_no, content_hash):
+        try:
+            if not candidate.is_file():
+                continue
+            data = candidate.read_bytes()
+        except OSError:
+            continue
+        if hashlib.sha256(data).hexdigest() == content_hash:
+            return data
+        log.warning("psg_pdf_cache_hash_mismatch", path=str(candidate))
+    return None
+
+
+def _psg_head_available(doc_pdf_path: str | None, appl_no: str | None, content_hash: str) -> bool:
+    """Cheap (stat-only) availability answer for the HEAD probe.
+
+    A row whose source_url is not an FDA PDF and that has no local file will
+    502 on GET with certainty -- a 200 probe for it would defeat the probe.
+    Existence alone (no read, no hash) keeps HEAD fast; a stale file that then
+    fails GET-side verification still has the remote branch behind it.
+    """
+    for candidate in _psg_local_candidates(doc_pdf_path, appl_no, content_hash):
+        try:
+            if candidate.is_file():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+@protected.head("/psg/documents/{doc_id}/pdf")
+def psg_document_pdf_head(doc_id: int) -> Response:
+    """Availability probe for the Studio's PDF pane.
+
+    Answers from the DB row plus at most two stat() calls -- never fda.gov,
+    never the rate budget -- so the frontend can distinguish "this document
+    can be served" from a transport failure before mounting the iframe.
+    FastAPI does not auto-answer HEAD for GET routes, so this handler is
+    load-bearing, not decoration.
+    """
+    doc = fetch_psg_pdf_source(doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="psg document not found")
+    if not doc.source_url.startswith(_PSG_FDA_URL_PREFIX) and not _psg_head_available(
+        doc.pdf_path, doc.appl_no, doc.content_hash
+    ):
+        # The GET is guaranteed to fail for this row; say so now instead of
+        # letting the pane frame an error body.
+        raise HTTPException(status_code=502, detail="document has no fetchable FDA source")
+    etag = f'"{doc.content_hash}"'
+    return Response(
+        status_code=200,
+        media_type="application/pdf",
+        headers=_psg_pdf_headers(appl_no=doc.appl_no, doc_id=doc.id, etag=etag),
+    )
+
+
+@protected.get("/psg/documents/{doc_id}/pdf")
+def psg_document_pdf(
+    request: Request,
+    doc_id: int,
+    user: User = Depends(require_user),
+) -> Response:
+    """Stream one PSG PDF inline: local cache first, else fetch from fda.gov.
+
+    The remote branch reuses the crawler's hardened ``download_pdf`` (polite
+    pause, streamed byte cap, %PDF validation, write-through cache in ingest's
+    own naming scheme) under a tighter per-request timeout budget. Error
+    details never include the upstream URL.
+    """
+    doc = fetch_psg_pdf_source(doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="psg document not found")
+
+    etag = f'"{doc.content_hash}"'
+    if _etag_matches(request.headers.get("if-none-match"), etag):
+        return Response(
+            status_code=304,
+            headers={"ETag": etag, "Cache-Control": "private, max-age=3600"},
+        )
+
+    local = _psg_local_pdf(doc.pdf_path, doc.appl_no, doc.content_hash)
+    if local is not None:
+        return Response(
+            content=local,
+            media_type="application/pdf",
+            headers=_psg_pdf_headers(appl_no=doc.appl_no, doc_id=doc.id, etag=etag),
+        )
+
+    if not doc.source_url.startswith(_PSG_FDA_URL_PREFIX):
+        raise HTTPException(status_code=502, detail="document has no fetchable FDA source")
+    # Rate-gate the remote branch only: local-disk hits stay unmetered, and the
+    # psgpdf: namespace keeps library browsing off the /query LLM budget.
+    if not query_limiter.allow(f"psgpdf:user:{user.id}", get_settings().rate_limit_per_minute):
+        raise HTTPException(status_code=429, detail="rate limit exceeded")
+
+    try:
+        with _psg_proxy_client() as fetch_client:
+            _, data, digest = download_pdf(doc.source_url, client=fetch_client)
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="fda.gov timed out serving the PDF") from exc
+    except httpx.HTTPStatusError as exc:
+        # Status code only -- str(exc) embeds the full URL.
+        raise HTTPException(
+            status_code=502,
+            detail=f"fda.gov returned {exc.response.status_code} for the PDF",
+        ) from exc
+    except _RetryableHTTP as exc:
+        # Retried-out 5xx/429: tenacity reraises the crawler's internal marker,
+        # not HTTPStatusError, so it needs its own arm or it escapes as a 500.
+        raise HTTPException(
+            status_code=502, detail="fda.gov kept failing to serve the PDF"
+        ) from exc
+    except httpx.HTTPError as exc:
+        # The catch-all network arm. httpx.HTTPError, not TransportError:
+        # TooManyRedirects (follow_redirects=True + a redirect cycle) and
+        # DecodingError (corrupt Content-Encoding) subclass RequestError
+        # directly and would otherwise escape as unmapped 500s.
+        raise HTTPException(status_code=502, detail="could not reach fda.gov for the PDF") from exc
+    except PdfTooLargeError as exc:
+        raise HTTPException(status_code=502, detail="upstream PDF exceeds the size cap") from exc
+    except PdfInvalidError as exc:
+        raise HTTPException(status_code=502, detail="upstream did not return a PDF") from exc
+
+    if digest != doc.content_hash:
+        # FDA revised the PDF since the last watch run. Serve the current
+        # official document; the daily watch cron owns reconciling the row.
+        log.warning("psg_pdf_hash_drift", doc_id=doc.id, stored=doc.content_hash, fetched=digest)
+        etag = f'"{digest}"'
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers=_psg_pdf_headers(appl_no=doc.appl_no, doc_id=doc.id, etag=etag),
+    )
 
 
 # ---------- /deficiency (DefPredict integration; DECISIONS.md 2026-07-30) ----------

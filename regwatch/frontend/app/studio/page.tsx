@@ -16,9 +16,13 @@ import { ComplianceSpine } from "@/components/studio/ComplianceSpine";
 import { DocumentCanvas } from "@/components/studio/DocumentCanvas";
 import { FindingsPanel, type PendingDisposition } from "@/components/studio/FindingsPanel";
 import { FormatBar } from "@/components/studio/FormatBar";
+import type { LibraryState } from "@/components/studio/LibrarySection";
+import { PdfPane } from "@/components/studio/PdfPane";
 import { RepositoryTree } from "@/components/studio/RepositoryTree";
 import { SelectionToolbar, type StudioSelection } from "@/components/studio/SelectionToolbar";
 import { TopBar } from "@/components/studio/TopBar";
+import { fetchPsgLibrary } from "@/lib/api";
+import { buildLibraryTree, type LibraryDoc } from "@/lib/studio-library";
 import {
   ASSISTANT_INTRO,
   CHECK_RESULTS,
@@ -142,6 +146,21 @@ export default function StudioPage() {
   const [treeOpen, setTreeOpen] = useState(false);
   const [thinking, setThinking] = useState(false);
 
+  // The reference library (real FDA PSGs from the database) and the one open
+  // on the canvas. `activeId` stays a valid DRAFT id throughout: a library doc
+  // is an overlay, so closing it returns to exactly the draft that was open,
+  // and none of the disposition-loop code paths change shape.
+  const [libraryDoc, setLibraryDoc] = useState<LibraryDoc | null>(null);
+  const [libraryState, setLibraryState] = useState<LibraryState>({ phase: "loading" });
+  const libraryLoading = useRef(false);
+  // Mirrored for delayed callbacks: a check that completes while a PSG is on
+  // the canvas must not resurrect the findings panel (its scrim would sit
+  // over the PDF), and the timer closure would otherwise read a stale value.
+  const libraryDocRef = useRef<LibraryDoc | null>(null);
+  useEffect(() => {
+    libraryDocRef.current = libraryDoc;
+  }, [libraryDoc]);
+
   // The disposition the analyst has picked but not recorded, the words they are
   // part-way through typing, and the last refusal. Drafts are keyed by finding
   // and live here rather than in the panel so closing the panel or switching
@@ -192,7 +211,28 @@ export default function StudioPage() {
 
   // --- documents -----------------------------------------------------------
 
+  const loadLibrary = useCallback(() => {
+    if (libraryLoading.current) return;
+    libraryLoading.current = true;
+    setLibraryState({ phase: "loading" });
+    fetchPsgLibrary()
+      .then((rows) => setLibraryState({ phase: "ready", buckets: buildLibraryTree(rows) }))
+      // State stays out of "ready" on failure: an error must never render as
+      // loaded-but-empty (house convention, same as the watch page).
+      .catch((e) =>
+        setLibraryState({ phase: "error", message: e instanceof Error ? e.message : String(e) }),
+      )
+      .finally(() => {
+        libraryLoading.current = false;
+      });
+  }, []);
+
+  useEffect(() => {
+    loadLibrary();
+  }, [loadLibrary]);
+
   const openDoc = useCallback((id: string) => {
+    setLibraryDoc(null);
     setActiveId(id);
     setActiveFindingId(null);
     setSelection(null);
@@ -201,6 +241,19 @@ export default function StudioPage() {
     // Optional call: jsdom elements have no scrollTo, and a missing scroll reset
     // must never take the document switch down with it.
     scrollRef.current?.scrollTo?.({ top: 0 });
+  }, []);
+
+  const openLibraryDoc = useCallback((d: LibraryDoc) => {
+    setLibraryDoc(d);
+    setActiveFindingId(null);
+    setSelection(null);
+    setTreeOpen(false);
+    setDispositionError(null);
+    // The panel shows the DRAFT's findings; leaving it open beside a PDF would
+    // mislabel them. `docs`, `drafts` and `pending` are deliberately untouched
+    // so a half-typed justification survives draft -> library -> draft.
+    setPanel(null);
+    setLive(`Opened PSG for ${d.ingredient}. Read-only FDA reference.`);
   }, []);
 
   const editBlock = useCallback(
@@ -219,7 +272,7 @@ export default function StudioPage() {
       patch(id, (d) => ({ ...d, checkState: "checking" }));
       later(() => {
         patch(id, (d) => applyFindings(d, CHECK_RESULTS[id] ?? []));
-        if (id === activeId) setPanel("findings");
+        if (id === activeId && !libraryDocRef.current) setPanel("findings");
       }, CHECK_MS);
     },
     [activeId, docs, later, patch],
@@ -333,6 +386,10 @@ export default function StudioPage() {
 
   const step = useCallback(
     (direction: 1 | -1) => {
+      if (libraryDoc) {
+        setLive("Reference documents have no findings to step through.");
+        return;
+      }
       if (!doc) return;
       const next = nextOpenFinding(doc, activeFindingId, direction);
       if (!next) {
@@ -343,7 +400,7 @@ export default function StudioPage() {
       setPanel("findings");
       setFocusToken((n) => n + 1);
     },
-    [activeFindingId, doc],
+    [activeFindingId, doc, libraryDoc],
   );
 
   const copyRecord = useCallback(async () => {
@@ -482,6 +539,18 @@ export default function StudioPage() {
 
       if (e.key !== "Escape") return;
       if (selection) setSelection(null);
+      else if (libraryDoc) {
+        // The PDF is the topmost surface, so Escape peels it (or the mobile
+        // drawer above it) FIRST -- reaching past it to cancel the retained
+        // draft's pending disposition would mutate state the analyst cannot
+        // see. The search box keeps its own Escape.
+        if (inTextField(e.target)) return;
+        if (treeOpen) setTreeOpen(false);
+        else {
+          setLibraryDoc(null);
+          setLive(`Returned to ${doc.name}.`);
+        }
+      }
       // Before the panel: closing the editor must not also close the panel, or a
       // half-typed justification would vanish along with two surfaces.
       else if (pending) cancelPending();
@@ -491,13 +560,19 @@ export default function StudioPage() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [cancelPending, panel, pending, selection, step, treeOpen]);
+  }, [cancelPending, doc, libraryDoc, panel, pending, selection, step, treeOpen]);
 
   if (!doc) return null;
 
   return (
     <div className="studio">
-      <TopBar doc={doc} onToggleTree={() => setTreeOpen((v) => !v)} />
+      <TopBar
+        doc={doc}
+        library={
+          libraryDoc ? { ingredient: libraryDoc.ingredient, drugLabel: libraryDoc.drugLabel } : null
+        }
+        onToggleTree={() => setTreeOpen((v) => !v)}
+      />
 
       {/* One live region for the whole surface, mounted unconditionally: a region
           that appears at the same moment as its first message is not announced. */}
@@ -509,84 +584,99 @@ export default function StudioPage() {
         <RepositoryTree
           tree={TREE}
           docs={docs}
-          activeId={activeId}
+          activeId={libraryDoc ? null : activeId}
+          library={libraryState}
+          activeLibraryId={libraryDoc?.id ?? null}
           open={treeOpen}
           checking={checking}
           onOpenDoc={openDoc}
+          onOpenLibraryDoc={openLibraryDoc}
+          onRetryLibrary={loadLibrary}
           onCheck={() => runCheck(activeId)}
         />
 
-        <ComplianceSpine
-          doc={doc}
-          scrollRef={scrollRef}
-          activeFindingId={activeFindingId}
-          onSelect={focusFinding}
-        />
+        {libraryDoc ? (
+          // The compliance chrome is HIDDEN, not disabled, while a reference
+          // PSG is open: the spine, format bar, panels and rail all read or
+          // write the DRAFT's blocks and findings, and rendering them next to
+          // a PDF they do not describe would be a lie ("2 open findings"
+          // beside a document that has none).
+          <PdfPane key={libraryDoc.id} doc={libraryDoc} />
+        ) : (
+          <>
+            <ComplianceSpine
+              doc={doc}
+              scrollRef={scrollRef}
+              activeFindingId={activeFindingId}
+              onSelect={focusFinding}
+            />
 
-        <div className="st-main">
-          <FormatBar
-            tracked={tracked}
-            onTrackedChange={setTracked}
-            canClear={doc.blocks.some((b) => b.marks.some((m) => m.kind === "highlight"))}
-            onClearHighlights={() => patch(activeId, clearHighlights)}
-          />
-          <DocumentCanvas
-            doc={doc}
-            scrollRef={scrollRef}
-            activeFindingId={activeFindingId}
-            tracked={tracked}
-            reduceMotion={reduceMotion}
-            onEditBlock={editBlock}
-            onSelectFinding={focusFinding}
-            onSelectionChange={setSelection}
-          />
-        </div>
-
-        <div className={`st-panel${panel ? " is-open" : ""}`} aria-hidden={panel === null}>
-          <div className="st-panel__inner">
-            {panel === "findings" && (
-              <FindingsPanel
+            <div className="st-main">
+              <FormatBar
+                tracked={tracked}
+                onTrackedChange={setTracked}
+                canClear={doc.blocks.some((b) => b.marks.some((m) => m.kind === "highlight"))}
+                onClearHighlights={() => patch(activeId, clearHighlights)}
+              />
+              <DocumentCanvas
                 doc={doc}
+                scrollRef={scrollRef}
                 activeFindingId={activeFindingId}
-                pending={pending}
-                drafts={drafts}
-                error={dispositionError}
-                copyFallback={copyFallback}
-                onSelect={focusFinding}
-                onAsk={(f) => send(`Explain the rule behind "${f.title}"`)}
-                onClose={() => setPanel(null)}
-                onApplySuggestion={applyFix}
-                onRevert={revert}
-                onPickDisposition={pickDisposition}
-                onDraftChange={(id, text) => setDrafts((prev) => ({ ...prev, [id]: text }))}
-                onRecord={commitPending}
-                onCancelPending={cancelPending}
-                onCopyRecord={copyRecord}
-                onStep={step}
+                tracked={tracked}
+                reduceMotion={reduceMotion}
+                onEditBlock={editBlock}
+                onSelectFinding={focusFinding}
+                onSelectionChange={setSelection}
               />
-            )}
-            {panel === "assistant" && (
-              <AssistantPanel
-                doc={doc}
-                messages={messages}
-                draft={draft}
-                thinking={thinking}
-                intro={ASSISTANT_INTRO}
-                onDraftChange={setDraft}
-                onSend={send}
-                onClose={() => setPanel(null)}
-              />
-            )}
-          </div>
-        </div>
+            </div>
 
-        <ActivityRail
-          panel={panel}
-          findingCount={openFindings}
-          checking={checking}
-          onTogglePanel={(id) => setPanel((prev) => (prev === id ? null : id))}
-          onRunFullCheck={runFullCheck}
-        />
+            <div className={`st-panel${panel ? " is-open" : ""}`} aria-hidden={panel === null}>
+              <div className="st-panel__inner">
+                {panel === "findings" && (
+                  <FindingsPanel
+                    doc={doc}
+                    activeFindingId={activeFindingId}
+                    pending={pending}
+                    drafts={drafts}
+                    error={dispositionError}
+                    copyFallback={copyFallback}
+                    onSelect={focusFinding}
+                    onAsk={(f) => send(`Explain the rule behind "${f.title}"`)}
+                    onClose={() => setPanel(null)}
+                    onApplySuggestion={applyFix}
+                    onRevert={revert}
+                    onPickDisposition={pickDisposition}
+                    onDraftChange={(id, text) => setDrafts((prev) => ({ ...prev, [id]: text }))}
+                    onRecord={commitPending}
+                    onCancelPending={cancelPending}
+                    onCopyRecord={copyRecord}
+                    onStep={step}
+                  />
+                )}
+                {panel === "assistant" && (
+                  <AssistantPanel
+                    doc={doc}
+                    messages={messages}
+                    draft={draft}
+                    thinking={thinking}
+                    intro={ASSISTANT_INTRO}
+                    onDraftChange={setDraft}
+                    onSend={send}
+                    onClose={() => setPanel(null)}
+                  />
+                )}
+              </div>
+            </div>
+
+            <ActivityRail
+              panel={panel}
+              findingCount={openFindings}
+              checking={checking}
+              onTogglePanel={(id) => setPanel((prev) => (prev === id ? null : id))}
+              onRunFullCheck={runFullCheck}
+            />
+          </>
+        )}
 
         {(treeOpen || panel) && (
           <button

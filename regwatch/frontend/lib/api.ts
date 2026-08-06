@@ -842,6 +842,51 @@ export function watchLatest(): Promise<WatchLatest> {
   return getJSON<WatchLatest>("/watch/latest");
 }
 
+// --- PSG reference library (Compliance Studio rail) --------------------------
+export type PsgLibraryDoc = Schemas["PsgLibraryDoc"];
+export type PsgDocumentListResponse = Schemas["PsgDocumentListResponse"];
+
+// One page, mirroring /watch/latest's count/total/limit/offset honesty.
+export function listPsgDocuments(
+  params: { limit?: number; offset?: number } = {},
+): Promise<PsgDocumentListResponse> {
+  const qs = new URLSearchParams();
+  if (params.limit !== undefined) qs.set("limit", String(params.limit));
+  if (params.offset !== undefined) qs.set("offset", String(params.offset));
+  const q = qs.toString();
+  return getJSON<PsgDocumentListResponse>(`/psg/documents${q ? `?${q}` : ""}`);
+}
+
+// The server caps limit at 5000 -- comfortably above the ~1,795-PSG FDA
+// catalog -- so the whole library is normally ONE request (multi-page offset
+// walks can tear under concurrent ingest inserts). The count<total loop is
+// the overflow fallback only, with a hard ceiling so a lying total cannot
+// loop forever.
+const PSG_PAGE_LIMIT = 5000;
+const PSG_MAX_PAGES = 4;
+
+export async function fetchPsgLibrary(): Promise<PsgLibraryDoc[]> {
+  const out: PsgLibraryDoc[] = [];
+  for (let page = 0; page < PSG_MAX_PAGES; page += 1) {
+    const res = await listPsgDocuments({
+      limit: PSG_PAGE_LIMIT,
+      offset: page * PSG_PAGE_LIMIT,
+    });
+    out.push(...res.documents);
+    if (res.documents.length === 0 || out.length >= res.total) break;
+  }
+  return out;
+}
+
+// DELIBERATELY not apiBase(): the iframe's PDF request is a subresource
+// navigation, and in the cross-origin direct-call dev mode
+// (NEXT_PUBLIC_API_BASE) the SameSite session cookie would not ride along --
+// the frame would 401. The same-origin /api rewrite exists in every mode and
+// always carries the cookie.
+export function psgPdfPath(psgId: number): string {
+  return `/api/psg/documents/${psgId}/pdf`;
+}
+
 export function listProducts(): Promise<ProductsResponse> {
   return getJSON<ProductsResponse>("/products");
 }

@@ -3,6 +3,50 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import StudioPage from "@/app/studio/page";
+import type { PsgLibraryDoc } from "@/lib/api";
+
+// The page's only real-network import: the reference-library list. Runtime
+// closures (the WatchPage pattern) so the hoisted factory never dereferences
+// the mock before this module body runs.
+const fetchPsgLibraryMock = vi.fn<() => Promise<PsgLibraryDoc[]>>();
+vi.mock("@/lib/api", () => ({
+  fetchPsgLibrary: () => fetchPsgLibraryMock(),
+  psgPdfPath: (id: number) => `/api/psg/documents/${id}/pdf`,
+}));
+
+function libRow(over: Partial<PsgLibraryDoc> & { id: number }): PsgLibraryDoc {
+  return {
+    active_ingredient: "Albuterol Sulfate",
+    normalized_name: "albuterol sulfate",
+    stripped_name: "albuterol",
+    dosage_form: "Aerosol, Metered",
+    route: "Inhalation",
+    appl_no: "020503",
+    psg_type: "final",
+    recommended_date: "2024-05-01",
+    source_url: "https://www.accessdata.fda.gov/drugsatfda_docs/psg/PSG_020503.pdf",
+    ...over,
+  };
+}
+
+const LIB_ROWS: PsgLibraryDoc[] = [
+  libRow({ id: 12 }),
+  libRow({
+    id: 13,
+    active_ingredient: "Albuterol",
+    dosage_form: "Tablet",
+    route: "Oral",
+    psg_type: "draft",
+  }),
+  libRow({
+    id: 40,
+    active_ingredient: "Budesonide",
+    normalized_name: "budesonide",
+    stripped_name: "budesonide",
+    dosage_form: "Suspension",
+    route: "Nasal",
+  }),
+];
 
 // The studio is a desktop instrument with a lot of measured layout. jsdom gives
 // it none of that, so the surface has to stay upright without ResizeObserver,
@@ -23,6 +67,17 @@ beforeEach(() => {
     dispatchEvent: () => false,
   }));
   Element.prototype.scrollIntoView = vi.fn();
+  // Default: the library load never settles. The fixture-loop tests render
+  // synchronously; a pending promise means zero post-render setState, so no
+  // act() warnings and no assertion drift -- the section just shows its
+  // loading line. Library tests override per-test.
+  fetchPsgLibraryMock.mockReset();
+  fetchPsgLibraryMock.mockImplementation(() => new Promise<never>(() => {}));
+  // PdfPane's HEAD probe; jsdom's fetch would otherwise hit the real network.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() => Promise.resolve({ ok: true, status: 200 })),
+  );
 });
 
 afterEach(() => {
@@ -458,5 +513,185 @@ describe("Compliance Studio", () => {
     for (const el of Array.from(document.querySelectorAll(".st-blk--table"))) {
       expect(el.getAttribute("contenteditable")).not.toBe("true");
     }
+  });
+});
+
+describe("Reference library", () => {
+  async function openAlbuterolPdf() {
+    fetchPsgLibraryMock.mockResolvedValue(LIB_ROWS);
+    render(<StudioPage />);
+    await userEvent.click(await screen.findByRole("button", { name: /^A - / }));
+    await userEvent.click(screen.getByRole("button", { name: /Aerosol, Metered \(Inhalation\)/ }));
+  }
+
+  it("lists the database PSGs grouped by letter, drug and form", async () => {
+    fetchPsgLibraryMock.mockResolvedValue(LIB_ROWS);
+    render(<StudioPage />);
+
+    expect(
+      await screen.findByRole("heading", { name: /Reference library - 3 PSGs/ }),
+    ).toBeInTheDocument();
+    // Letter buckets, collapsed by default, carrying their doc counts.
+    const bucketA = await screen.findByRole("button", { name: /^A - / });
+    expect(bucketA).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(bucketA);
+    // Salt forms collapse under one drug ("Albuterol" holds both PSGs).
+    expect(screen.getByRole("button", { name: /^Albuterol$/ })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Aerosol, Metered \(Inhalation\).*Final/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Tablet \(Oral\).*Draft/ })).toBeInTheDocument();
+    // The working-documents header stays untouched.
+    expect(screen.getByText("Repository - 7 docs")).toBeInTheDocument();
+  });
+
+  it("opens a PSG read-only in the inline viewer with the chrome hidden", async () => {
+    await openAlbuterolPdf();
+
+    const frame = await screen.findByTitle(/PSG PDF: Albuterol Sulfate/);
+    expect(frame).toHaveAttribute("src", "/api/psg/documents/12/pdf");
+    expect(screen.getByText("Read-only - FDA reference")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /PSG: Albuterol Sulfate/ })).toBeInTheDocument();
+    // The compliance chrome describes the draft, so beside a PDF it is hidden.
+    expect(screen.queryByRole("group", { name: "Compliance spine" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Compliance results/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Tracked changes" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check this document" })).toBeDisabled();
+    expect(screen.getByText(/Compliance checks run on working documents/)).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: "Open on fda.gov" });
+    expect(link).toHaveAttribute(
+      "href",
+      "https://www.accessdata.fda.gov/drugsatfda_docs/psg/PSG_020503.pdf",
+    );
+  });
+
+  it("filters both sections from the one search box", async () => {
+    fetchPsgLibraryMock.mockResolvedValue(LIB_ROWS);
+    render(<StudioPage />);
+    await screen.findByRole("button", { name: /^A - / });
+
+    const search = screen.getByRole("textbox", { name: "Search documents" });
+    await userEvent.type(search, "albuterol");
+    // No fixture draft matches; the library force-opens its surviving branch.
+    expect(screen.getByText("No documents match that search.")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Aerosol, Metered \(Inhalation\).*Final/ }),
+    ).toBeInTheDocument();
+
+    await userEvent.clear(search);
+    await userEvent.type(search, "specification");
+    expect(
+      screen.getByRole("button", { name: /3\.2\.S\.4\.1 Specification\.docx/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("No PSGs match that search.")).toBeInTheDocument();
+  });
+
+  it("shows a retry on load failure and leaves the working tree standing", async () => {
+    fetchPsgLibraryMock.mockRejectedValueOnce(new Error("boom"));
+    render(<StudioPage />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/Couldn't load the reference library/);
+    // The fixture repository is untouched by the failure.
+    expect(screen.getByRole("button", { name: /3\.2\.S\.4\.1 Specification\.docx/ })).toBeInTheDocument();
+
+    fetchPsgLibraryMock.mockResolvedValue(LIB_ROWS);
+    await userEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("button", { name: /^A - / })).toBeInTheDocument();
+  });
+
+  it("says when the database holds no guidance documents", async () => {
+    fetchPsgLibraryMock.mockResolvedValue([]);
+    render(<StudioPage />);
+    expect(
+      await screen.findByText("No FDA guidance documents ingested yet."),
+    ).toBeInTheDocument();
+  });
+
+  it("leaves the disposition loop untouched across draft -> library -> draft", async () => {
+    fetchPsgLibraryMock.mockResolvedValue(LIB_ROWS);
+    render(<StudioPage />);
+    await userEvent.click(screen.getByRole("button", { name: /^Compliance results/ }));
+    const card = () => document.querySelector('[data-finding-card="ds-f1"]') as HTMLElement;
+
+    await userEvent.click(within(card()).getByRole("button", { name: "Not applicable" }));
+    await userEvent.type(
+      within(card()).getByRole("textbox", { name: /Why is this not applicable/ }),
+      "Draft in progress",
+    );
+
+    // Into the library and back.
+    await userEvent.click(await screen.findByRole("button", { name: /^A - / }));
+    await userEvent.click(screen.getByRole("button", { name: /Aerosol, Metered \(Inhalation\)/ }));
+    await screen.findByTitle(/PSG PDF: Albuterol Sulfate/);
+    // F8 has nothing to traverse on a reference document.
+    await userEvent.keyboard("{F8}");
+    expect(document.querySelector("[data-finding-card]")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: /3\.2\.S\.4\.1 Specification\.docx/ }));
+
+    await userEvent.click(screen.getByRole("button", { name: /^Compliance results/ }));
+    expect(within(card()).getByRole("textbox", { name: /Why is this not applicable/ })).toHaveValue(
+      "Draft in progress",
+    );
+  });
+
+  it("falls back to the fda.gov panel when the PDF probe fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve({ ok: false, status: 404 })),
+    );
+    await openAlbuterolPdf();
+
+    const fallback = await screen.findByRole("alert");
+    expect(fallback).toHaveTextContent(/Couldn't load this PDF in the studio/);
+    expect(screen.queryByTitle(/PSG PDF/)).not.toBeInTheDocument();
+    expect(within(fallback).getByRole("link", { name: "Open on fda.gov" })).toBeInTheDocument();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve({ ok: true, status: 200 })),
+    );
+    await userEvent.click(within(fallback).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByTitle(/PSG PDF: Albuterol Sulfate/)).toBeInTheDocument();
+  });
+
+  it("degrades Escape from the PDF back to the retained draft", async () => {
+    await openAlbuterolPdf();
+    await screen.findByTitle(/PSG PDF: Albuterol Sulfate/);
+
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByTitle(/PSG PDF/)).not.toBeInTheDocument();
+    // The draft that was open before the detour is back on the canvas.
+    expect(screen.getByText(/3\.2\.S\.4\.1 Specification - Drug Substance/)).toBeInTheDocument();
+  });
+
+  it("keeps Escape in the search box away from the PDF", async () => {
+    await openAlbuterolPdf();
+    await screen.findByTitle(/PSG PDF: Albuterol Sulfate/);
+
+    await userEvent.click(screen.getByRole("textbox", { name: "Search documents" }));
+    await userEvent.keyboard("{Escape}");
+    expect(screen.getByTitle(/PSG PDF: Albuterol Sulfate/)).toBeInTheDocument();
+  });
+
+  it("does not raise the findings panel or scrim when a check finishes behind an open PDF", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    fetchPsgLibraryMock.mockResolvedValue(LIB_ROWS);
+    render(<StudioPage />);
+
+    // Start a check on the draft, then open a PSG before it completes.
+    await user.click(screen.getByRole("button", { name: "Check this document" }));
+    await user.click(await screen.findByRole("button", { name: /^A - / }));
+    await user.click(screen.getByRole("button", { name: /Aerosol, Metered \(Inhalation\)/ }));
+    await screen.findByTitle(/PSG PDF: Albuterol Sulfate/);
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+
+    // The completed check must not put an invisible panel's scrim over the PDF.
+    expect(screen.getByTitle(/PSG PDF: Albuterol Sulfate/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Close panel" })).not.toBeInTheDocument();
   });
 });

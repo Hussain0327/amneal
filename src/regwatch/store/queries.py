@@ -11,6 +11,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from sqlalchemy import func, inspect
+from sqlalchemy import select as sa_select
 from sqlmodel import col, select
 
 from regwatch.common.logging import get_logger
@@ -179,3 +180,111 @@ def current_dosage_form_routes(
         if form not in (None, "") and rte not in (None, "")
     }
     return sorted(combos)
+
+
+@dataclass(frozen=True)
+class PsgCatalogEntry:
+    """One ``psg_document`` catalog row as the reference-library rail needs it.
+
+    Plain values, not ORM rows, so callers never trip over session expiry
+    (the same trap pipeline.py documents around detached instances).
+    """
+
+    id: int
+    active_ingredient: str
+    normalized_name: str
+    dosage_form: str | None
+    route: str | None
+    appl_no: str | None
+    psg_type: str
+    recommended_date: str | None
+    source_url: str
+
+
+def list_psg_documents(*, limit: int, offset: int) -> list[PsgCatalogEntry]:
+    """One deterministic page of the PSG catalog.
+
+    ``coalesce`` pins NULL dosage_form/route ordering across dialects, and
+    ``id`` is the final tiebreak so limit/offset paging is gapless and
+    duplicate-free even under concurrent ingest inserts.
+    """
+    with session_scope() as s:
+        rows = s.execute(
+            # sqlalchemy's select over col()-wrapped attributes: sqlmodel's
+            # typed select stops at four columns, and the bare class attributes
+            # read as plain values to mypy.
+            sa_select(
+                col(PsgDocument.id),
+                col(PsgDocument.active_ingredient),
+                col(PsgDocument.normalized_name),
+                col(PsgDocument.dosage_form),
+                col(PsgDocument.route),
+                col(PsgDocument.appl_no),
+                col(PsgDocument.psg_type),
+                col(PsgDocument.recommended_date),
+                col(PsgDocument.source_url),
+            )
+            .order_by(
+                col(PsgDocument.normalized_name).asc(),
+                func.coalesce(PsgDocument.dosage_form, "").asc(),
+                func.coalesce(PsgDocument.route, "").asc(),
+                col(PsgDocument.psg_type).asc(),
+                col(PsgDocument.id).asc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        ).all()
+    return [
+        PsgCatalogEntry(
+            id=int(row[0]),
+            active_ingredient=row[1],
+            normalized_name=row[2],
+            dosage_form=row[3],
+            route=row[4],
+            appl_no=row[5],
+            psg_type=row[6],
+            recommended_date=row[7],
+            source_url=row[8],
+        )
+        for row in rows
+    ]
+
+
+def count_psg_documents() -> int:
+    """Total ``psg_document`` rows -- the listing response's ``total``."""
+    with session_scope() as s:
+        return int(s.scalar(select(func.count()).select_from(PsgDocument)) or 0)
+
+
+@dataclass(frozen=True)
+class PsgPdfSource:
+    """The fields the PDF-serving route needs from one ``psg_document`` row."""
+
+    id: int
+    appl_no: str | None
+    source_url: str
+    pdf_path: str | None
+    content_hash: str
+
+
+def fetch_psg_pdf_source(doc_id: int) -> PsgPdfSource | None:
+    """The PDF-locating fields for one document, or None when the id is unknown."""
+    with session_scope() as s:
+        row = s.execute(
+            sa_select(
+                col(PsgDocument.id),
+                col(PsgDocument.appl_no),
+                col(PsgDocument.source_url),
+                col(PsgDocument.pdf_path),
+                col(PsgDocument.content_hash),
+            ).where(col(PsgDocument.id) == doc_id)
+        ).first()
+    if row is None:
+        return None
+    return PsgPdfSource(
+        id=int(row[0]),
+        appl_no=row[1],
+        source_url=row[2],
+        pdf_path=row[3],
+        content_hash=row[4],
+    )

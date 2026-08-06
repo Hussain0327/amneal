@@ -11,7 +11,9 @@ import {
   ShieldIcon,
   UploadIcon,
 } from "@/components/studio/icons";
+import { LibrarySection, type LibraryState } from "@/components/studio/LibrarySection";
 import { docGlyph } from "@/lib/studio-marks";
+import { countLibraryDocs, type LibraryDoc } from "@/lib/studio-library";
 import type { StudioDoc, TreeNode } from "@/lib/studio-types";
 
 /** The glyph is a colour and a shape; screen readers get the same state in words. */
@@ -59,10 +61,16 @@ function indent(depth: number): CSSProperties {
 interface RepositoryTreeProps {
   tree: TreeNode[];
   docs: Record<string, StudioDoc>;
-  activeId: string;
+  /** Active working-document id, or null while a library doc is on the canvas. */
+  activeId: string | null;
+  library: LibraryState;
+  /** Active library doc id ("psg-.."), or null while a draft is on the canvas. */
+  activeLibraryId: string | null;
   open: boolean;
   checking: boolean;
   onOpenDoc: (id: string) => void;
+  onOpenLibraryDoc: (doc: LibraryDoc) => void;
+  onRetryLibrary: () => void;
   onCheck: () => void;
 }
 
@@ -70,9 +78,13 @@ export function RepositoryTree({
   tree,
   docs,
   activeId,
+  library,
+  activeLibraryId,
   open,
   checking,
   onOpenDoc,
+  onOpenLibraryDoc,
+  onRetryLibrary,
   onCheck,
 }: RepositoryTreeProps) {
   const [query, setQuery] = useState("");
@@ -179,6 +191,7 @@ export function RepositoryTree({
       </div>
 
       <div className="st-tree__scroll">
+        <h3 className="st-tree__section">Working documents</h3>
         {visible.length > 0 ? (
           renderNodes(visible, 0)
         ) : (
@@ -186,16 +199,41 @@ export function RepositoryTree({
             {searching ? "No documents match that search." : "No documents in this repository yet."}
           </div>
         )}
+
+        <h3 className="st-tree__section">
+          Reference library
+          {library.phase === "ready"
+            ? ` - ${countLibraryDocs(library.buckets)} ${
+                countLibraryDocs(library.buckets) === 1 ? "PSG" : "PSGs"
+              }`
+            : ""}
+        </h3>
+        <LibrarySection
+          state={library}
+          needle={needle}
+          activeLibraryId={activeLibraryId}
+          onOpen={onOpenLibraryDoc}
+          onRetry={onRetryLibrary}
+        />
       </div>
 
       <div className="st-check">
-        <button type="button" className="st-check__btn" onClick={onCheck} disabled={checking}>
+        <button
+          type="button"
+          className="st-check__btn"
+          onClick={onCheck}
+          // Disabled, not hidden, while a reference PSG is open: the footer is
+          // a stable landmark, and the swapped note explains the refusal.
+          disabled={checking || activeLibraryId !== null}
+        >
           <ShieldIcon />
           {checking ? "Checking..." : "Check this document"}
         </button>
         <p className="st-check__note">
-          Checks the open document against ICH, USP, 21 CFR and your internal SOPs. Run the whole repository from
-          the right rail.
+          {activeLibraryId !== null
+            ? "Reference PSGs are FDA source documents. Compliance checks run on working documents."
+            : "Checks the open document against ICH, USP, 21 CFR and your internal SOPs. " +
+              "Run the whole repository from the right rail."}
         </p>
       </div>
     </aside>
