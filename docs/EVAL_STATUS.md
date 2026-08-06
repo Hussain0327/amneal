@@ -128,18 +128,55 @@ again at a floor of **0.88**.
 That is the intended sensitivity: the gate catches the system starting to
 **answer** what it must not, and does not flake on a single drifting turn.
 
-### Errored turns are not decisions
+### A turn that failed in transport measured nothing
 
-A turn that ends in `status="error"` (provider transport failure, malformed
-structure, catalog error) is excluded from the `refusal_accuracy` denominator
-and reported as `errored` in the scorecard and `eval_run` artifact.
+A turn whose **transport** failed — `reason` in `{provider_error,
+catalog_error}`: the synthesizer raised 429/5xx/timeout, or the dosage-form
+catalog query did — is excluded from **every** denominator and counted as
+`errored` in the scorecard and the `eval_run` artifact.
 
-This was a real defect, not housekeeping. The error paths build their reply with
-`_refuse`, so `refused` is `True`, and the old scorer banked a provider failure
-as a **correct refusal** — which is exactly why identical code measured 0.710 on
-2026-08-05 and 0.726 on 2026-08-06 (one `regwatch.query_guidance` 400 landed on
-a refusal row). A metric that rises when the provider breaks cannot support a
-floor. The count is printed loudly on every run; it is never a silent drop.
+`malformed_structure` is deliberately **not** in that set. That is the model
+emitting output the claim gate could not admit — a real quality defect, live at
+~12% of production turns — so it keeps scoring against the run.
+
+This closed two distinct lies, both observed:
+
+1. **An error counted as a correct refusal.** The error paths build their reply
+   with `_refuse`, so `refused` is `True`. That is why identical code measured
+   0.710 on 2026-08-05 and 0.726 on 2026-08-06 — one 400 landed on a refusal row.
+2. **An error counted as a retrieval miss.** On an *answerable* row the same
+   turn scored recall 0 inside the full denominator. On 2026-08-06 two eval jobs
+   ran concurrently against the same Databricks workspace, five turns came back
+   `REQUEST_LIMIT_EXCEEDED`, and `recall_at_k` fell 0.814 → 0.721 with no change
+   to retrieval anywhere in the diff. Both open PRs went red.
+
+Scoping the rule to decision rows only was incoherent, and the first live run
+proved it: all five failures landed on answerable rows, where it did not apply.
+It now applies to every row. Replaying that run's recorded per-row outcomes
+through the corrected scorer returns every metric to its baseline:
+
+| Metric | As measured (5 × 429) | Replayed, transport failures excluded | Baseline |
+|---|---:|---:|---:|
+| `recall_at_k` | 0.721 | **0.816** | 0.814 |
+| `citation_precision` | 0.674 | **0.763** | 0.756 |
+| `refusal_accuracy` | 0.823 | **0.895** | 0.903 |
+
+### A run that could not measure fails differently from one that measured badly
+
+Because transport failures leave the denominators, a bad enough outage could
+otherwise shrink the gate to a handful of lucky rows and report green. When more
+than `MAX_UNMEASURED_FRACTION` (10%) of turns fail in transport,
+`--check-thresholds` exits **3** with a message naming the provider — before it
+scores anything — rather than exiting 2 and sending someone hunting a retrieval
+bug that is not there. The 2026-08-06 run lost 5 of 62 (8%), under the cap, so
+its metrics stand.
+
+**The underlying infrastructure problem is not fixed here.** `databricks-gpt-oss-120b`
+is a pay-per-token endpoint with a workspace QPS limit, and two CI eval jobs
+running at once exceed it. The durable fixes are a provisioned-throughput
+endpoint (a cost decision) or serialising the live-eval job across PRs (a CI
+latency decision). Both are owner calls; the gate now merely reports the
+condition honestly instead of misattributing it.
 
 ## Known quality defects (open, not closed by the ratchet)
 

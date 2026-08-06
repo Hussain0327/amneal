@@ -80,6 +80,14 @@ TARGETS = {
     "refusal_accuracy": 0.95,
 }
 
+# Above this share of transport-failed turns, --check-thresholds exits 3 instead
+# of scoring: the run did not measure the system. 10% of the 62-row gold set is
+# ~6 turns. The 2026-08-06 rate-limit run lost 5 (8%) and is the case this is
+# calibrated to let through WITH its metrics intact, since excluding those five
+# returns every metric to its recorded baseline. A worse outage must not be able
+# to pass the gate on a shrunken denominator.
+MAX_UNMEASURED_FRACTION = 0.10
+
 
 def _apply_profile(profile: str) -> str:
     """Point THIS PROCESS at one embedding arm, then re-read settings.
@@ -251,13 +259,14 @@ def _print_scorecard(sc: Scorecard) -> None:
             f"offline in the deterministic eval gate): {absent}[/yellow]"
         )
     if sc.errored:
-        # Also loud: these rows left the denominator because the turn errored, so
-        # refusal_accuracy is measured over fewer items than the gold set has. A
-        # rising count means the provider is failing, not that judgment improved.
+        # Also loud: these rows left EVERY denominator because their transport
+        # failed, so all metrics above are measured over fewer items than the
+        # gold set has. A rising count means the provider is failing, not that
+        # the system improved.
         broke = [(d.get("errored"), d["q"]) for d in sc.details if d.get("errored")]
         console.print(
-            f"[yellow]{sc.errored} decision item(s) ended in a system error and are "
-            f"excluded from refusal_accuracy (an error is not a decision): {broke}[/yellow]"
+            f"[yellow]{sc.errored}/{sc.n} turn(s) failed in transport and are excluded "
+            f"from every metric (they measured nothing): {broke}[/yellow]"
         )
 
 
@@ -418,6 +427,22 @@ def run(
     # measurement and is exactly the row a later investigation needs. Exiting
     # first would record only the passing runs.
     if check_thresholds:
+        # "Could not measure" and "measured badly" are different build failures,
+        # and reporting the first as the second is what sent two PRs red on
+        # 2026-08-06. Transport-failed turns leave the denominators (see
+        # metrics.unmeasured_turn), so without this a provider outage could
+        # shrink the gate to a handful of lucky rows and pass. Checked BEFORE
+        # the thresholds so the message names the real problem.
+        if sc.n and sc.errored / sc.n > MAX_UNMEASURED_FRACTION:
+            console = Console()
+            console.print(
+                f"[red]{sc.errored}/{sc.n} turns failed in transport "
+                f"({sc.errored / sc.n:.0%} > {MAX_UNMEASURED_FRACTION:.0%} allowed). "
+                "This run did not measure the system -- the metrics above are "
+                "computed over too few rows to mean anything. Fix the provider, "
+                "then re-run; do NOT read this as a quality regression.[/red]"
+            )
+            sys.exit(3)
         violations = [
             (k, getattr(sc, k), thr) for k, thr in THRESHOLDS.items() if getattr(sc, k) < thr
         ]

@@ -513,3 +513,46 @@ def test_every_blocking_floor_sits_below_its_target(_unused: None = None) -> Non
         assert (
             floor <= TARGETS[metric]
         ), f"{metric} gate {floor} exceeds its target {TARGETS[metric]}"
+
+
+def test_a_run_that_could_not_measure_fails_differently_from_one_that_measured_badly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Exit 3, not 2, and not a pass.
+
+    Transport-failed turns leave every denominator, so without this guard a
+    provider outage could shrink the gate to a few lucky rows and report a
+    green build. "Could not measure" and "measured badly" are different
+    failures and CI must be able to tell them apart -- conflating them is what
+    sent two PRs red on 2026-08-06 with no code regression behind it.
+    """
+    from regwatch.eval.run_eval import MAX_UNMEASURED_FRACTION
+
+    assert MAX_UNMEASURED_FRACTION == 0.10
+
+    # 5/62 = 8%: the recorded rate-limit run. Under the cap, so its metrics
+    # stand and the gate scores them normally.
+    ok, _, _ = _run_cli(monkeypatch, tmp_path, scorecard=_sc(errored=5), persist=False)
+    assert ok == 0
+
+    # 7/62 = 11%: over the cap. The metrics are meaningless, so refuse to score.
+    broken, _, _ = _run_cli(monkeypatch, tmp_path, scorecard=_sc(errored=7), persist=False)
+    assert broken == 3, "an unmeasurable run must not exit 0 (pass) or 2 (regression)"
+
+
+def test_the_unmeasured_guard_outranks_a_threshold_miss(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """When both are true the message must name the real problem.
+
+    A run this broken has metrics computed over too few rows to mean anything,
+    so reporting "recall regressed" would send someone hunting a retrieval bug
+    that is not there.
+    """
+    code, _, _ = _run_cli(
+        monkeypatch,
+        tmp_path,
+        scorecard=_sc(errored=20, recall_at_k=0.0, citation_precision=0.0),
+        persist=False,
+    )
+    assert code == 3
