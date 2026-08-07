@@ -22,8 +22,8 @@ func (s *Server) StreamGate(w http.ResponseWriter, r *http.Request) bool {
 	if !ok {
 		return true // 401 already written
 	}
-	if !s.queryLimiter.Allow("user:"+chatUserID(u), s.cfg.RateLimitPerMinute) {
-		writeDetail(w, http.StatusTooManyRequests, "rate limit exceeded")
+	if !s.queryLimiter.Allow(queryRateKey(chatUserID(u)), s.cfg.RateLimitPerMinute) {
+		writeDetail(w, http.StatusTooManyRequests, detailRateLimited)
 		return true
 	}
 	return false // authed + under limit -> let the relay carry the stream

@@ -52,13 +52,7 @@ func (s *Server) handleCompleteQuery(w http.ResponseWriter, r *http.Request) {
 		K         *int                       `json:"k"`
 		SessionID *string                    `json:"session_id"`
 	}
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(&body); err != nil {
-		writeValidationError(w, validationItem{Type: "json_invalid", Loc: []string{"body"}, Msg: "Input should be a valid JSON"})
-		return
-	}
-	if dec.More() {
-		writeValidationError(w, validationItem{Type: "json_invalid", Loc: []string{"body"}, Msg: "Input should be a valid JSON"})
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	var problems []validationItem
@@ -82,13 +76,13 @@ func (s *Server) handleCompleteQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Rate limit (429): Go the single authority across /query + /query/stream.
-	if !s.queryLimiter.Allow("user:"+userID, s.cfg.RateLimitPerMinute) {
+	if !s.queryLimiter.Allow(queryRateKey(userID), s.cfg.RateLimitPerMinute) {
 		// Logged because this rejection is otherwise INVISIBLE: no query_log
 		// row (nothing ran), no metric, and no log line -- a 429 storm left no
 		// trace in any surface the team has. No turn exists yet (both ids are
 		// minted below), so the user id is the only correlation key there is.
 		s.errLog.Printf("qa_rate_limited user_id=%s", userID)
-		writeDetail(w, http.StatusTooManyRequests, "rate limit exceeded")
+		writeDetail(w, http.StatusTooManyRequests, detailRateLimited)
 		return
 	}
 
@@ -97,7 +91,7 @@ func (s *Server) handleCompleteQuery(w http.ResponseWriter, r *http.Request) {
 	filtersObj := filtersObjectJSON(filters)  // {} when absent, for stored payloads
 
 	// Ownership (S5) + session id.
-	sessionID := ""
+	var sessionID string
 	if body.SessionID != nil {
 		sessionID = *body.SessionID
 	}
@@ -130,21 +124,20 @@ func (s *Server) handleCompleteQuery(w http.ResponseWriter, r *http.Request) {
 	t0 := s.now().Truncate(time.Microsecond)
 	sessionID, t1err := s.persistUserTurn(baseCtx, sessionID, turnID, userID, *body.Question, filtersObj, t0)
 	if errors.Is(t1err, errSessionOwnershipLost) {
-		writeDetail(w, http.StatusNotFound, "session not found")
+		writeDetail(w, http.StatusNotFound, detailSessionNotFound)
 		return
 	}
 
 	// RAG compute over a FINITE deadline. Dead/slow upstream -> synthesized
 	// upstream_error turn (still audited).
 	ragCtx, cancel := context.WithTimeout(baseCtx, s.cfg.RAGTimeout)
-	uid := userID
 	payload, ragErr := s.rag.compute(ragCtx, computeRequest{
 		Question:  *body.Question,
 		Filters:   filtersReq,
 		K:         body.K,
 		SessionID: sessionID,
 		TurnID:    turnID,
-		UserID:    &uid,
+		UserID:    &userID,
 	})
 	cancel()
 	if errors.Is(ragErr, errSaturated) {
@@ -228,7 +221,7 @@ func (s *Server) authorizeSession(ctx context.Context, w http.ResponseWriter, se
 		row = re
 	}
 	if !row.UserID.Valid || row.UserID.String != userID {
-		writeDetail(w, http.StatusNotFound, "session not found")
+		writeDetail(w, http.StatusNotFound, detailSessionNotFound)
 		return false
 	}
 	return true
@@ -241,17 +234,16 @@ func (s *Server) synthesizeUpstreamError(question, sessionID, turnID, userID str
 	routeJSON := errorRouteJSON("upstream_error", filtersObj)
 	status := "error"
 	reason := "upstream_error"
-	uid, sid, tid := userID, sessionID, turnID
 
-	response := mustJSON(map[string]any{
+	response := jsonOrNull(map[string]any{
 		"answer":         serviceUnavailableText,
 		"citations":      []any{},
 		"refused":        true,
 		"model_name":     "",
 		"session_id":     sessionID,
 		"turn_id":        turnID,
-		"status":         "error",
-		"reason":         "upstream_error",
+		"status":         status,
+		"reason":         reason,
 		"interpretation": nil,
 		"clarify":        []any{},
 		"related":        []any{},
@@ -267,11 +259,11 @@ func (s *Server) synthesizeUpstreamError(question, sessionID, turnID, userID str
 				Citations:  json.RawMessage("[]"),
 				Refused:    true,
 				ModelName:  "",
-				SessionID:  &sid,
-				TurnID:     &tid,
-				UserID:     &uid,
+				SessionID:  &sessionID,
+				TurnID:     &turnID,
+				UserID:     &userID,
 				Status:     &status,
-				RouteJson:  routeJSON,
+				RouteJSON:  routeJSON,
 			},
 			AllowSkip: true,
 			Patch: sessionPatch{
@@ -285,14 +277,14 @@ func (s *Server) synthesizeUpstreamError(question, sessionID, turnID, userID str
 				Citations: json.RawMessage("[]"),
 				Clarify:   json.RawMessage("[]"),
 				Related:   json.RawMessage("[]"),
-				Metadata:  mustJSON(map[string]any{"retrieved": []any{}, "route": json.RawMessage(routeJSON)}),
+				Metadata:  jsonOrNull(map[string]any{"retrieved": []any{}, "route": json.RawMessage(routeJSON)}),
 			},
 		},
 	}
 }
 
 func errorRouteJSON(reason string, filtersObj []byte) json.RawMessage {
-	return mustJSON(map[string]any{
+	return jsonOrNull(map[string]any{
 		"route":           "psg_scoped_rag",
 		"filters":         json.RawMessage(filtersObj),
 		"reason":          reason,
@@ -359,7 +351,7 @@ func filtersObjectJSON(kept map[string]json.RawMessage) []byte {
 	return b
 }
 
-func mustJSON(v any) json.RawMessage {
+func jsonOrNull(v any) json.RawMessage {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return json.RawMessage("null") // unreachable for the fixed shapes here

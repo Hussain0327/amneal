@@ -15,6 +15,7 @@ package api
 // still relays untouched.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -71,11 +72,10 @@ func bootstrap(t *testing.T, pool *pgxpool.Pool) {
 }
 
 type harness struct {
-	srv      *Server
-	pool     *pgxpool.Pool
-	ts       *httptest.Server
-	upstream *httptest.Server
-	client   *http.Client
+	srv    *Server
+	pool   *pgxpool.Pool
+	ts     *httptest.Server
+	client *http.Client
 }
 
 // newHarness builds the full stack: disposable DB + Server + composite proxy
@@ -119,12 +119,15 @@ func newHarness(t *testing.T, cfg Config) *harness {
 		_, _ = io.WriteString(w, "relayed:"+r.URL.Path)
 	}))
 	t.Cleanup(upstream.Close)
-	up, _ := url.Parse(upstream.URL)
+	up, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
 
 	ts := httptest.NewServer(proxy.NewHandlerWithNative(up, logger, srv.Routes()))
 	t.Cleanup(ts.Close)
 
-	return &harness{srv: srv, pool: pool, ts: ts, upstream: upstream,
+	return &harness{srv: srv, pool: pool, ts: ts,
 		client: &http.Client{Timeout: waitFor}}
 }
 
@@ -153,7 +156,7 @@ func (h *harness) do(t *testing.T, method, path, cookie string, body any) *http.
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}
-		rdr = strings.NewReader(string(b))
+		rdr = bytes.NewReader(b)
 	}
 	req, err := http.NewRequest(method, h.ts.URL+path, rdr)
 	if err != nil {
@@ -219,6 +222,28 @@ func wantKeys(t *testing.T, m map[string]any, keys ...string) {
 	}
 }
 
+// wantMethodNotAllowed asserts the FastAPI-shaped 405 contract for each probe:
+// status 405, the pinned first-match Allow value, no leak to the relay, and
+// the exact detail body.
+func wantMethodNotAllowed(t *testing.T, h *harness, probes []struct{ method, path, allow string }) {
+	t.Helper()
+	for _, probe := range probes {
+		resp := h.do(t, probe.method, probe.path, "", nil)
+		if resp.StatusCode != 405 {
+			t.Fatalf("%s %s: %d, want 405", probe.method, probe.path, resp.StatusCode)
+		}
+		if got := resp.Header.Get("Allow"); got != probe.allow {
+			t.Fatalf("%s %s Allow=%q, want %q", probe.method, probe.path, got, probe.allow)
+		}
+		if resp.Header.Get("X-Upstream") == "python" {
+			t.Fatalf("%s %s leaked to the relay", probe.method, probe.path)
+		}
+		if body := decode(t, resp); body["detail"] != "Method Not Allowed" {
+			t.Fatalf("405 body: %v", body)
+		}
+	}
+}
+
 // --- login (test_login_success_returns_user_and_httponly_cookie etc.) ---
 
 func TestLoginSuccessBodyAndCookie(t *testing.T) {
@@ -265,10 +290,20 @@ func TestLoginSecureCookieFlag(t *testing.T) {
 	h := newHarness(t, Config{SessionTTL: 72 * time.Hour, CookieSecure: true})
 	h.seedUser(t, testEmail, testPassword, true)
 	resp := h.do(t, "POST", "/auth/login", "", map[string]string{"email": testEmail, "password": testPassword})
+	if resp.StatusCode != 200 {
+		t.Fatalf("login: %d", resp.StatusCode)
+	}
+	var found bool
 	for _, c := range resp.Cookies() {
-		if c.Name == sessionCookie && !c.Secure {
-			t.Fatal("Secure flag missing with CookieSecure=true")
+		if c.Name == sessionCookie {
+			found = true
+			if !c.Secure {
+				t.Fatal("Secure flag missing with CookieSecure=true")
+			}
 		}
+	}
+	if !found {
+		t.Fatal("no session cookie set on login")
 	}
 }
 
@@ -354,7 +389,7 @@ func TestLoginPerIPKeyingUnderTrustProxy(t *testing.T) {
 	attempt := func(email string, hdr map[string]string) int {
 		t.Helper()
 		b, _ := json.Marshal(map[string]string{"email": email, "password": "x"})
-		req, err := http.NewRequest("POST", h.ts.URL+"/auth/login", strings.NewReader(string(b)))
+		req, err := http.NewRequest("POST", h.ts.URL+"/auth/login", bytes.NewReader(b))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -542,12 +577,14 @@ func TestExpiredSessionRejectedAndPurged(t *testing.T) {
 
 // --- sessions (test_sessions_list_ordering_titles_and_counts etc.) ---
 
-func (h *harness) seedChat(t *testing.T, sid string, userID any, title any, updatedOffset time.Duration) {
+func (h *harness) seedChat(t *testing.T, sid string, userID any, updatedOffset time.Duration) {
 	t.Helper()
+	// title is always NULL: nothing writes it in production (see chat.sql) and
+	// the detail-title-fallback assertions depend on the fallback path running.
 	if _, err := h.pool.Exec(t.Context(),
 		`INSERT INTO public.chat_session (id, user_id, title, created_at, updated_at)
-		 VALUES ($1, $2, $3, now(), now() + $4::interval)`,
-		sid, userID, title, fmt.Sprintf("%f seconds", updatedOffset.Seconds())); err != nil {
+		 VALUES ($1, $2, NULL, now(), now() + $3::interval)`,
+		sid, userID, fmt.Sprintf("%f seconds", updatedOffset.Seconds())); err != nil {
 		t.Fatalf("seed chat %s: %v", sid, err)
 	}
 }
@@ -572,9 +609,9 @@ func TestSessionsListOrderingTitlesAndCounts(t *testing.T) {
 	uidStr := fmt.Sprint(uid)
 
 	longQ := strings.Repeat("q", 80)
-	h.seedChat(t, "sid1", uidStr, nil, -2*time.Hour)
-	h.seedChat(t, "sid2", uidStr, nil, -3*time.Hour)
-	h.seedChat(t, "empty-session", uidStr, nil, -1*time.Hour)
+	h.seedChat(t, "sid1", uidStr, -2*time.Hour)
+	h.seedChat(t, "sid2", uidStr, -3*time.Hour)
+	h.seedChat(t, "empty-session", uidStr, -1*time.Hour)
 	h.seedMsg(t, "m1", "sid1", "user", longQ, "", -4*time.Hour)
 	h.seedMsg(t, "m2", "sid1", "assistant", "a1", "", -3*time.Hour)
 	h.seedMsg(t, "m3", "sid1", "user", "follow", "", -2*time.Hour)
@@ -611,7 +648,8 @@ func TestSessionsListOrderingTitlesAndCounts(t *testing.T) {
 		t.Fatalf("title must be first user message truncated to 60: %q", second["title"])
 	}
 	if second["message_count"].(float64) != 4 || raw[2].(map[string]any)["message_count"].(float64) != 2 {
-		t.Fatal("message counts wrong")
+		t.Fatalf("message_count: sid1 got %v want 4, sid2 got %v want 2",
+			second["message_count"], raw[2].(map[string]any)["message_count"])
 	}
 	// Timestamps parse as naive ISO (no timezone suffix).
 	for _, key := range []string{"created_at", "updated_at"} {
@@ -631,8 +669,8 @@ func TestSessionsOwnershipInvisibility(t *testing.T) {
 	h.seedUser(t, "b@example.com", testPassword, true)
 	tokenB := h.login(t, "b@example.com", testPassword)
 
-	h.seedChat(t, "owned-by-a", fmt.Sprint(uidA), nil, 0)
-	h.seedChat(t, "legacy-null", nil, nil, 0)
+	h.seedChat(t, "owned-by-a", fmt.Sprint(uidA), 0)
+	h.seedChat(t, "legacy-null", nil, 0)
 
 	// Foreign and legacy NULL-user sessions: 404 with the exact body, never
 	// confirmed to exist; absent from the list.
@@ -658,7 +696,7 @@ func TestSessionDetailShapeAndVerbatimPassthrough(t *testing.T) {
 	h := newHarness(t, Config{SessionTTL: 72 * time.Hour})
 	uid := h.seedUser(t, testEmail, testPassword, true)
 	token := h.login(t, testEmail, testPassword)
-	h.seedChat(t, "s1", fmt.Sprint(uid), nil, 0)
+	h.seedChat(t, "s1", fmt.Sprint(uid), 0)
 	// Stored citation carries a key NO wire type declares -- it must survive
 	// verbatim (api-contract-freeze passthrough contract).
 	h.seedMsg(t, "m1", "s1", "user", "what changed?", `[{"doc_id":1,"legacy_extra":"kept","source_url":"https://x"}]`, -2*time.Hour)
@@ -708,7 +746,7 @@ func TestDeleteSessionRemovesMessages(t *testing.T) {
 	h := newHarness(t, Config{SessionTTL: 72 * time.Hour})
 	uid := h.seedUser(t, testEmail, testPassword, true)
 	token := h.login(t, testEmail, testPassword)
-	h.seedChat(t, "s1", fmt.Sprint(uid), nil, 0)
+	h.seedChat(t, "s1", fmt.Sprint(uid), 0)
 	h.seedMsg(t, "m1", "s1", "user", "q", "", -1*time.Hour)
 	h.seedMsg(t, "m2", "s1", "assistant", "a", "", 0)
 
@@ -765,27 +803,13 @@ func TestAuthWallAndRelayPrecedence(t *testing.T) {
 	// Method mismatches on Go-owned paths must NOT relay (no Python handler
 	// exists behind them since B2): FastAPI-shaped 405 with the first-match
 	// Allow quirk preserved (GET for /sessions/{id}, never "GET, DELETE").
-	for _, probe := range []struct{ method, path, allow string }{
+	wantMethodNotAllowed(t, h, []struct{ method, path, allow string }{
 		{"GET", "/auth/login", "POST"},
 		{"DELETE", "/auth/logout", "POST"},
 		{"PUT", "/auth/me", "GET"},
 		{"POST", "/sessions", "GET"},
 		{"PUT", "/sessions/some-id", "GET"},
-	} {
-		resp := h.do(t, probe.method, probe.path, "", nil)
-		if resp.StatusCode != 405 {
-			t.Fatalf("%s %s: %d, want 405", probe.method, probe.path, resp.StatusCode)
-		}
-		if got := resp.Header.Get("Allow"); got != probe.allow {
-			t.Fatalf("%s %s Allow=%q, want %q", probe.method, probe.path, got, probe.allow)
-		}
-		if resp.Header.Get("X-Upstream") == "python" {
-			t.Fatalf("%s %s leaked to the relay", probe.method, probe.path)
-		}
-		if body := decode(t, resp); body["detail"] != "Method Not Allowed" {
-			t.Fatalf("405 body: %v", body)
-		}
-	}
+	})
 }
 
 func TestCORSParity(t *testing.T) {
@@ -793,7 +817,11 @@ func TestCORSParity(t *testing.T) {
 	h.seedUser(t, testEmail, testPassword, true)
 
 	// Simple response: allowlisted Origin is echoed with credentials.
-	req, _ := http.NewRequest("POST", h.ts.URL+"/auth/login", strings.NewReader(`{"email":"analyst@example.com","password":"correct-horse-battery-staple"}`))
+	req, err := http.NewRequest("POST", h.ts.URL+"/auth/login",
+		strings.NewReader(fmt.Sprintf(`{"email":%q,"password":%q}`, testEmail, testPassword)))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://amneal.vercel.app")
 	resp, err := h.client.Do(req)
@@ -807,7 +835,10 @@ func TestCORSParity(t *testing.T) {
 	}
 
 	// Disallowed origin: no CORS headers (the allowlist is the cookie guard).
-	req2, _ := http.NewRequest("GET", h.ts.URL+"/auth/me", nil)
+	req2, err := http.NewRequest("GET", h.ts.URL+"/auth/me", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
 	req2.Header.Set("Origin", "https://evil.example.com")
 	resp2, err := h.client.Do(req2)
 	if err != nil {
@@ -819,7 +850,10 @@ func TestCORSParity(t *testing.T) {
 	}
 
 	// Preflight.
-	req3, _ := http.NewRequest("OPTIONS", h.ts.URL+"/auth/login", nil)
+	req3, err := http.NewRequest("OPTIONS", h.ts.URL+"/auth/login", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
 	req3.Header.Set("Origin", "https://amneal.vercel.app")
 	req3.Header.Set("Access-Control-Request-Method", "POST")
 	req3.Header.Set("Access-Control-Request-Headers", "content-type")

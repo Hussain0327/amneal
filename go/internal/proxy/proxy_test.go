@@ -149,7 +149,7 @@ func TestProxiesVerbatim(t *testing.T) {
 		t.Errorf("upstream Host = %q, want %q", got.host, wantHost)
 	}
 	if got.body != `{"question":"?"}` {
-		t.Errorf("upstream body = %q", got.body)
+		t.Errorf("upstream body = %q, want %q", got.body, `{"question":"?"}`)
 	}
 	if v := got.header.Get("X-Custom-Header"); v != "custom-value" {
 		t.Errorf("X-Custom-Header = %q, want %q", v, "custom-value")
@@ -315,8 +315,11 @@ func TestHealthzIndependentOfUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200 with upstream down", resp.StatusCode)
 	}
@@ -331,8 +334,11 @@ func TestDeadUpstreamReturns502(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET through proxy: %v", err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Errorf("status = %d, want 502", resp.StatusCode)
 	}
@@ -439,10 +445,10 @@ func TestConfigFromEnv(t *testing.T) {
 		t.Fatalf("defaults: %v", err)
 	}
 	if got := cfg.Upstream.String(); got != "http://127.0.0.1:8000" {
-		t.Errorf("default upstream = %q", got)
+		t.Errorf("default upstream = %q, want %q", got, "http://127.0.0.1:8000")
 	}
 	if cfg.Addr != ":8080" {
-		t.Errorf("default addr = %q", cfg.Addr)
+		t.Errorf("default addr = %q, want %q", cfg.Addr, ":8080")
 	}
 
 	t.Setenv("UPSTREAM_URL", "http://app.process.amneal.internal:8000")
@@ -452,10 +458,10 @@ func TestConfigFromEnv(t *testing.T) {
 		t.Fatalf("overrides: %v", err)
 	}
 	if cfg.Upstream.Host != "app.process.amneal.internal:8000" {
-		t.Errorf("upstream host = %q", cfg.Upstream.Host)
+		t.Errorf("upstream host = %q, want %q", cfg.Upstream.Host, "app.process.amneal.internal:8000")
 	}
 	if cfg.Addr != ":3000" {
-		t.Errorf("addr = %q", cfg.Addr)
+		t.Errorf("addr = %q, want %q", cfg.Addr, ":3000")
 	}
 
 	// "127.0.0.1:8000" is the likeliest operator typo (missing scheme); it

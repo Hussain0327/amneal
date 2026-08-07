@@ -142,8 +142,8 @@ func scrubEvent(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 }
 
 func scrubMessage(s string) string {
-	if i := strings.Index(s, pgxEncodeMarker); i >= 0 {
-		return s[:i] + pgxEncodeMarker + ": scrubbed"
+	if before, _, found := strings.Cut(s, pgxEncodeMarker); found {
+		return before + pgxEncodeMarker + ": scrubbed"
 	}
 	return s
 }

@@ -122,7 +122,7 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		ID: r.PathValue("id"), UserID: text(chatUserID(u)),
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		writeDetail(w, http.StatusNotFound, "session not found")
+		writeDetail(w, http.StatusNotFound, detailSessionNotFound)
 		return
 	}
 	if err != nil {
@@ -200,7 +200,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		ID: r.PathValue("id"), UserID: text(chatUserID(u)),
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		writeDetail(w, http.StatusNotFound, "session not found")
+		writeDetail(w, http.StatusNotFound, detailSessionNotFound)
 		return
 	}
 	if err != nil {

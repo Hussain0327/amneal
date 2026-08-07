@@ -119,7 +119,7 @@ func initRecording(t *testing.T) *recordingTransport {
 	return rt
 }
 
-func TestCaptureAttachsCorrelationTags(t *testing.T) {
+func TestCaptureAttachesCorrelationTags(t *testing.T) {
 	rt := initRecording(t)
 
 	Capture(errors.New("insert query_log failed"), map[string]string{
@@ -134,10 +134,10 @@ func TestCaptureAttachsCorrelationTags(t *testing.T) {
 	}
 	tags := events[0].Tags
 	if tags["turn_id"] != "11111111-1111-4111-8111-111111111111" {
-		t.Errorf("turn_id tag = %q, want the turn id", tags["turn_id"])
+		t.Errorf("turn_id tag = %q, want %q", tags["turn_id"], "11111111-1111-4111-8111-111111111111")
 	}
 	if tags["event"] != "qa_answer_audit_write_failed" {
-		t.Errorf("event tag = %q", tags["event"])
+		t.Errorf("event tag = %q, want %q", tags["event"], "qa_answer_audit_write_failed")
 	}
 	if _, ok := tags["session_id"]; ok {
 		t.Errorf("empty tag values must be dropped, got %q", tags["session_id"])

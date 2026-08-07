@@ -1,12 +1,10 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
-	"strconv"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -51,9 +49,7 @@ func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 		Rating  *int    `json:"rating"`
 		Comment *string `json:"comment"`
 	}
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(&body); err != nil || dec.More() {
-		writeValidationError(w, validationItem{Type: "json_invalid", Loc: []string{"body"}, Msg: "Input should be a valid JSON"})
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	// Field-declaration order (audit_id, rating, comment), errors
@@ -83,7 +79,7 @@ func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auditID := int32(*body.AuditID)
-	userID := strconv.Itoa(int(u.UserID)) // Python: str(user.id); query_log.user_id is text
+	userID := chatUserID(u) // query_log.user_id is text, same str(user.id) encoding as chat_session
 
 	// Ownership probe and upsert are separate statements, exactly like the
 	// Python handler's two session_scopes; the single-statement upsert is

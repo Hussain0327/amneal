@@ -94,7 +94,7 @@ func nativeRoutes(logger *log.Logger) (map[string]http.Handler, func(http.Respon
 	// POST /query/stream (401/429) before relaying. With the flag off, both
 	// /query and /query/stream relay to Python exactly as today.
 	var preRelay func(http.ResponseWriter, *http.Request) bool
-	if apiCfg.GONativeQuery {
+	if apiCfg.GoNativeQuery {
 		preRelay = server.StreamGate
 	}
 	return server.Routes(), preRelay, nil

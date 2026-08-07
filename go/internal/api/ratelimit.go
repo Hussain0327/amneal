@@ -32,6 +32,7 @@ type RateLimiter struct {
 	now       func() time.Time
 }
 
+// NewRateLimiter returns an empty limiter using the real clock.
 func NewRateLimiter() *RateLimiter {
 	return &RateLimiter{hits: map[string][]time.Time{}, now: time.Now}
 }
@@ -80,4 +81,12 @@ func (l *RateLimiter) Reset() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.hits = map[string][]time.Time{}
+}
+
+// queryRateKey is the per-user bucket key for the query limiter. POST /query
+// and POST /query/stream MUST share this key -- Go being the single per-user
+// rate-limit authority across both routes (the StreamGate invariant) rests on
+// both sites computing byte-identical keys.
+func queryRateKey(userID string) string {
+	return "user:" + userID
 }

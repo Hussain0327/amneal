@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,7 +87,7 @@ func TestClientIP(t *testing.T) {
 			r.Header.Set("X-Forwarded-For", c.xff)
 		}
 		if got := clientIP(r, c.trust); got != c.want {
-			t.Fatalf("%s: got %q want %q", c.name, got, c.want)
+			t.Errorf("%s: got %q want %q", c.name, got, c.want)
 		}
 	}
 }
@@ -107,17 +108,11 @@ func TestIsoNaive(t *testing.T) {
 }
 
 func TestTruncate60IsRuneSafe(t *testing.T) {
-	ascii := ""
-	for i := 0; i < 70; i++ {
-		ascii += "a"
-	}
+	ascii := strings.Repeat("a", 70)
 	if got := truncate60(ascii); len(got) != 60 {
 		t.Fatalf("ascii truncation: len=%d", len(got))
 	}
-	multi := ""
-	for i := 0; i < 70; i++ {
-		multi += "é" // 2 bytes per rune
-	}
+	multi := strings.Repeat("é", 70) // 2 bytes per rune
 	got := truncate60(multi)
 	if r := []rune(got); len(r) != 60 {
 		t.Fatalf("rune truncation: %d runes", len(r))
@@ -131,19 +126,14 @@ func TestVerifyPasswordTruncatesAt72Bytes(t *testing.T) {
 	// Python's bcrypt lib silently truncates at 72 bytes; x/crypto errors.
 	// The wrapper must make a >72-byte password with a matching prefix verify,
 	// exactly like Python.
-	long := ""
-	for i := 0; i < 80; i++ {
-		long += "x"
+	long := strings.Repeat("x", 80)
+	// Hash what Python would have hashed: the first 72 bytes. MinCost
+	// keeps the test fast; verification cost comes from the stored hash.
+	h, err := bcrypt.GenerateFromPassword([]byte(long[:72]), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash: %v", err)
 	}
-	hashOfTruncated := func() string {
-		// Hash what Python would have hashed: the first 72 bytes. MinCost
-		// keeps the test fast; verification cost comes from the stored hash.
-		h, err := bcrypt.GenerateFromPassword([]byte(long[:72]), bcrypt.MinCost)
-		if err != nil {
-			t.Fatalf("hash: %v", err)
-		}
-		return string(h)
-	}()
+	hashOfTruncated := string(h)
 	if !verifyPassword(hashOfTruncated, long) {
 		t.Fatal("80-byte password must verify against its 72-byte-prefix hash (Python parity)")
 	}
