@@ -147,7 +147,15 @@ CITATION_KEYS = frozenset(
 RETRIEVED_ITEM_KEYS = frozenset(
     {"chunk_id", "score", "doc_id", "version_id", "page", "normalized_name", "short_name"}
 )
-ROUTE_JSON_KEYS = frozenset({"route", "filters", "reason", "context_applied", "response_mode"})
+# "retrieval" is the stage-1 search ledger and rides on EVERY route, from both
+# producers (grounded_qa._route_json and Go's errorRouteJSON). It is empty when
+# the turn declined before search ran and populated when it ran, so "did stage-1
+# happen" is asserted as a VALUE, never as key presence -- multi_form declines on
+# both sides of retrieve(), so no reason-keyed rule could express it without
+# encoding a false invariant.
+ROUTE_JSON_KEYS = frozenset(
+    {"route", "filters", "reason", "context_applied", "response_mode", "retrieval"}
+)
 # Healthy pre-synthesis non-answer routes carry a constrained router-model
 # ledger. The model selects only an allowlisted next step and existing option
 # ids; it cannot write display prose or alter status, filters, or citations.
@@ -157,7 +165,14 @@ GUIDED_ROUTE_JSON_KEYS = ROUTE_JSON_KEYS | frozenset({"prompt", "guidance"})
 # claim gate: the answer path AND the post-gate declines (model_refusal,
 # no_valid_citations, material_drop, audit_error). These routes do not also run
 # guidance: every healthy turn gets exactly one model path.
-ANSWER_ROUTE_JSON_KEYS = ROUTE_JSON_KEYS | frozenset({"prompt", "partial_evidence", "turn"})
+#
+# "synthesis" is the synthesis-call telemetry (max_output_tokens, retry,
+# truncation class). It rides alongside "turn" on every route that reached the
+# synthesizer, and is what separates a malformed_structure caused by the token
+# cap from one caused by a JSON error.
+ANSWER_ROUTE_JSON_KEYS = ROUTE_JSON_KEYS | frozenset(
+    {"prompt", "partial_evidence", "turn", "synthesis"}
+)
 
 # The full status vocabulary (src/regwatch/generate/rag_contract.py).
 QUERY_STATUSES = frozenset(

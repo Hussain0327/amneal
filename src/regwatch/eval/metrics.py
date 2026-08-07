@@ -91,6 +91,78 @@ class GoldItem:
     # folds into refusal_accuracy (the decision-accuracy bucket) like must_refuse,
     # and like must_refuse it does not contribute to recall/precision/faithfulness.
     must_clarify: bool = False
+    # Strings that must NOT appear in the answer. Until this existed the gold
+    # set could only express what an answer must CONTAIN, so an answer that
+    # added six extra claims -- correct-looking, validly cited, and not asked
+    # for -- still scored 1.000 on every metric. That makes any change to
+    # answer DEPTH unfalsifiable, which is exactly what it is needed for.
+    forbidden: list[str] = field(default_factory=list)
+
+
+def contains_none(answer: str, forbidden: list[str]) -> bool:
+    """True when none of ``forbidden`` appears in ``answer``.
+
+    Case- and hyphen-insensitive, mirroring prompt_eval's check so the two
+    negative-assertion surfaces cannot disagree about what "appears" means.
+    """
+    haystack = answer.lower().replace("-", " ")
+    return not any(term.lower().replace("-", " ") in haystack for term in forbidden)
+
+
+def claim_count(answer: str) -> int:
+    """How many CITED sentences the answer rendered.
+
+    One admitted claim renders as exactly one stamped sentence, so this equals
+    len(admitted) without reaching into the runtime. Every existing metric is
+    claim-count-invariant, so without this a depth change is invisible to the
+    eval: a 4-claim answer and a 10-claim answer score identically.
+    """
+    return sum(1 for s in split_sentences(strip_sources_trailer(answer)) if has_citation(s))
+
+
+def _content_tokens(sentence: str) -> set[str]:
+    return {t for t in re.split(r"[^a-z0-9]+", sentence.lower()) if len(t) > 2}
+
+
+def redundancy(answer: str) -> float:
+    """Max pairwise token-Jaccard over the answer's cited sentences.
+
+    Nothing in the gate compares claims to each other, so a model told to
+    produce more claims can satisfy that by restating one fact several ways and
+    every existing metric still reports 1.000. This is the signal that
+    distinguishes "six facts" from "three facts said six times", and it has to
+    exist BEFORE any depth target is raised or the change cannot be evaluated.
+    """
+    sentences = [s for s in split_sentences(strip_sources_trailer(answer)) if has_citation(s)]
+    if len(sentences) < 2:
+        return 0.0
+    token_sets = [_content_tokens(s) for s in sentences]
+    worst = 0.0
+    for i in range(len(token_sets)):
+        for j in range(i + 1, len(token_sets)):
+            a, b = token_sets[i], token_sets[j]
+            union = a | b
+            if not union:
+                continue
+            worst = max(worst, len(a & b) / len(union))
+    return worst
+
+
+def rejection_reasons(details: list[dict[str, Any]]) -> dict[str, int]:
+    """Histogram of decline reasons across a run.
+
+    The aggregate scores say quality moved; only this says whether it moved
+    because answers got worse or because more turns stopped being answered at
+    all. Raising the claim count pressures AVAILABILITY first -- the whole-turn
+    materiality guard trips on a single material drop -- so this is the metric
+    that should be watched when depth changes.
+    """
+    counts: dict[str, int] = {}
+    for item in details:
+        reason = (item.get("trace") or {}).get("reason")
+        if reason:
+            counts[str(reason)] = counts.get(str(reason), 0) + 1
+    return dict(sorted(counts.items()))
 
 
 @dataclass
@@ -111,6 +183,14 @@ class Scorecard:
     # the denominator with a notice rather than counted as a wrong decision. Never
     # a silent pass — the offline gate still hard-gates the clarify behavior.
     skipped: int = 0
+    # Answer-shape metrics. Reported, never thresholded yet: a gate on an
+    # unmeasured metric is a coin flip. Their job right now is to establish the
+    # baseline that a later depth change is judged against.
+    mean_claims: float = 0.0
+    max_claims: int = 0
+    redundant_claim_rate: float = 0.0
+    forbidden_violations: int = 0
+    rejection_reasons: dict[str, int] = field(default_factory=dict)
     # Items whose TRANSPORT failed (provider 429/5xx/timeout, catalog query), in
     # any bucket. Such a turn measured nothing, so it leaves every denominator
     # and is reported instead — see unmeasured_turn. Two distinct lies this
@@ -491,6 +571,9 @@ def evaluate(
                 "faithfulness": f,
                 "fact_recall": fr,
                 "n_citations": len(citations),
+                "claim_count": claim_count(result.answer),
+                "redundancy": redundancy(result.answer),
+                "forbidden_ok": contains_none(result.answer, it.forbidden),
                 "trace": trace,
             }
         )
@@ -527,6 +610,12 @@ def evaluate(
     # neither passes nor fails the gate.
     scored = max(1, n - skipped - errored)
     refusal_accuracy = (refusal_correct + clarify_correct + correct_non_refusals) / scored
+    # Answer-shape aggregates, over the items that actually produced an answer.
+    # A refused item has no claims, and averaging its 0 in would report "claims
+    # went down" when what happened was "more turns refused" -- two different
+    # regressions that must stay distinguishable.
+    shaped = [d for d in details if "claim_count" in d]
+    counts = [int(d["claim_count"]) for d in shaped]
     return Scorecard(
         n=n,
         recall_at_k=sums["recall"] / answerable,
@@ -543,6 +632,15 @@ def evaluate(
         refused_incorrectly=refused_incorrectly,
         cited_ungrounded=cited_ungrounded,
         skipped=skipped,
+        mean_claims=(sum(counts) / len(counts)) if counts else 0.0,
+        max_claims=max(counts, default=0),
+        redundant_claim_rate=(
+            (sum(1 for d in shaped if float(d["redundancy"]) >= 0.6) / len(shaped))
+            if shaped
+            else 0.0
+        ),
+        forbidden_violations=sum(1 for d in shaped if not d["forbidden_ok"]),
+        rejection_reasons=rejection_reasons(details),
         errored=errored,
         by_category=_by_category(items, details),
         details=details,

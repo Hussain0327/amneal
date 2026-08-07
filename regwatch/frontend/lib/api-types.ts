@@ -137,6 +137,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/psg/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Psg Documents */
+        get: operations["psg_documents_psg_documents_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/psg/documents/{doc_id}/pdf": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Psg Document Pdf
+         * @description Stream one PSG PDF inline: local cache first, else fetch from fda.gov.
+         *
+         *     The remote branch reuses the crawler's hardened ``download_pdf`` (polite
+         *     pause, streamed byte cap, %PDF validation, write-through cache in ingest's
+         *     own naming scheme) under a tighter per-request timeout budget. Error
+         *     details never include the upstream URL.
+         */
+        get: operations["psg_document_pdf_psg_documents__doc_id__pdf_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        /**
+         * Psg Document Pdf Head
+         * @description Availability probe for the Studio's PDF pane.
+         *
+         *     Answers from the DB row plus at most two stat() calls -- never fda.gov,
+         *     never the rate budget -- so the frontend can distinguish "this document
+         *     can be served" from a transport failure before mounting the iframe.
+         *     FastAPI does not auto-answer HEAD for GET routes, so this handler is
+         *     load-bearing, not decoration.
+         */
+        head: operations["psg_document_pdf_head_psg_documents__doc_id__pdf_head"];
+        patch?: never;
+        trace?: never;
+    };
     "/query": {
         parameters: {
             query?: never;
@@ -664,6 +716,51 @@ export interface components {
             error?: string | null;
             /** Ok */
             ok: boolean;
+        };
+        /** PsgDocumentListResponse */
+        PsgDocumentListResponse: {
+            /** Count */
+            count: number;
+            /** Documents */
+            documents: components["schemas"]["PsgLibraryDoc"][];
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Total */
+            total: number;
+        };
+        /**
+         * PsgLibraryDoc
+         * @description One psg_document catalog row for the reference-library rail.
+         *
+         *     ``stripped_name`` is derived at read time (text_normalize.stripped_name) so
+         *     the client can salt-collapse ("albuterol sulfate" -> "albuterol") without
+         *     shipping the salt-token table. ``psg_type`` stays a plain str (house
+         *     precedent: AlertRecord's listing fields) -- the crawler only ever writes
+         *     "draft"/"final", and a str never 500s on a legacy row.
+         */
+        PsgLibraryDoc: {
+            /** Active Ingredient */
+            active_ingredient: string;
+            /** Appl No */
+            appl_no: string | null;
+            /** Dosage Form */
+            dosage_form: string | null;
+            /** Id */
+            id: number;
+            /** Normalized Name */
+            normalized_name: string;
+            /** Psg Type */
+            psg_type: string;
+            /** Recommended Date */
+            recommended_date: string | null;
+            /** Route */
+            route: string | null;
+            /** Source Url */
+            source_url: string;
+            /** Stripped Name */
+            stripped_name: string;
         };
         /** QueryCitation */
         QueryCitation: {
@@ -1293,6 +1390,106 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    psg_documents_psg_documents_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PsgDocumentListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    psg_document_pdf_psg_documents__doc_id__pdf_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                doc_id: number;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    psg_document_pdf_head_psg_documents__doc_id__pdf_head: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                doc_id: number;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

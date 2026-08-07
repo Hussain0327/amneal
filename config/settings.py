@@ -23,6 +23,22 @@ _SNAPSHOT_SUFFIX_RE = re.compile(r"\d[\d-]*")
 # was set explicitly (vs. the legacy RETRIEVAL_TOP_K) in effective_rerank_top_k.
 _DEFAULT_RERANK_TOP_K = 8
 
+# Hard ceiling on ONE synthesis call, independent of SYNTHESIZER_MAX_TOKENS.
+# The truncation retry doubles the budget, so this is what stops an operator
+# from making a single turn cost an unbounded number of tokens.
+#
+# It lives HERE, next to the setting it bounds, rather than in
+# generate/grounded_qa.py where it used to sit. Splitting them let the
+# validator accept anything up to 32768 while the runtime silently clamped to
+# the ceiling AND silently disabled the retry (a budget at the ceiling has no
+# larger retry to escalate to). The validator below now refuses that range
+# outright, which it can only do by seeing this number.
+#
+# Sized so the retry is real at the configured default: 3000 * 2 == 6000, and
+# the 20-claim schema worst case (20 x 400 chars x 4 cites = 3,817 output
+# tokens by o200k_harmony, + 500 reasoning) fits under it.
+SYNTH_MAX_TOKENS_CEILING = 6000
+
 # Databricks serving-endpoint name prefixes for PARTNER-hosted model families.
 # Databricks brands these alongside its open-weight endpoints and they are
 # indistinguishable at the call site, but they carry the partner's retention
@@ -140,11 +156,28 @@ class Settings(BaseSettings):
     # envelope spends tokens on structure (per-claim objects with named cite
     # objects) that prose spent on content, and a truncated JSON payload is
     # UNPARSEABLE where truncated prose merely lost a sentence -- the failure
-    # got sharper, so the budget has to get bigger. A live replay of the failing
-    # prod call already used 842 completion tokens against the old 900 cap, in
-    # PROSE. 1600 is a sized guess, not a measurement: instrument output_tokens
-    # on the first structured turns and re-tune from data.
-    synthesizer_max_tokens: int = 1600
+    # got sharper, so the budget has to get bigger.
+    #
+    # Raised 1600 -> 3000, and this one IS measured. Sized off the SCHEMA
+    # CEILING, never off observed p95: because a truncated payload is
+    # unparseable, undershooting costs the WHOLE TURN (an audited
+    # malformed_structure refusal), not a lost sentence. Budgeting for the
+    # median would be budgeting for the failure.
+    #
+    # Arithmetic, o200k_harmony (the gpt-oss-120b tokenizer), pretty-printed
+    # because the worked example the model imitates is pretty-printed:
+    #     20 claims x 250 chars x 2 cites = 2,317 output tokens
+    #   + reasoning residual                =   500 (observed 13-485, mean 144)
+    #                                        -------
+    #                                         2,817  -> 3000, leaving ~180 for
+    # JSON \uXXXX escaping, which is unbounded per character.
+    #
+    # Note 1600 never covered even the OLD 10-claim cap: 10 x 400 x 4 = 1,927
+    # + 500 = 2,427. The raise is justified independently of any cap change.
+    #
+    # Must stay strictly below SYNTH_MAX_TOKENS_CEILING (enforced at boot by
+    # _check_synthesizer_max_tokens) or the truncation retry stops working.
+    synthesizer_max_tokens: int = 3000
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     # ---------- LLM client transport (B3) ----------
@@ -254,8 +287,19 @@ class Settings(BaseSettings):
         # A zero/negative cap would truncate every completion to nothing and
         # degrade every turn to the empty_completion refusal -- the app would
         # look alive while answering nothing.
-        if not 1 <= v <= 32768:
-            raise ValueError("SYNTHESIZER_MAX_TOKENS must be in [1, 32768]")
+        #
+        # The upper bound is the synthesis ceiling, EXCLUSIVE, not an arbitrary
+        # 32768. At or above it two things break silently and together: the
+        # first call is clamped down to the ceiling with no log, and the
+        # truncation retry (min(capped * 2, CEILING)) can no longer produce a
+        # larger budget, so a truncated turn raises instead of retrying. Both
+        # are invisible in prod. Fail the boot instead.
+        if not 1 <= v < SYNTH_MAX_TOKENS_CEILING:
+            raise ValueError(
+                f"SYNTHESIZER_MAX_TOKENS must be in [1, {SYNTH_MAX_TOKENS_CEILING - 1}]: "
+                f"a value at or above the synthesis ceiling ({SYNTH_MAX_TOKENS_CEILING}) "
+                "is silently clamped AND silently disables the truncation retry"
+            )
         return v
 
     # ---------- D1 residency tripwires ----------

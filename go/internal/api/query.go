@@ -290,6 +290,10 @@ func errorRouteJSON(reason string, filtersObj []byte) json.RawMessage {
 		"reason":          reason,
 		"context_applied": false,
 		"response_mode":   "refused",
+		// The Python service was never reached, so stage-1 provably did not
+		// run: the empty ledger is the accurate value, and it keeps this row
+		// the same SHAPE as every Python-authored route_json.
+		"retrieval": map[string]any{},
 	})
 }
 

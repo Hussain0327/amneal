@@ -387,7 +387,7 @@ question
    │     • passages span >1 form?    ───────────► ROUTER-ROLE GUIDANCE PLANNER
    │
    ├─ SYNTHESIZER LLM (temperature 0.0, strict grounding system prompt,
-   │                   SYNTHESIZER_MAX_TOKENS budget - default 900, shared by a
+   │                   SYNTHESIZER_MAX_TOKENS budget - default 3000, shared by a
    │                   reasoning model's thought AND answer)
    │
    ├─ model returned NO_EVIDENCE? ─────────────► REFUSE / CLARIFY (no second AI call)
@@ -869,7 +869,7 @@ for the annotated surface. The load-bearing knobs:
 | `DATABRICKS_REASONING_EFFORT` (`low`) | Reasoning budget sent on every role. `low` is the only level measured to finish inside the 900-token cap on gpt-oss-20b |
 | `D1_ENFORCED` / `D1_ALLOWED_LLM_MODELS` | Residency tripwires: boot guard on half-migrated config + per-response served-model check. List BOTH the UC alias and the served model id |
 | `ROUTER_MODEL` / `SYNTHESIZER_MODEL` / `EXTRACTOR_MODEL` | OpenAI role-specific models (cheap classifier, capable synthesizer/extractor) |
-| `SYNTHESIZER_MAX_TOKENS` (900) | Synthesis output cap, buffered and streamed alike; a reasoning model's thought and answer share it |
+| `SYNTHESIZER_MAX_TOKENS` (3000) | Synthesis output cap, buffered and streamed alike; a reasoning model's thought and answer share it |
 | `VECTOR_TOP_K` (50) / `RERANK_TOP_K` (8) / `RERANKER_ENABLED` (false) | Two-stage retrieval sizing |
 | `REFUSAL_SCORE_THRESHOLD` (0.30) | The refuse-over-guess line (INV-2) |
 | `AUTH_COOKIE_SECURE` / `AUTH_SESSION_TTL_HOURS` / `RATE_LIMIT_PER_MINUTE` | Auth + abuse controls |

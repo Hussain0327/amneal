@@ -85,10 +85,12 @@ def _one_new_row(payload: dict[str, Any], client: EdgeClient) -> dict[str, Any]:
         expected_route_keys = ROUTE_JSON_KEYS
     assert set(row["route_json"].keys()) == expected_route_keys
     if payload["status"] in {"answer", "summary"}:
-        _assert_prompt_identity(row["route_json"], prompt_id="regwatch.grounded_qa", version="4")
+        _assert_prompt_identity(row["route_json"], prompt_id="regwatch.grounded_qa", version="5")
         # A deliberate pin, never a mirror of the source: changing the prompt
-        # identity must be a conscious edit here. "4" adds the helpful,
-        # partial-evidence behavior while retaining the structured claim gate.
+        # identity must be a conscious edit here. "4" added the helpful,
+        # partial-evidence behavior while retaining the structured claim gate;
+        # "5" raises the claims cap to 20 and bounds the unsupported labels, so
+        # a drill-down follow-up can be answered at its real depth.
         assert isinstance(row["route_json"]["partial_evidence"], bool)
         # The gate ledger reached the row, and its verdict agrees with the
         # turn that was served: an answer/summary is only rendered when at

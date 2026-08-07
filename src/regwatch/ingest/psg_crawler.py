@@ -420,7 +420,6 @@ def download_pdf(url: str, *, client: httpx.Client | None = None) -> tuple[Path,
     (ingest_listing) already degrade these to a logged 'error' for that listing.
     """
     s = get_settings()
-    s.ensure_dirs()
     with owned_client(client, _pdf_client) as active_client:
         _polite_pause()
         data = _stream_capped(active_client, url, s.pdf_max_bytes)
@@ -430,6 +429,15 @@ def download_pdf(url: str, *, client: httpx.Client | None = None) -> tuple[Path,
         appl_match = APPL_FROM_PDF.search(url)
         appl_no = appl_match.group(1) if appl_match else digest[:12]
         path = s.raw_pdf_dir / f"PSG_{appl_no}_{digest[:8]}.pdf"
-        if not path.exists():
-            path.write_bytes(data)
+        # Best-effort cache: every consumer parses/serves the returned BYTES,
+        # and every reader of the path already treats a missing file as a cache
+        # miss -- so a full or read-only disk must never turn a successful
+        # fetch into a failure (an unmapped 500 in the API, a dead listing in
+        # ingest).
+        try:
+            s.ensure_dirs()
+            if not path.exists():
+                path.write_bytes(data)
+        except OSError:
+            log.warning("pdf_cache_write_failed", path=str(path), exc_info=True)
         return path, data, digest
