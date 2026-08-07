@@ -18,6 +18,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from regwatch.retrieve.mode import RetrievalMode
+
 if TYPE_CHECKING:  # typing-only import to avoid a cycle with pgvector_store
     from sqlalchemy.engine import Connection
 
@@ -227,6 +229,7 @@ def similarity_search_profile(
     *,
     k: int = 8,
     where: dict[str, Any] | None = None,
+    mode: RetrievalMode | None = None,
 ) -> list[Hit]:
     from regwatch.store import embedding_profiles
 
@@ -235,4 +238,5 @@ def similarity_search_profile(
         query_embedding,
         k=k,
         where=where,
+        mode=mode,
     )

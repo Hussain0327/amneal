@@ -21,6 +21,7 @@ from regwatch.process.embedder import (
     get_embedding_provider,
     get_embedding_provider_for_profile,
 )
+from regwatch.retrieve.mode import RetrievalMode, RetrievalScope, default_mode_for_scope
 from regwatch.store.db import get_engine, session_scope
 from regwatch.store.models import PsgDocument, PsgVersion
 from regwatch.store.vector_store import (
@@ -192,17 +193,31 @@ def retrieve(
     *,
     k: int | None = None,
     filters: dict[str, Any] | None = None,
+    mode: RetrievalMode | None = None,
 ) -> list[RetrievedPassage]:
     """Stage-1 vector search.
 
     Returns up to VECTOR_TOP_K candidates. The reranker (in grounded_qa) trims
     this to RERANK_TOP_K. If the caller passes an explicit `k`, that overrides
     VECTOR_TOP_K for the wide-net stage.
+
+    ``mode`` is the CALLER's choice of retrieval algorithm. Omitted, it defaults
+    from the resolved scope -- always to one of the EXACT modes, so no caller
+    gets approximate search by accident. The mode fully determines the SQL and
+    the session settings (see store.embedding_profiles.build_search_sql), which
+    is why the caller can record what will run without the store handing back a
+    separate execution report.
+
+    The scope is derived from the CALLER's filters, deliberately BEFORE the
+    current-version clause is added: that clause goes on every query, so "has a
+    filter" cannot tell a product-scoped question from a corpus-wide one -- the
+    distinction that actually matters.
     """
     s = get_settings()
     k = k if k is not None else s.vector_top_k
     if k <= 0:
         return []
+    resolved_mode = mode or default_mode_for_scope(RetrievalScope.from_filters(filters))
     profile_id = (s.active_embedding_profile or "legacy").strip()
     if profile_id == "legacy":
         embedder = get_embedding_provider()
@@ -224,7 +239,7 @@ def retrieve(
     if profile_id == "legacy":
         hits: list[Hit] = similarity_search(qv, k=k, where=where)
     else:
-        hits = similarity_search_profile(profile_id, qv, k=k, where=where)
+        hits = similarity_search_profile(profile_id, qv, k=k, where=where, mode=resolved_mode)
 
     passages: list[RetrievedPassage] = []
     for h in hits:

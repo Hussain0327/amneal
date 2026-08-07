@@ -366,6 +366,7 @@ def run(
         get_embedding_provider,
         get_embedding_provider_for_profile,
     )
+    from regwatch.retrieve.mode import RetrievalMode
     from regwatch.store.db import init_db
     from regwatch.store.embedding_profiles import (
         get_embedding_profile,
@@ -397,7 +398,12 @@ def run(
     prof = run_arm(
         profile,
         get_embedding_provider_for_profile(profile_row),
-        lambda vec, k: similarity_search_profile(profile, vec, k=k),
+        # Unfiltered by design (see this module's header). Naming EXACT_CORPUS
+        # makes that explicit: the arm is compared on exact search rather than
+        # on whichever plan the approximate index happened to produce.
+        lambda vec, k: similarity_search_profile(
+            profile, vec, k=k, mode=RetrievalMode.EXACT_CORPUS
+        ),
         gold_items,
         refuse_questions,
         doc_items,

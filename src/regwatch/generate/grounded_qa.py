@@ -96,6 +96,7 @@ from regwatch.generate.rag_contract import (
 )
 from regwatch.generate.turn_gate import AdmittedTurn, GateFailure, admit_turn
 from regwatch.generate.turn_schema import TURN_SCHEMA_MESSAGE
+from regwatch.retrieve.mode import RetrievalPlan, RetrievalScope, default_mode_for_scope
 from regwatch.retrieve.reranker import rerank_passages
 from regwatch.retrieve.resolver import resolve_brand, resolve_product, suggest_products
 from regwatch.retrieve.retriever import RetrievedPassage, retrieve
@@ -405,6 +406,14 @@ def _route_json(
         "reason": reason,
         "context_applied": context_applied,
         "response_mode": response_mode,
+        # The stage-1 search ledger, UNCONDITIONAL: empty means the turn ended
+        # before search ran, populated records what ran (mode, scope, profile,
+        # k, returned). "Did we search?" is a VALUE, never key presence: the
+        # same reason declines on BOTH sides of retrieve() -- multi_form fires
+        # at the pre-retrieval form guard and again at the post-retrieval blend
+        # backstop -- so presence could not answer it. Callers that do search
+        # overwrite this default.
+        "retrieval": {},
     }
 
 
@@ -1435,6 +1444,9 @@ def ask_core(
     resolved_by_name = False
     context_applied = False
     response_mode: QueryStatusLiteral = "summary" if _is_summary_request(question) else "answer"
+    # Populated once stage-1 search runs; read by _decline so a turn that
+    # declines AFTER retrieving still records which retrieval mode ran.
+    retrieval_block: dict[str, Any] = {}
 
     def _decline(
         maker: Callable[..., tuple[RagOutcome, AuditPayload]],
@@ -1464,6 +1476,11 @@ def ask_core(
             context_applied=context_applied,
             response_mode=response_mode,
         )
+        # Declines that happen AFTER stage-1 search still describe a retrieval
+        # that ran, so the plan belongs on their audit row too. _decline builds
+        # a FRESH rj, so it cannot inherit the answer path's mutation.
+        if retrieval_block:
+            rj["retrieval"] = dict(retrieval_block)
         if route_extra:
             rj.update(route_extra)
         kw.setdefault("model_name", model_name)
@@ -1788,10 +1805,18 @@ def ask_core(
     )
     _emit("Searching the FDA guidance corpus…")
     _maybe_inject_fault("retrieve")
+    # The MODE is this layer's decision, not a side effect of whether a filter
+    # happens to exist downstream. Deciding it here is also what makes it
+    # auditable: the mode determines the SQL and the session settings outright
+    # (store.embedding_profiles.build_search_sql), so recording it records what
+    # ran rather than what we hope ran.
+    retrieval_scope = RetrievalScope.from_filters(active_filters)
+    retrieval_mode = default_mode_for_scope(retrieval_scope)
     # Embed the RE-ANCHORED query, not necessarily the user's words: a
     # contentless drill-down has no topical signal of its own. Identity for
     # every question that carries its own topic, so single-turn behaviour and
-    # the offline eval are byte-identical.
+    # the offline eval are byte-identical. Orthogonal to the mode above: this
+    # decides WHAT text is searched, the mode decides HOW the search runs.
     search_query = _retrieval_query(
         question, normalized_name=resolved_name, prior_turns=_recent_turns()
     )
@@ -1800,7 +1825,18 @@ def ask_core(
     # words, and M7 (follow-up miss rate) counts exactly this flag.
     if search_query != question:
         route_json["retrieval_query_rewritten"] = True
-    passages = retrieve(search_query, k=k, filters=active_filters)
+    retrieval_block.update(
+        RetrievalPlan(
+            mode=retrieval_mode,
+            scope=retrieval_scope,
+            profile_id=(s.active_embedding_profile or "legacy").strip(),
+            dimension=0,
+            k=k if k is not None else s.vector_top_k,
+        ).as_route_json()
+    )
+    passages = retrieve(search_query, k=k, filters=active_filters, mode=retrieval_mode)
+    retrieval_block["returned"] = len(passages)
+    route_json["retrieval"] = dict(retrieval_block)
     # Stage 2: optional rerank, then trim to RERANK_TOP_K. Same rewritten query
     # -- the reranker scores relevance against the search intent, not the
     # literal keystrokes.
