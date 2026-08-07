@@ -73,6 +73,25 @@ export function citeKey(shortName: string, page: number): string {
   return `${shortName.toUpperCase()}:${page}`;
 }
 
+/**
+ * One citation per case-insensitive (short_name, page) key, first occurrence
+ * wins -- the SAME dedupe rule and order citationIndex numbers by. Every surface
+ * that displays or resolves a [n] (stamp index, stamp-resolution array, chips,
+ * references) must consume the same deduped list, or a duplicated wire citation
+ * makes [n] point at the wrong source.
+ */
+export function dedupeCitations<T extends MatchableCitation>(citations: readonly T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const c of citations) {
+    const key = citeKey(c.short_name, c.page);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(c);
+  }
+  return out;
+}
+
 // Build the lookup the renderer matches tags against: key -> 1-based index into
 // the turn's citation list (the [n] the stamp displays and the citation it opens).
 export function citationIndex(citations: MatchableCitation[]): Map<string, number> {

@@ -8,10 +8,25 @@ import type { Citation } from "@/lib/api";
 //
 // Nothing renders when neither a date nor a diff is present, so an older turn
 // (or a streamed response that didn't carry recency) shows no empty badge.
-export function RecencyBadge({ c }: { c: Citation }) {
+// Surfaces where absence is itself provenance (evidence drawer, reference rows)
+// opt in via `explicitEmpty` to say "not recorded" instead of staying silent.
+export function RecencyBadge({
+  c,
+  explicitEmpty = false,
+}: {
+  c: Citation;
+  explicitEmpty?: boolean;
+}) {
   const date = c.recommended_date ?? null;
   const diff = c.diff_summary ?? null;
-  if (!date && !diff) return null;
+  if (!date && !diff) {
+    if (!explicitEmpty) return null;
+    return (
+      <div className="recency">
+        <span className="recency__none">Revision date not recorded</span>
+      </div>
+    );
+  }
   return (
     <div className="recency">
       {date && (

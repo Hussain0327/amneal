@@ -2,12 +2,14 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
-import { ApiError, deleteSession, getPublicSettings, type PublicSettings } from "@/lib/api";
+import { deleteSession } from "@/lib/api";
+import { parseApiDate } from "@/lib/time";
 import { useAuth } from "./AuthProvider";
 import { useCurrentProduct } from "./CurrentProductProvider";
 import { useSessions } from "./SessionsProvider";
+import { useSettings } from "./SettingsProvider";
 import { Wordmark } from "./Wordmark";
 
 // Append the scoped-product params to an in-app href so navigating between the
@@ -25,12 +27,12 @@ const NAV = [
   { href: "/deficiency", no: "05", label: "Deficiency", note: "Scan a draft" },
 ];
 
-// Compact relative time for the history list. Timestamps may arrive without an
-// offset (naive UTC from SQLite) — treat a missing offset as UTC.
+// Compact relative time for the history list. parseApiDate applies the shared
+// naive-UTC rule (a missing offset means UTC) so this can never disagree with
+// the docket provenance stamps.
 function relTime(iso: string): string {
-  const norm = /(?:Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`;
-  const t = Date.parse(norm);
-  if (Number.isNaN(t)) return "";
+  const t = parseApiDate(iso);
+  if (t === null) return "";
   const mins = Math.floor(Math.max(0, Date.now() - t) / 60000);
   if (mins < 1) return "now";
   if (mins < 60) return `${mins}m`;
@@ -41,25 +43,22 @@ function relTime(iso: string): string {
   return new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+// Absolute date for a history row's hover title -- "Jan 5, 2026". en-US pinned
+// so the rendering is deterministic under vitest regardless of host locale
+// (same rule as lib/time.ts). Returns "" when the timestamp does not parse.
+function absTime(iso: string): string {
+  const t = parseApiDate(iso);
+  if (t === null) return "";
+  return new Date(t).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+}
+
 export function Sidebar() {
   const pathname = usePathname();
   const { user, logout } = useAuth();
   const { productParams } = useCurrentProduct();
-  const [settings, setSettings] = useState<PublicSettings | null>(null);
-  const [reachable, setReachable] = useState(true);
-
-  useEffect(() => {
-    getPublicSettings()
-      .then((s) => {
-        setSettings(s);
-        setReachable(true);
-      })
-      // A 401 is an auth-expiry (AuthProvider handles the redirect), not a
-      // transport failure — don't show "API unreachable" for it.
-      .catch((e) => {
-        if (!(e instanceof ApiError) || e.status !== 401) setReachable(false);
-      });
-  }, []);
+  // Shared with the Ask page's confidence legend via SettingsProvider -- one
+  // GET /settings for the whole shell instead of a private fetch here.
+  const { settings, reachable } = useSettings();
 
   return (
     <aside className="sidebar">
@@ -89,7 +88,7 @@ export function Sidebar() {
                 borderRadius: "2px",
                 textDecoration: "none",
                 color: active ? "var(--ink)" : "var(--ink-2)",
-                background: active ? "#fffdf8" : "transparent",
+                background: active ? "var(--paper-bright)" : "transparent",
                 boxShadow: active ? "inset 3px 0 0 var(--gold)" : "inset 3px 0 0 transparent",
                 transition: "background 0.15s ease, box-shadow 0.15s ease",
               }}
@@ -181,9 +180,15 @@ function History() {
   const { productParams } = useCurrentProduct();
   const { sessions, loaded, activeSessionId, setActiveSessionId, refresh } = useSessions();
   const [confirming, setConfirming] = useState<string | null>(null);
+  // Session id whose delete failed -- drives the inline "couldn't delete" row
+  // so a failure is never silent (the row would otherwise just reappear).
+  const [deleteFailed, setDeleteFailed] = useState<string | null>(null);
 
   async function remove(id: string) {
     setConfirming(null);
+    // A retry starts clean: the failure row clears on entry and comes back
+    // only if this attempt also fails.
+    setDeleteFailed(null);
     let ok = true;
     try {
       await deleteSession(id);
@@ -192,6 +197,7 @@ function History() {
       // failure means the row is still there — don't clear the active session
       // or navigate away as if the delete had succeeded.
       ok = false;
+      setDeleteFailed(id);
     }
     if (ok && id === activeSessionId) {
       setActiveSessionId(null);
@@ -229,6 +235,7 @@ function History() {
         ) : (
           sessions.map((s) => {
             const active = s.id === activeSessionId;
+            const rel = relTime(s.updated_at);
             return (
               <div key={s.id} className={`hist${active ? " hist--active" : ""}`}>
                 {confirming === s.id ? (
@@ -237,16 +244,37 @@ function History() {
                     <button onClick={() => void remove(s.id)}>yes</button>
                     <button onClick={() => setConfirming(null)}>no</button>
                   </div>
+                ) : deleteFailed === s.id ? (
+                  // The delete did NOT happen: say so where it failed, with a
+                  // way to retry or stand down. role=alert so a screen reader
+                  // hears the failure without hunting for the row.
+                  <div className="hist__confirm" role="alert">
+                    <span>{"couldn't delete"}</span>
+                    <button onClick={() => void remove(s.id)}>retry</button>
+                    <button onClick={() => setDeleteFailed(null)}>dismiss</button>
+                  </div>
                 ) : (
                   <>
                     <Link
                       href={withScope(`/?session=${encodeURIComponent(s.id)}`, productParams)}
                       className="hist__main"
-                      title={s.title}
+                      title={`${s.title} \u00b7 ${absTime(s.updated_at)} \u00b7 ${s.message_count} messages`}
                       onClick={() => setActiveSessionId(s.id)}
                     >
                       <span className="hist__title">{s.title}</span>
-                      <span className="hist__time">{relTime(s.updated_at)}</span>
+                      {/* Visible: compact "2h \u00b7 7". aria-label on a generic
+                          span is prohibited ARIA, so the bare count is
+                          aria-hidden and a sr-only tail spells it out as
+                          "N messages" instead. When the timestamp does not
+                          parse (rel === ""), the count renders alone -- no
+                          orphaned separator. */}
+                      <span className="hist__time">
+                        {rel}
+                        <span aria-hidden="true">
+                          {rel ? ` \u00b7 ${s.message_count}` : s.message_count}
+                        </span>
+                        <span className="sr-only">{` \u2014 ${s.message_count} messages`}</span>
+                      </span>
                     </Link>
                     <button
                       className="hist__del"

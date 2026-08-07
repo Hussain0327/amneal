@@ -6,6 +6,7 @@ import { useAuth } from "@/components/AuthProvider";
 import { CurrentProductProvider } from "@/components/CurrentProductProvider";
 import { ProductScopeBar } from "@/components/ProductScopeBar";
 import { SessionsProvider } from "@/components/SessionsProvider";
+import { SettingsProvider } from "@/components/SettingsProvider";
 import { Sidebar } from "@/components/Sidebar";
 
 // The shared shell for the four product surfaces (Ask / Assemble / Watch /
@@ -22,22 +23,27 @@ export default function ShellLayout({ children }: { children: React.ReactNode })
   const { user } = useAuth();
   return (
     <SessionsProvider key={user?.id ?? "anon"}>
-      {/* useSearchParams (CurrentProductProvider + Sidebar) needs a Suspense
-          boundary to prerender cleanly. */}
-      <Suspense fallback={null}>
-        <CurrentProductProvider>
-          <div className="shell">
-            <a href="#main" className="skip-link">
-              Skip to content
-            </a>
-            <Sidebar />
-            <main id="main" tabIndex={-1} className="canvas">
-              <ProductScopeBar />
-              {children}
-            </main>
-          </div>
-        </CurrentProductProvider>
-      </Suspense>
+      {/* Inside the keyed SessionsProvider: settings are global, but sharing
+          the identity remount is harmless (one refetch) and keeps every
+          authed fetch behind the same gate. */}
+      <SettingsProvider>
+        {/* useSearchParams (CurrentProductProvider + Sidebar) needs a Suspense
+            boundary to prerender cleanly. */}
+        <Suspense fallback={null}>
+          <CurrentProductProvider>
+            <div className="shell">
+              <a href="#main" className="skip-link">
+                Skip to content
+              </a>
+              <Sidebar />
+              <main id="main" tabIndex={-1} className="canvas">
+                <ProductScopeBar />
+                {children}
+              </main>
+            </div>
+          </CurrentProductProvider>
+        </Suspense>
+      </SettingsProvider>
     </SessionsProvider>
   );
 }

@@ -99,6 +99,30 @@ describe("Markdown citation stamps", () => {
     expect(container).toHaveTextContent("[PSG_020503, p.3]");
   });
 
+  it("numbers stamps from the deduped list and resolves clicks against it", async () => {
+    const onCite = vi.fn();
+    const a = cite("PSG_020503", 3);
+    const duplicateOfA = cite("PSG_020503", 3);
+    const b = cite("PSG_021730", 4);
+    render(
+      <Markdown citations={[a, duplicateOfA, b]} onCite={onCite}>
+        {"First [PSG_020503, p.3], then [PSG_021730, p.4]."}
+      </Markdown>,
+    );
+    // The duplicate must not leave a numbering hole: B is [2], never [3].
+    expect(screen.getByRole("button", { name: /Source 1: PSG_020503, page 3/i })).toHaveTextContent(
+      "[1]",
+    );
+    const stampB = screen.getByRole("button", { name: /Source 2: PSG_021730, page 4/i });
+    expect(stampB).toHaveTextContent("[2]");
+    await userEvent.click(stampB);
+    // The stamp resolution array must be the SAME deduped list the index was
+    // built from -- deduping only the index would resolve [2] to A's duplicate
+    // (raw citations[1]) and open the wrong source (INV-1).
+    expect(onCite).toHaveBeenCalledTimes(1);
+    expect(onCite).toHaveBeenCalledWith(b);
+  });
+
   it("stamps each source of a compound tag and keeps a link working alongside", async () => {
     const onCite = vi.fn();
     const a = cite("PSG_020503", 4);

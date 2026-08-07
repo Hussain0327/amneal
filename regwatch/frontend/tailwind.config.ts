@@ -9,7 +9,7 @@ const config: Config = {
     extend: {
       colors: {
         paper: { DEFAULT: "#faf6ec", deep: "#f4eede", edge: "#e4d9bf" },
-        ink: { DEFAULT: "#16213a", soft: "#6c7286", faint: "#9a9784" },
+        ink: { DEFAULT: "#16213a", soft: "#686d80", faint: "#6b6859" },
         gold: { DEFAULT: "#f5b400", deep: "#c98a0c", ink: "#8a5b00" },
         oxblood: "#7a2e2e",
       },
