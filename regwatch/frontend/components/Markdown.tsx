@@ -8,6 +8,11 @@ import type { Citation } from "@/lib/api";
 import { citationIndex, citeKey, dedupeCitations, segmentCitations, type CitePair } from "@/lib/citations";
 import { safeHref } from "@/lib/url";
 
+// A bare numeric marker bracket in prose: "[1]" or the compound "[1, 2]".
+// Meaningless on its own -- it becomes a stamp ONLY when the caller supplies a
+// trailer-derived marker map AND the mapped pair matches a validated citation.
+const NUM_BRACKET = /\[(\d{1,3}(?:\s*[,;]\s*\d{1,3})*)\]/g;
+
 // Minimal local mdast shapes (we only touch type/value/children), so this file
 // carries no hard dependency on @types/mdast — which is a transitive package and
 // could de-hoist on a clean install.
@@ -39,14 +44,14 @@ function stampNode(n: number, pair: CitePair): MdNode {
 // an `inlineCode`/`code` node's `.value` string, never a `text` node, so code is
 // untouched for free (the "tags inside code are not transformed" rule). Links,
 // tables, lists keep working because their text children flow through unchanged.
-function remarkCitationStamps(index: Map<string, number>) {
+function remarkCitationStamps(index: Map<string, number>, markers: Map<number, CitePair> | null) {
   return function transform(tree: MdNode): void {
     function walk(node: MdNode): void {
       if (!node.children) return;
       const next: MdNode[] = [];
       for (const child of node.children) {
         if (child.type === "text") {
-          next.push(...splitTextNode(child.value ?? "", index));
+          next.push(...splitTextNode(child.value ?? "", index, markers));
         } else {
           walk(child);
           next.push(child);
@@ -60,14 +65,22 @@ function remarkCitationStamps(index: Map<string, number>) {
 
 // Split one text node's value into text + stamp nodes. An unmatched pair (no real
 // citation) keeps the bracket as literal text — never fabricated (INV-1).
-function splitTextNode(value: string, index: Map<string, number>): MdNode[] {
+function splitTextNode(
+  value: string,
+  index: Map<string, number>,
+  markers: Map<number, CitePair> | null,
+): MdNode[] {
   const segments = segmentCitations(value);
-  // Fast path: no citation brackets — return one untouched text node.
-  if (segments.length === 1 && segments[0].kind === "text") return [{ type: "text", value }];
-
   const out: MdNode[] = [];
   const pushText = (v: string) => {
-    if (v) out.push({ type: "text", value: v });
+    if (!v) return;
+    // Text between (or without) tag brackets may still carry bare numeric
+    // markers -- resolve those through the trailer map where one exists.
+    if (markers) {
+      out.push(...splitMarkerText(v, index, markers));
+    } else {
+      out.push({ type: "text", value: v });
+    }
   };
   for (const seg of segments) {
     if (seg.kind === "text") {
@@ -96,6 +109,43 @@ function splitTextNode(value: string, index: Map<string, number>): MdNode[] {
   return out;
 }
 
+// Resolve bare numeric markers ("[1]", "[1, 2]") against the trailer map. Each
+// marker becomes a stamp only when its trailer pair matches a validated
+// citation; the stamp DISPLAYS the canonical deduped index (the same [n] the
+// reference list shows), not the model's marker, so numbering never forks. A
+// bracket where nothing resolves stays literal prose (INV-1), mirroring the
+// tag-bracket rule above.
+function splitMarkerText(
+  value: string,
+  index: Map<string, number>,
+  markers: Map<number, CitePair>,
+): MdNode[] {
+  const out: MdNode[] = [];
+  let last = 0;
+  NUM_BRACKET.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = NUM_BRACKET.exec(value)) !== null) {
+    const matched: { n: number; pair: CitePair }[] = [];
+    for (const raw of m[1].split(/[,;]/)) {
+      const pair = markers.get(Number(raw.trim()));
+      if (!pair) continue;
+      const n = index.get(citeKey(pair.shortName, pair.page));
+      if (n !== undefined) matched.push({ n, pair });
+    }
+    if (matched.length === 0) continue; // stays literal inside surrounding text
+    if (m.index > last) out.push({ type: "text", value: value.slice(last, m.index) });
+    const seen = new Set<number>();
+    for (const { n, pair } of matched) {
+      if (seen.has(n)) continue;
+      seen.add(n);
+      out.push(stampNode(n, pair));
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < value.length) out.push({ type: "text", value: value.slice(last) });
+  return out;
+}
+
 /**
  * Renders model/dossier markdown as editorial prose (see .prose in globals.css).
  * When `citations` + `onCite` are supplied (answer/summary turns only), inline
@@ -109,11 +159,16 @@ export function Markdown({
   children,
   citations,
   onCite,
+  markers,
   plainLinks = false,
 }: {
   children: string;
   citations?: Citation[];
   onCite?: (c: Citation) => void;
+  // Trailer-derived bare-marker map ([n] -> its bibliography pair), supplied
+  // only alongside citations/onCite. Markers resolve through the validated
+  // index like any tag; without this map a bare [n] always stays literal.
+  markers?: Map<number, CitePair>;
   plainLinks?: boolean;
 }): React.JSX.Element {
   const stampable = citations !== undefined && onCite !== undefined && citations.length > 0;
@@ -122,7 +177,9 @@ export function Markdown({
   // must open the citation the index numbered (bijective, INV-1).
   const deduped = stampable ? dedupeCitations(citations) : null;
   const index = deduped ? citationIndex(deduped) : null;
-  const plugins = index ? [remarkGfm, () => remarkCitationStamps(index)] : [remarkGfm];
+  const plugins = index
+    ? [remarkGfm, () => remarkCitationStamps(index, markers ?? null)]
+    : [remarkGfm];
 
   // The Components map is typed for known HTML tags; our custom "cite-stamp"
   // element isn't in that type, so build the map loosely and cast once.

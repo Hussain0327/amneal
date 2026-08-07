@@ -6,7 +6,7 @@ import { AnswerFeedback } from "@/components/AnswerFeedback";
 import { Markdown } from "@/components/Markdown";
 import { RecencyBadge } from "@/components/RecencyBadge";
 import type { Citation, Suggestion } from "@/lib/api";
-import { dedupeCitations } from "@/lib/citations";
+import { dedupeCitations, splitSourcesTrailer, trailerMarkerPairs } from "@/lib/citations";
 import { formatClock, formatFiled, parseApiDate } from "@/lib/time";
 import { confidenceBand, confidenceTitle, nonAnswerLabel, reasonCopy, type Turn } from "@/lib/turns";
 import { safeHref } from "@/lib/url";
@@ -329,6 +329,16 @@ export const AssistantTurn = memo(function AssistantTurn({
   // dedupe.
   const hasCitations = turn.citations.length > 0;
   const deduped = dedupeCitations(turn.citations);
+  // The model-authored "Sources:" bibliography duplicates the UI's own
+  // reference list (built from the VALIDATED citations), so on a cited turn the
+  // prose ends where the trailer begins — and the trailer's numbering is what
+  // lets bare inline [n] markers resolve to real stamps. An uncited turn keeps
+  // its full text: with no reference list below, stripping would erase the only
+  // source hints the reply carries.
+  const { prose, trailer } = hasCitations
+    ? splitSourcesTrailer(turn.content)
+    : { prose: turn.content, trailer: null };
+  const markers = trailer ? trailerMarkerPairs(trailer) : undefined;
   // Show how the question was read ONLY when it adds information — a rewrite the
   // analyst didn't type. A quiet caption above the answer; subordinate to it.
   const interpreted =
@@ -343,8 +353,8 @@ export const AssistantTurn = memo(function AssistantTurn({
         {/* Stamps render ONLY here (answer/summary), wired to the evidence drawer
             via onCite. INV-1: the Markdown plugin stamps a tag only when its
             (short_name,page) matches a real citation on this turn. */}
-        <Markdown citations={turn.citations} onCite={onCite}>
-          {turn.content}
+        <Markdown citations={turn.citations} onCite={onCite} markers={markers}>
+          {prose}
         </Markdown>
       </div>
 
@@ -416,17 +426,39 @@ export const AssistantTurn = memo(function AssistantTurn({
       {turn.meta && (
         <details className="prov">
           <summary className="kicker">Provenance</summary>
-          <p className="code prov__line">
-            {/* model_name isn't persisted on history; omit it there rather than print "model ". */}
-            {turn.meta.model_name ? `model ${turn.meta.model_name} · ` : ""}audit #{turn.meta.audit_id} · status{" "}
-            {turn.status}
-            {sessionId ? ` · session ${sessionId}` : ""} · turn {turn.meta.turn_id}
+          {/* What an analyst can act on, named: the audit number (the anchor
+              feedback and traceability hang off), the engine, and when it was
+              filed. The raw trace id is kept for support conversations but
+              shortened -- the full value rides in the title attribute. Session
+              identity stays in the URL, not restated here. */}
+          <dl className="prov__grid code">
+            <div className="prov__row">
+              <dt>Audit</dt>
+              <dd>#{turn.meta.audit_id}</dd>
+            </div>
+            {/* model_name isn't persisted on history; omit the row there
+                rather than label an empty value. */}
+            {turn.meta.model_name && (
+              <div className="prov__row">
+                <dt>Model</dt>
+                <dd>{turn.meta.model_name}</dd>
+              </div>
+            )}
             {/* Absolute filed time -- only when the timestamp actually parses,
                 so a malformed wire date never prints as garbage. */}
-            {turn.createdAt != null && parseApiDate(turn.createdAt) !== null
-              ? ` \u00b7 filed ${formatFiled(turn.createdAt)}`
-              : ""}
-          </p>
+            {turn.createdAt != null && parseApiDate(turn.createdAt) !== null && (
+              <div className="prov__row prov__line">
+                <dt>Filed</dt>
+                <dd>{formatFiled(turn.createdAt)}</dd>
+              </div>
+            )}
+            <div className="prov__row">
+              <dt>Trace</dt>
+              <dd title={`turn ${turn.meta.turn_id}${sessionId ? ` · session ${sessionId}` : ""}`}>
+                {turn.meta.turn_id.slice(0, 8)}
+              </dd>
+            </div>
+          </dl>
           {/* The SSE docket log this answer settled through -- the live ticker
               is ephemeral, so the folded provenance keeps the record for the
               audit-minded (history persists no frames; rehydrated turns skip). */}

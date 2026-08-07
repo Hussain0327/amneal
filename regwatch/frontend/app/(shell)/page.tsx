@@ -326,8 +326,11 @@ function AskView() {
     setError(null);
     // The role=status hint inserted under the composer is fresh DOM, which
     // VoiceOver often fails to announce; the persistent composer notice
-    // region is the reliable channel, so state the load there too.
-    announceComposer("Opening conversation");
+    // region is the reliable channel, so state the load there too. Set
+    // directly (NOT announceComposer): flushSync may not run inside an
+    // effect, and this path never needs the re-announce trick — the region
+    // is always empty here (cleared by every prior settle/reset).
+    setComposerNotice("Opening conversation");
     getSession(urlSession)
       .then((d) => {
         if (cancelled) return;

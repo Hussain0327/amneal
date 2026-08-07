@@ -47,3 +47,25 @@ export function formatFiled(iso: string): string {
   });
   return `${date} \u00b7 ${formatClock(iso)}`;
 }
+
+/**
+ * Bucket label for the history docket's day groups, computed in the viewer's
+ * LOCAL calendar (the wire is naive-UTC; grouping by the raw string would
+ * bucket by UTC day and mislabel evening sessions). Buckets, newest first:
+ * "Today", "Yesterday", "This week" (last 7 days), then month labels like
+ * "July 2026" (en-US pinned for deterministic tests). Returns "Earlier" when
+ * the timestamp does not parse -- an unparseable date is still a session the
+ * analyst must be able to reach.
+ */
+export function historyBucket(iso: string, nowMs: number): string {
+  const t = parseApiDate(iso);
+  if (t === null) return "Earlier";
+  const now = new Date(nowMs);
+  const then = new Date(t);
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const dayDiff = Math.round((startOfDay(now) - startOfDay(then)) / 86_400_000);
+  if (dayDiff <= 0) return "Today";
+  if (dayDiff === 1) return "Yesterday";
+  if (dayDiff < 7) return "This week";
+  return then.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
