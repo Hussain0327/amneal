@@ -22,6 +22,7 @@ of the ordered list the model was shown, so a later caller can build
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Literal
 
@@ -110,6 +111,38 @@ class ParsedProseTurn(BaseModel):
     # fragments, so the caller can run the materiality check on what was
     # removed instead of trusting that the kill was benign.
     leftover_brackets: list[str] = Field(default_factory=list)
+
+
+def gate_payload(parsed: ParsedProseTurn, passages: list[RetrievedPassage]) -> str:
+    """Serialize a parsed prose turn into the gate's claims-JSON contract.
+
+    One admission loop for both formats: the parser resolved [n] markers into
+    passage positions; this bridge rewrites them as the (short_name, page)
+    pairs the gate validates against THIS turn's passages. A numeric marker the
+    parser carried as declared-but-unresolvable becomes a deliberately unknown
+    cite (UNRESOLVED_<n>) so the gate still sees an ASSERTED source fact on its
+    drop-or-correct path -- never uncited conversation. Parser-classified
+    reasoning/conversation sentences bridge with zero cites: under v6's
+    unchanged refuse-or-cite policy they land on DROP_NO_CITES exactly as a v5
+    zero-cite claim would. Still serialization, not admission: the gate remains
+    the only judge of what renders.
+    """
+    claims: list[dict[str, object]] = []
+    for claim in parsed.claims:
+        cites: list[dict[str, object]] = [
+            {"short_name": passages[i].short_name, "page": passages[i].page}
+            for i in claim.cite_indices
+        ]
+        unresolved_seen: set[str] = set()
+        for token in claim.raw_markers:
+            if not token.isdigit() or token in unresolved_seen:
+                continue
+            if 1 <= int(token) <= len(passages):
+                continue
+            unresolved_seen.add(token)
+            cites.append({"short_name": f"UNRESOLVED_{token}", "page": 1})
+        claims.append({"text": claim.text, "cites": cites})
+    return json.dumps({"turn_type": parsed.turn_type, "claims": claims, "unsupported": []})
 
 
 def _reattach_markers(text: str) -> str:

@@ -35,7 +35,7 @@ from regwatch.common.audit import log_query as real_log_query
 from regwatch.generate import grounded_qa as qa_mod
 from regwatch.generate import turn_gate as tg
 from regwatch.generate.llm import EchoLLMProvider, LLMMessage, LLMResponse
-from tests.conftest import create_user, session_client
+from tests.conftest import create_user, session_client, synth_turn_json
 from tests.test_invariants import _meta, _seed_corpus
 from tests.test_query_stream import _parse_sse, _result_payload, _stream
 
@@ -45,18 +45,22 @@ _QUESTION = "What study design is recommended?"
 _CORPUS = [("Fasting BE study with 36 subjects.", _meta(1, 3, "PSG_020503"))]
 
 
-def _claim(text: str, cites: list[tuple[str, int]]) -> dict[str, Any]:
-    return {"text": text, "cites": [{"short_name": s, "page": p} for s, p in cites]}
+def _claim(text: str, cites: list[tuple[str, int]]) -> tuple[str, list[tuple[str, int]]]:
+    return (text, cites)
 
 
 def _turn(
-    claims: list[dict[str, Any]],
+    claims: list[tuple[str, list[tuple[str, int]]]],
     *,
     turn_type: str = "ANSWER",
     unsupported: list[str] | None = None,
 ) -> str:
-    """One conformant structured completion, as the synthesizer must now emit."""
-    return json.dumps({"turn_type": turn_type, "claims": claims, "unsupported": unsupported or []})
+    """One conformant structured completion, as the synthesizer must now emit.
+
+    Built through the ONE shared payload seam (tests/conftest.synth_turn_json)
+    so a synthesis-format change is one edit, not one per stub module (F10).
+    """
+    return synth_turn_json(claims, turn_type=turn_type, unsupported=tuple(unsupported or ()))
 
 
 # A two-claim grounded turn: long enough once rendered (marker per sentence plus
@@ -189,6 +193,40 @@ def test_replay_emits_exactly_the_rendered_answer(monkeypatch: pytest.MonkeyPatc
     # no half of a "[PSG_020503," / "p.3]" marker word) is torn across frames.
     assert [t for chunk in tokens for t in chunk.split()] == result.answer.split()
     # What was replayed is what was recorded: the marker and its Sources trailer.
+    assert "[PSG_020503, p.3]" in result.answer
+    assert {(c.short_name, c.page) for c in result.citations} == {("PSG_020503", 3)}
+
+
+def test_prose_flag_replay_emits_exactly_the_rendered_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flag-on twin of the replay pin: the v6 prose chain replays the GATED render.
+
+    The model-facing [n] markers never reach the sink -- the replayed bytes
+    carry canonical [SHORT_NAME, p.N] markers plus the Sources trailer, chunked
+    on whitespace so no marker is torn across frames -- and the synthesis call
+    itself carries NO response_format (prose, not json_object).
+    """
+    _seed_corpus(_CORPUS)
+    monkeypatch.setenv("REGWATCH_PROSE_SYNTHESIS", "1")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
+    prov = _use(
+        monkeypatch,
+        _StructuredLLM(
+            "A fasting bioequivalence study is recommended [1]. "
+            "The study enrolls thirty-six healthy subjects [1]."
+        ),
+    )
+    tokens: list[str] = []
+    result = qa_mod.ask(_QUESTION, on_token=tokens.append)
+    assert result.refused is False
+    assert prov.calls[0]["response_format"] is None
+    assert "".join(tokens) == result.answer
+    assert len(tokens) >= 2, "the replay really chunks; a single frame is not a typing effect"
+    assert [t for chunk in tokens for t in chunk.split()] == result.answer.split()
+    assert "[1]" not in result.answer
     assert "[PSG_020503, p.3]" in result.answer
     assert {(c.short_name, c.page) for c in result.citations} == {("PSG_020503", 3)}
 

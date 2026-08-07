@@ -12,6 +12,7 @@ from regwatch.generate.llm import LLMResponse
 from regwatch.generate.prompt_identity import identify_prompt
 from regwatch.generate.prompts import (
     GROUNDED_QA_PROMPT,
+    GROUNDED_QA_PROMPT_V6,
     GROUNDED_QA_SYSTEM,
     GROUNDED_QA_USER,
     QUERY_GUIDANCE_SYSTEM,
@@ -63,6 +64,67 @@ def test_generation_prompt_manifest_is_versioned_and_hashed() -> None:
         "regwatch.change_summary": "2",
     }
     assert all(len(item["sha256"]) == 64 for item in manifest.values())
+
+
+def test_manifest_reports_the_flag_active_prose_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The manifest describes what the deployment SERVES: flag on -> v6.
+
+    v6 is a distinct identity, not a re-hash: exemplars are folded into its
+    sha256 and TURN_SCHEMA_MESSAGE is not (prose sends no schema message), so
+    the two versions can never share a hash by accident.
+    """
+    monkeypatch.setenv("REGWATCH_PROSE_SYNTHESIS", "1")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
+    try:
+        manifest = generation_prompt_manifest()
+        assert manifest["regwatch.grounded_qa"] == GROUNDED_QA_PROMPT_V6.as_dict()
+        assert manifest["regwatch.grounded_qa"]["version"] == "6"
+        assert GROUNDED_QA_PROMPT_V6.sha256 != GROUNDED_QA_PROMPT.sha256
+    finally:
+        # The autouse env fixture re-clears at the next test's setup; this
+        # clear just keeps the cache honest for the rest of THIS module.
+        cs.get_settings.cache_clear()
+
+
+def test_qa_eval_flag_on_runs_the_prose_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Flag-on _run_qa drives v6 prompt -> prose parse -> real gate -> rendered scoring.
+
+    The echo provider keys on the v6 system sentinel and answers
+    "ECHO grounded test answer [1]."; the row passes only if the RENDERED
+    string carries the canonical marker the scorer reads -- proving the dark
+    harness measures the same chain prod would serve after the flip.
+    """
+    monkeypatch.setenv("REGWATCH_PROSE_SYNTHESIS", "1")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
+    try:
+        rows = [
+            {
+                "id": "prose-echo-1",
+                "question": "What study design is recommended?",
+                "passages": [
+                    {
+                        "short_name": "PSG_020503",
+                        "page": 3,
+                        "text": "Fasting BE study with 36 subjects.",
+                        "section": "II.A",
+                    }
+                ],
+                "expected_turn_type": "ANSWER",
+                "expected_citations": [["PSG_020503", 3]],
+                "expected_facts": ["ECHO grounded test answer"],
+            }
+        ]
+        assert prompt_eval._run_qa(rows) == [
+            {"id": "prose-echo-1", "passed": True, "model": "echo"}
+        ]
+    finally:
+        cs.get_settings.cache_clear()
 
 
 def test_guidance_prompt_fingerprint_includes_the_output_schema() -> None:

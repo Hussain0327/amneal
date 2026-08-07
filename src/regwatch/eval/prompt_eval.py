@@ -17,14 +17,18 @@ import typer
 from config.settings import get_settings
 
 from regwatch.common.citations import iter_psg_citations
+from regwatch.generate import prose_turn
 from regwatch.generate import turn_gate as tg
 from regwatch.generate.guidance import GuidanceRequest, build_guidance_request, parse_guidance_plan
 from regwatch.generate.llm import LLMMessage, current_model_name, get_llm_provider
 from regwatch.generate.prompts import (
     BE_EXTRACTION_SYSTEM,
     BE_EXTRACTION_USER,
+    GROUNDED_QA_EXEMPLARS_V6,
     GROUNDED_QA_SYSTEM,
+    GROUNDED_QA_SYSTEM_V6,
     GROUNDED_QA_USER,
+    GROUNDED_QA_USER_V6,
     generation_prompt_manifest,
 )
 from regwatch.generate.rag_contract import ClarifyOption
@@ -150,6 +154,25 @@ def _qa_user(row: dict[str, Any]) -> str:
     )
 
 
+def _qa_user_v6(row: dict[str, Any]) -> str:
+    """The v6 numbered-passage user prompt for one eval row.
+
+    Mirrors grounded_qa._format_passages_numbered: a [n] label prefixes the
+    same pair header, so the harness feeds the model exactly the prompt shape
+    the runtime sends.
+    """
+    blocks = []
+    for position, passage in enumerate(row["passages"], start=1):
+        section = f" ({passage['section']})" if passage.get("section") else ""
+        blocks.append(
+            f"[{position}] [{passage['short_name']}, p.{passage['page']}]{section}\n"
+            f"{passage['text']}\n"
+        )
+    return GROUNDED_QA_USER_V6.format(
+        recent_context="", question=row["question"], passages="\n---\n".join(blocks)
+    )
+
+
 def _qa_passages(row: dict[str, Any]) -> list[RetrievedPassage]:
     """Synthetic passages in the shape the gate validates against.
 
@@ -221,23 +244,60 @@ def _guidance_request(row: dict[str, Any]) -> GuidanceRequest:
 
 def _run_qa(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     settings = get_settings()
+    # Flag-aware, mirroring the runtime exactly: with REGWATCH_PROSE_SYNTHESIS
+    # set, rows run through the v6 prose prompt, the prose parser, and the same
+    # gate with correction live and the uncited-downgrade OFF -- so a dark eval
+    # measures the chain prod would serve after the flip, scored on the SAME
+    # rendered string (rendering is unchanged, so iter_psg_citations scoring
+    # stays valid).
+    prose_mode = bool(getattr(settings, "prose_synthesis_enabled", False))
     provider = get_llm_provider(role="synthesizer")
     details: list[dict[str, Any]] = []
     for row in rows:
-        response = provider.complete(
-            [
+        passages = _qa_passages(row)
+        if prose_mode:
+            messages = [LLMMessage(role="system", content=GROUNDED_QA_SYSTEM_V6)]
+            messages.extend(
+                LLMMessage(role=exemplar_role, content=exemplar_text)
+                for exemplar_role, exemplar_text in GROUNDED_QA_EXEMPLARS_V6
+            )
+            messages.append(LLMMessage(role="user", content=_qa_user_v6(row)))
+            response_format: str | None = None
+        else:
+            messages = [
                 LLMMessage(role="system", content=GROUNDED_QA_SYSTEM),
                 LLMMessage(role="user", content=_qa_user(row)),
                 TURN_SCHEMA_MESSAGE,
-            ],
+            ]
+            response_format = "json"
+        response = provider.complete(
+            messages,
             temperature=0.0,
             max_tokens=settings.synthesizer_max_tokens,
-            response_format="json",
+            response_format=response_format,
         )
+        raw_completion = response.text.strip()
+        killed_sentences: list[str] = []
+        if prose_mode:
+            parsed = prose_turn.parse(raw_completion, passages=passages)
+            material_kill = parsed.truncated_material or any(
+                tg.materiality_trigger(t) is not None for t in parsed.leftover_brackets
+            )
+            if material_kill or (parsed.turn_type == "ANSWER" and not parsed.claims):
+                # The runtime declines these turns before the gate; the row is
+                # a failure the same way a GateFailure is.
+                details.append({"id": row["id"], "passed": False, "model": response.model})
+                continue
+            killed_sentences = list(parsed.leftover_brackets)
+            gate_input = prose_turn.gate_payload(parsed, passages)
+        else:
+            gate_input = raw_completion
         admitted = tg.admit_turn(
-            response.text.strip(),
-            passages=_qa_passages(row),
+            gate_input,
+            passages=passages,
             question=row["question"],
+            correct=prose_mode,
+            downgrade_uncited=False,
         )
         if isinstance(admitted, tg.GateFailure):
             details.append({"id": row["id"], "passed": False, "model": response.model})
@@ -265,6 +325,9 @@ def _run_qa(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 # Strictly stronger than the old "no uncited segment" criterion:
                 # nothing the model drafted may have been dropped at all.
                 not admitted.dropped,
+                # Prose parity for the same criterion: a parser-killed sentence
+                # is a drop that never reached the gate.
+                not killed_sentences,
             )
         )
         details.append({"id": row["id"], "passed": passed, "model": response.model})

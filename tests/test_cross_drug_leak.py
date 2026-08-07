@@ -16,7 +16,6 @@ drops such a claim WHOLE, so the cross-drug text is gone, not re-stamped.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
@@ -27,6 +26,7 @@ from regwatch.generate.llm import LLMResponse
 from regwatch.process.embedder import get_embedding_provider
 from regwatch.store.db import init_db
 from regwatch.store.vector_store import add_chunks
+from tests.conftest import synth_turn_json
 
 pytestmark = pytest.mark.invariants
 
@@ -79,17 +79,10 @@ def _turn(claims: list[tuple[str, list[tuple[str, int]]]]) -> str:
 
     The synthesizer no longer writes prose or markers: it declares
     (short_name, page) per claim and the renderer stamps validated passages.
+    Built through the ONE shared payload seam (tests/conftest.synth_turn_json)
+    so a synthesis-format change is one edit, not one per stub module (F10).
     """
-    return json.dumps(
-        {
-            "turn_type": "ANSWER",
-            "claims": [
-                {"text": text, "cites": [{"short_name": s, "page": p} for s, p in cites]}
-                for text, cites in claims
-            ],
-            "unsupported": [],
-        }
-    )
+    return synth_turn_json(claims)
 
 
 def _zero_threshold(monkeypatch: pytest.MonkeyPatch) -> None:

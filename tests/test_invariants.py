@@ -30,6 +30,7 @@ from regwatch.process.embedder import get_embedding_provider
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import QueryLog
 from regwatch.store.vector_store import add_chunks
+from tests.conftest import synth_turn_json
 
 pytestmark = pytest.mark.invariants
 
@@ -83,18 +84,11 @@ def _turn(
     The synthesizer no longer writes prose or citation markers: it returns ONE
     JSON object (see generate/turn_schema.py) declaring (short_name, page) per
     claim, and the renderer writes every marker itself. Tests that hand the
-    provider stub prose are testing a channel that no longer exists.
+    provider stub prose are testing a channel that no longer exists. Built
+    through the ONE shared payload seam (tests/conftest.synth_turn_json) so a
+    synthesis-format change is one edit, not one per stub module (F10).
     """
-    return json.dumps(
-        {
-            "turn_type": turn_type,
-            "claims": [
-                {"text": text, "cites": [{"short_name": s, "page": p} for s, p in cites]}
-                for text, cites in claims
-            ],
-            "unsupported": [],
-        }
-    )
+    return synth_turn_json(claims, turn_type=turn_type)
 
 
 def _only_route_json() -> dict:

@@ -237,6 +237,36 @@ def test_complete_strips_inline_and_structured_reasoning_from_text_and_raw() -> 
     assert "PRIVATE" not in repr(result.raw)
 
 
+def test_prose_call_with_thinking_scrubs_thought_before_the_prose_gate() -> None:
+    """v6 prose is the first non-json synthesizer call, so allow_thinking is
+    REACHABLE for the answer path and the scrub is answer-path load-bearing:
+    what leaves complete() is exactly what prose_turn.parse will read, so a
+    surviving thought token would become a parser kill (or worse, a sentence).
+    """
+    response = _response(
+        [
+            {
+                "type": "text",
+                "text": (
+                    "<|channel>thought\nPRIVATE PLANNING"
+                    "<channel|>A fasting study is described [1]."
+                ),
+            }
+        ]
+    )
+    completions = _Completions(response)
+
+    result = _provider(completions).complete([LLMMessage("user", "question")])
+
+    # Thinking WAS requested on the wire (prose carries no json response_format,
+    # so the synthesizer-only gate opens)...
+    assert completions.calls[0]["messages"][0]["content"].startswith("<|think|>")
+    assert "response_format" not in completions.calls[0]
+    # ...and none of it survives into the visible answer channel.
+    assert result.text == "A fasting study is described [1]."
+    assert "PRIVATE" not in result.text
+
+
 @pytest.mark.parametrize("role", ["router", "extractor", "default"])
 def test_thinking_is_forced_off_outside_synthesizer(role: str) -> None:
     completions = _Completions(_response("<|channel>thought\n<channel|>answer"))

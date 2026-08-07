@@ -1,0 +1,205 @@
+# The ONE live Databricks eval lane (slm-layer F15). Two entry points, one
+# shared concurrency group:
+#
+#   - workflow_call from ci.yml: the blocking PR/main eval, prose=false.
+#   - workflow_dispatch: the dark v6 arm (prose=true by default), run by hand
+#     to produce a recorded scorecard before a checkpoint.
+#
+# The non-canceling "databricks-eval" group serializes every live eval against
+# the shared Databricks workspace: concurrent evals collide on workspace QPS
+# and trip the transport gate (a green eval used to also mean "nobody else was
+# running one"), and before the split a dispatch-triggered eval would have
+# joined ci-${ref} and CANCELED in-flight PR CI. Called runs take the group at
+# the caller job (ci.yml); the workflow-level group below governs dispatch
+# runs. Same group name either way, so the mutual exclusion spans both.
+name: databricks-eval
+
+on:
+  workflow_call:
+    inputs:
+      prose:
+        description: run the eval with REGWATCH_PROSE_SYNTHESIS=1 (the v6 prose arm)
+        type: boolean
+        default: false
+        required: false
+  workflow_dispatch:
+    inputs:
+      prose:
+        description: run the eval with REGWATCH_PROSE_SYNTHESIS=1 (the v6 prose arm)
+        type: boolean
+        default: true
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: databricks-eval
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # Only what the "resolve live eval arm" step needs to decide which arm is
+      # available. Every one of these is a string where empty means "not
+      # configured", so an absent secret cannot change behavior. The typed
+      # provider settings (model names, dimension) are declared on the eval
+      # steps that use them -- an empty value at job scope once broke pydantic
+      # import (see the _blank_env_falls_back_to_default validator).
+      QWEN_EMBEDDING_BASE_URL: ${{ secrets.QWEN_EMBEDDING_BASE_URL }}
+      QWEN_EMBEDDING_TOKEN: ${{ secrets.QWEN_EMBEDDING_TOKEN }}
+      # A repo VARIABLE, not a secret, and deliberately stable: it is part of
+      # the embedding-profile fingerprint, so a per-run value would mint a new
+      # profile id every build and break the eval_run trend line.
+      DATABRICKS_SERVING_RUNTIME_VERSION: ${{ vars.DATABRICKS_SERVING_RUNTIME_VERSION }}
+      # The v6 prose arm. Empty means OFF (the settings validator reads a blank
+      # env as unset); "1" flips synthesis to the prose+markers chain, which is
+      # the whole point of the dark dispatch run.
+      REGWATCH_PROSE_SYNTHESIS: ${{ inputs.prose && '1' || '' }}
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: install python
+        run: uv python install 3.12
+
+      - name: sync deps
+        run: uv sync --extra dev --extra llm --extra local-embeddings
+
+      # Live eval. Two arms, and the Databricks one is the point: production
+      # embeds queries with Databricks-hosted Qwen3, so a gate that only ever
+      # ran on OpenAI's 1536-dim space never measured the geometry prod serves.
+      # REFUSAL_SCORE_THRESHOLD's behavior on real embeddings is gated NOWHERE
+      # else -- tests/test_eval_gate.py runs on hash-based echo embeddings with
+      # the threshold pinned to 0.0.
+      - name: resolve live eval arm
+        id: eval_arm
+        run: |
+          if [ -n "$QWEN_EMBEDDING_BASE_URL" ] && [ -n "$QWEN_EMBEDDING_TOKEN" ] \
+             && [ -n "$DATABRICKS_SERVING_RUNTIME_VERSION" ]; then
+            echo "arm=databricks" >> "$GITHUB_OUTPUT"
+          elif [ -n "$OPENAI_API_KEY" ]; then
+            echo "arm=legacy" >> "$GITHUB_OUTPUT"
+          else
+            echo "arm=none" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Register FIRST, then seed with the arm active: ingest writes the profile
+      # vectors inline (_profile_document_embeddings) and leaves the legacy
+      # 1536-dim column NULL, so this arm needs no backfill pass and no OpenAI
+      # key at all. Registration is content-addressed, so it is idempotent.
+      - name: prepare databricks eval arm
+        if: steps.eval_arm.outputs.arm == 'databricks'
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          # Both feed the profile fingerprint. Left unset, settings' committed
+          # defaults apply; an empty value is treated as unset, not as "".
+          QWEN_EMBEDDING_MODEL: ${{ vars.QWEN_EMBEDDING_MODEL }}
+          QWEN_EMBEDDING_DIMENSION: ${{ vars.QWEN_EMBEDDING_DIMENSION }}
+        run: |
+          set -euo pipefail
+          PROFILE_ID=$(uv run regwatch embedding-profile-register \
+            --serving-runtime-version "$DATABRICKS_SERVING_RUNTIME_VERSION" --id-only)
+          echo "EVAL_PROFILE_ID=$PROFILE_ID" >> "$GITHUB_ENV"
+
+      # Index BEFORE seed, not after. `regwatch seed` runs with the profile
+      # ACTIVE, so its init_db() calls assert_profile_ready_for_activation,
+      # which demands a valid HNSW index. Seeding first is therefore circular:
+      # the index the assert wants would not exist until the step after the one
+      # that needs it. Building it against an empty chunk_embedding is legal --
+      # coverage is 0/0, which counts as complete, and pgvector maintains an
+      # HNSW index on insert -- so ordering it here satisfies both this step's
+      # own assert and the seed step's. run_eval also refuses an arm without a
+      # ready index, so this is a gate prerequisite either way.
+      - name: index databricks eval arm
+        if: steps.eval_arm.outputs.arm == 'databricks'
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: uv run regwatch embedding-profile-index "$EVAL_PROFILE_ID"
+
+      - name: seed vector store (databricks arm)
+        if: steps.eval_arm.outputs.arm == 'databricks'
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          EMBEDDING_PROVIDER: qwen3
+          QWEN_EMBEDDING_MODEL: ${{ vars.QWEN_EMBEDDING_MODEL }}
+          QWEN_EMBEDDING_DIMENSION: ${{ vars.QWEN_EMBEDDING_DIMENSION }}
+        # ACTIVE_EMBEDDING_PROFILE is exported here rather than in the `env:`
+        # block above because EVAL_PROFILE_ID is produced by a previous step via
+        # $GITHUB_ENV; exporting it in the shell keeps the dependency obvious.
+        run: |
+          set -euo pipefail
+          export ACTIVE_EMBEDDING_PROFILE="$EVAL_PROFILE_ID"
+          uv run regwatch seed
+
+      - name: eval (databricks arm)
+        if: steps.eval_arm.outputs.arm == 'databricks'
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          EMBEDDING_PROVIDER: qwen3
+          QWEN_EMBEDDING_MODEL: ${{ vars.QWEN_EMBEDDING_MODEL }}
+          QWEN_EMBEDDING_DIMENSION: ${{ vars.QWEN_EMBEDDING_DIMENSION }}
+          LLM_PROVIDER: databricks
+          DATABRICKS_LLM_BASE_URL: ${{ secrets.DATABRICKS_LLM_BASE_URL }}
+          DATABRICKS_LLM_TOKEN: ${{ secrets.DATABRICKS_LLM_TOKEN }}
+          DATABRICKS_LLM_MODEL: ${{ vars.DATABRICKS_LLM_MODEL }}
+        run: |
+          uv run python -m regwatch.eval.run_eval \
+            --profile "$EVAL_PROFILE_ID" --check-thresholds --out eval-scorecard.json
+
+      - name: seed vector store (legacy arm)
+        if: steps.eval_arm.outputs.arm == 'legacy'
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          EMBEDDING_PROVIDER: openai
+        run: uv run regwatch seed
+
+      - name: eval (legacy openai arm)
+        if: steps.eval_arm.outputs.arm == 'legacy'
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          EMBEDDING_PROVIDER: openai
+        run: uv run python -m regwatch.eval.run_eval --check-thresholds --out eval-scorecard.json
+
+      # The scorecard is also written to the eval_run ledger, but that lands in
+      # the CI Postgres service container, which is destroyed with the job. The
+      # artifact is what survives for a human comparing two runs; the dark v6
+      # arm uploads under its own name so a Checkpoint packet can cite it.
+      - name: upload eval scorecard
+        if: always() && steps.eval_arm.outputs.arm != 'none'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: ${{ inputs.prose && 'dark-eval-scorecard' || 'eval-scorecard' }}
+          path: eval-scorecard.json
+          if-no-files-found: ignore
+
+      - name: eval skipped
+        if: steps.eval_arm.outputs.arm == 'none'
+        run: |
+          echo "::warning::Live eval SKIPPED - no provider credentials configured."
+          echo "Configure QWEN_EMBEDDING_BASE_URL + QWEN_EMBEDDING_TOKEN +"
+          echo "DATABRICKS_SERVING_RUNTIME_VERSION for the Databricks arm (preferred:"
+          echo "it measures the geometry production serves), or OPENAI_API_KEY for the"
+          echo "legacy arm. pytest still runs the deterministic offline eval gate, which"
+          echo "does NOT exercise real embedding geometry or the 0.30 refusal threshold."

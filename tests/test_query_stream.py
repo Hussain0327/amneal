@@ -45,7 +45,7 @@ from regwatch.generate import grounded_qa as qa_mod
 from regwatch.generate.llm import LLMResponse
 from regwatch.store.db import session_scope
 from regwatch.store.models import QueryLog
-from tests.conftest import create_user, session_client
+from tests.conftest import create_user, session_client, synth_turn_json
 from tests.test_invariants import _meta, _seed_corpus
 
 pytestmark = pytest.mark.invariants
@@ -62,21 +62,11 @@ def _turn_json(
 
     Each claim is ``(text, [(short_name, page), ...])``. The model authors NO
     citation markers -- the renderer writes them from validated passages -- so
-    the claim text here is deliberately marker-free.
+    the claim text here is deliberately marker-free. Built through the ONE
+    shared payload seam (tests/conftest.synth_turn_json) so a synthesis-format
+    change is one edit, not one per stub module (F10).
     """
-    return json.dumps(
-        {
-            "turn_type": turn_type,
-            "claims": [
-                {
-                    "text": text,
-                    "cites": [{"short_name": s, "page": p} for s, p in cites],
-                }
-                for text, cites in claims
-            ],
-            "unsupported": list(unsupported),
-        }
-    )
+    return synth_turn_json(list(claims), turn_type=turn_type, unsupported=unsupported)
 
 
 def _turn_llm(payload: str) -> Any:
