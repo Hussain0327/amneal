@@ -1,0 +1,294 @@
+"""The prose parser: every rule, and the safe direction each one fails in.
+
+The parser is the ONLY deterministic reading of model prose; nothing it emits
+is admitted without the gate. These tests pin the reading itself: which
+brackets are citations (trailing only, finding F4), which sentences a marker
+binds (its own, never a neighbor), and which uncited sentences a frame may NOT
+launder (materiality, finding F3).
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from regwatch.generate import prose_turn as pt
+from regwatch.retrieve.retriever import RetrievedPassage
+
+pytestmark = pytest.mark.invariants
+
+
+def _passage(
+    short_name: str,
+    page: int,
+    *,
+    chunk_id: str,
+    text: str,
+) -> RetrievedPassage:
+    return RetrievedPassage(
+        chunk_id=chunk_id,
+        text=text,
+        score=0.71,
+        doc_id=1,
+        version_id=10,
+        page=page,
+        section_path=None,
+        normalized_name="albuterol sulfate",
+        source_url=f"http://example/{short_name}.pdf",
+        short_name=short_name,
+        metadata={},
+    )
+
+
+# Ordered exactly as they would be sent to the model: marker [1] names the
+# first entry, [2] the second.
+_PASSAGES = [
+    _passage("PSG_020503", 3, chunk_id="chunk-1", text="Fasting single-dose crossover study."),
+    _passage("PSG_021730", 4, chunk_id="chunk-2", text="Dissolution: USP paddle."),
+]
+
+
+def _parse(raw: str) -> pt.ParsedProseTurn:
+    return pt.parse(raw, passages=_PASSAGES)
+
+
+# ---------- marker grammar ----------
+
+
+@pytest.mark.parametrize(
+    ("raw", "indices", "markers"),
+    [
+        ("A fasting crossover study is described [1].", [0], ["1"]),
+        ("A fasting crossover study is described [1][2].", [0, 1], ["1", "2"]),
+        ("A fasting crossover study is described [1, 2].", [0, 1], ["1", "2"]),
+        ("A fasting crossover study is described[1].", [0], ["1"]),
+        ("A fasting crossover study is described [1] [2].", [0, 1], ["1", "2"]),
+        # A duplicated marker dedupes the resolved index but stays visible in
+        # the raw declaration.
+        ("A fasting crossover study is described [1][1].", [0], ["1", "1"]),
+    ],
+)
+def test_trailing_marker_grammar(raw: str, indices: list[int], markers: list[str]) -> None:
+    turn = _parse(raw)
+    assert turn.turn_type == "ANSWER"
+    assert [c.kind for c in turn.claims] == ["source_fact"]
+    claim = turn.claims[0]
+    assert claim.text == "A fasting crossover study is described."
+    assert claim.cite_indices == indices
+    assert claim.raw_markers == markers
+    assert turn.leftover_brackets == []
+
+
+# ---------- position rule (finding F4) ----------
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # A passage-echo quote carrying a numeric bracket mid-sentence.
+        'The passage header text "[1] Dissolution" appears in the corpus.',
+        # A user-typed bracket reaching the model via the question.
+        "You asked about item [2] of the checklist.",
+        # A marker at the START of a sentence is not trailing either.
+        "[1] The paddle method is specified.",
+    ],
+)
+def test_non_trailing_bracket_kills_its_sentence(raw: str) -> None:
+    """A bracket that is not sentence-trailing is NEVER consumed as a citation.
+
+    An in-range [1] quoted from source or user text would otherwise resolve as
+    a valid-but-wrong citation; the safe direction is to drop the sentence.
+    """
+    turn = _parse(raw)
+    assert turn.claims == []
+    assert turn.leftover_brackets == [raw]
+
+
+def test_mid_sentence_bracket_kills_even_beside_a_valid_trailing_marker() -> None:
+    raw = 'The echoed header "[1] Dissolution" is discussed here [2].'
+    turn = _parse(raw)
+    # The trailing [2] dies WITH its sentence; it is not salvaged as a cite.
+    assert turn.claims == []
+    assert turn.leftover_brackets == [raw]
+
+
+# ---------- sentence-initial marker reattachment ----------
+
+
+def test_marker_after_terminator_reattaches_to_its_own_sentence() -> None:
+    turn = _parse("A fasting crossover study is described. [1] The paddle method is specified. [2]")
+    assert [(c.text, c.cite_indices) for c in turn.claims] == [
+        ("A fasting crossover study is described.", [0]),
+        ("The paddle method is specified.", [1]),
+    ]
+    assert turn.leftover_brackets == []
+    assert turn.truncated_material is False
+
+
+# ---------- pair-grammar collision ----------
+
+
+def test_verbatim_pair_echo_normalizes_to_its_passage_index() -> None:
+    turn = _parse("The paddle method is specified [PSG_021730, p.4].")
+    claim = turn.claims[0]
+    assert claim.kind == "source_fact"
+    assert claim.cite_indices == [1]
+    assert claim.raw_markers == ["PSG_021730, p.4"]
+
+
+def test_pair_echo_resolves_case_insensitively_but_keeps_the_raw_echo() -> None:
+    turn = _parse("The paddle method is specified [psg_021730, p.4].")
+    claim = turn.claims[0]
+    assert claim.cite_indices == [1]
+    assert claim.raw_markers == ["psg_021730, p.4"]
+
+
+def test_compound_pair_echo_resolves_every_pair() -> None:
+    turn = _parse("Both design and method are covered [PSG_020503, p.3; PSG_021730, p.4].")
+    assert turn.claims[0].cite_indices == [0, 1]
+
+
+def test_fabricated_pair_kills_its_sentence() -> None:
+    raw = "The waiver criteria appear at [PSG_999999, p.9]."
+    turn = _parse(raw)
+    assert turn.claims == []
+    assert turn.leftover_brackets == [raw]
+
+
+# ---------- unknown (out-of-range) markers ----------
+
+
+def test_out_of_range_marker_is_carried_as_declared_but_unresolvable() -> None:
+    """The gate, not the parser, decides whether to drop or correct it."""
+    turn = _parse("The pilot study design is described [7].")
+    claim = turn.claims[0]
+    assert claim.kind == "source_fact"
+    assert claim.cite_indices == []
+    assert claim.raw_markers == ["7"]
+
+
+def test_mixed_in_and_out_of_range_markers_keep_both_declarations() -> None:
+    turn = _parse("The pilot study design is described [1][7].")
+    claim = turn.claims[0]
+    assert claim.cite_indices == [0]
+    assert claim.raw_markers == ["1", "7"]
+
+
+# ---------- marker scope ----------
+
+
+def test_one_trailing_marker_never_covers_a_neighboring_sentence() -> None:
+    turn = _parse(
+        "The two documents cover the same product. "
+        "The paddle method appears in the second document [2]."
+    )
+    first, second = turn.claims
+    assert (first.kind, first.cite_indices) == ("conversation", [])
+    assert (second.kind, second.cite_indices) == ("source_fact", [1])
+
+
+# ---------- epistemic classification ----------
+
+
+@pytest.mark.parametrize(
+    ("raw", "kind"),
+    [
+        ("My reading is that the two documents describe the same design.", "reasoning"),
+        # Frame matching is case- and whitespace-normalized.
+        ("MY  READING   IS that the two documents align.", "reasoning"),
+        ("Beyond the guidance, sponsors add a pilot study.", "reasoning"),
+        ("Reading the guidance together, the design language matches.", "reasoning"),
+        ("Let me know if you want more detail.", "conversation"),
+        # FRAMED MATERIALITY (finding F3): a model-authored frame must not
+        # launder a material FDA claim -- the hit reclassifies to source_fact
+        # with zero cites, the gate's correct-or-drop path.
+        ("My reading is that a fed study is not required.", "source_fact"),
+        # The same guard on the conversation residual (AIS guard).
+        ("A fed study must accompany the submission.", "source_fact"),
+    ],
+)
+def test_uncited_sentence_classification(raw: str, kind: str) -> None:
+    turn = _parse(raw)
+    claim = turn.claims[0]
+    assert claim.kind == kind
+    assert claim.cite_indices == []
+    assert claim.raw_markers == []
+
+
+# ---------- truncation rule ----------
+
+
+def test_material_truncated_tail_is_dropped_and_flagged() -> None:
+    turn = _parse("The paddle method is specified [1]. A fed study must not be")
+    assert [c.text for c in turn.claims] == ["The paddle method is specified."]
+    assert turn.truncated_material is True
+
+
+def test_benign_truncated_tail_is_dropped_without_the_flag() -> None:
+    # "noting" must not trip the word-boundary "not" match.
+    turn = _parse("The paddle method is specified [1]. It is worth noting tha")
+    assert [c.text for c in turn.claims] == ["The paddle method is specified."]
+    assert turn.truncated_material is False
+
+
+def test_lone_unterminated_sentence_yields_zero_claims() -> None:
+    turn = _parse("A fed study must not be")
+    assert turn.claims == []
+    assert turn.truncated_material is True
+
+
+# ---------- NO_EVIDENCE sentinel ----------
+
+
+def test_sentinel_completion_is_a_no_evidence_turn() -> None:
+    for raw in (pt.PROSE_NO_EVIDENCE_SENTINEL, "  NO_EVIDENCE. \n"):
+        turn = _parse(raw)
+        assert turn.turn_type == "NO_EVIDENCE"
+        assert turn.claims == []
+        assert turn.truncated_material is False
+        assert turn.leftover_brackets == []
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # The sentinel is a whole-completion match, not a substring trigger.
+        "NO_EVIDENCE. The paddle method is specified [1].",
+        # And it is exact: a lowercase echo is just prose.
+        "no_evidence.",
+    ],
+)
+def test_non_sentinel_completions_stay_answers(raw: str) -> None:
+    assert _parse(raw).turn_type == "ANSWER"
+
+
+# ---------- leftover-bracket kill ----------
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # A trailing bracket that is neither numeric nor pair-shaped.
+        "The appendix holds the details [see appendix].",
+        # A bracket with no sentence around it.
+        "[1].",
+    ],
+)
+def test_non_citation_brackets_kill_their_sentence(raw: str) -> None:
+    turn = _parse(raw)
+    assert turn.claims == []
+    assert turn.leftover_brackets == [raw]
+
+
+def test_kill_records_the_full_sentence_so_materiality_stays_checkable() -> None:
+    """The caller must be able to ask whether a killed sentence was material."""
+    raw = "A fed study is not required [see note]."
+    turn = _parse(raw)
+    assert turn.leftover_brackets == [raw]
+
+
+def test_empty_completion_parses_to_an_empty_answer() -> None:
+    turn = _parse("")
+    assert turn.turn_type == "ANSWER"
+    assert turn.claims == []
+    assert turn.truncated_material is False
+    assert turn.leftover_brackets == []

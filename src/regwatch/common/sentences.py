@@ -61,18 +61,24 @@ _NON_TERMINAL_ABBREVIATIONS = frozenset(
 _TRAILING_TOKEN = re.compile(r"([A-Za-z][A-Za-z.]*)\.$")
 
 
-def _is_non_terminal(segment: str) -> bool:
-    """True when `segment` ends in an abbreviation, so the next chunk continues it."""
+def _is_non_terminal(segment: str, following: str) -> bool:
+    """True when `segment` ends in an abbreviation that `following` continues."""
     match = _TRAILING_TOKEN.search(segment.strip())
     if match is None:
         return False
-    token = match.group(1).lower()
+    abbrev = match.group(1).lower()
+    if abbrev == "ph":
+        # "pH." legitimately ends dissolution-method sentences, so "Ph." merges
+        # only into its one real continuation -- the "Ph. Eur." pharmacopoeia
+        # reference. Anything else after "pH." is a genuine boundary, and
+        # merging it would put two assertions behind one set of cites.
+        return following.lstrip()[:3].lower() == "eur"
     # An INTERNAL period makes the token a dotted initialism -- "U.S", the
     # "F.D.A" of "F.D.A.". Those never end a sentence. Note this deliberately
     # does NOT extend to a bare single letter: "...is required for product X."
     # is a real sentence ending, and merging it would swallow the sentence that
     # follows into one claim slot.
-    return "." in token or token in _NON_TERMINAL_ABBREVIATIONS
+    return "." in abbrev or abbrev in _NON_TERMINAL_ABBREVIATIONS
 
 
 def split_sentences(text: str) -> list[str]:
@@ -82,7 +88,7 @@ def split_sentences(text: str) -> list[str]:
         return []
     merged: list[str] = [raw[0]]
     for segment in raw[1:]:
-        if _is_non_terminal(merged[-1]):
+        if _is_non_terminal(merged[-1], segment):
             merged[-1] = f"{merged[-1]} {segment}"
         else:
             merged.append(segment)
