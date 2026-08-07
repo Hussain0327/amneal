@@ -25,6 +25,7 @@ from regwatch.generate import turn_gate as tg
         "A waiver may apply, e.g. for a lower strength.",
         "The reference product, i.e. the RLD, must be used.",
         "Compare the test product vs. the reference listed drug.",
+        "Dissolution testing follows the Ph. Eur.",
         "Dr. Smith signed the protocol.",
         # Decimals never split: there is no whitespace after the period.
         "Dissolution is measured at 0.5 mg per unit.",
@@ -43,6 +44,12 @@ def test_single_sentence_stays_single(text: str) -> None:
         # "etc." is deliberately NOT treated as non-terminal: it can end a
         # sentence, and merging is the dangerous direction.
         "Include dissolution, content uniformity, etc. A fed study is required.",
+        # "pH." ends dissolution sentences for real; only "Eur." continues a
+        # "Ph." abbreviation. Merging here would hide two assertions behind
+        # one set of cites.
+        "The buffer is adjusted to the target pH. A second stage follows.",
+        # "Ph. Eur." can itself end a sentence; the next one stays separate.
+        "Testing follows the Ph. Eur. The method is described below.",
     ],
 )
 def test_two_sentences_are_still_two(text: str) -> None:
