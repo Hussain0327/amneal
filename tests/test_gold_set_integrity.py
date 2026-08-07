@@ -184,3 +184,28 @@ def test_answerable_items_actually_test_something() -> None:
         assert (
             item.expected_sources or item.expected_facts
         ), f"answerable item asserts nothing: {item.question!r}"
+
+
+def test_forbidden_terms_are_non_empty_strings() -> None:
+    """A blank forbidden term matches every answer and fails the whole set."""
+    for item in _load():
+        assert isinstance(item.forbidden, list)
+        for term in item.forbidden:
+            assert (
+                isinstance(term, str) and term.strip()
+            ), f"blank forbidden term on {item.question!r}"
+
+
+def test_no_row_forbids_what_it_also_requires() -> None:
+    """A self-contradicting row can never pass, and would read as a real regression.
+
+    The check is substring-based in both directions because that is how both
+    fact_recall and contains_none match.
+    """
+    for item in _load():
+        for term in item.forbidden:
+            for fact in item.expected_facts:
+                t, f = term.lower(), fact.lower()
+                assert (
+                    t not in f and f not in t
+                ), f"row both requires {fact!r} and forbids {term!r}: {item.question!r}"

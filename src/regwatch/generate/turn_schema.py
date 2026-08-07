@@ -24,9 +24,9 @@ deterministic.
 from __future__ import annotations
 
 import json
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from regwatch.common.structured_json import schema_for_prompt
 from regwatch.generate.llm import LLMMessage
@@ -57,8 +57,32 @@ class GroundedTurn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     turn_type: Literal["ANSWER", "NO_EVIDENCE"]
-    claims: list[Claim] = Field(default_factory=list, max_length=10)
-    unsupported: list[str] = Field(default_factory=list, max_length=2)
+    # 10 -> 20. This cap is NOT a trim: pydantic raises on the 21st claim, the
+    # gate returns malformed_structure, and the user gets "service temporarily
+    # unavailable" with ZERO claims. It is a whole-turn kill switch, so a cap
+    # set below what the model may reasonably emit converts a long answer into
+    # an outage.
+    #
+    # 20, not 30, because the EVIDENCE binds before the schema does: exactly 8
+    # passages reach synthesis (effective_rerank_top_k) and overlapping chunks
+    # collapse to as few as 4 distinct citable (short_name, page) keys. Claims
+    # beyond what 8 passages can independently support are either redundant or
+    # fail the gate's overlap check. 30 is also unaffordable: 30 x 400 chars x
+    # 4 cites is 5,707 output tokens, above SYNTH_MAX_TOKENS_CEILING.
+    #
+    # Safe for INV-1: the gate validates each claim independently against this
+    # turn's passages, and its admission loop is order-independent, so a longer
+    # list cannot make any single claim likelier to survive incorrectly. The
+    # real exposure of a larger n is AVAILABILITY -- the whole-turn materiality
+    # guard trips on a single material drop -- which is why the depth targets
+    # that would actually fill this cap are gated on a measured baseline.
+    claims: list[Claim] = Field(default_factory=list, max_length=20)
+    # The list was capped at 2; the ITEMS were unbounded. The prompt asks for
+    # "SHORT LABELS" and nothing enforced it, so two 2,000-char strings could
+    # add ~2,000 output tokens to a payload the budget sized at ~30.
+    unsupported: list[Annotated[str, StringConstraints(max_length=80)]] = Field(
+        default_factory=list, max_length=2
+    )
 
 
 # Rendered once at import and appended as a TRAILING system message rather than

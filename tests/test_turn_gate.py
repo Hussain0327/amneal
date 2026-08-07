@@ -536,3 +536,80 @@ def test_ledger_records_the_whole_claim_not_a_window_of_it() -> None:
     assert recorded == long_claim, "the full claim must survive into the ledger"
     assert recorded.endswith("unless a waiver applies")
     assert schema_cap == tg._LEDGER_TEXT_CHARS
+
+
+# ---------- the schema caps are whole-turn kill switches ----------
+#
+# Exceeding one is NOT a trim. pydantic raises, admit_turn returns GateFailure,
+# and grounded_qa serves "service temporarily unavailable" with ZERO claims. So
+# a cap set below what the model may reasonably emit converts a long answer
+# into an outage -- which is the argument for raising it, not for keeping it
+# low. INV-1 is unaffected either way: the gate validates each claim
+# independently, so a longer list cannot make any one claim likelier to survive
+# incorrectly.
+
+
+def _n_claims(n: int) -> str:
+    return synth_turn_json(
+        [
+            (f"Requirement number {i} is stated in the guidance", [("PSG_020503", 3)])
+            for i in range(n)
+        ]
+    )
+
+
+def test_twenty_claims_are_admitted_at_the_new_cap() -> None:
+    turn = _admit(_n_claims(20))
+
+    assert turn.verdict == tg.VERDICT_ANSWER
+    assert len(turn.admitted) == 20
+    assert not turn.dropped
+
+
+def test_the_twenty_first_claim_kills_the_whole_turn() -> None:
+    """Pins the cap as a HARD WALL, never a silent trim.
+
+    If this ever starts returning an AdmittedTurn with 20 claims, the model's
+    21st claim is being discarded without anyone being told -- a silent
+    truncation of a regulatory answer, which is worse than the outage.
+    """
+    out = tg.admit_turn(_n_claims(21), passages=_PASSAGES, question=_QUESTION)
+
+    assert isinstance(out, tg.GateFailure)
+    assert out.reason == "malformed_structure"
+
+
+def test_the_cap_the_model_is_told_matches_the_cap_enforced() -> None:
+    """The advertised schema and the validator must never drift.
+
+    TURN_SCHEMA_MESSAGE is the LAST thing the model reads, so its maxItems is a
+    stronger anchor on answer length than any prose instruction. A stale number
+    here quietly teaches the model the old limit.
+    """
+    from regwatch.generate.turn_schema import TURN_SCHEMA_MESSAGE, GroundedTurn
+
+    cap = GroundedTurn.model_fields["claims"].metadata[0].max_length
+    assert cap == 20
+    assert f'"maxItems":{cap}' in TURN_SCHEMA_MESSAGE.content
+
+
+def test_an_unsupported_label_is_bounded_to_a_short_label() -> None:
+    """The list was capped at 2; the ITEMS were unbounded.
+
+    The prompt asks for "SHORT LABELS" and nothing enforced it, so two
+    2,000-char strings could add ~2,000 output tokens to a payload the budget
+    sized at roughly 30.
+    """
+    ok = tg.admit_turn(
+        synth_turn_json([], turn_type="ANSWER", unsupported=("x" * 80,)),
+        passages=_PASSAGES,
+        question=_QUESTION,
+    )
+    assert isinstance(ok, tg.AdmittedTurn)
+
+    too_long = tg.admit_turn(
+        synth_turn_json([], turn_type="ANSWER", unsupported=("x" * 81,)),
+        passages=_PASSAGES,
+        question=_QUESTION,
+    )
+    assert isinstance(too_long, tg.GateFailure)

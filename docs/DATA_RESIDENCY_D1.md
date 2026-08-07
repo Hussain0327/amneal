@@ -93,7 +93,7 @@ the status banner.)
       max_tokens=s.synthesizer_max_tokens,
   )
   ```
-  (the cap is the `SYNTHESIZER_MAX_TOKENS` knob, default 900). With
+  (the cap is the `SYNTHESIZER_MAX_TOKENS` knob, default 3000). With
   `LLM_PROVIDER=openai` this lands in `OpenAIProvider._complete_responses` ->
   `client.responses.create(...)` or the legacy `OpenAIProvider._complete_chat` ->
   `client.chat.completions.create(...)`, depending on `OPENAI_API_MODE` (default
