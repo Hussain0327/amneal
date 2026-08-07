@@ -63,6 +63,18 @@ const ANSWER: Turn = {
   meta: META,
 };
 
+// Bibliography-style answer: the model cited with bare [n] markers and a
+// trailing "Sources:" list (the prod placement bug). The UI splits the trailer
+// off (its own references replace it) and resolves each marker through the
+// trailer into a real stamp; an unlisted marker ([3]) stays literal prose.
+const BIBLIO: Turn = {
+  ...ANSWER,
+  content:
+    "The recommended bioequivalence study design is a fasting, single-dose, two-way crossover in vivo study [1]. In vitro studies should include single actuation content through container life and aerodynamic particle size distribution [2]. A marker with no bibliography entry stays plain text [3].\n\nSources:\n[1] [PSG_021457, p.2]\n[2] [PSG_021457, p.4]",
+  interpretation: null,
+  meta: { ...META, audit_id: 4222 },
+};
+
 const REFUSAL: Turn = {
   role: "assistant",
   status: "refused",
@@ -260,6 +272,11 @@ export default function FixturesPage() {
         <Section no="F2" title="Answer · cited finding">
           <UserTurn content="What BE study design is recommended for albuterol sulfate inhalation aerosol?" live />
           <AssistantTurn turn={ANSWER} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} threshold={0.3} />
+        </Section>
+
+        <Section no="F2b" title="Answer · bibliography markers resolved to stamps">
+          <UserTurn content="What BE study design is recommended for albuterol sulfate inhalation aerosol?" live />
+          <AssistantTurn turn={BIBLIO} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} threshold={0.3} />
         </Section>
 
         <Section no="F3" title="Helpful refusal · not in corpus">

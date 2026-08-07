@@ -128,7 +128,9 @@ export function ProductScopeBar() {
       ) : (
         <>
           <span className="scopebar__empty">No product scoped —</span>
-          <button className="scopebar__clear" onClick={openPicker}>
+          {/* Flows with the sentence (scopebar__clear alone floats right,
+              which reads as a detached control on the full-width bar). */}
+          <button className="scopebar__clear scopebar__clear--flow" onClick={openPicker}>
             pin one here
           </button>
           <span className="scopebar__empty">or set one on White&nbsp;Paper or Watch.</span>

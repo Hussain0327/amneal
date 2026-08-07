@@ -4,7 +4,7 @@
 // zero-padded, 24-hour time.
 import { describe, expect, it } from "vitest";
 
-import { formatClock, formatFiled, parseApiDate } from "@/lib/time";
+import { formatClock, formatFiled, historyBucket, parseApiDate } from "@/lib/time";
 
 const ISO_UTC = "2026-01-07T14:32:00Z";
 
@@ -61,5 +61,36 @@ describe("formatFiled", () => {
 
   it("returns an empty string on unparseable input", () => {
     expect(formatFiled("garbage")).toBe("");
+  });
+});
+
+describe("historyBucket", () => {
+  // A fixed "now": Friday Aug 7, 2026 15:00 UTC (tests run under TZ=UTC).
+  const NOW = Date.parse("2026-08-07T15:00:00Z");
+
+  it("buckets the same local day as Today", () => {
+    expect(historyBucket("2026-08-07T01:10:00Z", NOW)).toBe("Today");
+  });
+
+  it("buckets the previous local day as Yesterday", () => {
+    expect(historyBucket("2026-08-06T23:59:00Z", NOW)).toBe("Yesterday");
+  });
+
+  it("buckets 2-6 days back as This week", () => {
+    expect(historyBucket("2026-08-04T09:00:00Z", NOW)).toBe("This week");
+    expect(historyBucket("2026-08-01T09:00:00Z", NOW)).toBe("This week");
+  });
+
+  it("labels older sessions by month and year", () => {
+    expect(historyBucket("2026-07-18T09:00:00Z", NOW)).toBe("July 2026");
+    expect(historyBucket("2025-12-30T09:00:00Z", NOW)).toBe("December 2025");
+  });
+
+  it("files an unparseable timestamp under Earlier (still reachable)", () => {
+    expect(historyBucket("not-a-date", NOW)).toBe("Earlier");
+  });
+
+  it("clamps clock skew (a future timestamp) to Today", () => {
+    expect(historyBucket("2026-08-08T00:30:00Z", NOW)).toBe("Today");
   });
 });

@@ -140,3 +140,80 @@ describe("Markdown citation stamps", () => {
     expect(onCite).toHaveBeenCalledWith(b);
   });
 });
+
+describe("bare numeric markers via the trailer map", () => {
+  it("stamps [n] through the marker map, displaying the canonical index", async () => {
+    const onCite = vi.fn();
+    const a = cite("PSG_020503", 3);
+    const b = cite("PSG_020503", 5);
+    const markers = new Map([
+      [1, { shortName: "PSG_020503", page: 3 }],
+      [2, { shortName: "PSG_020503", page: 5 }],
+    ]);
+    render(
+      <Markdown citations={[a, b]} onCite={onCite} markers={markers}>
+        {"First claim [1]. Second claim [2]."}
+      </Markdown>,
+    );
+    const s1 = screen.getByRole("button", { name: /Source 1: PSG_020503, page 3/i });
+    const s2 = screen.getByRole("button", { name: /Source 2: PSG_020503, page 5/i });
+    expect(s1).toHaveTextContent("[1]");
+    expect(s2).toHaveTextContent("[2]");
+    await userEvent.click(s2);
+    expect(onCite).toHaveBeenCalledWith(b);
+  });
+
+  it("keeps a marker literal when its pair matches no validated citation (INV-1)", () => {
+    const markers = new Map([[1, { shortName: "PSG_999999", page: 9 }]]);
+    render(
+      <Markdown citations={[cite("PSG_020503", 3)]} onCite={() => {}} markers={markers}>
+        {"A claim [1]."}
+      </Markdown>,
+    );
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByText(/A claim \[1\]\./)).toBeInTheDocument();
+  });
+
+  it("keeps [n] literal when no marker map is supplied at all", () => {
+    render(
+      <Markdown citations={[cite("PSG_020503", 3)]} onCite={() => {}}>
+        {"A claim [1]."}
+      </Markdown>,
+    );
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByText(/A claim \[1\]\./)).toBeInTheDocument();
+  });
+
+  it("resolves a compound [1, 2] bracket into both stamps", () => {
+    const markers = new Map([
+      [1, { shortName: "PSG_020503", page: 3 }],
+      [2, { shortName: "PSG_020503", page: 5 }],
+    ]);
+    render(
+      <Markdown
+        citations={[cite("PSG_020503", 3), cite("PSG_020503", 5)]}
+        onCite={() => {}}
+        markers={markers}
+      >
+        {"Both apply [1, 2]."}
+      </Markdown>,
+    );
+    expect(screen.getAllByRole("button").map((b) => b.textContent)).toEqual(["[1]", "[2]"]);
+  });
+
+  it("markers displaying the canonical number stay consistent when the model numbered differently", () => {
+    // The model's [1] names the pair that dedupes to index 2: the stamp shows
+    // [2] so prose, chips, and references all agree on one numbering.
+    const markers = new Map([[1, { shortName: "PSG_020503", page: 5 }]]);
+    render(
+      <Markdown
+        citations={[cite("PSG_020503", 3), cite("PSG_020503", 5)]}
+        onCite={() => {}}
+        markers={markers}
+      >
+        {"A claim [1]."}
+      </Markdown>,
+    );
+    expect(screen.getByRole("button")).toHaveTextContent("[2]");
+  });
+});

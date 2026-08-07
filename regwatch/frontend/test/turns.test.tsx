@@ -507,7 +507,7 @@ describe("the docket margin -- provenance rail on assistant turns (B9)", () => {
     expect(container.querySelector(".marginalia")).toBeNull();
   });
 
-  it("adds the absolute filed stamp to the provenance line when createdAt parses", () => {
+  it("adds a labelled Filed row to the provenance record when createdAt parses", () => {
     const { container } = render(
       <AssistantTurn
         turn={answerWithProvenance}
@@ -517,9 +517,93 @@ describe("the docket margin -- provenance rail on assistant turns (B9)", () => {
         busy={false} threshold={null}
       />,
     );
-    expect(container.querySelector(".prov__line")?.textContent).toContain(
-      `filed ${formatFiled(FILED_AT)}`,
+    const filed = container.querySelector(".prov__line");
+    expect(filed?.querySelector("dt")?.textContent).toBe("Filed");
+    expect(filed?.textContent).toContain(formatFiled(FILED_AT));
+  });
+
+  it("names the provenance rows and shortens the trace instead of dumping ids", () => {
+    const { container } = render(
+      <AssistantTurn
+        turn={{ ...answerWithProvenance, meta: { ...FIXTURE_META, turn_id: "157314a8-33ef-4f29" } }}
+        sessionId="330d61ef-4540"
+        onPick={() => {}}
+        onCite={() => {}}
+        busy={false} threshold={null}
+      />,
     );
+    const grid = container.querySelector(".prov__grid");
+    const rows = Array.from(grid?.querySelectorAll(".prov__row") ?? []).map(
+      (r) => [r.querySelector("dt")?.textContent, r.querySelector("dd")?.textContent] as const,
+    );
+    expect(rows).toContainEqual(["Audit", "#4218"]);
+    expect(rows).toContainEqual(["Model", "test-model"]);
+    // The trace shows only a recognizable prefix; the full ids ride in the
+    // title attribute for support conversations, and the session id is never
+    // restated as visible text.
+    expect(rows).toContainEqual(["Trace", "157314a8"]);
+    const trace = Array.from(grid?.querySelectorAll(".prov__row dd") ?? []).find(
+      (d) => d.textContent === "157314a8",
+    );
+    expect(trace?.getAttribute("title")).toBe(
+      "turn 157314a8-33ef-4f29 · session 330d61ef-4540",
+    );
+    expect(grid?.textContent).not.toContain("330d61ef-4540");
+  });
+});
+
+describe("bibliography-style answers -- trailer split + bare markers (INV-1)", () => {
+  const biblioTurn = nonAnswerTurn({
+    status: "answer",
+    refused: false,
+    reason: null,
+    content:
+      "A crossover study is recommended [1]. In vitro studies apply too [2], but [3] has no entry.\n\nSources:\n[1] [PSG_020503, p.3]\n[2] [PSG_020503, p.5]",
+    citations: [
+      { ...wireCitation("PSG_020503", 3), score: 0.71 },
+      { ...wireCitation("PSG_020503", 5), score: 0.6 },
+    ],
+    meta: FIXTURE_META,
+  });
+
+  it("drops the model-authored Sources trailer from the body (the UI's references replace it)", () => {
+    const { container } = render(
+      <AssistantTurn turn={biblioTurn} sessionId={null} onPick={() => {}} onCite={() => {}} busy={false} threshold={null} />,
+    );
+    expect(container.querySelector(".msg__body")?.textContent).not.toContain("Sources:");
+    // The real reference list is still there, numbered from the validated set.
+    expect(container.querySelector(".sources summary")?.textContent).toBe("Sources · 2");
+  });
+
+  it("resolves listed bare markers into stamps and leaves unlisted ones literal", () => {
+    const onCite = vi.fn();
+    const { container } = render(
+      <AssistantTurn turn={biblioTurn} sessionId={null} onPick={() => {}} onCite={onCite} busy={false} threshold={null} />,
+    );
+    const stamps = Array.from(container.querySelectorAll(".cite-stamp"));
+    expect(stamps.map((s) => s.textContent)).toEqual(["[1]", "[2]"]);
+    // [3] names no bibliography entry: never fabricated, stays prose.
+    expect(container.querySelector(".msg__body")?.textContent).toContain("[3]");
+    fireEvent.click(stamps[1]);
+    expect(onCite).toHaveBeenCalledWith(expect.objectContaining({ short_name: "PSG_020503", page: 5 }));
+  });
+
+  it("keeps the full text (trailer included) when a turn carries no citations", () => {
+    const uncited = nonAnswerTurn({
+      status: "answer",
+      refused: false,
+      reason: null,
+      content: "An unverifiable claim.\n\nSources:\n[1] [PSG_999999, p.9]",
+      citations: [],
+      meta: FIXTURE_META,
+    });
+    const { container } = render(
+      <AssistantTurn turn={uncited} sessionId={null} onPick={() => {}} onCite={() => {}} busy={false} threshold={null} />,
+    );
+    // The ungrounded backstop fires AND the reply's own source hints survive --
+    // with no reference list below, stripping would erase them.
+    expect(container.querySelector(".msg__ungrounded")).not.toBeNull();
+    expect(container.querySelector(".msg__body")?.textContent).toContain("Sources:");
   });
 });
 

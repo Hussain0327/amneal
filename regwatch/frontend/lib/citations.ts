@@ -92,6 +92,59 @@ export function dedupeCitations<T extends MatchableCitation>(citations: readonly
   return out;
 }
 
+// The trailing "Sources:" bibliography. Mirrors the backend's _SOURCES_TRAILER
+// (src/regwatch/common/citations.py): everything after a line reading
+// "Sources:" is the model-authored source list. The UI renders its own
+// references from the VALIDATED citations array, so the trailer is redundant
+// display text -- prose-only consumers drop it, exactly as the backend's
+// strip_sources_trailer does.
+const SOURCES_TRAILER = /\n\s*Sources:\s*\n/;
+
+export interface SplitAnswer {
+  prose: string;
+  trailer: string | null;
+}
+
+/**
+ * Splits an answer into prose and its trailing "Sources:" bibliography (null
+ * when absent). A degenerate answer that is ONLY a bibliography keeps its full
+ * text as prose -- display dedupe must never blank a reply.
+ */
+export function splitSourcesTrailer(text: string): SplitAnswer {
+  const m = SOURCES_TRAILER.exec(text);
+  if (!m) return { prose: text, trailer: null };
+  const prose = text.slice(0, m.index);
+  if (!prose.trim()) return { prose: text, trailer: null };
+  return { prose, trailer: text.slice(m.index + m[0].length) };
+}
+
+// One numbered trailer line: an optional bracketed marker, then the entry
+// ("[1] [PSG_020503, p.4]" / "1. PSG_020503, p.4"). The entry text is handed
+// to the SAME pair grammar the backend validated, so a marker resolves only
+// through a source-shaped (short_name, page) pair.
+const TRAILER_LINE = /^\s*\[?(\d{1,3})[\].):]*\s+(.+)$/;
+
+/**
+ * Maps the model's own bibliography numbering (the bare [n] markers it cites
+ * with inline) to the (short_name, page) pair each trailer line names. This is
+ * the model's statement about its own text, never a guess: a marker with no
+ * parseable trailer pair stays unmapped, and the renderer still resolves every
+ * mapped pair against the turn's VALIDATED citations before a stamp renders
+ * (INV-1 -- an unmatched marker remains literal prose).
+ */
+export function trailerMarkerPairs(trailer: string): Map<number, CitePair> {
+  const map = new Map<number, CitePair>();
+  for (const line of trailer.split("\n")) {
+    const m = TRAILER_LINE.exec(line);
+    if (!m) continue;
+    const pairs = pairsIn(m[2]);
+    if (pairs.length === 0) continue;
+    const n = Number(m[1]);
+    if (!map.has(n)) map.set(n, pairs[0]);
+  }
+  return map;
+}
+
 // Build the lookup the renderer matches tags against: key -> 1-based index into
 // the turn's citation list (the [n] the stamp displays and the citation it opens).
 export function citationIndex(citations: MatchableCitation[]): Map<string, number> {
