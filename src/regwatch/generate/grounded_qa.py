@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from time import perf_counter
 from typing import Any
 
@@ -49,6 +49,7 @@ from regwatch.common.conversation import (
 from regwatch.common.logging import get_logger
 from regwatch.common.observability import capture_exception
 from regwatch.common.text_normalize import canonical_name
+from regwatch.generate import prose_turn
 from regwatch.generate import turn_gate as tg
 from regwatch.generate.guidance import (
     QUERY_GUIDANCE_PROMPT,
@@ -69,9 +70,13 @@ from regwatch.generate.llm import (
     get_llm_provider,
 )
 from regwatch.generate.prompts import (
+    GROUNDED_QA_EXEMPLARS_V6,
     GROUNDED_QA_PROMPT,
+    GROUNDED_QA_PROMPT_V6,
     GROUNDED_QA_SYSTEM,
+    GROUNDED_QA_SYSTEM_V6,
     GROUNDED_QA_USER,
+    GROUNDED_QA_USER_V6,
 )
 
 # The core/shell contract types live in rag_contract (a pipeline-free module so
@@ -739,6 +744,30 @@ def _format_passages(passages: list[RetrievedPassage]) -> str:
     return "\n---\n".join(blocks)
 
 
+def _format_passages_numbered(passages: list[RetrievedPassage]) -> str:
+    """The v6 prose variant: a [n] label prefixes the same pair header.
+
+    The [n] label is what the model cites; the [SHORT_NAME, p.N] pair header
+    stays because the prose parser's pair-echo collision handling and the echo
+    provider's discriminating scrape both key on it, and an operator reading a
+    raw prompt still sees the canonical citation identity next to each number.
+    """
+    blocks: list[str] = []
+    for position, p in enumerate(passages, start=1):
+        section = f" ({p.section_path})" if p.section_path else ""
+        blocks.append(f"[{position}] [{p.short_name}, p.{p.page}]{section}\n{p.text.strip()}\n")
+    return "\n---\n".join(blocks)
+
+
+# Bare numeric markers ("[3]", "[1, 2]") in conversation memory. Stripped by
+# _format_recent ALONGSIDE the pair-form strip: under v6 prose a stale [3] in a
+# prior answer would read as a live pointer into THIS turn's passage numbering.
+# Unconditional and plain-deletion on purpose -- v5 history contains no numeric
+# markers, so the sub is a byte-level no-op there and the v5 prompt (and its
+# eval) stays byte-identical.
+_NUMERIC_MARKER_RE = re.compile(r"\[\s*\d+\s*(?:,\s*\d+\s*)*\]")
+
+
 def _format_recent(turns: list[PriorTurn]) -> str:
     """Render prior turns as a compact, citation-free conversation context block.
 
@@ -753,13 +782,13 @@ def _format_recent(turns: list[PriorTurn]) -> str:
     for t in turns:
         # Strip markers from BOTH sides: a citation-shaped token in a prior
         # question is context too, never a source the model may reuse this turn.
-        q = strip_all_citations(t.question).strip()[:400]
+        q = _NUMERIC_MARKER_RE.sub("", strip_all_citations(t.question)).strip()[:400]
         # Stored answers end with a "Sources:" trailer. Current entries are
         # bracketed, while legacy entries were not; drop the whole trailer before
         # the bracket strip (shared with eval/metrics.faithfulness) so neither
         # form can become a stale re-citable pointer in conversation memory.
         answer_prose = strip_sources_trailer(t.answer)
-        a = strip_all_citations(answer_prose).strip()[:600]
+        a = _NUMERIC_MARKER_RE.sub("", strip_all_citations(answer_prose)).strip()[:600]
         if not q and not a:
             continue
         lines.append(f"User: {q}\nAssistant: {a}")
@@ -771,9 +800,15 @@ def _complete_structured(
     messages: list[LLMMessage],
     *,
     max_tokens: int,
+    response_format: str | None = "json",
     telemetry: dict[str, Any] | None = None,
 ) -> LLMResponse:
-    """One buffered json-mode completion, with a single 2x truncation retry.
+    """One buffered completion, with a single 2x truncation retry.
+
+    ``response_format`` defaults to "json" (every legacy caller); the v6 prose
+    synthesizer passes None so no json_object mode -- and no appended user json
+    directive -- reaches the wire. Everything else (buffering, D1-first
+    re-raise, the bounded truncation retry) is format-independent.
 
     Buffered, never ``provider.stream()``: stream() takes no response_format on
     the Protocol or in any implementation, ``_buffered_stream`` drops it, and
@@ -794,7 +829,7 @@ def _complete_structured(
             messages,
             temperature=_SYNTH_TEMPERATURE,
             max_tokens=capped,
-            response_format="json",
+            response_format=response_format,
         )
     except D1ResidencyError:
         raise
@@ -834,7 +869,7 @@ def _complete_structured(
             messages,
             temperature=_SYNTH_TEMPERATURE,
             max_tokens=retry_budget,
-            response_format="json",
+            response_format=response_format,
         )
 
 
@@ -1838,23 +1873,48 @@ def _synthesize_and_admit(
         if recent_block
         else ""
     )
-    user_prompt = GROUNDED_QA_USER.format(
-        recent_context=recent_context,
-        question=question,
-        passages=_format_passages(evidence_passages),
-    )
-    route_json["prompt"] = GROUNDED_QA_PROMPT.as_dict()
+    # v6 prose vs v5 claims-JSON is a per-turn read, not a boot decision: the
+    # flag is a Fly secret flip with no deploy, and the audit row must stamp
+    # the identity of the path that actually produced it.
+    prose_mode = bool(getattr(s, "prose_synthesis_enabled", False))
+    active_prompt = GROUNDED_QA_PROMPT_V6 if prose_mode else GROUNDED_QA_PROMPT
+    if prose_mode:
+        user_prompt = GROUNDED_QA_USER_V6.format(
+            recent_context=recent_context,
+            question=question,
+            passages=_format_passages_numbered(evidence_passages),
+        )
+    else:
+        user_prompt = GROUNDED_QA_USER.format(
+            recent_context=recent_context,
+            question=question,
+            passages=_format_passages(evidence_passages),
+        )
+    route_json["prompt"] = active_prompt.as_dict()
 
     _emit("Composing a cited answer…")
-    log.info("llm_prompt", role="synthesizer", **GROUNDED_QA_PROMPT.log_fields())
+    log.info("llm_prompt", role="synthesizer", **active_prompt.log_fields())
     provider = get_llm_provider(role="synthesizer")
-    synth_messages = [
-        LLMMessage(role="system", content=GROUNDED_QA_SYSTEM),
-        LLMMessage(role="user", content=user_prompt),
-        # The schema rides as a TRAILING system message, so it is the last thing
-        # the model reads and it never has to survive a .format() pass.
-        TURN_SCHEMA_MESSAGE,
-    ]
+    if prose_mode:
+        # v6 sends NO schema message anywhere -- the schema is the server-side
+        # parser now -- and the few-shot exemplars ride between the system
+        # prompt and the live turn as real user/assistant pairs. The tail
+        # restatement inside GROUNDED_QA_USER_V6 is the true last-read text on
+        # the Gemma path (all system content is front-loaded on that wire).
+        synth_messages = [LLMMessage(role="system", content=GROUNDED_QA_SYSTEM_V6)]
+        synth_messages.extend(
+            LLMMessage(role=exemplar_role, content=exemplar_text)
+            for exemplar_role, exemplar_text in GROUNDED_QA_EXEMPLARS_V6
+        )
+        synth_messages.append(LLMMessage(role="user", content=user_prompt))
+    else:
+        synth_messages = [
+            LLMMessage(role="system", content=GROUNDED_QA_SYSTEM),
+            LLMMessage(role="user", content=user_prompt),
+            # The schema rides as a TRAILING system message, so it is the last
+            # thing the model reads and it never has to survive a .format() pass.
+            TURN_SCHEMA_MESSAGE,
+        ]
     # What the synthesis call actually cost and whether it had to retry. Two
     # facts that lived only in a structlog line (or, for the retry, nowhere
     # durable at all), which is why "is our malformed_structure rate a token
@@ -1868,6 +1928,7 @@ def _synthesize_and_admit(
             provider,
             synth_messages,
             max_tokens=s.synthesizer_max_tokens,
+            response_format=None if prose_mode else "json",
             telemetry=synth_telemetry,
         )
     except Exception as exc:  # provider transport error (timeout / 429 / 5xx)
@@ -1905,7 +1966,64 @@ def _synthesize_and_admit(
         )
 
     _emit("Checking each claim against its source…")
-    admitted = admit_turn(answer, passages=evidence_passages, question=question)
+    admitted: AdmittedTurn | GateFailure
+    parsed_prose: prose_turn.ParsedProseTurn | None = None
+    if prose_mode:
+        parsed_prose = prose_turn.parse(answer, passages=evidence_passages)
+        # Nested under the existing "synthesis" telemetry block on purpose: the
+        # route_json TOP-level key set is contract-pinned, and the parse record
+        # is synthesis forensics (INV-6) -- what the parser killed and why.
+        synth_telemetry["prose_parse"] = {
+            "claims_parsed": len(parsed_prose.claims),
+            "killed": [t[:400] for t in parsed_prose.leftover_brackets],
+            "truncated_material": parsed_prose.truncated_material,
+        }
+        killed_material: str | None = None
+        for killed in parsed_prose.leftover_brackets:
+            killed_material = tg.materiality_trigger(killed)
+            if killed_material is not None:
+                break
+        if parsed_prose.truncated_material or killed_material is not None:
+            # The parser removed materially-worded text (an unterminated tail
+            # or a bracket-killed sentence). What survives could read as its
+            # own opposite, so the whole answer is rejected -- the same OD-4
+            # stance as the gate's material-drop verdict, one layer earlier.
+            log.warning(
+                "qa_prose_parse_material_kill",
+                truncated=parsed_prose.truncated_material,
+                material_word=killed_material,
+            )
+            return _decline(
+                _refuse,
+                reason="material_drop",
+                response_mode="refused",
+                passages=passages,
+                model_name=response.model,
+                answer_text=tg.MATERIAL_DROP_TEXT,
+                usage=response.usage,
+                route_extra=synth_route,
+                guide=False,
+            )
+        if parsed_prose.turn_type == "ANSWER" and not parsed_prose.claims:
+            # Reason string kept as malformed_structure so the ops greps and
+            # the ~12% prod baseline stay comparable; in prose mode it means
+            # "no sentences parsed", not "schema violation".
+            admitted = GateFailure(
+                "malformed_structure", "no sentences parsed from prose completion"
+            )
+        else:
+            admitted = admit_turn(
+                prose_turn.gate_payload(parsed_prose, evidence_passages),
+                passages=evidence_passages,
+                question=question,
+                # Re-stamp correction is live (still refuse-or-cite: a corrected
+                # claim is a CITED claim); the uncited-downgrade path is not --
+                # serving gate-framed uncited prose is the v7 policy shift.
+                correct=True,
+                downgrade_uncited=False,
+            )
+    else:
+        admitted = admit_turn(answer, passages=evidence_passages, question=question)
     if isinstance(admitted, GateFailure):
         # A parse failure asserts something about the MACHINE, never about the
         # corpus. Serving settings.refusal_text here ("I couldn't find this in
@@ -1931,6 +2049,19 @@ def _synthesize_and_admit(
             guide=False,
         )
 
+    if (
+        parsed_prose is not None
+        and parsed_prose.leftover_brackets
+        and admitted.verdict == tg.VERDICT_ANSWER
+    ):
+        # OD-5 continuity for parser kills: a benign bracket-killed sentence
+        # never reached the gate, so the verdict alone would render a clean
+        # fully-cited answer while text was silently removed. Folding to
+        # PARTIAL makes render_answer disclose the omission in the same plain
+        # language as a gate drop; the removed sentences themselves are in
+        # synth_telemetry["prose_parse"]["killed"].
+        admitted = replace(admitted, verdict=tg.VERDICT_PARTIAL)
+
     log.info("qa_turn_gate", **_gate_log_fields(admitted))
 
     # OD-5's operator half rides on EVERY post-gate audit row, not just the
@@ -1942,9 +2073,7 @@ def _synthesize_and_admit(
     # once here so the answer and decline paths cannot drift.
     turn_route = {
         **synth_route,
-        "turn": tg.ledger(
-            admitted, model=response.model, prompt_version=GROUNDED_QA_PROMPT.version
-        ),
+        "turn": tg.ledger(admitted, model=response.model, prompt_version=active_prompt.version),
     }
 
     if admitted.verdict == tg.VERDICT_NO_EVIDENCE:

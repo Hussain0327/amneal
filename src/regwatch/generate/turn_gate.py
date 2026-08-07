@@ -442,6 +442,7 @@ def admit_turn(
     passages: list[RetrievedPassage],
     question: str,
     correct: bool = False,
+    downgrade_uncited: bool | None = None,
 ) -> AdmittedTurn | GateFailure:
     """Parse one structured completion and admit its claims.
 
@@ -449,6 +450,14 @@ def admit_turn(
     epistemic fields appear in the output at their defaults. ``correct=True``
     lets an unknown-cite claim attempt a lexical re-stamp and an uncited benign
     claim downgrade to gate-framed reasoning, both refused for material claims.
+
+    ``downgrade_uncited`` splits the two corrector behaviors along the phase
+    boundary: None (default) follows ``correct``; False keeps re-stamp
+    correction while an uncited benign claim stays on today's DROP_NO_CITES
+    path. The v6 prose caller passes False because its policy is still
+    refuse-or-cite -- serving a gate-framed UNCITED sentence is the v7
+    selective-citation policy shift (and the renderer's marker line assumes a
+    non-empty pair set until v7 changes it).
 
     NO json_repair, deliberately, and this divergence from the shipped
     deficiency ladder must not be "harmonized" later. The usual argument
@@ -499,6 +508,7 @@ def admit_turn(
     # F6: computed ONCE per turn. Correction is only safe when the evidence is
     # provably one product/form, and that premise is metadata-conditional.
     metadata_uniform = correct and _metadata_uniform(passages)
+    allow_downgrade = correct if downgrade_uncited is None else (correct and downgrade_uncited)
 
     for index, claim in enumerate(turn.claims):
         declared = tuple((c.short_name, c.page) for c in claim.cites)
@@ -538,8 +548,9 @@ def admit_turn(
                 # measurable.
                 correction_method = CORRECTION_MATERIAL_EXEMPT
             elif reason == DROP_NO_CITES:
-                downgrade = True
-                reason = None
+                if allow_downgrade:
+                    downgrade = True
+                    reason = None
             elif metadata_uniform:
                 corrected = correct_unknown_citation(text, declared, passages)
                 if corrected is not None:

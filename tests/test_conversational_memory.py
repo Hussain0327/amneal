@@ -226,6 +226,26 @@ def test_format_recent_drops_unbracketed_sources_trailer() -> None:
     assert "Sources" not in block
 
 
+def test_format_recent_strips_bare_numeric_markers() -> None:
+    """A stale model-facing [n] in stored history must never read as a live
+    pointer into THIS turn's passage numbering (v6 prose). Pair markers and the
+    Sources trailer are already handled; the numeric strip is unconditional and
+    deletion-only, so unmatched history text stays byte-identical."""
+    turns = [
+        PriorTurn(
+            question="What about the fed arm [2]?",
+            answer=("A fed study is described [1, 2]. See section II.A.\n\nSources:\n- [3]"),
+            status="answer",
+        )
+    ]
+    block = qa_mod._format_recent(turns)
+    assert "[2]" not in block
+    assert "[1, 2]" not in block
+    assert "fed arm" in block  # question prose still threads
+    assert "fed study is described" in block  # answer prose still threads
+    assert "Sources" not in block
+
+
 # ---------- the load-bearing INV-1 property under multi-turn ----------
 
 

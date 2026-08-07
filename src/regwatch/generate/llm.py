@@ -176,6 +176,12 @@ class EchoLLMProvider:
         is_guidance = any(
             m.role == "system" and "[REGWATCH_QUERY_GUIDANCE_V1]" in m.content for m in messages
         )
+        # F19: the v6 prose synthesizer is keyed on its system sentinel, like
+        # the guidance branch -- NOT on marker-shape + response_format, which
+        # would misfire on the deficiency chat_completion seam.
+        is_prose_qa = any(
+            m.role == "system" and "[REGWATCH_GROUNDED_QA_V6]" in m.content for m in messages
+        )
         usage = LLMUsage(input_tokens=0, output_tokens=0)  # stub: zeros, never None
         # Scrape the prompt's FIRST passage marker BEFORE the json branch: it is
         # what discriminates the synthesizer (whose user prompt carries passage
@@ -233,6 +239,31 @@ class EchoLLMProvider:
                 ),
                 model="echo",
                 usage=usage,
+            )
+        if is_prose_qa:
+            # v6 prose synthesis. The lazy import avoids a module cycle
+            # (prose_turn -> turn_gate -> turn_schema -> this module); by call
+            # time everything is loaded. The cited shape reuses the v5 echo
+            # claim text so the RENDERED answer is byte-identical across the
+            # format flip, and [1] resolves to the prompt's first passage --
+            # the same passage the json branch scrapes.
+            if self._flag("REGWATCH_ECHO_FORCE_MALFORMED"):
+                # Unterminated on purpose: the parser drops the tail, parses
+                # zero sentences, and the caller serves malformed_structure --
+                # the prose analogue of "not json at all {".
+                return LLMResponse(
+                    text="an unterminated prose fragment with no terminal punctuation at all",
+                    model="echo",
+                    usage=usage,
+                )
+            if self._force_refusal():
+                from regwatch.generate.prose_turn import PROSE_NO_EVIDENCE_SENTINEL
+
+                return LLMResponse(text=PROSE_NO_EVIDENCE_SENTINEL, model="echo", usage=usage)
+            if marker is not None:
+                return LLMResponse(text="ECHO grounded test answer [1].", model="echo", usage=usage)
+            return LLMResponse(
+                text="ECHO prose synthesis without passages.", model="echo", usage=usage
             )
         if self._force_refusal():
             return LLMResponse(text=get_settings().refusal_text, model="echo", usage=usage)
@@ -1060,6 +1091,16 @@ def get_llm_provider(name: str | None = None, *, role: str = "default") -> LLMPr
         assert isinstance(base_url, str)  # noqa: S101
         assert isinstance(token, str)  # noqa: S101
         assert isinstance(databricks_model, str)  # noqa: S101
+        if (
+            role == "synthesizer"
+            and bool(getattr(s, "gemma_thinking_enabled", False))
+            and bool(getattr(s, "prose_synthesis_enabled", False))
+        ):
+            # Prose synthesis carries no json response_format, so allow_thinking
+            # becomes REACHABLE for the synthesizer for the first time and
+            # _visible_gemma_text is answer-path load-bearing. Runbook:
+            # GEMMA_THINKING_ENABLED stays unset through the v6 rollout.
+            log.warning("gemma_thinking_enabled_with_prose_synthesis")
         return DatabricksProvider(
             model=databricks_model,
             base_url=base_url,

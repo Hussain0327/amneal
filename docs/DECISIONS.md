@@ -425,3 +425,32 @@ The eval was RED on the real corpus (`recall@8=0.667, citation_precision=0.000, 
 - **No live-model result is claimed here.** This decision records the shipped
   prompt/schema boundary and its deterministic validation; provider-backed
   conversational quality remains an explicit evaluation step.
+
+## v6 prose synthesis ships dark; live evals serialize (Aug 7 2026)
+
+- **Format A/B, not a policy change.** `REGWATCH_PROSE_SYNTHESIS` (default
+  off) switches synthesis from the v5 claims-JSON envelope to v6 natural prose
+  with model-facing `[n]` markers, parsed server-side (`generate/prose_turn.py`)
+  and admitted by the same gate. The refuse-or-cite policy is unchanged in
+  BOTH modes: every rendered sentence is cited or the turn declines. The gate's
+  lexical re-stamp corrector is live under the flag (a corrected claim is a
+  cited claim); the uncited-downgrade path is explicitly off
+  (`admit_turn(downgrade_uncited=False)`) because serving gate-framed uncited
+  prose is the v7 selective-citation policy shift, not a format change.
+- **The wire is untouched.** Rendered answers keep canonical
+  `[SHORT_NAME, p.N]` markers plus the `Sources:` trailer; audit rows stamp the
+  flag-active prompt identity (v5/v6) so cohorts are distinguishable; the new
+  parse/corrector forensics ride inside the existing `route_json["synthesis"]`
+  and `route_json["turn"]` blocks.
+- **Exactly one live Databricks eval at a time.** The blocking CI eval moved
+  out of `lint-type-test` into `.github/workflows/databricks-eval.yml`,
+  entered via `workflow_call` (blocking arm, prose off) and `workflow_dispatch`
+  (dark v6 arm, prose on), all under the non-canceling `databricks-eval`
+  concurrency group. Concurrent evals collide on shared workspace QPS, and a
+  dispatch eval must never cancel PR CI. RUNBOOK: never add a live-eval step
+  outside this group; if branch protection pins required checks by name, add
+  the `databricks-eval / eval` check alongside `lint-type-test`.
+- **An empty flag secret reads as OFF.** `REGWATCH_PROSE_SYNTHESIS=""` falls
+  back to the default instead of failing settings validation at boot -- the
+  rollback story is "unset the secret", and a blank value must not become an
+  outage.

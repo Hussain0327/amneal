@@ -137,6 +137,15 @@ class Settings(BaseSettings):
     # therefore the default, not a tuning preference. Unset ("") sends no
     # parameter, for endpoints that reject it.
     databricks_reasoning_effort: str | None = "low"
+    # v6 prose synthesis (slm-layer Phase A). False = the v5 claims-JSON
+    # synthesis contract, byte-identical to before the flag existed. True =
+    # prose + [n] markers parsed server-side (generate/prose_turn.py) and
+    # admitted by the same gate -- the refuse-or-cite POLICY is unchanged
+    # either way; only the model-facing format flips. Aliased so the prod
+    # flip reads as a REGWATCH_* Fly secret, like REGWATCH_ALLOW_TEST_PROVIDERS.
+    prose_synthesis_enabled: bool = Field(
+        default=False, validation_alias="REGWATCH_PROSE_SYNTHESIS"
+    )
     # OpenAI call surface: "responses" (default, GPT-5.x native) or "chat" (legacy
     # Chat Completions). The LLMProvider.complete() interface is identical either way.
     openai_api_mode: str = "responses"
@@ -210,7 +219,15 @@ class Settings(BaseSettings):
         value = str(v).strip()
         return value or None
 
-    @field_validator("qwen_embedding_model", "qwen_embedding_dimension", mode="before")
+    @field_validator(
+        "qwen_embedding_model",
+        "qwen_embedding_dimension",
+        # The prose flag's rollback story is "unset the Fly secret"; a secret
+        # set to the empty string must read as OFF, not take the app down at
+        # boot with a bool_parsing error.
+        "prose_synthesis_enabled",
+        mode="before",
+    )
     @classmethod
     def _blank_env_falls_back_to_default(cls, v: object, info: ValidationInfo) -> object:
         """An env var set to "" means "not configured", not "override with empty".
