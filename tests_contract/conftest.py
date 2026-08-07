@@ -157,7 +157,14 @@ GUIDED_ROUTE_JSON_KEYS = ROUTE_JSON_KEYS | frozenset({"prompt", "guidance"})
 # claim gate: the answer path AND the post-gate declines (model_refusal,
 # no_valid_citations, material_drop, audit_error). These routes do not also run
 # guidance: every healthy turn gets exactly one model path.
-ANSWER_ROUTE_JSON_KEYS = ROUTE_JSON_KEYS | frozenset({"prompt", "partial_evidence", "turn"})
+#
+# "synthesis" is the synthesis-call telemetry (max_output_tokens, retry,
+# truncation class). It rides alongside "turn" on every route that reached the
+# synthesizer, and is what separates a malformed_structure caused by the token
+# cap from one caused by a JSON error.
+ANSWER_ROUTE_JSON_KEYS = ROUTE_JSON_KEYS | frozenset(
+    {"prompt", "partial_evidence", "turn", "synthesis"}
+)
 
 # The full status vocabulary (src/regwatch/generate/rag_contract.py).
 QUERY_STATUSES = frozenset(

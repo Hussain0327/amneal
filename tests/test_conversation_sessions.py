@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy import func
 from sqlmodel import col, select
 
-from regwatch.common.conversation import update_session_filters
+from regwatch.common.conversation import PriorTurn, update_session_filters
 from regwatch.generate import grounded_qa as qa_mod
 from regwatch.generate import turn_gate as tg
 from regwatch.generate.llm import LLMResponse
@@ -201,3 +201,173 @@ def test_scope_warning_is_conversational_and_audited() -> None:
         assert log.session_id == result.session_id
         assert log.turn_id == result.turn_id
         assert dict(log.route_json)["response_mode"] == "scope_warning"
+
+
+# ---------- drill-down follow-ups ----------
+#
+# The conversational requirement is: read an analysis, then ask "why?", "what
+# should I change?", "would this remediation resolve it?" and keep drilling in
+# the same context. Two things blocked that, and they had to be fixed together:
+#
+#   1. _looks_like_follow_up did not recognise those phrasings, so the session
+#      product was dropped and the turn hit the no_product refusal.
+#   2. Nothing rewrites the query before it is embedded. Fixing (1) alone would
+#      have carried the product forward and then embedded the literal string
+#      "why?", which has no topical signal -- trading a no_product refusal for
+#      a low_top_score one.
+
+
+_ELABORATION_TURN = synth_turn_json(
+    [("The albuterol PSG specifies a fasting single-dose design", [("PSG_020503", 4)])]
+)
+
+
+class _ElaborationLLM:
+    name = "stub"
+
+    def complete(self, *args: object, **kwargs: object) -> LLMResponse:
+        return LLMResponse(text=_ELABORATION_TURN, model="stub")
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "why?",
+        "what should i change?",
+        "tell me more",
+        "explain that",
+        "go on",
+        "how would that work?",
+        # Regression: these already worked, and must keep working.
+        "would this remediation resolve it?",
+        "what about dissolution?",
+    ],
+)
+def test_drill_down_phrasings_are_recognized_as_follow_ups(question: str) -> None:
+    assert qa_mod._looks_like_follow_up(question) is True
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "albuterol sulfate",  # bare drug name -> vague-input clarify, not a follow-up
+        "what is the dissolution method for metformin?",
+        "hello",
+    ],
+)
+def test_a_standalone_question_is_not_a_follow_up(question: str) -> None:
+    assert qa_mod._looks_like_follow_up(question) is False
+
+
+def test_a_contentless_follow_up_is_re_anchored_on_the_prior_question() -> None:
+    """ "why?" must not be what gets embedded.
+
+    Retrieval-only: the synthesizer still receives the user's literal words, so
+    the answer addresses what was actually asked.
+    """
+    prior = [PriorTurn(question="What fed BE study does albuterol need?", answer="x", status="a")]
+
+    rewritten = qa_mod._retrieval_query(
+        "why?", normalized_name="albuterol sulfate", prior_turns=prior
+    )
+
+    assert rewritten == "What fed BE study does albuterol need? why?"
+
+
+def test_the_rewrite_is_the_identity_when_the_question_carries_a_topic() -> None:
+    """Today's working follow-ups keep their own embedding, undiluted."""
+    prior = [PriorTurn(question="What fed BE study?", answer="x", status="a")]
+
+    assert (
+        qa_mod._retrieval_query(
+            "what about dissolution?", normalized_name="albuterol sulfate", prior_turns=prior
+        )
+        == "what about dissolution?"
+    )
+
+
+def test_the_rewrite_is_the_identity_with_no_prior_turn() -> None:
+    """Nothing to anchor on is not a licence to guess."""
+    assert (
+        qa_mod._retrieval_query("why?", normalized_name="albuterol sulfate", prior_turns=[])
+        == "why?"
+    )
+
+
+def test_a_misspelled_different_product_breaks_the_follow_up_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard that makes widening the follow-up prefixes safe.
+
+    The user changed subject to a DIFFERENT drug and merely misspelled it.
+    Inheriting the session's product here would answer a levalbuterol question
+    out of the albuterol guidance -- silently, with real-looking citations.
+    The same hole existed on the original prefixes before this guard
+    ("what about levalbuterl?" inherited albuterol outright).
+    """
+    _seed_two_inhalation_drugs()
+    monkeypatch.setenv("REFUSAL_SCORE_THRESHOLD", "0.0")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _ElaborationLLM())
+
+    first = qa_mod.ask("What BE study does FDA recommend for albuterol sulfate?")
+    assert first.status == "answer"
+
+    switched = qa_mod.ask("what about levalbuterl tartrate?", session_id=first.session_id)
+
+    assert switched.status == "clarify"
+    assert switched.reason == "did_you_mean"
+    assert switched.citations == []
+    # The decisive assertion: it did NOT quietly answer out of albuterol.
+    assert "PSG_020503" not in switched.answer
+
+
+def test_tell_me_more_elaborates_instead_of_serving_a_clarify_menu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The end-to-end product behaviour, and the reason the rewrite exists.
+
+    "tell me more" is topic-less, so the vague-input gate used to intercept it
+    and offer a menu to a user who had just asked to hear more about the thing
+    they were already discussing.
+    """
+    _seed_two_inhalation_drugs()
+    monkeypatch.setenv("REFUSAL_SCORE_THRESHOLD", "0.0")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _ElaborationLLM())
+
+    first = qa_mod.ask("What BE study does FDA recommend for albuterol sulfate?")
+    assert first.status == "answer"
+
+    more = qa_mod.ask("tell me more", session_id=first.session_id)
+
+    assert more.status == "answer"
+    assert more.reason != "vague_input"
+    assert {(c.short_name, c.page) for c in more.citations} == {("PSG_020503", 4)}
+    with session_scope() as s:
+        log = s.get(QueryLog, more.audit_id)
+        assert log is not None
+        route = dict(log.route_json)
+        assert route["context_applied"] is True
+        # The audit row must show this turn searched on something other than
+        # the user's words. The rewritten TEXT is deliberately not persisted.
+        assert route["retrieval_query_rewritten"] is True
+
+
+def test_a_vague_input_with_no_history_still_clarifies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The conjunct that keeps the exemption honest.
+
+    With no prior turn there is nothing to re-anchor on, so exempting the vague
+    gate would trade a useful clarify menu for a low_top_score refusal.
+    """
+    _seed_two_inhalation_drugs()
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _ElaborationLLM())
+
+    result = qa_mod.ask("albuterol sulfate")
+
+    assert result.status == "clarify"
+    assert result.reason == "vague_input"

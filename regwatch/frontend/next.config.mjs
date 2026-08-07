@@ -46,6 +46,10 @@ const nextConfig = {
       "frame-ancestors 'none'",
       "object-src 'none'",
       "img-src 'self' data:",
+      // Explicit, not the default-src fallback: the studio's PDF pane frames
+      // the same-origin /api/psg/... stream, and a future default-src edit
+      // must not silently break the viewer.
+      "frame-src 'self'",
       "font-src 'self'",
       "style-src 'self' 'unsafe-inline'",
       // Next App Router injects inline bootstrap scripts without a nonce.
@@ -64,6 +68,18 @@ const nextConfig = {
           { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
           { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains" },
           { key: "Content-Security-Policy-Report-Only", value: csp },
+        ],
+      },
+      // The studio embeds the PSG PDF stream in a same-origin <iframe>, and the
+      // catch-all above stamps X-Frame-Options: DENY on every response --
+      // including rewritten /api/* -- which refuses even same-origin framing.
+      // A later entry wins per key, so ONLY the PDF paths relax to SAMEORIGIN;
+      // every other route keeps DENY. Scoped to /api/psg/* on purpose.
+      {
+        source: "/api/psg/:path*",
+        headers: [
+          { key: "X-Frame-Options", value: "SAMEORIGIN" },
+          { key: "Content-Security-Policy-Report-Only", value: "frame-ancestors 'self'" },
         ],
       },
     ];

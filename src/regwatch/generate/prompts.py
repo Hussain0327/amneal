@@ -239,7 +239,7 @@ def _grounded_qa_identity() -> PromptIdentity:
 
     return identify_prompt(
         "regwatch.grounded_qa",
-        "4",
+        "5",
         GROUNDED_QA_SYSTEM,
         GROUNDED_QA_USER,
         TURN_SCHEMA_MESSAGE.content,

@@ -8,11 +8,15 @@ from typing import Any
 from regwatch.eval.metrics import (
     GoldItem,
     citation_precision,
+    claim_count,
+    contains_none,
     evaluate,
     fact_recall,
     faithfulness,
     recall_at_k,
     reciprocal_rank,
+    redundancy,
+    rejection_reasons,
 )
 
 
@@ -403,6 +407,77 @@ def test_must_clarify_absent_product_is_skipped() -> None:
     assert sc.clarified_correctly == 0
     # Skipped item is out of the denominator: only the answered item scores.
     assert sc.refusal_accuracy == 1.0
+
+
+# ---------- answer-shape metrics ----------
+#
+# Every metric above is claim-count-invariant: a 4-claim answer and a 10-claim
+# answer containing six extra validly-cited statements score identically on all
+# of them. These exist so a change to answer DEPTH is measurable at all, and
+# they must land BEFORE any such change ships.
+
+
+def test_claim_count_counts_only_cited_sentences() -> None:
+    """One admitted claim renders as exactly one stamped sentence.
+
+    The disclosure lines the RENDERER appends are not claims and must not
+    inflate the count.
+    """
+    answer = (
+        "A fasting study is recommended [PSG_020503, p.3]. "
+        "Dissolution uses the paddle method [PSG_020503, p.4]. "
+        "Some of the model's statements were removed because they were not "
+        "supported by the cited sources."
+    )
+    assert claim_count(answer) == 2
+
+
+def test_claim_count_ignores_the_sources_trailer() -> None:
+    answer = "A fasting study is recommended [PSG_020503, p.3].\n\nSources:\n- [PSG_020503, p.3]"
+    assert claim_count(answer) == 1
+
+
+def test_redundancy_flags_a_restated_claim() -> None:
+    """The failure mode a bigger claim budget invites.
+
+    Nothing in the gate compares claims to each other, so "more claims" can be
+    satisfied by saying one fact several ways -- and every other metric still
+    reports 1.000.
+    """
+    answer = (
+        "A fasting single-dose study is recommended [PSG_020503, p.3]. "
+        "A single-dose fasting study is recommended [PSG_020503, p.3]."
+    )
+    assert redundancy(answer) > 0.6
+
+
+def test_redundancy_is_low_for_genuinely_distinct_claims() -> None:
+    answer = (
+        "A fasting single-dose study is recommended [PSG_020503, p.3]. "
+        "Dissolution uses the USP paddle apparatus [PSG_020503, p.4]."
+    )
+    assert redundancy(answer) < 0.6
+
+
+def test_redundancy_is_zero_below_two_claims() -> None:
+    assert redundancy("A fasting study is recommended [PSG_020503, p.3].") == 0.0
+    assert redundancy("") == 0.0
+
+
+def test_contains_none_is_case_and_hyphen_insensitive() -> None:
+    assert contains_none("A single dose study", ["biowaiver"]) is True
+    assert contains_none("A SINGLE-DOSE study", ["single dose"]) is False
+
+
+def test_rejection_reasons_buckets_every_decline() -> None:
+    details: list[dict[str, Any]] = [
+        {"trace": {"reason": "material_drop"}},
+        {"trace": {"reason": "material_drop"}},
+        {"trace": {"reason": "no_valid_citations"}},
+        {"trace": {"reason": None}},
+        {},
+    ]
+    assert rejection_reasons(details) == {"material_drop": 2, "no_valid_citations": 1}
 
 
 # --- The withhold policy for must_refuse rows (issue #161, 2026-08-06) --------
