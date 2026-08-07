@@ -26,6 +26,8 @@ def _passage(
     chunk_id: str = "chunk-1",
     score: float = 0.71,
     text: str = "Fasting single-dose two-way crossover bioequivalence study in healthy subjects.",
+    normalized_name: str = "albuterol sulfate",
+    metadata: dict[str, str] | None = None,
 ) -> RetrievedPassage:
     return RetrievedPassage(
         chunk_id=chunk_id,
@@ -35,10 +37,10 @@ def _passage(
         version_id=10,
         page=page,
         section_path=None,
-        normalized_name="albuterol sulfate",
+        normalized_name=normalized_name,
         source_url=f"http://example/{short_name}.pdf",
         short_name=short_name,
-        metadata={},
+        metadata={} if metadata is None else metadata,
     )
 
 
@@ -46,9 +48,17 @@ _PASSAGES = [_passage(), _passage(page=4, chunk_id="chunk-2", text="Dissolution:
 _QUESTION = "What study design and dissolution method are recommended?"
 
 
-def _admit(raw: str, passages: list[RetrievedPassage] | None = None) -> tg.AdmittedTurn:
+def _admit(
+    raw: str,
+    passages: list[RetrievedPassage] | None = None,
+    *,
+    correct: bool = False,
+) -> tg.AdmittedTurn:
     out = tg.admit_turn(
-        raw, passages=_PASSAGES if passages is None else passages, question=_QUESTION
+        raw,
+        passages=_PASSAGES if passages is None else passages,
+        question=_QUESTION,
+        correct=correct,
     )
     assert isinstance(out, tg.AdmittedTurn), out
     return out
@@ -613,3 +623,282 @@ def test_an_unsupported_label_is_bounded_to_a_short_label() -> None:
         question=_QUESTION,
     )
     assert isinstance(too_long, tg.GateFailure)
+
+
+# ---------- the citation corrector and the epistemic ledger fields ----------
+#
+# DARK in v5: no production caller passes correct=True, so today these paths
+# surface only as ledger fields at their defaults. The tests pin the mechanics
+# now so flipping the flag later is a config change, not a behavior gamble.
+
+_UNIFORM_META = {"dosage_form": "Aerosol, Metered", "route": "Inhalation"}
+
+# Exactly 5 scoreable tokens -- fasting, crossover, design, healthy, subjects
+# ("in" is under the length floor) -- so passage overlaps land on exact fifths
+# and the floor/margin boundaries are testable without float surprises.
+_CORRECTABLE_CLAIM = "Fasting crossover design in healthy subjects"
+_BEST_TEXT = "Fasting crossover design procedures for healthy adult volunteers."  # 4/5
+_OFF_TOPIC_TEXT = "Dissolution testing with the paddle apparatus."  # 0/5
+
+
+def _uniform_passage(page: int, chunk_id: str, text: str) -> RetrievedPassage:
+    return _passage(page=page, chunk_id=chunk_id, text=text, metadata=dict(_UNIFORM_META))
+
+
+def test_correct_true_restamps_an_unknown_cite_onto_the_unambiguous_passage() -> None:
+    passages = [
+        _uniform_passage(3, "chunk-best", _BEST_TEXT),
+        _uniform_passage(4, "chunk-other", _OFF_TOPIC_TEXT),
+    ]
+    turn = _admit(
+        synth_turn_json([(_CORRECTABLE_CLAIM, [("PSG_999999", 7)])]), passages, correct=True
+    )
+
+    assert turn.verdict == tg.VERDICT_ANSWER
+    assert not turn.dropped
+    claim = turn.admitted[0]
+    assert claim.pairs == (("PSG_020503", 3),)
+    assert claim.correction_method == tg.CORRECTION_LEXICAL
+    assert claim.original_cites == (("PSG_999999", 7),)
+    assert claim.kind == tg.CLAIM_KIND_SOURCE_FACT
+    assert claim.downgraded is False
+    # The citation binds the chunk whose TEXT won the argmax.
+    assert tg.citations(turn)[0].chunk_id == "chunk-best"
+
+
+def test_correction_accepts_at_the_exact_floor() -> None:
+    at_floor = _passage(text="Fasting crossover design procedures.")  # 3/5 == the floor
+
+    out = tg.correct_unknown_citation(_CORRECTABLE_CLAIM, (("PSG_999999", 7),), [at_floor])
+
+    assert out is at_floor
+
+
+def test_correction_rejects_below_the_floor() -> None:
+    weak = _passage(text="Fasting procedures overview.")  # 1/5
+
+    assert tg.correct_unknown_citation(_CORRECTABLE_CLAIM, (("PSG_999999", 7),), [weak]) is None
+
+
+def test_correction_accepts_at_the_exact_margin_over_the_runner_up() -> None:
+    best = _passage(chunk_id="chunk-best", text=_BEST_TEXT)  # 4/5
+    runner = _passage(page=4, chunk_id="chunk-runner", text="Fasting crossover design overview.")
+
+    # Runner-up listed first: the winner is found by score, not list position.
+    out = tg.correct_unknown_citation(_CORRECTABLE_CLAIM, (), [runner, best])
+
+    assert out is best
+
+
+def test_correction_rejects_a_near_tie_inside_the_margin() -> None:
+    """A near-tie means the evidence cannot say WHICH passage the model meant,
+    and a guessed re-stamp is the OD-4 bug the gate exists to prevent."""
+    best = _passage(chunk_id="chunk-best", text=_BEST_TEXT)  # 4/5
+    tie = _passage(page=4, chunk_id="chunk-tie", text="Healthy fasting crossover design summary.")
+
+    assert tg.correct_unknown_citation(_CORRECTABLE_CLAIM, (), [best, tie]) is None
+
+
+def test_correction_is_negation_blind_so_material_claims_return_none() -> None:
+    """The P0 (F1): "not required" overlaps the passage saying it IS required,
+    so a material claim must never reach the argmax at all."""
+    claim = "A fed study is not required for the 45 mcg strength"
+    inverting = _passage(text="A fed study is required for the 45 mcg strength in adults.")
+
+    assert tg.correct_unknown_citation(claim, (("PSG_999999", 7),), [inverting]) is None
+
+
+def test_material_claim_is_never_corrected_and_lands_on_material_drop() -> None:
+    """F1 end to end: overwhelming overlap with the INVERTING passage, every
+    other precondition satisfied -- the claim still drops, the turn is still
+    rejected as material, and the exemption is ledgered so its rate shows up."""
+    passages = [
+        _uniform_passage(3, "chunk-best", _BEST_TEXT),
+        _uniform_passage(5, "chunk-fed", "A fed study is required for the 45 mcg strength."),
+    ]
+    turn = _admit(
+        synth_turn_json(
+            [
+                (_CORRECTABLE_CLAIM, [("PSG_020503", 3)]),
+                ("A fed study is not required for the 45 mcg strength", [("PSG_999999", 7)]),
+            ]
+        ),
+        passages,
+        correct=True,
+    )
+
+    assert turn.verdict == tg.VERDICT_MATERIAL_DROP
+    assert turn.material_word == "not"
+    assert [c.reason for c in turn.dropped] == [tg.DROP_UNKNOWN_CITATION]
+    assert turn.dropped[0].correction_method == tg.CORRECTION_MATERIAL_EXEMPT
+    assert turn.admitted[0].correction_method is None  # the valid sibling is untouched
+    led = tg.ledger(turn, model="stub-model", prompt_version="6")
+    row = next(c for c in led["claims"] if not c["admitted"])
+    assert row["correction_method"] == tg.CORRECTION_MATERIAL_EXEMPT
+
+
+def test_material_uncited_claim_is_never_downgraded() -> None:
+    turn = _admit(
+        synth_turn_json(
+            [
+                (_CORRECTABLE_CLAIM, [("PSG_020503", 3)]),
+                ("A fed study is not required for the 45 mcg strength", []),
+            ]
+        ),
+        [_uniform_passage(3, "chunk-best", _BEST_TEXT)],
+        correct=True,
+    )
+
+    assert turn.verdict == tg.VERDICT_MATERIAL_DROP
+    assert [c.reason for c in turn.dropped] == [tg.DROP_NO_CITES]
+    assert turn.dropped[0].correction_method == tg.CORRECTION_MATERIAL_EXEMPT
+    assert all(not c.downgraded for c in turn.admitted)
+
+
+@pytest.mark.parametrize(
+    "passages",
+    [
+        # Two dosage forms: the single product/form premise fails outright.
+        [
+            _uniform_passage(3, "chunk-a", _BEST_TEXT),
+            _passage(
+                page=4,
+                chunk_id="chunk-b",
+                text=_OFF_TOPIC_TEXT,
+                metadata={"dosage_form": "Tablet", "route": "Oral"},
+            ),
+        ],
+        # Empty metadata: ingest wrote nothing, so the upstream mixed-form
+        # guards skipped this passage and uniformity cannot be proven.
+        [_passage(chunk_id="chunk-a", text=_BEST_TEXT)],
+        # Empty product name, same argument.
+        [
+            _passage(
+                chunk_id="chunk-a",
+                text=_BEST_TEXT,
+                normalized_name="",
+                metadata=dict(_UNIFORM_META),
+            )
+        ],
+    ],
+)
+def test_nonuniform_or_empty_metadata_falls_back_to_todays_drop(
+    passages: list[RetrievedPassage],
+) -> None:
+    """F6: correction's premise is metadata-conditional, so an unprovable
+    premise means today's drop behavior, never a best-effort re-stamp."""
+    turn = _admit(
+        synth_turn_json([(_CORRECTABLE_CLAIM, [("PSG_999999", 7)])]), passages, correct=True
+    )
+
+    assert turn.verdict == tg.VERDICT_NO_VALID_CITATIONS
+    assert [c.reason for c in turn.dropped] == [tg.DROP_UNKNOWN_CITATION]
+    assert turn.dropped[0].correction_method is None
+
+
+def test_downgrade_prepends_the_gate_frame_and_clears_cites() -> None:
+    claim = tg.AdmittedClaim(
+        index=2,
+        text="The two documents describe the same crossover design",
+        pairs=(("PSG_020503", 3),),
+        citations=(),
+        overlap=0.5,
+    )
+
+    down = tg.downgrade_to_reasoning(claim)
+
+    assert down.text == f"{tg.REASONING_FRAME}The two documents describe the same crossover design"
+    assert down.kind == tg.CLAIM_KIND_REASONING
+    assert down.downgraded is True
+    assert down.pairs == ()
+    assert down.citations == ()
+    assert down.index == 2
+
+
+def test_downgrade_is_unreachable_for_a_material_claim() -> None:
+    claim = tg.AdmittedClaim(
+        index=0, text="A fed study is not required", pairs=(), citations=(), overlap=0.0
+    )
+
+    with pytest.raises(ValueError, match="material"):
+        tg.downgrade_to_reasoning(claim)
+
+
+def test_uncited_benign_claim_downgrades_to_reasoning_when_correct_is_on() -> None:
+    turn = _admit(
+        synth_turn_json([("The two guidances describe the same crossover design", [])]),
+        correct=True,
+    )
+
+    assert turn.verdict == tg.VERDICT_ANSWER
+    assert not turn.dropped
+    claim = turn.admitted[0]
+    assert claim.kind == tg.CLAIM_KIND_REASONING
+    assert claim.downgraded is True
+    assert claim.pairs == ()
+    assert claim.citations == ()
+    assert claim.text.startswith(tg.REASONING_FRAME)
+    led = tg.ledger(turn, model="stub-model", prompt_version="6")
+    row = led["claims"][0]
+    assert row["kind"] == tg.CLAIM_KIND_REASONING
+    assert row["downgraded"] is True
+    assert row["cites"] == []
+
+
+def test_correct_defaults_off_and_admission_is_unchanged() -> None:
+    """The dark-launch contract: without correct=True the gate behaves exactly
+    as today even when every correction precondition holds, and the new fields
+    ride the ledger at their defaults."""
+    passages = [
+        _uniform_passage(3, "chunk-best", _BEST_TEXT),
+        _uniform_passage(4, "chunk-other", _OFF_TOPIC_TEXT),
+    ]
+    payload = synth_turn_json(
+        [
+            (_CORRECTABLE_CLAIM, [("PSG_020503", 3)]),
+            ("The reference product is a metered aerosol", []),
+            ("The crossover design uses healthy adult volunteers", [("PSG_999999", 7)]),
+        ]
+    )
+
+    out = tg.admit_turn(payload, passages=passages, question=_QUESTION)
+
+    assert isinstance(out, tg.AdmittedTurn)
+    assert out.verdict == tg.VERDICT_PARTIAL
+    assert [c.reason for c in out.dropped] == [tg.DROP_NO_CITES, tg.DROP_UNKNOWN_CITATION]
+    assert all(c.correction_method is None for c in out.dropped)
+    kept = out.admitted[0]
+    assert (kept.kind, kept.correction_method, kept.original_cites, kept.downgraded) == (
+        tg.CLAIM_KIND_SOURCE_FACT,
+        None,
+        None,
+        False,
+    )
+    led = tg.ledger(out, model="stub-model", prompt_version="5")
+    for row in led["claims"]:
+        assert row["kind"] == tg.CLAIM_KIND_SOURCE_FACT
+        assert row["correction_method"] is None
+        assert row["original_cites"] is None
+        assert row["downgraded"] is False
+    assert json.loads(json.dumps(led))["claims"][0]["downgraded"] is False
+
+
+def test_ledger_serializes_the_correction_fields() -> None:
+    passages = [
+        _uniform_passage(3, "chunk-best", _BEST_TEXT),
+        _uniform_passage(4, "chunk-other", _OFF_TOPIC_TEXT),
+    ]
+    turn = _admit(
+        synth_turn_json([(_CORRECTABLE_CLAIM, [("PSG_999999", 7)])]), passages, correct=True
+    )
+
+    led = tg.ledger(turn, model="stub-model", prompt_version="6")
+
+    # json round-trip first: the ledger is persisted verbatim inside route_json.
+    row = json.loads(json.dumps(led))["claims"][0]
+    assert row["admitted"] is True
+    assert row["kind"] == tg.CLAIM_KIND_SOURCE_FACT
+    assert row["correction_method"] == tg.CORRECTION_LEXICAL
+    assert row["original_cites"] == ["PSG_999999,p.7"]
+    assert row["cites"] == ["PSG_020503,p.3"]
+    assert row["downgraded"] is False

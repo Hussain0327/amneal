@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from pydantic import ValidationError
@@ -118,6 +118,34 @@ DROP_NO_CITES = "no_cites"
 DROP_UNKNOWN_CITATION = "unknown_citation"
 
 # ---------------------------------------------------------------------------
+# Epistemic claim kinds and the citation corrector (dark until a caller passes
+# admit_turn(correct=True); v5 callers never do, so today these only surface as
+# ledger fields at their defaults).
+# ---------------------------------------------------------------------------
+CLAIM_KIND_SOURCE_FACT = "source_fact"
+CLAIM_KIND_REASONING = "reasoning"
+
+# correction_method values the ledger can carry. material_exempt marks a claim
+# the materiality guard EXCLUDED from correction/downgrade, so the exemption
+# rate is measurable from real traffic before any threshold is revisited.
+CORRECTION_LEXICAL = "lexical_overlap"
+CORRECTION_MATERIAL_EXEMPT = "material_exempt"
+
+# GATE-authored, deterministic downgrade frame -- the same trust model as the
+# renderer-authored citation markers: these words are written by the gate, never
+# accepted from the model, so a reader can trust the hedge was applied by code.
+REASONING_FRAME = "The guidance does not state this directly; my reading is: "
+
+# Correction thresholds. Both are required: the FLOOR says the claim must be
+# substantially contained in the winning passage at all, and the MARGIN says the
+# winner must be unambiguous among the passages sent this turn -- a near-tie
+# means the evidence cannot say WHICH passage the model meant, and a guessed
+# re-stamp is exactly the OD-4 failure this gate exists to prevent. Values are
+# provisional; every correction is ledgered so they can be calibrated from data.
+CORRECTION_OVERLAP_FLOOR = 0.6
+CORRECTION_OVERLAP_MARGIN = 0.2
+
+# ---------------------------------------------------------------------------
 # OD-5: the two user-visible disclosure strings. Plain language, no
 # implementation detail -- a user must never read "claim 3 failed citation
 # validation". Operator detail lives in the ledger.
@@ -167,6 +195,11 @@ class AdmittedClaim:
     pairs: tuple[tuple[str, int], ...]  # canonical (SHORT_NAME, page), declaration order
     citations: tuple[Citation, ...]
     overlap: float  # claim/passage token overlap -- logged, NOT enforced
+    # Epistemic ledger fields (additive; defaults preserve every v5 consumer).
+    kind: str = CLAIM_KIND_SOURCE_FACT
+    correction_method: str | None = None
+    original_cites: tuple[tuple[str, int], ...] | None = None  # pre-correction, as declared
+    downgraded: bool = False
 
 
 @dataclass(frozen=True)
@@ -177,6 +210,8 @@ class DroppedClaim:
     bad_cites: tuple[tuple[str, int], ...]
     reason: str
     material_word: str | None
+    # material_exempt when the materiality guard blocked correction/downgrade.
+    correction_method: str | None = None
 
 
 @dataclass(frozen=True)
@@ -264,6 +299,13 @@ def _tokens(text: str) -> set[str]:
     return {t for t in _WORD_RE.findall(text.lower()) if len(t) > 2}
 
 
+def _overlap_score(claim_tokens: set[str], passage_tokens: set[str]) -> float:
+    """The fraction of claim tokens found in the passage tokens."""
+    if not claim_tokens:
+        return 0.0
+    return round(len(claim_tokens & passage_tokens) / len(claim_tokens), 3)
+
+
 def _overlap(text: str, passages: list[RetrievedPassage]) -> float:
     """Claim/passage token overlap, for calibration only.
 
@@ -272,13 +314,94 @@ def _overlap(text: str, passages: list[RetrievedPassage]) -> float:
     the overlap is what lets a floor be calibrated from real traffic later
     instead of guessed now.
     """
-    claim_tokens = _tokens(text)
-    if not claim_tokens:
-        return 0.0
     passage_tokens: set[str] = set()
     for p in passages:
         passage_tokens |= _tokens(p.text)
-    return round(len(claim_tokens & passage_tokens) / len(claim_tokens), 3)
+    return _overlap_score(_tokens(text), passage_tokens)
+
+
+def correct_unknown_citation(
+    claim_text: str,
+    declared_cites: tuple[tuple[str, int], ...],
+    evidence_passages: list[RetrievedPassage],
+) -> RetrievedPassage | None:
+    """Best-match re-stamp for a claim whose declared cite resolved to nothing.
+
+    The declared cite names a passage that was never sent this turn. When ONE of
+    the passages that WAS sent is an unambiguously strong lexical match, the
+    claim can be re-stamped onto it instead of dropped: the winner must clear an
+    absolute overlap floor AND lead the runner-up by a margin. Returns the
+    winning passage rather than its (name, page) pair so the citation binds the
+    chunk whose text actually matched, not the top-ranked chunk of that page.
+    ``declared_cites`` is unused here; the caller ledgers it as original_cites.
+
+    Never for material claims: token overlap is negation-blind -- "a fed study
+    is NOT required" scores highly against the passage saying it IS required --
+    so the materiality check is repeated here in addition to the call site, and
+    no future caller can reach the argmax without it.
+    """
+    if materiality_trigger(claim_text) is not None:
+        return None
+    claim_tokens = _tokens(claim_text)
+    if not claim_tokens:
+        return None
+    scored = sorted(
+        ((_overlap_score(claim_tokens, _tokens(p.text)), p) for p in evidence_passages),
+        key=lambda pair: pair[0],
+        reverse=True,
+    )
+    if not scored:
+        return None
+    best_score, best = scored[0]
+    runner_up = scored[1][0] if len(scored) > 1 else 0.0
+    if best_score < CORRECTION_OVERLAP_FLOOR:
+        return None
+    if best_score - runner_up < CORRECTION_OVERLAP_MARGIN:
+        return None
+    return best
+
+
+def _metadata_uniform(passages: list[RetrievedPassage]) -> bool:
+    """True when every passage carries truthy AND identical product metadata.
+
+    Correction assumes all evidence describes one product in one dosage form,
+    but that premise is metadata-conditional, not guaranteed: the upstream
+    mixed-product/form clarify guards SKIP passages with empty metadata (ingest
+    writes "" when the FDA listing lacks the field), so mixed evidence can reach
+    the gate whenever metadata is missing. Empty or non-uniform metadata
+    therefore disables correction outright (F6).
+    """
+    combos: set[tuple[str, str, str]] = set()
+    for p in passages:
+        form = str(p.metadata.get("dosage_form") or "")
+        route = str(p.metadata.get("route") or "")
+        if not (p.normalized_name and form and route):
+            return False
+        combos.add((p.normalized_name, form, route))
+    return len(combos) == 1
+
+
+def downgrade_to_reasoning(claim: AdmittedClaim) -> AdmittedClaim:
+    """Reframe an uncited-but-benign claim as the gate's own hedged reading.
+
+    The frame is GATE-authored and deterministic -- the model cannot emit these
+    words into a claim slot and have them trusted, exactly as it cannot author a
+    citation marker. Cites are cleared because a reasoning sentence must never
+    wear a stamp.
+    """
+    if materiality_trigger(claim.text) is not None:
+        # F1 (P0): a material sentence served uncited-but-hedged can still
+        # invert the guidance, so material claims are exempt from every
+        # softening path. Reaching here is a caller bug, not a data condition.
+        raise ValueError("material claim must never be downgraded to reasoning")
+    return replace(
+        claim,
+        text=f"{REASONING_FRAME}{claim.text}",
+        pairs=(),
+        citations=(),
+        kind=CLAIM_KIND_REASONING,
+        downgraded=True,
+    )
 
 
 def _keep_unsupported(labels: list[str], question: str) -> tuple[list[str], list[str]]:
@@ -318,8 +441,14 @@ def admit_turn(
     *,
     passages: list[RetrievedPassage],
     question: str,
+    correct: bool = False,
 ) -> AdmittedTurn | GateFailure:
     """Parse one structured completion and admit its claims.
+
+    ``correct=False`` (every v5 caller) keeps today's behavior exactly; the new
+    epistemic fields appear in the output at their defaults. ``correct=True``
+    lets an unknown-cite claim attempt a lexical re-stamp and an uncited benign
+    claim downgrade to gate-framed reasoning, both refused for material claims.
 
     NO json_repair, deliberately, and this divergence from the shipped
     deficiency ladder must not be "harmonized" later. The usual argument
@@ -367,6 +496,9 @@ def admit_turn(
     allowed = allowed_passage_map(passages)
     admitted: list[AdmittedClaim] = []
     dropped: list[DroppedClaim] = []
+    # F6: computed ONCE per turn. Correction is only safe when the evidence is
+    # provably one product/form, and that premise is metadata-conditional.
+    metadata_uniform = correct and _metadata_uniform(passages)
 
     for index, claim in enumerate(turn.claims):
         declared = tuple((c.short_name, c.page) for c in claim.cites)
@@ -393,6 +525,37 @@ def admit_turn(
             if bad:
                 reason = DROP_UNKNOWN_CITATION
 
+        correction_method: str | None = None
+        corrected: RetrievedPassage | None = None
+        downgrade = False
+        if correct and reason in (DROP_NO_CITES, DROP_UNKNOWN_CITATION):
+            if materiality_trigger(text) is not None:
+                # F1 (P0): token overlap is negation-blind -- "a fed study is
+                # NOT required" matches the passage saying it IS required -- so
+                # a material claim is never re-stamped and never reframed. It
+                # stays on the drop path and the material-drop verdict applies
+                # unchanged; the exemption is ledgered so its rate is
+                # measurable.
+                correction_method = CORRECTION_MATERIAL_EXEMPT
+            elif reason == DROP_NO_CITES:
+                downgrade = True
+                reason = None
+            elif metadata_uniform:
+                corrected = correct_unknown_citation(text, declared, passages)
+                if corrected is not None:
+                    correction_method = CORRECTION_LEXICAL
+                    reason = None
+                    log.info(
+                        "qa_claim_cite_corrected",
+                        claim_index=index,
+                        original_cites=[f"{s},p.{p}" for s, p in declared],
+                        corrected_cite=f"{corrected.short_name},p.{corrected.page}",
+                        claim_text=text[:400],
+                    )
+            # else: F6 -- metadata empty or non-uniform, so the single
+            # product/form premise behind a lexical re-stamp does not hold;
+            # unknown cites keep today's drop behavior.
+
         if reason is not None:
             trigger = materiality_trigger(text)
             # Every materiality decision is logged with the claim text and the
@@ -414,6 +577,28 @@ def admit_turn(
                     bad_cites=bad,
                     reason=reason,
                     material_word=trigger,
+                    correction_method=correction_method,
+                )
+            )
+            continue
+
+        if corrected is not None:
+            admitted.append(
+                AdmittedClaim(
+                    index=index,
+                    text=text,
+                    pairs=((corrected.short_name, corrected.page),),
+                    citations=(_citation_for(corrected),),
+                    overlap=_overlap(text, [corrected]),
+                    correction_method=CORRECTION_LEXICAL,
+                    original_cites=declared,
+                )
+            )
+            continue
+        if downgrade:
+            admitted.append(
+                downgrade_to_reasoning(
+                    AdmittedClaim(index=index, text=text, pairs=(), citations=(), overlap=0.0)
                 )
             )
             continue
@@ -565,6 +750,14 @@ def ledger(turn: AdmittedTurn, *, model: str, prompt_version: str) -> dict[str, 
                 "bad_cites": [],
                 "material_word": None,
                 "passage_overlap": claim.overlap,
+                "kind": claim.kind,
+                "correction_method": claim.correction_method,
+                "original_cites": (
+                    None
+                    if claim.original_cites is None
+                    else [f"{s},p.{p}" for s, p in claim.original_cites]
+                ),
+                "downgraded": claim.downgraded,
             }
             for claim in turn.admitted
         ]
@@ -578,6 +771,13 @@ def ledger(turn: AdmittedTurn, *, model: str, prompt_version: str) -> dict[str, 
                 "bad_cites": [f"{s},p.{p}" for s, p in claim.bad_cites],
                 "material_word": claim.material_word,
                 "passage_overlap": None,
+                # A dropped claim was always an attempted source fact; only
+                # correction_method varies (material_exempt when the guard
+                # blocked correction/downgrade).
+                "kind": CLAIM_KIND_SOURCE_FACT,
+                "correction_method": claim.correction_method,
+                "original_cites": None,
+                "downgraded": False,
             }
             for claim in turn.dropped
         ],
