@@ -5,6 +5,9 @@ import { useEffect, useRef, useState } from "react";
 import { useCurrentProduct } from "@/components/CurrentProductProvider";
 import { PageHeader } from "@/components/PageHeader";
 import { Markdown } from "@/components/Markdown";
+import { DossierPlan } from "@/components/assemble/DossierPlan";
+import { DossierView } from "@/components/assemble/DossierView";
+import { Intake } from "@/components/assemble/Intake";
 import { assemble, type AssembleResponse } from "@/lib/api";
 
 export default function AssemblePage() {
@@ -59,21 +62,16 @@ export default function AssemblePage() {
         tagline="A scaffold of what the FDA calls for on a target product — assembled and cited from the guidance corpus. It states what's required, not what your team has done."
       />
 
-      <form onSubmit={onSubmit} className="doc doc--pad rise d3">
-        <div className="kicker" style={{ color: "var(--gold-ink)" }}>
-          Intake
-        </div>
-        <div className="mt-4 grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(13rem, 1fr))" }}>
-          <Field id="ingredient" label="Active ingredient" value={ingredient} onChange={setIngredient} placeholder="albuterol sulfate" />
-          <Field id="dosage" label="Dosage form · optional" value={dosage} onChange={setDosage} placeholder="inhalation aerosol" />
-          <Field id="rld" label="RLD · brand or appl. no. · optional" value={rld} onChange={setRld} placeholder="e.g. 020503" />
-        </div>
-        <div className="mt-5">
-          <button className="btn" type="submit" disabled={loading || !ingredient.trim()}>
-            {loading ? "Compiling…" : "Compile dossier"}
-          </button>
-        </div>
-      </form>
+      <Intake
+        ingredient={ingredient}
+        dosage={dosage}
+        rld={rld}
+        onIngredient={setIngredient}
+        onDosage={setDosage}
+        onRld={setRld}
+        onSubmit={onSubmit}
+        loading={loading}
+      />
 
       {error && (
         <div className="stamp mt-8" role="alert">
@@ -83,6 +81,10 @@ export default function AssemblePage() {
           </p>
         </div>
       )}
+
+      {/* Until a dossier exists (and again while one recompiles), the page
+          promises exactly what it will deliver — the contents plan. */}
+      {(loading || !result) && <DossierPlan compiling={loading} />}
 
       {result && !loading && (
         <section className="mt-9 rise">
@@ -94,57 +96,16 @@ export default function AssemblePage() {
               </div>
             </div>
           ) : (
-            <div className="doc doc--seal doc--pad">
-              <div className="kicker" style={{ color: "var(--gold-ink)", marginBottom: "0.6rem" }}>
-                Dossier
-              </div>
-              <Markdown>{result.markdown}</Markdown>
-            </div>
+            <DossierView markdown={result.markdown} />
           )}
           <details className="mt-6">
             <summary className="kicker" style={{ cursor: "pointer", color: "var(--ink-faint)" }}>
               Raw sections
             </summary>
-            <pre
-              className="code mt-2"
-              style={{
-                fontSize: "0.7rem",
-                background: "var(--paper-3)",
-                border: "1px solid var(--edge)",
-                borderRadius: "2px",
-                padding: "0.8rem",
-                overflow: "auto",
-                color: "var(--ink-2)",
-              }}
-            >
-              {JSON.stringify(result.sections, null, 2)}
-            </pre>
+            <pre className="code mt-2 dossier__raw">{JSON.stringify(result.sections, null, 2)}</pre>
           </details>
         </section>
       )}
-    </div>
-  );
-}
-
-function Field({
-  id,
-  label,
-  value,
-  onChange,
-  placeholder,
-}: {
-  id: string;
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-}) {
-  return (
-    <div>
-      <label className="kicker" htmlFor={id} style={{ color: "var(--ink-faint)" }}>
-        {label}
-      </label>
-      <input id={id} className="field mt-1" value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
     </div>
   );
 }

@@ -4,10 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useCurrentProduct } from "@/components/CurrentProductProvider";
 import { PageHeader } from "@/components/PageHeader";
+import { AlertEntry, alertKind, fmtDetected, parseUtcMs } from "@/components/WatchEntry";
 import {
   listProducts,
   watchLatest,
-  type AlertRecord,
   type ProductRecord,
   type WatchLatest,
   type WatchRunSummary,
@@ -27,50 +27,9 @@ function canonAppl(v: unknown): string {
   return digits ? digits.padStart(6, "0") : "";
 }
 
-// Store timestamps (alert captured_at, run started/finished) are naive UTC, so
-// a missing offset is treated as UTC -- the same convention Sidebar / White
-// Paper timestamps use. Returns NaN when unparseable so callers can refuse to
-// claim anything (a date, staleness) they cannot actually prove.
-function parseUtcMs(iso: string): number {
-  if (!iso) return NaN;
-  const norm = /(?:Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`;
-  return Date.parse(norm);
-}
-
-// timeZone is pinned so the rendered date is stable across machines/CI rather
-// than shifting with the runner's locale.
-function fmtDetected(iso: string): string {
-  const t = parseUtcMs(iso);
-  if (Number.isNaN(t)) return "";
-  return new Date(t).toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    timeZone: "UTC",
-  });
-}
-
-// Confidence is a 0..1 match score; show a whole percent, not the raw float that
-// leaked before (0.9047619047619048). 0/NaN/undefined render nothing -- the
-// matcher never emits a 0 score, so an absent one is a non-result, not "0%".
-function pctMatch(v: number): string {
-  if (!Number.isFinite(v) || v <= 0) return "";
-  return `${Math.round(v * 100)}% match`;
-}
-
-// New vs Revised prefers the backend's structural change_kind (derived from
-// version history, so it survives the prod degrade where a revision's summary
-// falls back to the "Initial version ingested" marker because the prior parsed
-// text lived on an ephemeral cron runner). The prose-marker heuristic remains
-// only as a fallback for alerts serialized before the field shipped: a first
-// version carries the marker (change_detector.summarize_change); anything else
-// is a revision. Match the ASCII prefix only (the marker's trailing excerpt is
-// non-ASCII); a null/empty summary reads as Revised.
-function alertKind(r: Pick<AlertRecord, "change_kind" | "diff_summary">): "New" | "Revised" {
-  if (r.change_kind === "new") return "New";
-  if (r.change_kind === "revised") return "Revised";
-  return (r.diff_summary ?? "").trim().startsWith("Initial version ingested") ? "New" : "Revised";
-}
+// parseUtcMs / fmtDetected / alertKind moved to components/WatchEntry.tsx with
+// the entry markup; the page still consumes them for run freshness and the
+// kind facet, so the filter can never disagree with the stamp on a card.
 
 // The watch cron runs daily, so a finished_at older than two scheduled runs
 // means at least one run failed to record and the bulletin can no longer be
@@ -92,11 +51,7 @@ function RunFreshness({ lastRun, asOfMs }: { lastRun: WatchRunSummary | null; as
     // No run has ever recorded (fresh install / wiped ledger). Say so plainly
     // instead of implying a check happened (INV-4: never report a run that
     // did not happen).
-    return (
-      <p className="code mt-2" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
-        No watch run recorded yet.
-      </p>
-    );
+    return <p className="issue-line">No watch run recorded yet.</p>;
   }
   const finished = str(lastRun.finished_at);
   const when = fmtDetected(finished);
@@ -106,16 +61,16 @@ function RunFreshness({ lastRun, asOfMs }: { lastRun: WatchRunSummary | null; as
   // honest placeholder rather than "Invalid Date".
   const stale = Number.isFinite(finishedMs) && asOfMs - finishedMs > RUN_STALE_AFTER_MS;
   return (
-    <p className="code mt-2" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
+    <p className="issue-line">
       Last checked {when ? <time dateTime={finished}>{when}</time> : "(date unavailable)"}.
       {stale && (
-        <span style={{ color: "var(--oxblood)" }}>
+        <span className="issue-line__warn">
           {" "}
           More than 48 hours ago; the feed may be out of date.
         </span>
       )}
       {lastRun.errors > 0 && (
-        <span style={{ color: "var(--oxblood)" }}>
+        <span className="issue-line__warn">
           {" "}
           The last run hit {lastRun.errors} ingest {lastRun.errors === 1 ? "error" : "errors"};
           the bulletin may be incomplete.
@@ -230,16 +185,7 @@ export default function WatchPage() {
             Bulletin
           </h2>
           <hr className="hair grow" />
-          <button
-            className="btn btn--ghost"
-            type="button"
-            onClick={load}
-            disabled={busy}
-            style={{ padding: "0.32rem 0.7rem", fontSize: "0.62rem", opacity: busy ? 0.6 : 1 }}
-          >
-            {busy ? "Refreshing" : "Refresh"}
-          </button>
-          <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
+          <span className="code count-line">
             {/* When the facet hides rows the counter must say so ("3 of 12
                 entries"), never pretend the visible slice is the whole page. */}
             {error
@@ -250,6 +196,15 @@ export default function WatchPage() {
                   : `${visible.length} of ${alerts.length} entries`
                 : "…"}
           </span>
+          <button
+            className="btn btn--ghost"
+            type="button"
+            onClick={load}
+            disabled={busy}
+            style={{ padding: "0.32rem 0.7rem", fontSize: "0.62rem", opacity: busy ? 0.6 : 1 }}
+          >
+            {busy ? "Refreshing" : "Refresh"}
+          </button>
         </div>
 
         {/* Run recency, not list emptiness: rendered whenever the feed loaded,
@@ -259,31 +214,20 @@ export default function WatchPage() {
         {!error && feed && <RunFreshness lastRun={feed.last_run ?? null} asOfMs={feedAt} />}
 
         {!error && alerts && alerts.length === 0 && (
-          <p className="mt-3" style={{ color: "var(--ink-soft)", fontSize: "0.95rem" }}>
+          <p className="bulletin-empty">
             No alerts yet. New and revised product-specific guidances will appear here as they’re detected.
           </p>
         )}
 
         {!error && alerts && alerts.length > 0 && (
-          <div className="mt-3 flex items-center gap-2" role="group" aria-label="Filter bulletin by change kind">
+          <div className="mt-3 facet" role="group" aria-label="Filter bulletin by change kind">
             {KIND_FILTERS.map((k) => (
               <button
                 key={k}
                 type="button"
-                className="chip"
+                className="facet__btn"
                 aria-pressed={kindFilter === k}
                 onClick={() => setKindFilter(k)}
-                // The active facet borrows the New chip's gold treatment so the
-                // pressed state is visible, not just an aria attribute.
-                style={
-                  kindFilter === k
-                    ? {
-                        color: "var(--gold-ink)",
-                        background: "var(--gold-wash)",
-                        borderColor: "var(--gold-deep)",
-                      }
-                    : undefined
-                }
               >
                 {k}
               </button>
@@ -294,15 +238,16 @@ export default function WatchPage() {
         {/* A facet with zero matches must not read as an empty feed -- the
             alerts exist, this page just has none of the selected kind. */}
         {!error && alerts && alerts.length > 0 && visible.length === 0 && (
-          <p className="mt-3" style={{ color: "var(--ink-soft)", fontSize: "0.95rem" }}>
+          <p className="bulletin-empty">
             No {kindFilter === "New" ? "new" : "revised"} entries in the current feed.
           </p>
         )}
 
         {/* On a failed (re)load the error stamp above owns the display — don't
-            also render a now-stale bulletin beneath it. */}
-        {!error && (
-          <div className="mt-3 flex flex-col gap-3">
+            also render a now-stale bulletin beneath it. The feed renders as
+            ONE ruled sheet (see .bulletin/.entry), not a stack of cards. */}
+        {!error && visible.length > 0 && (
+          <div className="doc bulletin">
             {visible.map((r) => {
               // Scoping from an alert writes the SAME canonical pair the
               // watchlist rows and the top bar pin (name + six-digit appl),
@@ -317,59 +262,13 @@ export default function WatchPage() {
               const scoped =
                 scopeable && name === referenceProductName && appl === applicationNumber;
               return (
-                <article key={`${r.psg_document_id}-${r.psg_version_id}-${r.product_id}`} className="doc doc--seal doc--pad">
-                  <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                    <span className="display" style={{ fontSize: "1.15rem", fontWeight: 600 }}>
-                      {name || "—"}
-                    </span>
-                    <span className="chip code">PSG {str(r.listing_appl_no) || "—"}</span>
-                    {str(r.listing_psg_type) && <span className="chip code">{str(r.listing_psg_type)}</span>}
-                    <span
-                      className="chip code"
-                      style={
-                        alertKind(r) === "New"
-                          ? {
-                              color: "var(--gold-ink)",
-                              background: "var(--gold-wash)",
-                              borderColor: "var(--gold-deep)",
-                            }
-                          : undefined
-                      }
-                    >
-                      {alertKind(r)}
-                    </span>
-                    {scopeable && (
-                      <button
-                        className="chip"
-                        type="button"
-                        aria-pressed={scoped}
-                        onClick={() => setProduct({ referenceProductName: name, applicationNumber: appl })}
-                      >
-                        {scoped ? "scoped" : "scope"}
-                      </button>
-                    )}
-                  </div>
-                  {str(r.diff_summary) && (
-                    <p style={{ margin: "0.6rem 0 0", color: "var(--ink-2)", lineHeight: 1.55 }}>{str(r.diff_summary)}</p>
-                  )}
-                  <div className="mt-3 flex items-center gap-4">
-                    {str(r.source_url) && (
-                      <a className="link code" style={{ fontSize: "0.76rem" }} href={safeHref(str(r.source_url))} target="_blank" rel="noreferrer">
-                        View source ↗
-                      </a>
-                    )}
-                    {fmtDetected(str(r.captured_at)) && (
-                      <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
-                        detected <time dateTime={str(r.captured_at)}>{fmtDetected(str(r.captured_at))}</time>
-                      </span>
-                    )}
-                    {pctMatch(r.confidence) && (
-                      <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
-                        {pctMatch(r.confidence)}
-                      </span>
-                    )}
-                  </div>
-                </article>
+                <AlertEntry
+                  key={`${r.psg_document_id}-${r.psg_version_id}-${r.product_id}`}
+                  alert={r}
+                  scopeable={scopeable}
+                  scoped={scoped}
+                  onScope={() => setProduct({ referenceProductName: name, applicationNumber: appl })}
+                />
               );
             })}
           </div>
@@ -380,7 +279,7 @@ export default function WatchPage() {
             Uses the unfiltered page size on purpose -- the facet counter above
             already owns the filtered story. */}
         {!error && feed && feed.total > feed.alerts.length && (
-          <p className="code mt-3" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
+          <p className="code count-line mt-3">
             Showing newest {feed.alerts.length} of {feed.total} entries.
           </p>
         )}
@@ -392,7 +291,7 @@ export default function WatchPage() {
             Watchlist
           </h2>
           <hr className="hair grow" />
-          <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
+          <span className="code count-line">
             {productError ? "—" : products ? `${products.length} products` : "…"}
           </span>
         </div>
@@ -487,7 +386,21 @@ function WatchlistTable({ products, error }: { products: ProductRecord[] | null;
               <tr key={p.id ?? `${appl}|${str(p.active_ingredient)}|${str(p.dosage_form)}`}>
                 {columns.map((c) => (
                   <td key={c} className={/no|number|appl|ndc|id/i.test(c) ? "code" : undefined}>
-                    {str(p[c])}
+                    {/* A raw URL blows the column out; the ledger shows a
+                        compact link instead (guarded like every source href). */}
+                    {c === "source_url" && str(p[c]) ? (
+                      <a
+                        className="link code"
+                        style={{ fontSize: "0.74rem" }}
+                        href={safeHref(str(p[c]))}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        source ↗
+                      </a>
+                    ) : (
+                      str(p[c])
+                    )}
                   </td>
                 ))}
                 <td>

@@ -5,7 +5,11 @@ import { useEffect, useState } from "react";
 
 import { StatusTicker } from "@/components/StatusTicker";
 import { AssistantTurn, ProvisionalDraft, UserTurn } from "@/components/Turns";
-import type { Citation } from "@/lib/api";
+import { DossierPlan } from "@/components/assemble/DossierPlan";
+import { DossierView } from "@/components/assemble/DossierView";
+import { Intake } from "@/components/assemble/Intake";
+import { AlertEntry } from "@/components/WatchEntry";
+import type { AlertRecord, Citation } from "@/lib/api";
 import type { Turn } from "@/lib/turns";
 
 // Design fixtures: the cited-chat states rendered from static fake data, so the
@@ -179,6 +183,102 @@ function TickerDemo() {
   return <StatusTicker frames={frames} />;
 }
 
+// ---- Assemble (02) / Watch (03) fixtures ----
+
+// Faithful to the markdown build_dossier emits: H1 title + lettered ## A–F.
+const DOSSIER_MD = `# albuterol sulfate dossier
+
+## A. Product-Specific Guidance(s)
+- **Albuterol Sulfate** (metered aerosol; inhalation) — [final, recommended Jun 2024](https://www.accessdata.fda.gov/drugsatfda_docs/psg/PSG_020503.pdf)
+  - Latest change: Added the in vitro-only Q1/Q2 sameness route.
+
+## B. Extracted BE Requirements
+### From https://www.accessdata.fda.gov/drugsatfda_docs/psg/PSG_020503.pdf
+- **study_type**: In vitro option or in vivo PK BE study
+    > Two options are recommended: an in vitro only approach, or an in vivo PK BE study with clinical endpoint considerations.
+- **in_vitro_battery**: Single actuation content; aerodynamic particle size distribution
+
+## C. Reference Listed Drug (RLD) Label
+- Brand: PROVENTIL HFA  /  Generic: albuterol sulfate
+- Application: NDA020503
+- Source: https://api.fda.gov/drug/label.json
+  - **Indications**: Treatment or prevention of bronchospasm in adults and children 4 years of age and older with reversible obstructive airway disease…
+
+## D. Applicable Guidance — Q&A Summary
+For albuterol sulfate inhalation aerosol, the guidance recommends demonstrating bioequivalence through either an in vitro only approach (when Q1/Q2 sameness holds) or an in vivo PK study with the full in vitro battery.
+
+### Sources
+- PSG_020503, p.2: https://www.accessdata.fda.gov/drugsatfda_docs/psg/PSG_020503.pdf
+
+## E. Dissolution Method
+- See FDA Dissolution Methods Database: https://www.accessdata.fda.gov/scripts/cder/dissolution/
+
+## F. Requirements Checklist (scaffold)
+_This is what the PSG calls for. It does not assert what the company has done._
+- [ ] Single actuation content through container life (sac)
+- [ ] Aerodynamic particle size distribution (apsd)
+- [ ] Spray pattern and plume geometry (spray)`;
+
+function makeFixtureAlert(overrides: Partial<AlertRecord>): AlertRecord {
+  return {
+    product_id: 1,
+    active_ingredient: "Albuterol Sulfate",
+    listing_appl_no: "NDA020503",
+    listing_psg_type: "final",
+    psg_document_id: 10,
+    psg_version_id: 2,
+    captured_at: "2026-06-01T12:00:00Z",
+    diff_summary: "Strength table updated; dissolution method revised.",
+    confidence: 0.9,
+    rationale: "canonical",
+    source_url: "https://www.fda.test/psg.pdf",
+    ...overrides,
+  };
+}
+
+const FIXTURE_ALERTS: AlertRecord[] = [
+  makeFixtureAlert({
+    change_kind: "new",
+    active_ingredient: "Budesonide",
+    listing_appl_no: "NDA020929",
+    psg_document_id: 11,
+    captured_at: "2026-06-03T08:00:00Z",
+    diff_summary: "Initial version ingested. Begins: This guidance addresses…",
+    confidence: 0.97,
+  }),
+  makeFixtureAlert({ change_kind: "revised" }),
+  makeFixtureAlert({
+    change_kind: "revised",
+    active_ingredient: "Cetirizine Hydrochloride",
+    listing_appl_no: "NDA022155",
+    listing_psg_type: "draft",
+    psg_document_id: 12,
+    captured_at: "2026-05-28T09:30:00Z",
+    diff_summary: null,
+    confidence: 0.74,
+  }),
+];
+
+// The intake is a controlled component; the fixture owns throwaway state so
+// typing works in the sandbox.
+function IntakeDemo() {
+  const [ingredient, setIngredient] = useState("albuterol sulfate");
+  const [dosage, setDosage] = useState("");
+  const [rld, setRld] = useState("");
+  return (
+    <Intake
+      ingredient={ingredient}
+      dosage={dosage}
+      rld={rld}
+      onIngredient={setIngredient}
+      onDosage={setDosage}
+      onRld={setRld}
+      onSubmit={(e) => e.preventDefault()}
+      loading={false}
+    />
+  );
+}
+
 function Section({ no, title, children }: { no: string; title: string; children: React.ReactNode }) {
   return (
     <section style={{ marginTop: "3.6rem" }}>
@@ -292,6 +392,36 @@ export default function FixturesPage() {
         <Section no="F5" title="Scope warning · declined">
           <UserTurn content="Which BE pathway should we pick for our ANDA?" live />
           <AssistantTurn turn={SCOPE} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} threshold={0.3} />
+        </Section>
+
+        <Section no="F6" title="Assemble · intake — the compilation order">
+          <div className="mt-4">
+            <IntakeDemo />
+          </div>
+        </Section>
+
+        <Section no="F7" title="Assemble · contents plan (idle + compiling)">
+          <DossierPlan compiling />
+        </Section>
+
+        <Section no="F8" title="Assemble · the bound dossier">
+          <div className="mt-4">
+            <DossierView markdown={DOSSIER_MD} />
+          </div>
+        </Section>
+
+        <Section no="F9" title="Watch · bulletin entries (new / revised / sparse)">
+          <div className="doc bulletin">
+            {FIXTURE_ALERTS.map((a, i) => (
+              <AlertEntry
+                key={a.psg_document_id}
+                alert={a}
+                scopeable
+                scoped={i === 1}
+                onScope={noop}
+              />
+            ))}
+          </div>
         </Section>
 
         <footer style={{ margin: "4rem 0 2rem" }}>
