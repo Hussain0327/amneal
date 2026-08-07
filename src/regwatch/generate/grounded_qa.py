@@ -30,7 +30,7 @@ from dataclasses import asdict, dataclass, field
 from time import perf_counter
 from typing import Any
 
-from config.settings import SYNTH_MAX_TOKENS_CEILING, get_settings
+from config.settings import SYNTH_MAX_TOKENS_CEILING, Settings, get_settings
 from sqlalchemy import func
 from sqlmodel import select
 
@@ -1364,257 +1364,60 @@ def _meta(
     return outcome, audit
 
 
-def ask_core(
-    question: str,
-    *,
-    session_id: str,
-    turn_id: str,
-    filters: dict[str, Any] | None = None,
-    k: int | None = None,
-    user_id: str | None = None,
-    load_session_filters: Callable[[], dict[str, Any]],
-    load_recent_turns: Callable[[], list[PriorTurn]],
-    on_progress: Callable[[str], None] | None = None,
-) -> tuple[RagOutcome, AuditPayload, SessionPatch]:
-    """The PURE compute half of a turn: load context -> compute -> describe.
+@dataclass
+class TurnState:
+    """Mid-flow mutable state of one ``ask_core`` turn, made explicit.
 
-    Performs NO persistence on ANY path (success, refusal, clarify, meta, and
-    error paths alike): every branch returns (RagOutcome, AuditPayload,
-    SessionPatch) and the ``ask()`` shell -- later, the Go control plane --
-    performs the writes. Reads are allowed (retrieval reads the vector store,
-    the resolver reads products); session context comes in through the two
-    shell-owned loaders, invoked lazily at exactly the pre-split call points so
-    turns that never carry context over still skip the reads.
-
-    ``session_id``/``turn_id`` are the SHELL's ids (already ensured/degraded);
-    the core only threads them into what it returns.
-
-    ``on_progress`` behaves exactly as documented on ``ask()``: cosmetic,
-    best-effort, never answer-bearing. There is deliberately NO token sink here
-    -- answer text is replayed by the shell after the audit write, so the core
-    emits no user-visible bytes at all.
+    One instance per turn, created by ``ask_core`` and threaded through the
+    stage functions below; each stage mutates it in place and returns it (or
+    a terminal decline triple). The ``_decline`` ceremony reads
+    ``active_filters``/``context_applied`` from here at CALL time -- before
+    the extraction these were loose closure variables, so that
+    read-at-call-time contract was invisible in any signature.
     """
-    s = get_settings()
 
-    def _emit(textline: str) -> None:
-        if on_progress is None:
-            return
-        try:
-            on_progress(textline)
-        except Exception:  # broad: progress is best-effort, never fatal
-            log.debug("on_progress_failed", exc_info=True)
-
-    model_name = current_model_name(role="synthesizer")
-    active_filters: dict[str, Any] = dict(filters or {})
-    # Product-key hardening: a caller (API / dossier / clarify option) may pass a
-    # normalized_name in any casing or salt-order. Canonicalize it to the exact key
-    # the corpus stores (canonical_name) so retrieval's exact-match filter cannot
-    # silently miss and turn a real product into a wrong refusal.
-    if active_filters.get("normalized_name"):
-        active_filters["normalized_name"] = canonical_name(str(active_filters["normalized_name"]))
-
-    # Up to two carry-over sites below read the session filters (product in the
-    # resolver's none-branch, then dosage_form/route after resolution). Nothing
-    # mutates them mid-turn (the shell applies filter updates after the turn),
-    # so fetch lazily ONCE and reuse instead of two identical row reads per
-    # follow-up. Lazy so turns that never carry over still skip the read.
-    session_filters_memo: dict[str, Any] | None = None
-
-    def _session_filters() -> dict[str, Any]:
-        nonlocal session_filters_memo
-        if session_filters_memo is None:
-            session_filters_memo = load_session_filters()
-        return session_filters_memo
-
-    recent_turns_memo: list[PriorTurn] | None = None
-
-    def _recent_turns() -> list[PriorTurn]:
-        """History, loaded at most once per turn.
-
-        Two callers now need it -- the retrieval rewrite (before the vector
-        search) and the synthesizer's conversation block (after it) -- and
-        ``load_recent_turns`` is a DB read. Memoized so widening the follow-up
-        path does not double the per-turn query count.
-        """
-        nonlocal recent_turns_memo
-        if recent_turns_memo is None:
-            recent_turns_memo = load_recent_turns()
-        return recent_turns_memo
-
-    resolved_by_name = False
-    context_applied = False
-    response_mode: QueryStatusLiteral = "summary" if _is_summary_request(question) else "answer"
+    active_filters: dict[str, Any]
+    context_applied: bool = False
+    resolved_by_name: bool = False
+    response_mode: QueryStatusLiteral = "answer"
+    # Filled by _retrieve_and_group for _synthesize_and_admit: every retrieved
+    # row (the audit trail), the individually above-threshold subset (all the
+    # synthesizer may see), and the retrieval route_json the answer path's
+    # audit row carries.
+    passages: list[RetrievedPassage] = field(default_factory=list)
+    evidence_passages: list[RetrievedPassage] = field(default_factory=list)
+    route_json: dict[str, Any] = field(default_factory=dict)
     # Populated once stage-1 search runs; read by _decline so a turn that
     # declines AFTER retrieving still records which retrieval mode ran.
-    retrieval_block: dict[str, Any] = {}
+    retrieval_block: dict[str, Any] = field(default_factory=dict)
 
-    def _decline(
-        maker: Callable[..., tuple[RagOutcome, AuditPayload]],
-        *,
-        reason: str,
-        response_mode: str,
-        route_extra: dict[str, Any] | None = None,
-        guide: bool = True,
-        **kw: Any,
-    ) -> tuple[RagOutcome, AuditPayload, SessionPatch]:
-        """One ceremony for every terminal decline (_refuse/_clarify/_scope_warning/
-        _meta) branch: build the audit route_json and the result TOGETHER so the
-        reason/response_mode pairing is single-source -- a branch can no longer
-        record an audit route that silently disagrees with the turn it describes.
-        Reads active_filters/context_applied at CALL time (they mutate as the
-        pipeline advances); post-synthesis branches override model_name
-        (response.model) and pass usage via **kw.
 
-        ``route_extra`` and ``guide`` are NAMED keywords, so neither is forwarded
-        to ``maker`` via **kw. Healthy PRE-synthesis terminal branches keep
-        ``guide=True`` and therefore attempt one constrained router completion;
-        post-synthesis/error branches set it false because an AI call already
-        happened or the failure makes another call inappropriate."""
-        rj = _route_json(
-            filters=active_filters,
-            reason=reason,
-            context_applied=context_applied,
-            response_mode=response_mode,
-        )
-        # Declines that happen AFTER stage-1 search still describe a retrieval
-        # that ran, so the plan belongs on their audit row too. _decline builds
-        # a FRESH rj, so it cannot inherit the answer path's mutation.
-        if retrieval_block:
-            rj["retrieval"] = dict(retrieval_block)
-        if route_extra:
-            rj.update(route_extra)
-        kw.setdefault("model_name", model_name)
-        outcome, audit = maker(
-            question=question,
-            reason=reason,
-            session_id=session_id,
-            turn_id=turn_id,
-            user_id=user_id,
-            route_json=rj,
-            **kw,
-        )
+# The stage functions keep the ask_core closure names (_decline/_emit/
+# _session_filters/_recent_turns) as PARAMETER names on purpose: their bodies
+# are transplanted verbatim from the pre-split ask_core, and identical names
+# keep that move mechanically checkable against the pre-split code.
 
-        if guide and outcome.status != "error":
-            # Every healthy Ask turn reaches exactly one AI path. On a branch that
-            # cannot safely synthesize a cited answer, the router model selects a
-            # server-allowlisted NEXT STEP and existing option IDs. It never writes
-            # display prose, changes status, invents filters, or sees weak passage
-            # text. A provider/shape failure keeps the trusted deterministic reply.
-            product = str(active_filters.get("normalized_name") or "").strip() or None
-            # An ambiguous/suggested candidate is not trusted product context.
-            # Scope guidance is the one handler that may resolve a product inside
-            # its deterministic maker without updating active_filters; recover it
-            # only when every application-authored option agrees.
-            if product is None and reason == "scope_warning":
-                candidates = {
-                    str(candidate)
-                    for option in outcome.related
-                    if (candidate := (option.filters or {}).get("normalized_name"))
-                }
-                if len(candidates) == 1:
-                    product = candidates.pop()
-            request = build_guidance_request(
-                question=question,
-                status=outcome.status,
-                reason=reason,
-                product=product,
-                clarify=outcome.clarify,
-                related=outcome.related,
-            )
-            rj["prompt"] = QUERY_GUIDANCE_PROMPT.as_dict()
-            rj["guidance"] = {"attempted": True, "applied": False}
-            router_model_name = current_model_name(role="router")
-            outcome.model_name = router_model_name
-            audit.model_name = router_model_name
-            log.info("llm_prompt", role="router", **QUERY_GUIDANCE_PROMPT.log_fields())
-            try:
-                guide_response = _complete_structured(
-                    get_llm_provider(role="router"), request.messages, max_tokens=600
-                )
-            except D1ResidencyError:
-                # Same fail-closed residency behavior as grounded synthesis: the
-                # outer audited pipeline boundary converts this into status=error.
-                raise
-            except Exception as exc:
-                log.warning(
-                    "qa_guidance_provider_error",
-                    error_type=type(exc).__name__,
-                )
-                capture_exception(exc)
-                rj["guidance"]["fallback_reason"] = "provider_error"
-            else:
-                outcome.model_name = guide_response.model
-                audit.model_name = guide_response.model
-                for field_name, value in _usage_fields(
-                    guide_response.model, guide_response.usage
-                ).items():
-                    setattr(audit, field_name, value)
-                try:
-                    plan = parse_guidance_plan(guide_response.text, request)
-                except ValueError as exc:
-                    log.warning("qa_guidance_invalid", reason=str(exc))
-                    rj["guidance"]["fallback_reason"] = str(exc)
-                else:
-                    message = render_guidance_message(
-                        plan,
-                        reason=reason,
-                        product=product,
-                        fallback=outcome.answer,
-                    )
-                    outcome.answer = message
-                    audit.answer_text = message
-                    if outcome.status == "clarify":
-                        outcome.interpretation = message
-                    outcome.clarify = prioritize_options(
-                        outcome.clarify, channel="clarify", plan=plan
-                    )
-                    outcome.related = prioritize_options(
-                        outcome.related, channel="related", plan=plan
-                    )
-                    rj["guidance"] = {
-                        "attempted": True,
-                        "applied": True,
-                        "next_step": plan.next_step,
-                        "option_ids": list(plan.option_ids),
-                        "selected_options": selected_option_records(plan, request),
-                    }
-        return outcome, audit, _build_patch(outcome, filters=active_filters, route_json=rj)
 
-    if _is_scope_warning_request(question):
-        return _decline(
-            _scope_warning,
-            reason="scope_warning",
-            response_mode="scope_warning",
-            # A caller-pinned product (API/dossier filter, already
-            # canonicalized above) short-circuits resolution.
-            filters=active_filters,
-        )
+def _resolve_and_carry_over(
+    state: TurnState,
+    *,
+    question: str,
+    _decline: Callable[..., tuple[RagOutcome, AuditPayload, SessionPatch]],
+    _session_filters: Callable[[], dict[str, Any]],
+) -> tuple[RagOutcome, AuditPayload, SessionPatch] | TurnState:
+    """Entity resolution + session carry-over (product first, then form/route).
 
-    # Meta gate — "what does this system do" → answer from trusted system state,
-    # then one bounded guidance turn; no retrieval. This sits AFTER the
-    # scope-warning check and BEFORE entity
-    # resolution/retrieval ON PURPOSE. It is a HARD VETO: fire meta only when the
-    # phrase matches AND the question does NOT resolve to a named in-corpus drug.
-    # The ordering is load-bearing — a named-drug question that happens to carry a
-    # meta phrase ("what BE study do you cover for atorvastatin?") MUST skip meta
-    # and continue to the grounded cite-or-refuse path, never the uncited answer.
-    # A caller-pinned product (API/dossier filter) is likewise a resolved context,
-    # so it also skips meta.
-    if (
-        _is_meta_request(question)
-        and not active_filters.get("normalized_name")
-        and resolve_product(question).status != "resolved"
-    ):
-        return _decline(_meta, reason="meta", response_mode="meta")
-
+    Mutates ``state`` in place and returns it to continue the turn; a tuple
+    return is a terminal clarify/refuse from the resolution family.
+    """
     # Entity resolution FIRST: pin the product before semantic retrieval so FDA
     # template boilerplate shared across drugs cannot leak a wrong-drug citation.
     # Skip only when the caller already pinned the product (API / dossier).
-    if not active_filters.get("normalized_name"):
+    if not state.active_filters.get("normalized_name"):
         resolution = resolve_product(question)
         if resolution.status == "resolved":
-            active_filters["normalized_name"] = resolution.normalized_name
-            resolved_by_name = resolution.by_name
+            state.active_filters["normalized_name"] = resolution.normalized_name
+            state.resolved_by_name = resolution.by_name
         elif resolution.status == "ambiguous":
             # Several products match → ASK which, don't guess (cross-drug guard).
             return _decline(
@@ -1652,11 +1455,11 @@ def ask_core(
                 # Carry the product across turns (the chosen dosage_form/route are
                 # carried just below, after resolved_name is set, so the same logic
                 # also covers the single-product-corpus fallback path).
-                active_filters["normalized_name"] = canonical_name(
+                state.active_filters["normalized_name"] = canonical_name(
                     str(session_filters["normalized_name"])
                 )
-                context_applied = True
-                resolved_by_name = False
+                state.context_applied = True
+                state.resolved_by_name = False
             else:
                 # No product named. Offer a high-confidence "did you mean" for genuine
                 # typos, then a brand→generic lookup (Adderall → amphetamine); else
@@ -1692,7 +1495,7 @@ def ask_core(
                     related=_options_from_names(suggestions + brand_matches),
                 )
 
-    resolved_name = active_filters.get("normalized_name")
+    resolved_name = state.active_filters.get("normalized_name")
 
     # Multi-form session carry-over: a follow-up that didn't itself pin a form
     # inherits the dosage_form/route the user already chose for THIS product (via
@@ -1702,16 +1505,70 @@ def ask_core(
     # "What about dissolution?" would re-trigger the multi-form clarify.
     if (
         resolved_name
-        and not active_filters.get("dosage_form")
-        and not active_filters.get("route")
+        and not state.active_filters.get("dosage_form")
+        and not state.active_filters.get("route")
         and _looks_like_follow_up(question)
     ):
         session_filters = _session_filters()
         if session_filters.get("normalized_name") == resolved_name:
             for key in ("dosage_form", "route"):
                 if session_filters.get(key):
-                    active_filters[key] = session_filters[key]
-                    context_applied = True
+                    state.active_filters[key] = session_filters[key]
+                    state.context_applied = True
+
+    return state
+
+
+def _pre_retrieval_route(
+    state: TurnState,
+    *,
+    question: str,
+    _decline: Callable[..., tuple[RagOutcome, AuditPayload, SessionPatch]],
+    _session_filters: Callable[[], dict[str, Any]],
+    _recent_turns: Callable[[], list[PriorTurn]],
+) -> tuple[RagOutcome, AuditPayload, SessionPatch] | TurnState:
+    """Every gate that can end the turn before retrieval runs.
+
+    Order is load-bearing and unchanged: scope warning, meta (with its
+    named-drug hard veto), resolution + carry-over, the vague-input clarify,
+    then the pre-retrieval multi-form guard.
+    """
+    if _is_scope_warning_request(question):
+        return _decline(
+            _scope_warning,
+            reason="scope_warning",
+            response_mode="scope_warning",
+            # A caller-pinned product (API/dossier filter, already
+            # canonicalized by ask_core) short-circuits resolution.
+            filters=state.active_filters,
+        )
+
+    # Meta gate — "what does this system do" → answer from trusted system state,
+    # then one bounded guidance turn; no retrieval. This sits AFTER the
+    # scope-warning check and BEFORE entity
+    # resolution/retrieval ON PURPOSE. It is a HARD VETO: fire meta only when the
+    # phrase matches AND the question does NOT resolve to a named in-corpus drug.
+    # The ordering is load-bearing — a named-drug question that happens to carry a
+    # meta phrase ("what BE study do you cover for atorvastatin?") MUST skip meta
+    # and continue to the grounded cite-or-refuse path, never the uncited answer.
+    # A caller-pinned product (API/dossier filter) is likewise a resolved context,
+    # so it also skips meta.
+    if (
+        _is_meta_request(question)
+        and not state.active_filters.get("normalized_name")
+        and resolve_product(question).status != "resolved"
+    ):
+        return _decline(_meta, reason="meta", response_mode="meta")
+
+    resolved = _resolve_and_carry_over(
+        state, question=question, _decline=_decline, _session_filters=_session_filters
+    )
+    if not isinstance(resolved, TurnState):
+        return resolved
+
+    # The same read _resolve_and_carry_over ended on: normalized_name is
+    # settled for the remainder of the turn once resolution has run.
+    resolved_name = state.active_filters.get("normalized_name")
 
     # Bare drug name / no real question → guide with options instead of dumping a
     # default BE answer. Fires however the product was pinned — named in the
@@ -1754,8 +1611,8 @@ def ask_core(
         try:
             combos = current_dosage_form_routes(
                 resolved_name,
-                dosage_form=active_filters.get("dosage_form"),
-                route=active_filters.get("route"),
+                dosage_form=state.active_filters.get("dosage_form"),
+                route=state.active_filters.get("route"),
             )
         except Exception as exc:
             # This enumeration is a CORRECTNESS guard (it prevents the wrong-form
@@ -1783,7 +1640,7 @@ def ask_core(
             # to clarify). Only a form-silent or ambiguous question clarifies.
             pinned = _combo_from_question(question, combos)
             if pinned is not None:
-                active_filters["dosage_form"], active_filters["route"] = pinned
+                state.active_filters["dosage_form"], state.active_filters["route"] = pinned
             else:
                 return _decline(
                     _clarify,
@@ -1796,12 +1653,33 @@ def ask_core(
                     options=build_form_options(resolved_name, combos, question),
                 )
 
+    return state
+
+
+def _retrieve_and_group(
+    state: TurnState,
+    *,
+    question: str,
+    k: int | None,
+    s: Settings,
+    _decline: Callable[..., tuple[RagOutcome, AuditPayload, SessionPatch]],
+    _emit: Callable[[str], None],
+    _recent_turns: Callable[[], list[PriorTurn]],
+) -> tuple[RagOutcome, AuditPayload, SessionPatch] | TurnState:
+    """Retrieve + rerank + threshold + the post-retrieval tripwires.
+
+    A turn that passes every guard leaves ``state.passages`` (audit trail),
+    ``state.evidence_passages`` (the only passages synthesis may see) and
+    ``state.route_json`` (the retrieval route) for ``_synthesize_and_admit``.
+    """
+    resolved_name = state.active_filters.get("normalized_name")
+
     # Stage 1: wide-net vector search (up to VECTOR_TOP_K), constrained to the product.
     route_json = _route_json(
-        filters=active_filters,
+        filters=state.active_filters,
         reason="retrieval",
-        context_applied=context_applied,
-        response_mode=response_mode,
+        context_applied=state.context_applied,
+        response_mode=state.response_mode,
     )
     _emit("Searching the FDA guidance corpus…")
     _maybe_inject_fault("retrieve")
@@ -1810,7 +1688,7 @@ def ask_core(
     # auditable: the mode determines the SQL and the session settings outright
     # (store.embedding_profiles.build_search_sql), so recording it records what
     # ran rather than what we hope ran.
-    retrieval_scope = RetrievalScope.from_filters(active_filters)
+    retrieval_scope = RetrievalScope.from_filters(state.active_filters)
     retrieval_mode = default_mode_for_scope(retrieval_scope)
     # Embed the RE-ANCHORED query, not necessarily the user's words: a
     # contentless drill-down has no topical signal of its own. Identity for
@@ -1825,7 +1703,7 @@ def ask_core(
     # words, and M7 (follow-up miss rate) counts exactly this flag.
     if search_query != question:
         route_json["retrieval_query_rewritten"] = True
-    retrieval_block.update(
+    state.retrieval_block.update(
         RetrievalPlan(
             mode=retrieval_mode,
             scope=retrieval_scope,
@@ -1834,9 +1712,9 @@ def ask_core(
             k=k if k is not None else s.vector_top_k,
         ).as_route_json()
     )
-    passages = retrieve(search_query, k=k, filters=active_filters, mode=retrieval_mode)
-    retrieval_block["returned"] = len(passages)
-    route_json["retrieval"] = dict(retrieval_block)
+    passages = retrieve(search_query, k=k, filters=state.active_filters, mode=retrieval_mode)
+    state.retrieval_block["returned"] = len(passages)
+    route_json["retrieval"] = dict(state.retrieval_block)
     # Stage 2: optional rerank, then trim to RERANK_TOP_K. Same rewritten query
     # -- the reranker scores relevance against the search intent, not the
     # literal keystrokes.
@@ -1913,6 +1791,33 @@ def ask_core(
             # cross-form evidence is the whole point of the row).
             passages=passages,
         )
+
+    state.passages = passages
+    state.evidence_passages = evidence_passages
+    state.route_json = route_json
+    return state
+
+
+def _synthesize_and_admit(
+    state: TurnState,
+    *,
+    question: str,
+    session_id: str,
+    turn_id: str,
+    user_id: str | None,
+    s: Settings,
+    _decline: Callable[..., tuple[RagOutcome, AuditPayload, SessionPatch]],
+    _emit: Callable[[str], None],
+    _recent_turns: Callable[[], list[PriorTurn]],
+) -> tuple[RagOutcome, AuditPayload, SessionPatch]:
+    """Prompt build + the one synthesis call + the admit gate + verdicts.
+
+    Always terminal: every branch returns the (outcome, audit, patch) triple.
+    """
+    passages = state.passages
+    evidence_passages = state.evidence_passages
+    route_json = state.route_json
+    resolved_name = state.active_filters.get("normalized_name")
 
     _emit(f"Reading {len(evidence_passages)} matching guidance passage(s)…")
     # Conversational memory: thread the last few ANSWERED turns so a follow-up
@@ -2048,7 +1953,7 @@ def ask_core(
         # vague inputs `_looks_vague` didn't catch) -> guide. When the product
         # came from the single-product fallback (no drug named), a decline is a
         # genuine "not covered" -> stay refused (INV-2).
-        if resolved_by_name and resolved_name:
+        if state.resolved_by_name and resolved_name:
             return _decline(
                 _clarify,
                 reason="model_refusal",
@@ -2123,7 +2028,7 @@ def ask_core(
         refused=False,
         model_name=response.model,
         retrieved=audited,
-        status=response_mode,
+        status=state.response_mode,
         reason=route_json.get("reason"),
         session_id=session_id,
         turn_id=turn_id,
@@ -2139,7 +2044,7 @@ def ask_core(
         session_id=session_id,
         turn_id=turn_id,
         user_id=user_id,
-        status=response_mode,
+        status=state.response_mode,
         route_json=route_json,
         # No-audit-no-answer (INV-6): a validated answer with no audit row is
         # never returned -- but the failure must be DEFINED, not a naked 500
@@ -2148,7 +2053,7 @@ def ask_core(
         # STRICT write; on failure it serves this fallback -- the fixed-copy
         # status="error" refusal, whose own audit is re-attempted and skipped
         # (flagged) if the DB is still down. Built eagerly (it is pure):
-        # active_filters/context_applied no longer mutate after synthesis, so
+        # state.active_filters/state.context_applied no longer mutate after synthesis, so
         # build-time and failure-time route_json are identical.
         allow_skip=False,
         failure_fallback=_decline(
@@ -2168,7 +2073,258 @@ def ask_core(
         ),
         **_usage_fields(response.model, response.usage),
     )
-    return outcome, audit, _build_patch(outcome, filters=active_filters, route_json=route_json)
+    return (
+        outcome,
+        audit,
+        _build_patch(outcome, filters=state.active_filters, route_json=route_json),
+    )
+
+
+def ask_core(
+    question: str,
+    *,
+    session_id: str,
+    turn_id: str,
+    filters: dict[str, Any] | None = None,
+    k: int | None = None,
+    user_id: str | None = None,
+    load_session_filters: Callable[[], dict[str, Any]],
+    load_recent_turns: Callable[[], list[PriorTurn]],
+    on_progress: Callable[[str], None] | None = None,
+) -> tuple[RagOutcome, AuditPayload, SessionPatch]:
+    """The PURE compute half of a turn: load context -> compute -> describe.
+
+    Performs NO persistence on ANY path (success, refusal, clarify, meta, and
+    error paths alike): every branch returns (RagOutcome, AuditPayload,
+    SessionPatch) and the ``ask()`` shell -- later, the Go control plane --
+    performs the writes. Reads are allowed (retrieval reads the vector store,
+    the resolver reads products); session context comes in through the two
+    shell-owned loaders, invoked lazily at exactly the pre-split call points so
+    turns that never carry context over still skip the reads.
+
+    ``session_id``/``turn_id`` are the SHELL's ids (already ensured/degraded);
+    the core only threads them into what it returns.
+
+    ``on_progress`` behaves exactly as documented on ``ask()``: cosmetic,
+    best-effort, never answer-bearing. There is deliberately NO token sink here
+    -- answer text is replayed by the shell after the audit write, so the core
+    emits no user-visible bytes at all.
+    """
+    s = get_settings()
+
+    def _emit(textline: str) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(textline)
+        except Exception:  # broad: progress is best-effort, never fatal
+            log.debug("on_progress_failed", exc_info=True)
+
+    model_name = current_model_name(role="synthesizer")
+    active_filters: dict[str, Any] = dict(filters or {})
+    # Product-key hardening: a caller (API / dossier / clarify option) may pass a
+    # normalized_name in any casing or salt-order. Canonicalize it to the exact key
+    # the corpus stores (canonical_name) so retrieval's exact-match filter cannot
+    # silently miss and turn a real product into a wrong refusal.
+    if active_filters.get("normalized_name"):
+        active_filters["normalized_name"] = canonical_name(str(active_filters["normalized_name"]))
+
+    # Up to two carry-over sites below read the session filters (product in the
+    # resolver's none-branch, then dosage_form/route after resolution). Nothing
+    # mutates them mid-turn (the shell applies filter updates after the turn),
+    # so fetch lazily ONCE and reuse instead of two identical row reads per
+    # follow-up. Lazy so turns that never carry over still skip the read.
+    session_filters_memo: dict[str, Any] | None = None
+
+    def _session_filters() -> dict[str, Any]:
+        nonlocal session_filters_memo
+        if session_filters_memo is None:
+            session_filters_memo = load_session_filters()
+        return session_filters_memo
+
+    recent_turns_memo: list[PriorTurn] | None = None
+
+    def _recent_turns() -> list[PriorTurn]:
+        """History, loaded at most once per turn.
+
+        Two callers now need it -- the retrieval rewrite (before the vector
+        search) and the synthesizer's conversation block (after it) -- and
+        ``load_recent_turns`` is a DB read. Memoized so widening the follow-up
+        path does not double the per-turn query count.
+        """
+        nonlocal recent_turns_memo
+        if recent_turns_memo is None:
+            recent_turns_memo = load_recent_turns()
+        return recent_turns_memo
+
+    response_mode: QueryStatusLiteral = "summary" if _is_summary_request(question) else "answer"
+    state = TurnState(active_filters=active_filters, response_mode=response_mode)
+
+    def _decline(
+        maker: Callable[..., tuple[RagOutcome, AuditPayload]],
+        *,
+        reason: str,
+        response_mode: str,
+        route_extra: dict[str, Any] | None = None,
+        guide: bool = True,
+        **kw: Any,
+    ) -> tuple[RagOutcome, AuditPayload, SessionPatch]:
+        """One ceremony for every terminal decline (_refuse/_clarify/_scope_warning/
+        _meta) branch: build the audit route_json and the result TOGETHER so the
+        reason/response_mode pairing is single-source -- a branch can no longer
+        record an audit route that silently disagrees with the turn it describes.
+        Reads state.active_filters/state.context_applied at CALL time (they mutate as the
+        pipeline advances); post-synthesis branches override model_name
+        (response.model) and pass usage via **kw.
+
+        ``route_extra`` and ``guide`` are NAMED keywords, so neither is forwarded
+        to ``maker`` via **kw. Healthy PRE-synthesis terminal branches keep
+        ``guide=True`` and therefore attempt one constrained router completion;
+        post-synthesis/error branches set it false because an AI call already
+        happened or the failure makes another call inappropriate."""
+        rj = _route_json(
+            filters=state.active_filters,
+            reason=reason,
+            context_applied=state.context_applied,
+            response_mode=response_mode,
+        )
+        # Declines that happen AFTER stage-1 search still describe a retrieval
+        # that ran, so the plan belongs on their audit row too. _decline builds
+        # a FRESH rj, so it cannot inherit the answer path's mutation.
+        if state.retrieval_block:
+            rj["retrieval"] = dict(state.retrieval_block)
+        if route_extra:
+            rj.update(route_extra)
+        kw.setdefault("model_name", model_name)
+        outcome, audit = maker(
+            question=question,
+            reason=reason,
+            session_id=session_id,
+            turn_id=turn_id,
+            user_id=user_id,
+            route_json=rj,
+            **kw,
+        )
+
+        if guide and outcome.status != "error":
+            # Every healthy Ask turn reaches exactly one AI path. On a branch that
+            # cannot safely synthesize a cited answer, the router model selects a
+            # server-allowlisted NEXT STEP and existing option IDs. It never writes
+            # display prose, changes status, invents filters, or sees weak passage
+            # text. A provider/shape failure keeps the trusted deterministic reply.
+            product = str(state.active_filters.get("normalized_name") or "").strip() or None
+            # An ambiguous/suggested candidate is not trusted product context.
+            # Scope guidance is the one handler that may resolve a product inside
+            # its deterministic maker without updating state.active_filters; recover it
+            # only when every application-authored option agrees.
+            if product is None and reason == "scope_warning":
+                candidates = {
+                    str(candidate)
+                    for option in outcome.related
+                    if (candidate := (option.filters or {}).get("normalized_name"))
+                }
+                if len(candidates) == 1:
+                    product = candidates.pop()
+            request = build_guidance_request(
+                question=question,
+                status=outcome.status,
+                reason=reason,
+                product=product,
+                clarify=outcome.clarify,
+                related=outcome.related,
+            )
+            rj["prompt"] = QUERY_GUIDANCE_PROMPT.as_dict()
+            rj["guidance"] = {"attempted": True, "applied": False}
+            router_model_name = current_model_name(role="router")
+            outcome.model_name = router_model_name
+            audit.model_name = router_model_name
+            log.info("llm_prompt", role="router", **QUERY_GUIDANCE_PROMPT.log_fields())
+            try:
+                guide_response = _complete_structured(
+                    get_llm_provider(role="router"), request.messages, max_tokens=600
+                )
+            except D1ResidencyError:
+                # Same fail-closed residency behavior as grounded synthesis: the
+                # outer audited pipeline boundary converts this into status=error.
+                raise
+            except Exception as exc:
+                log.warning(
+                    "qa_guidance_provider_error",
+                    error_type=type(exc).__name__,
+                )
+                capture_exception(exc)
+                rj["guidance"]["fallback_reason"] = "provider_error"
+            else:
+                outcome.model_name = guide_response.model
+                audit.model_name = guide_response.model
+                for field_name, value in _usage_fields(
+                    guide_response.model, guide_response.usage
+                ).items():
+                    setattr(audit, field_name, value)
+                try:
+                    plan = parse_guidance_plan(guide_response.text, request)
+                except ValueError as exc:
+                    log.warning("qa_guidance_invalid", reason=str(exc))
+                    rj["guidance"]["fallback_reason"] = str(exc)
+                else:
+                    message = render_guidance_message(
+                        plan,
+                        reason=reason,
+                        product=product,
+                        fallback=outcome.answer,
+                    )
+                    outcome.answer = message
+                    audit.answer_text = message
+                    if outcome.status == "clarify":
+                        outcome.interpretation = message
+                    outcome.clarify = prioritize_options(
+                        outcome.clarify, channel="clarify", plan=plan
+                    )
+                    outcome.related = prioritize_options(
+                        outcome.related, channel="related", plan=plan
+                    )
+                    rj["guidance"] = {
+                        "attempted": True,
+                        "applied": True,
+                        "next_step": plan.next_step,
+                        "option_ids": list(plan.option_ids),
+                        "selected_options": selected_option_records(plan, request),
+                    }
+        return outcome, audit, _build_patch(outcome, filters=state.active_filters, route_json=rj)
+
+    routed = _pre_retrieval_route(
+        state,
+        question=question,
+        _decline=_decline,
+        _session_filters=_session_filters,
+        _recent_turns=_recent_turns,
+    )
+    if not isinstance(routed, TurnState):
+        return routed
+
+    grouped = _retrieve_and_group(
+        state,
+        question=question,
+        k=k,
+        s=s,
+        _decline=_decline,
+        _emit=_emit,
+        _recent_turns=_recent_turns,
+    )
+    if not isinstance(grouped, TurnState):
+        return grouped
+
+    return _synthesize_and_admit(
+        state,
+        question=question,
+        session_id=session_id,
+        turn_id=turn_id,
+        user_id=user_id,
+        s=s,
+        _decline=_decline,
+        _emit=_emit,
+        _recent_turns=_recent_turns,
+    )
 
 
 def ask(
