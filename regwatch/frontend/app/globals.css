@@ -13,6 +13,7 @@
   --paper: #faf6ec;
   --paper-2: #f4eede;
   --paper-3: #efe7d3;
+  --paper-bright: #fffdf8; /* raised surface: composer bar, fields, active rail rows */
   --edge: #e4d9bf; /* hairline on paper */
 
   /* Ink */
@@ -33,6 +34,9 @@
   /* Serious notice (refusal / stamp) */
   --oxblood: #7a2e2e;
   --oxblood-wash: #f3e3df;
+
+  /* Settled green: high-confidence dot; not a brand accent. */
+  --green-settled: #3f7d54;
 
   --shadow-soft: 0 1px 2px rgba(22, 33, 58, 0.05), 0 14px 34px -20px rgba(22, 33, 58, 0.28);
   --shadow-lift: 0 2px 4px rgba(22, 33, 58, 0.06), 0 22px 48px -24px rgba(22, 33, 58, 0.34);
@@ -252,6 +256,26 @@ main:focus {
   font-size: 0.74rem;
   color: var(--ink-faint);
 }
+/* Docket header of a reopened conversation: its filed identity (title + opened
+   date) above the transcript, like a case caption. Only rehydrated threads
+   have server meta, so live conversations never show one. */
+.chat__docket {
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--edge);
+}
+.chat__docket-title {
+  margin: 0.45rem 0 0.3rem;
+  font-family: var(--font-display), Georgia, serif;
+  font-weight: 500;
+  font-size: 1.15rem;
+  line-height: 1.25;
+  color: var(--ink);
+}
+.chat__docket-date {
+  margin: 0;
+  font-size: 0.7rem;
+  color: var(--ink-faint);
+}
 .chat__empty {
   margin-top: 0.75rem;
 }
@@ -307,6 +331,22 @@ main:focus {
 .chat-row--user {
   justify-content: flex-end;
 }
+/* The docket margin: the assistant's avatar column. Narrow viewports get just
+   the avatar; >=1100px it widens into a marginal provenance rail (see the
+   min-width query beside the 860px block below). */
+.chat-row__margin {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  width: 1.7rem;
+}
+/* Marginalia (time filed, audit no, confidence dot) exist only on the wide
+   rail -- hidden by default, revealed by the min-width query. */
+.marginalia {
+  display: none;
+}
 .avatar {
   flex: none;
   width: 1.7rem;
@@ -351,10 +391,28 @@ main:focus {
 /* Provisional streaming draft: the answer as it types, BEFORE citation
    validation. Muted + labelled so it never reads as a settled, sourced answer;
    it carries no citation stamps / drawer / confidence (INV-1/INV-2) and is
-   replaced by the validated turn when the result frame lands. */
+   replaced by the validated turn when the result frame lands. The draft is now
+   citation-less Markdown (no pre-wrap needed) -- same typography as the settled
+   answer, so settling doesn't reflow the whole reply. */
 .msg__body--draft {
-  white-space: pre-wrap;
   color: var(--ink-soft);
+}
+/* .prose sets --ink; inherit instead so the draft keeps its muted register. */
+.msg__body--draft .prose {
+  color: inherit;
+}
+/* The draft is WHOLLY muted: .prose paints headings navy and list markers
+   gold, but gold means "sourced" on this surface and navy is the settled
+   voice -- unvalidated output inherits the muted ink everywhere instead.
+   (Links are neutralized structurally: the draft's Markdown renders them as
+   plain spans, so .prose a never applies.) */
+.msg__body--draft .prose h1,
+.msg__body--draft .prose h2,
+.msg__body--draft .prose h3 {
+  color: inherit;
+}
+.msg__body--draft .prose li::marker {
+  color: inherit;
 }
 .msg__drafting {
   display: inline-flex;
@@ -401,6 +459,13 @@ main:focus {
   font-size: 0.7rem;
   color: var(--ink-faint);
 }
+/* Stream-fallback disclosure: the draft vanished mid-type, so the settled turn
+   says why. Transport detail, not epistemic status -- quiet ink, never oxblood. */
+.msg__fallback {
+  margin: 0.7rem 0 0;
+  font-size: 0.7rem;
+  color: var(--ink-faint);
+}
 /* Why a turn was declined / clarified — a quiet mono caption under the tag or
    prompt. Text only; carries no grounding (INV-2). */
 .msg__reason {
@@ -411,6 +476,39 @@ main:focus {
 }
 .msg__declined .msg__reason {
   color: #6a4a4a; /* readable within the oxblood wash */
+}
+/* "Likely transient" cue on infrastructure failures only -- a quiet next step,
+   subordinate to the reason line it follows. */
+.msg__declined .msg__retry {
+  margin: 0.45rem 0 0;
+  font-size: 0.72rem;
+  color: #6a4a4a;
+}
+/* INV-1 backstop: an answer that arrived with zero citations is an anomaly and
+   must read like one. Mirrors the declined register (oxblood seam + wash, mono
+   uppercase tag) under its OWN class -- INV-2 tests key on .msg__declined, so
+   that class stays reserved for refusals/scope. */
+.msg__ungrounded {
+  margin: 0.7rem 0 0;
+  border-left: 2px solid var(--oxblood);
+  background: var(--oxblood-wash);
+  border-radius: 0 6px 6px 0;
+  padding: 0.7rem 0.9rem;
+  color: #5a2222;
+}
+.msg__ungrounded .msg__ungrounded-tag {
+  display: block;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--oxblood);
+  margin-bottom: 0.35rem;
+}
+.msg__ungrounded p {
+  margin: 0;
+  line-height: 1.55;
 }
 /* "Interpreted as: …" — a subordinate caption ABOVE the answer body, showing how
    a terse question was read when the rewrite adds information. */
@@ -441,7 +539,7 @@ main:focus {
   background: var(--ink-faint);
 }
 .confidence--high .confidence__dot {
-  background: #3f7d54; /* settled green — a clear-cut retrieval */
+  background: var(--green-settled); /* a clear-cut retrieval */
 }
 .confidence--moderate .confidence__dot {
   background: var(--gold-deep); /* hedged amber near the threshold */
@@ -462,6 +560,11 @@ main:focus {
 }
 .recency__diff {
   color: var(--ink-soft);
+}
+/* Explicit "not recorded" state (drawer + references): absence of a revision
+   date is provenance information too -- say so instead of rendering nothing. */
+.recency__none {
+  color: var(--ink-faint);
 }
 
 /* Citation chips: compact grounding, each links to its FDA source. The full
@@ -560,6 +663,17 @@ main:focus {
   font-size: 0.72rem;
   color: var(--ink-soft);
 }
+/* The SSE status frames the answer settled through, numbered like a docket log.
+   list-style is restated because the Tailwind preflight strips it. */
+.prov__log {
+  margin: 0.45rem 0 0;
+  padding-left: 1.5rem;
+  list-style: decimal;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  color: var(--ink-faint);
+}
 
 /* Clarify options + example prompts: soft pills, matching the mockup. */
 .pills {
@@ -586,6 +700,40 @@ main:focus {
 .pill:disabled {
   opacity: 0.55;
   cursor: progress;
+}
+
+/* Failed send: transport-register notice under the unanswered inquiry turn.
+   Quiet mono oxblood TEXT only -- deliberately NOT the .msg__declined block:
+   that register is an epistemic verdict (INV-2); this is plumbing. Right-
+   aligned because it belongs to the user bubble above it. */
+.sendfail {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+.sendfail__msg {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--oxblood);
+}
+.sendfail__retry {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--oxblood);
+  background: transparent;
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+.sendfail__retry:hover {
+  border-color: var(--oxblood);
 }
 
 /* Composer: a rounded bar pinned to the bottom with a round gold send. */
@@ -615,11 +763,58 @@ main:focus {
   grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
   margin-top: 0.6rem;
 }
+/* Active-scope chips between the folded filter editor and the bar: the
+   details element hides the scope, so this row is what makes it visible. */
+.composer__scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+/* AA contrast: .chip's --ink-soft sits at 4.17:1 on the chip's --paper-3
+   ground -- under the 4.5:1 small-text floor at this ~11px size. --ink-2
+   clears it with room (10:1). Repeated .chip outranks the base .chip color. */
+.chip.composer__scope-chip,
+.chip.composer__restore {
+  color: var(--ink-2);
+}
+/* Uppercased key label inside a scope chip (e.g. INGREDIENT albuterol).
+   --ink-faint clears AA here (4.54:1 on --paper-3). */
+.composer__scope-chip .chip__k {
+  font-size: 0.58rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+/* Clearing scope / restoring a question are neutral acts: hover stays in the
+   ink/edge register -- button.chip's default hover is gold-washed, and gold
+   means "sourced" here. Extra specificity (.chip repeated) outranks that base
+   hover rule. */
+button.chip.composer__scope-chip:hover:not(:disabled),
+button.chip.composer__restore:hover:not(:disabled) {
+  border-color: var(--ink-faint);
+  background: var(--paper-2);
+  color: var(--ink);
+}
+/* Restore chip: hands a cancelled question back; the quoted text is a
+   recognition cue, not a transcript (JS truncates it). */
+.composer__restore {
+  margin-bottom: 0.5rem;
+}
+.composer__restore-quote {
+  color: var(--ink-faint);
+}
+/* Why the composer is paused while a conversation opens (typing stays live). */
+.composer__hint {
+  margin: 0.45rem 0 0;
+  font-size: 0.7rem;
+  color: var(--ink-faint);
+}
 .composer__bar {
   display: flex;
   align-items: flex-end;
   gap: 0.5rem;
-  background: #fffdf8;
+  background: var(--paper-bright);
   border: 1px solid var(--edge);
   border-radius: 14px;
   padding: 0.4rem 0.4rem 0.4rem 1rem;
@@ -748,7 +943,7 @@ main:focus {
 /* ---------- Document card ---------- */
 .doc {
   position: relative;
-  background: linear-gradient(180deg, #fffdf8, var(--paper-2));
+  background: linear-gradient(180deg, var(--paper-bright), var(--paper-2));
   border: 1px solid var(--edge);
   border-radius: 3px;
   box-shadow: var(--shadow-soft);
@@ -774,7 +969,7 @@ main:focus {
   font-family: var(--font-body), sans-serif;
   font-size: 1rem;
   color: var(--ink);
-  background: #fffdf8;
+  background: var(--paper-bright);
   border: 1px solid var(--edge);
   border-radius: 2px;
   padding: 0.7rem 0.85rem;
@@ -851,7 +1046,7 @@ main:focus {
   gap: 0.9rem;
   width: 100%;
   text-align: left;
-  background: #fffdf8;
+  background: var(--paper-bright);
   border: 1px solid var(--edge);
   border-radius: 2px;
   padding: 0.85rem 1rem;
@@ -1132,10 +1327,10 @@ button.chip:disabled {
   transition: background 0.15s ease, box-shadow 0.15s ease;
 }
 .hist:hover {
-  background: #fffdf8;
+  background: var(--paper-bright);
 }
 .hist--active {
-  background: #fffdf8;
+  background: var(--paper-bright);
   box-shadow: inset 3px 0 0 var(--gold);
 }
 .hist__main {
@@ -1291,7 +1486,7 @@ button.chip:disabled {
   background: var(--gold-deep);
 }
 .wp-dot--verified_absent {
-  background: #fffdf8;
+  background: var(--paper-bright);
   box-shadow: inset 0 0 0 1.5px var(--ink-soft);
 }
 .wp-dot--analyst_input_required {
@@ -1530,7 +1725,7 @@ button.chip:disabled {
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 999px;
-  background: #fffdf8;
+  background: var(--paper-bright);
   box-shadow: inset 0 0 0 1.5px var(--ink-soft);
 }
 
@@ -1650,6 +1845,45 @@ button.chip:disabled {
   }
   .scopebar {
     flex-wrap: wrap;
+  }
+}
+
+/* ---------- The docket margin (>=1100px) ----------
+   First min-width query in the file (the app is desktop-first; the 860px block
+   above handles narrow screens): on wide viewports the assistant avatar column
+   grows into a period-correct marginal rail -- time filed, audit number,
+   confidence dot -- set right-aligned against the message column. Promotes the
+   provenance already on the wire into the page's identity; below 1100px the
+   rail collapses back to the bare avatar (.marginalia stays display:none). */
+@media (min-width: 1100px) {
+  .chat-row__margin {
+    width: 4.6rem;
+    align-items: flex-end;
+  }
+  .marginalia {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.28rem;
+    font-family: var(--font-mono), monospace;
+    font-size: 0.6rem;
+    letter-spacing: 0.02em;
+    color: var(--ink-faint);
+    text-align: right;
+  }
+  .marginalia__dot {
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 999px;
+  }
+  /* The dot restates the existing confidence bands -- settled green for High,
+     deep gold for Moderate. Gold discipline holds: gold-deep already means
+     "grounded but hedged" on the confidence band itself. */
+  .marginalia__dot--high {
+    background: var(--green-settled);
+  }
+  .marginalia__dot--moderate {
+    background: var(--gold-deep);
   }
 }
 

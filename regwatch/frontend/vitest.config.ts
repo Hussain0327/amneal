@@ -14,6 +14,9 @@ export default defineConfig({
     globals: true,
     setupFiles: ["./test/setup.ts"],
     include: ["test/**/*.test.{ts,tsx}"],
+    // Pin the suite's timezone: date assertions (sidebarHistory's "Jan 5,
+    // 2026", time.test.ts) must not depend on the host's local offset.
+    env: { TZ: "UTC" },
   },
   resolve: {
     // Mirror the tsconfig "@/*" path alias so component imports resolve in tests.

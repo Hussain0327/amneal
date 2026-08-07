@@ -95,11 +95,18 @@ export function EvidenceDrawer({
           {/* Numeric retrieval score lives here only — the main view shows a
               coarse band so a near-threshold answer reads hedged, not precise. */}
           {typeof citation.score === "number" && ` · score ${citation.score.toFixed(2)}`}
+          {/* Which revision of the guidance backed this claim. Type-guarded:
+              legacy rehydrated citations are passthrough dicts and may lack
+              version_id despite the generated type saying it is required. */}
+          {typeof citation.version_id === "number" && ` \u00b7 v${citation.version_id}`}
         </p>
-        <RecencyBadge c={citation} />
+        {/* explicitEmpty: in the evidence view, "no revision date recorded" is
+            itself provenance the analyst needs stated, not omitted. */}
+        <RecencyBadge c={citation} explicitEmpty />
         <blockquote className="ref__quote evidence__quote">{citation.snippet}</blockquote>
+        {/* The arrow is decorative -- keep it out of the accessible name. */}
         <a className="link code evidence__link" href={safeHref(citation.source_url)} target="_blank" rel="noreferrer">
-          Open source PDF ↗
+          Open source PDF <span aria-hidden="true">{"\u2197"}</span>
         </a>
       </aside>
     </div>,

@@ -56,6 +56,10 @@ const ANSWER: Turn = {
   interpretation: "BE study design for albuterol sulfate inhalation aerosol",
   reason: null,
   live: true,
+  createdAt: "2026-01-07T14:32:00Z",
+  statusLog: [],
+  streamFellBack: false,
+  id: null,
   meta: META,
 };
 
@@ -84,6 +88,10 @@ const REFUSAL: Turn = {
   interpretation: null,
   reason: "no_product",
   live: true,
+  createdAt: "2026-01-07T14:41:00Z",
+  statusLog: [],
+  streamFellBack: false,
+  id: null,
   meta: { ...META, audit_id: 4218 },
 };
 
@@ -114,6 +122,10 @@ const CLARIFY: Turn = {
   interpretation: "There are three propranolol guidances in the corpus — which dosage form?",
   reason: "multi_form",
   live: true,
+  createdAt: "2026-01-07T14:47:00Z",
+  statusLog: [],
+  streamFellBack: false,
+  id: null,
   meta: { ...META, audit_id: 4220 },
 };
 
@@ -129,6 +141,10 @@ const SCOPE: Turn = {
   interpretation: null,
   reason: "scope_warning",
   live: true,
+  createdAt: "2026-01-07T14:52:00Z",
+  statusLog: [],
+  streamFellBack: false,
+  id: null,
   meta: { ...META, audit_id: 4221 },
 };
 
@@ -228,9 +244,13 @@ export default function FixturesPage() {
 
         <Section no="F1b" title="Streaming draft — provisional, before citation validation">
           <div className="chat-row">
-            <span className="avatar" aria-hidden>
-              RW
-            </span>
+            {/* Bare avatar (no marginalia): a draft has no provenance yet. The
+                margin wrapper keeps the column aligned with settled turns. */}
+            <div className="chat-row__margin">
+              <span className="avatar" aria-hidden>
+                RW
+              </span>
+            </div>
             <div className="msg">
               <ProvisionalDraft text="For albuterol sulfate inhalation aerosol, the PSG recommends two routes to demonstrating bioequivalence [PSG_021457, p.2]. The in vitro option covers single actuation content and aerodynamic particle size distribution" />
             </div>
@@ -239,22 +259,22 @@ export default function FixturesPage() {
 
         <Section no="F2" title="Answer · cited finding">
           <UserTurn content="What BE study design is recommended for albuterol sulfate inhalation aerosol?" live />
-          <AssistantTurn turn={ANSWER} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} />
+          <AssistantTurn turn={ANSWER} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} threshold={0.3} />
         </Section>
 
         <Section no="F3" title="Helpful refusal · not in corpus">
           <UserTurn content="What BE study design is recommended for atorvastatin oral tablets?" live />
-          <AssistantTurn turn={REFUSAL} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} />
+          <AssistantTurn turn={REFUSAL} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} threshold={0.3} />
         </Section>
 
         <Section no="F4" title="Clarify · options + free-text reply">
           <UserTurn content="propranolol" live />
-          <AssistantTurn turn={CLARIFY} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} />
+          <AssistantTurn turn={CLARIFY} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} threshold={0.3} />
         </Section>
 
         <Section no="F5" title="Scope warning · declined">
           <UserTurn content="Which BE pathway should we pick for our ANDA?" live />
-          <AssistantTurn turn={SCOPE} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} />
+          <AssistantTurn turn={SCOPE} sessionId="s_fixture" onPick={noop} onCite={noop} busy={false} threshold={0.3} />
         </Section>
 
         <footer style={{ margin: "4rem 0 2rem" }}>

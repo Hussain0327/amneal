@@ -1,12 +1,14 @@
 "use client";
 
-import { memo } from "react";
+import { memo, useDeferredValue } from "react";
 
 import { AnswerFeedback } from "@/components/AnswerFeedback";
 import { Markdown } from "@/components/Markdown";
 import { RecencyBadge } from "@/components/RecencyBadge";
 import type { Citation, Suggestion } from "@/lib/api";
-import { confidenceBand, nonAnswerLabel, reasonCopy, type Turn } from "@/lib/turns";
+import { dedupeCitations } from "@/lib/citations";
+import { formatClock, formatFiled, parseApiDate } from "@/lib/time";
+import { confidenceBand, confidenceTitle, nonAnswerLabel, reasonCopy, type Turn } from "@/lib/turns";
 import { safeHref } from "@/lib/url";
 
 // Ask renders as a cited chat: the user's line as a bubble, the assistant as a
@@ -44,20 +46,45 @@ export const UserTurn = memo(function UserTurn({ content, live }: { content: str
 });
 
 // The provisional streaming draft — the assistant's answer as it types, BEFORE
-// citation validation. Deliberately plain: rendered as raw text (not Markdown, so
-// a literal [PSG, p.N] never becomes a clickable stamp), with NO citation chips,
-// evidence drawer, confidence band, feedback, or audit line. Those grounding
-// affordances appear ONLY on a validated turn (INV-1/INV-2). The real
-// AssistantTurn replaces this the instant the result frame lands.
+// citation validation. Rendered as citation-LESS Markdown so the draft reads in
+// the same typography it will settle into (no wholesale reflow on settle):
+// omitting citations/onCite keeps `stampable` false, so a literal [PSG, p.N]
+// never becomes a clickable stamp and there are NO citation chips, evidence
+// drawer, confidence band, feedback, or audit line. Those grounding affordances
+// appear ONLY on a validated turn (INV-1/INV-2). The real AssistantTurn
+// replaces this the instant the result frame lands.
 export function ProvisionalDraft({ text }: { text: string }) {
+  // Deferred so each token's setState commits cheaply and the full markdown
+  // re-parse of the (growing) draft runs at deferred priority -- it may trail
+  // the newest tokens by a frame, which is invisible at stream speed.
+  const deferredText = useDeferredValue(text);
   return (
     <>
-      <div className="msg__body msg__body--draft">{text}</div>
+      <div className="msg__body msg__body--draft">
+        {/* plainLinks: unvalidated output must never render a clickable gold
+            anchor -- links stay inert text until the validated turn lands. */}
+        <Markdown plainLinks>{deferredText}</Markdown>
+      </div>
       <p className="msg__drafting code">
         <span className="msg__drafting-dot" aria-hidden />
         Drafting — verifying citations…
       </p>
     </>
+  );
+}
+
+// The stream died mid-draft and the answer arrived over the plain /query
+// fallback: the analyst watched a half-typed draft vanish, so the settled turn
+// says why -- and that the shown answer was re-verified, not the dead stream's
+// text. Renders nothing on the (overwhelmingly common) clean-stream path.
+// Fixed slot in EVERY branch: immediately after the reply content, before any
+// feedback block -- a transport footnote never interleaves with feedback.
+function FallbackNote({ turn }: { turn: Turn }) {
+  if (!turn.streamFellBack) return null;
+  return (
+    <p className="msg__fallback code">
+      {"Connection dropped mid-draft \u2014 answer re-verified over a fresh request."}
+    </p>
   );
 }
 
@@ -89,12 +116,51 @@ function CiteChip({ c, onSelect }: { c: Citation; onSelect: (c: Citation) => voi
 
 // The assistant frame: navy RW avatar + a message column the status branches
 // fill. (Gold is reserved to grounding — see globals.css.) `live` gates .rise.
-function AssistantShell({ children, live }: { children: React.ReactNode; live: boolean }) {
+//
+// The docket margin: on wide viewports (>=1100px, see globals.css) the avatar
+// column grows into a marginal rail carrying the turn's provenance -- time
+// filed, audit no, confidence dot. aria-hidden: it restates data already read
+// out by the message body / audit line, and it derives from the identity-
+// stable turn object so the memo'd AssistantTurn adds no per-token work.
+// `turn` is optional so a caller without one (in-flight slot, bare fixtures)
+// keeps the plain avatar.
+function AssistantShell({
+  children,
+  live,
+  turn,
+}: {
+  children: React.ReactNode;
+  live: boolean;
+  turn?: Turn;
+}) {
+  const filedMs = turn?.createdAt != null ? parseApiDate(turn.createdAt) : null;
+  // Confidence marks belong ONLY to validated answers (answer/summary): gate
+  // on status BEFORE scoring, so a refused/clarify turn that ever carried a
+  // scored citation still shows no dot. The branch renderers already drop the
+  // citation surface on those paths; the rail must agree (INV-2 defense-in-
+  // depth -- a non-answer never wears a confidence mark).
+  const band =
+    turn && (turn.status === "answer" || turn.status === "summary")
+      ? confidenceBand(turn.citations)
+      : null;
   return (
     <div className={`chat-row${live ? " rise" : ""}`}>
-      <span className="avatar" aria-hidden>
-        RW
-      </span>
+      <div className="chat-row__margin">
+        <span className="avatar" aria-hidden>
+          RW
+        </span>
+        {turn && (filedMs !== null || turn.meta) && (
+          <div className="marginalia" aria-hidden="true">
+            {filedMs !== null && turn.createdAt != null && (
+              <span className="marginalia__time">{formatClock(turn.createdAt)}</span>
+            )}
+            {turn.meta && <span className="marginalia__audit">#{turn.meta.audit_id}</span>}
+            {band && (
+              <span className={`marginalia__dot marginalia__dot--${band.toLowerCase()}`} />
+            )}
+          </div>
+        )}
+      </div>
       <div className="msg">{children}</div>
     </div>
   );
@@ -108,12 +174,17 @@ export const AssistantTurn = memo(function AssistantTurn({
   onPick,
   onCite,
   busy,
+  threshold,
 }: {
   turn: Turn;
   sessionId: string | null;
   onPick: (s: Suggestion) => void;
   onCite: (c: Citation) => void;
   busy: boolean;
+  // Live refusal_score_threshold from /settings (null until it resolves),
+  // grounding the confidence tooltip. A primitive, so memo's shallow compare
+  // still bails out during token streaming.
+  threshold: number | null;
 }) {
   if (turn.status === "clarify") {
     const why = reasonCopy(turn.reason);
@@ -122,7 +193,7 @@ export const AssistantTurn = memo(function AssistantTurn({
         ? turn.interpretation.trim()
         : null;
     return (
-      <AssistantShell live={turn.live}>
+      <AssistantShell live={turn.live} turn={turn}>
         {interpreted && <p className="msg__interp">Interpreted as: {interpreted}</p>}
         <div className="msg__body">
           {/* Clarification copy may contain Markdown, but remains citation-incapable:
@@ -133,9 +204,10 @@ export const AssistantTurn = memo(function AssistantTurn({
             history. Text only, so INV-2 holds (no citation surface). */}
         {why && <p className="msg__reason code">{why}</p>}
         {/* Options are persisted (Tier-2), so rehydrated clarify turns keep them;
-            only pre-Tier-2 legacy rows rehydrate with clarify []. */}
+            only pre-Tier-2 legacy rows rehydrate with clarify []. Named group so
+            a screen reader announces what these buttons collectively are. */}
         {turn.clarify.length > 0 && (
-          <div className="pills">
+          <div className="pills" role="group" aria-label="Clarification options">
             {turn.clarify.map((opt, i) => (
               <button key={`${opt.query}::${i}`} type="button" className="pill" disabled={busy} onClick={() => onPick(opt)}>
                 {opt.label}
@@ -143,6 +215,14 @@ export const AssistantTurn = memo(function AssistantTurn({
             ))}
           </div>
         )}
+        <FallbackNote turn={turn} />
+        {/* Was asking the right call? The exact signal the clarify heuristics
+            need; gated on audit_id like answer feedback. */}
+        {turn.meta && <AnswerFeedback auditId={turn.meta.audit_id} variant="clarify" />}
+        {/* Visible audit trail: without it a clarify turn's audit id lived
+            only inside the aria-hidden marginalia -- which is only honestly
+            decorative when the data is also readable here. */}
+        <AuditLine turn={turn} />
       </AssistantShell>
     );
   }
@@ -154,12 +234,13 @@ export const AssistantTurn = memo(function AssistantTurn({
   // no "No citations" fallback — there is nothing to cite and nothing declined.
   if (turn.status === "meta") {
     return (
-      <AssistantShell live={turn.live}>
+      <AssistantShell live={turn.live} turn={turn}>
         <div className="msg__body">
           {/* Citation-incapable by construction — no citations/onCite passed, so
               the Markdown renders verbatim with zero stamps (INV-2). */}
           <Markdown>{turn.content}</Markdown>
         </div>
+        <FallbackNote turn={turn} />
         <AuditLine turn={turn} />
       </AssistantShell>
     );
@@ -188,7 +269,7 @@ export const AssistantTurn = memo(function AssistantTurn({
         ? turn.interpretation.trim()
         : null;
     return (
-      <AssistantShell live={turn.live}>
+      <AssistantShell live={turn.live} turn={turn}>
         {interpreted && <p className="msg__interp">Interpreted as: {interpreted}</p>}
         <div className="msg__body msg__declined">
           <span className="msg__declined-tag">{tag}</span>
@@ -198,6 +279,14 @@ export const AssistantTurn = memo(function AssistantTurn({
           {/* Why it was declined — plain-language analyst copy under the tag,
               persisted across history. Text only (INV-2 holds). */}
           {why && <p className="msg__reason code">{why}</p>}
+          {/* Infrastructure faults (not evidence gaps) are usually transient:
+              tell the analyst re-asking is reasonable instead of leaving a
+              dead end that reads permanent. */}
+          {tag === "Answer unavailable" && (
+            <p className="msg__retry code">
+              {"Likely transient \u2014 try the question again in a moment."}
+            </p>
+          )}
         </div>
         {/* "Related, not an answer": re-runnable queries (product names + source
             links), NOT evidence. These are inert '.pill' buttons wired to the
@@ -223,13 +312,23 @@ export const AssistantTurn = memo(function AssistantTurn({
             </div>
           </>
         )}
+        <FallbackNote turn={turn} />
+        {/* Was declining the right call? Rating a refusal is the exact
+            0.30-threshold signal; gated on audit_id like answer feedback. */}
+        {turn.meta && <AnswerFeedback auditId={turn.meta.audit_id} variant="declined" />}
         <AuditLine turn={turn} />
       </AssistantShell>
     );
   }
 
-  // answer / summary — a cited finding.
+  // answer / summary -- a cited finding. Chips, the Sources count, and the
+  // reference rows all consume the SAME deduped list the stamp index is built
+  // from (see Markdown.tsx), so a duplicated wire citation can't make [n]
+  // disagree between a stamp and its reference row. hasCitations stays on the
+  // raw array: groundedness is a property of the wire data, not our display
+  // dedupe.
   const hasCitations = turn.citations.length > 0;
+  const deduped = dedupeCitations(turn.citations);
   // Show how the question was read ONLY when it adds information — a rewrite the
   // analyst didn't type. A quiet caption above the answer; subordinate to it.
   const interpreted =
@@ -238,7 +337,7 @@ export const AssistantTurn = memo(function AssistantTurn({
       : null;
   const band = confidenceBand(turn.citations);
   return (
-    <AssistantShell live={turn.live}>
+    <AssistantShell live={turn.live} turn={turn}>
       {interpreted && <p className="msg__interp">Interpreted as: {interpreted}</p>}
       <div className="msg__body">
         {/* Stamps render ONLY here (answer/summary), wired to the evidence drawer
@@ -252,22 +351,40 @@ export const AssistantTurn = memo(function AssistantTurn({
       {hasCitations ? (
         <>
           {/* Coarse, honest confidence — a near-threshold answer reads hedged.
-              The raw score stays out of the main view (drawer only). */}
-          {band && (
-            <p className={`confidence confidence--${band.toLowerCase()}`}>
+              The raw score stays out of the main view (drawer only); the title
+              grounds the band in the live refusal threshold. */}
+          {band ? (
+            <p
+              className={`confidence confidence--${band.toLowerCase()}`}
+              title={confidenceTitle(band, threshold)}
+            >
               <span className="confidence__dot" aria-hidden />
               {band} confidence
+              {/* The title attr is mouse-only (unreachable by keyboard, touch,
+                  or SR); restate the same explanation for everyone else. */}
+              <span className="sr-only">{`\u2014 ${confidenceTitle(band, threshold)}`}</span>
+            </p>
+          ) : (
+            // Citations without scores (older rehydrated rows): state the
+            // absence explicitly -- silently omitting the band would let an
+            // unscored answer read no differently from a scored one. Default
+            // ink-faint dot; no band modifier, so no green/amber is faked.
+            <p className="confidence confidence--none">
+              <span className="confidence__dot" aria-hidden />
+              Confidence not recorded
             </p>
           )}
           <div className="cites">
-            {turn.citations.map((c, i) => (
+            {deduped.map((c, i) => (
               <CiteChip key={`${c.short_name}-${c.page}-${i}`} c={c} onSelect={onCite} />
             ))}
           </div>
           <details className="sources">
-            <summary className="kicker">Sources · {turn.citations.length}</summary>
+            <summary className="kicker">
+              Sources {"\u00b7"} {deduped.length}
+            </summary>
             <div className="mt-2">
-              {turn.citations.map((c, i) => (
+              {deduped.map((c, i) => (
                 <Reference key={`${c.short_name}-${c.page}-${i}`} n={i + 1} c={c} />
               ))}
             </div>
@@ -277,9 +394,19 @@ export const AssistantTurn = memo(function AssistantTurn({
         // Defense-in-depth for INV-1: the backend converts an ungrounded answer
         // to a refusal, so this should be unreachable — but if that ever
         // regressed, a cited surface must never silently pass off an answer with
-        // no grounding as if it were sourced.
-        <p className="msg__audit">No citations</p>
+        // no grounding as if it were sourced. An anomaly this serious gets the
+        // full oxblood register under its OWN class -- INV-2 tests key on
+        // .msg__declined -- not a whisper of meta text.
+        <div className="msg__ungrounded" role="note">
+          <span className="msg__ungrounded-tag">{"Ungrounded \u2014 treat as unverified"}</span>
+          <p>
+            This reply arrived with no supporting citations and could not be verified against
+            the guidance corpus.
+          </p>
+        </div>
       )}
+
+      <FallbackNote turn={turn} />
 
       {/* Feedback is gated on audit_id (meta) presence, not liveness: Tier-2
           persists audit_id, so a rehydrated answer can still be rated — a saved
@@ -294,7 +421,22 @@ export const AssistantTurn = memo(function AssistantTurn({
             {turn.meta.model_name ? `model ${turn.meta.model_name} · ` : ""}audit #{turn.meta.audit_id} · status{" "}
             {turn.status}
             {sessionId ? ` · session ${sessionId}` : ""} · turn {turn.meta.turn_id}
+            {/* Absolute filed time -- only when the timestamp actually parses,
+                so a malformed wire date never prints as garbage. */}
+            {turn.createdAt != null && parseApiDate(turn.createdAt) !== null
+              ? ` \u00b7 filed ${formatFiled(turn.createdAt)}`
+              : ""}
           </p>
+          {/* The SSE docket log this answer settled through -- the live ticker
+              is ephemeral, so the folded provenance keeps the record for the
+              audit-minded (history persists no frames; rehydrated turns skip). */}
+          {turn.statusLog.length > 0 && (
+            <ol className="prov__log">
+              {turn.statusLog.map((frame, i) => (
+                <li key={`${i}-${frame}`}>{frame}</li>
+              ))}
+            </ol>
+          )}
         </details>
       )}
     </AssistantShell>
@@ -309,10 +451,14 @@ function Reference({ n, c }: { n: number; c: Citation }) {
         <span className="ref__src">{c.short_name}</span>
         <span className="ref__page"> · p.{c.page}</span>
       </div>
-      <RecencyBadge c={c} />
+      {/* explicitEmpty: in a reference row, a missing revision date is itself
+          provenance -- state it rather than render nothing. */}
+      <RecencyBadge c={c} explicitEmpty />
       <blockquote className="ref__quote">{c.snippet}</blockquote>
+      {/* Labeled action, not raw-URL soup; the arrow is decorative so the
+          accessible name stays "Open source PDF". */}
       <a className="link code" style={{ fontSize: "0.76rem" }} href={safeHref(c.source_url)} target="_blank" rel="noreferrer">
-        {c.source_url}
+        Open source PDF <span aria-hidden="true">{"\u2197"}</span>
       </a>
     </div>
   );

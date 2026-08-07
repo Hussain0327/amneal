@@ -2,12 +2,16 @@
 
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 
 import { EvidenceDrawer } from "@/components/EvidenceDrawer";
 import { StatusTicker } from "@/components/StatusTicker";
 import { AssistantTurn, ProvisionalDraft, UserTurn } from "@/components/Turns";
 import { useSessions } from "@/components/SessionsProvider";
+import { useSettings } from "@/components/SettingsProvider";
 import { askQueryStream, getSession, STREAM_FALLBACK_STATUS, type Citation, type Suggestion } from "@/lib/api";
+import type { SessionMeta } from "@/lib/auth-types";
+import { formatFiled, parseApiDate } from "@/lib/time";
 import { assistantTurn, nonAnswerLabel, turnFromMessage, userTurn, type Turn } from "@/lib/turns";
 import { syncTextareaHeight } from "@/lib/composer";
 
@@ -54,6 +58,81 @@ function StopGlyph() {
   );
 }
 
+function CrossGlyph() {
+  return (
+    <svg viewBox="0 0 20 20" width="11" height="11" aria-hidden="true" fill="none">
+      <path d="M5 5l10 10M15 5L5 15" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+// Human labels for the two structured filter fields; clarify-pick extras
+// (e.g. "route") read as their key with underscores spaced.
+const FILTER_KEY_LABELS: Record<string, string> = {
+  normalized_name: "ingredient",
+  dosage_form: "form",
+};
+
+function filterLabel(key: string): string {
+  return FILTER_KEY_LABELS[key] ?? key.replace(/_/g, " ");
+}
+
+// Enough of the recoverable question to recognize it, not a transcript.
+function truncateQuote(q: string): string {
+  return q.length > 60 ? `${q.slice(0, 60).trimEnd()}\u2026` : q;
+}
+
+// A send that reached the catch path: everything needed to retry it verbatim.
+interface FailedSend {
+  readonly question: string;
+  readonly filters: Record<string, string> | null;
+  readonly message: string;
+}
+
+// Active-scope chips between the (folded) filter editor and the composer bar:
+// the details element hid the scope, so a clarify pick could silently scope
+// every follow-up. One quiet chip per active filter; the cross clears it.
+function ScopeChips({
+  entries,
+  onClear,
+}: {
+  entries: ReadonlyArray<readonly [string, string]>;
+  onClear: (key: string) => void;
+}) {
+  if (entries.length === 0) return null;
+  return (
+    <div className="composer__scope">
+      {entries.map(([key, value]) => (
+        <button
+          key={key}
+          type="button"
+          className="chip composer__scope-chip"
+          aria-label={`Clear filter: ${filterLabel(key)} ${value}`}
+          onClick={() => onClear(key)}
+        >
+          <span className="chip__k">{filterLabel(key)}</span>
+          {value}
+          <CrossGlyph />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Transport-register failure under the unanswered inquiry turn: quiet mono
+// oxblood TEXT, deliberately NOT the declined block -- that register is an
+// epistemic verdict (INV-2); this is plumbing, so no wash/seam/tag.
+function SendFailNotice({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="sendfail" role="alert">
+      <p className="sendfail__msg code">{`Not sent \u2014 ${message}`}</p>
+      <button type="button" className="sendfail__retry" onClick={onRetry}>
+        Retry
+      </button>
+    </div>
+  );
+}
+
 export default function AskPage() {
   // useSearchParams needs a Suspense boundary during prerender.
   return (
@@ -68,15 +147,36 @@ function AskView() {
   const searchParams = useSearchParams();
   const urlSession = searchParams.get("session");
   const { refresh: refreshSessions, setActiveSessionId } = useSessions();
+  // Grounds each answer's confidence tooltip in the live refusal threshold;
+  // null until /settings resolves (the tooltip degrades, never fakes a number).
+  const { settings } = useSettings();
 
   const [question, setQuestion] = useState("");
   const [ingredient, setIngredient] = useState("");
   const [dosage, setDosage] = useState("");
+  // Clarify-pick filter keys beyond the two visible fields (e.g. "route").
+  // Persisted so a pick's scope truthfully applies to typed follow-ups too --
+  // previously these applied to the pick and then silently vanished.
+  const [extraFilters, setExtraFilters] = useState<Record<string, string>>({});
   const [turns, setTurns] = useState<Turn[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  // The reopened conversation's server identity (title + opened date), rendered
+  // as a docket header above the transcript. null on a live-only conversation
+  // -- the server names a session asynchronously, so we never fake a title.
+  const [sessionMeta, setSessionMeta] = useState<SessionMeta | null>(null);
   const [loading, setLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
+  // History-load failures ONLY (rendered above the composer). Send failures
+  // live in-thread as failedSend so the typed question is never thrown away.
   const [error, setError] = useState<string | null>(null);
+  // The last send that failed in run()'s catch: its optimistic turn stays in
+  // the thread and a Retry renders under it. Mirrored in a ref so the shared
+  // clear can run inside the URL-sync effect without becoming a dependency.
+  const [failedSend, setFailedSend] = useState<FailedSend | null>(null);
+  const failedSendRef = useRef<FailedSend | null>(null);
+  // A question cancelled mid-flight (stop / session switch / new chat) that
+  // can be handed back to an EMPTY composer via the restore chip.
+  const [recoverableQuestion, setRecoverableQuestion] = useState<string | null>(null);
   // SSE status frames for the in-flight query; cleared when the answer lands.
   const [statusFrames, setStatusFrames] = useState<string[]>([]);
   // Provisional answer text streamed token-by-token BEFORE citation validation.
@@ -87,6 +187,20 @@ function AskView() {
   // ticker unmounts on completion, so this is the only "answer ready" cue AT
   // gets (WCAG 4.1.3). A short lead keeps it from re-reading the transcript.
   const [announcement, setAnnouncement] = useState("");
+  // Second polite region, for composer-side state changes (programmatic
+  // scoping, pill filter clears, question recovery): the answer region above
+  // must stay reserved for answer lifecycle or the two would overwrite each
+  // other mid-stream. Cleared alongside announcement at run() start.
+  const [composerNotice, setComposerNotice] = useState("");
+  // The one write path for composer notices. flushSync is load-bearing: it
+  // commits the CLEAR as its own DOM update before the text lands. Without it
+  // "clear + set the same text" coalesce into one React batch -- a no-op DOM
+  // diff -- and polite live regions only announce on an actual text change, so
+  // a second identical notice would be silent to a screen reader.
+  const announceComposer = useCallback((text: string) => {
+    flushSync(() => setComposerNotice(""));
+    setComposerNotice(text);
+  }, []);
   // The citation whose evidence drawer is open (null = closed). Presentation-only
   // over an already-validated citation; closeDrawer is stable so the drawer's
   // focus effect doesn't re-run on every render.
@@ -111,6 +225,19 @@ function AskView() {
   // The question of the in-flight run, handed back to the composer if stopped.
   const lastQuestionRef = useRef("");
 
+  // A failed send's turn is client-only (the server never saw it): before any
+  // NEXT dispatch or session reset it must leave the thread, or the transcript
+  // shows an unanswered question that looks server-persisted. Stable identity
+  // (ref-backed) so the URL-sync effect can call it without re-running.
+  const clearFailedSend = useCallback(() => {
+    if (!failedSendRef.current) return;
+    failedSendRef.current = null;
+    setFailedSend(null);
+    setTurns((prev) =>
+      prev.length && prev[prev.length - 1].role === "user" ? prev.slice(0, -1) : prev,
+    );
+  }, []);
+
   // This effect synchronizes local chat state to the URL `session` param: every
   // setState in it is an intentional reset/sync (new chat, switch, or load), not
   // a cascading-render bug. set-state-in-effect is a new rule in
@@ -122,13 +249,30 @@ function AskView() {
       // historyLoading too — switching to a new chat while a prior session's
       // history fetch is in flight cancels that fetch, and its (guarded)
       // finally never clears the flag, which would otherwise wedge the UI.
+      const wasStreaming = controllerRef.current !== null;
       controllerRef.current?.abort();
       sessionIdRef.current = null;
       setSessionId(null);
+      setSessionMeta(null);
       setTurns([]);
       setError(null);
       setHistoryLoading(false);
+      // A cancelled load's "Opening conversation" notice must not outlive the
+      // load it described.
+      setComposerNotice("");
       setActiveSessionId(null);
+      // A failed send's question is typed work the server never saw: park it
+      // behind the restore chip BEFORE clearFailedSend tears down its Retry
+      // notice -- clearing alone would discard the question silently.
+      if (failedSendRef.current) {
+        setRecoverableQuestion(failedSendRef.current.question);
+      }
+      clearFailedSend();
+      // A question cut off by starting a new chat is handed back as a restore
+      // chip rather than silently discarded (typed work is never lost).
+      if (wasStreaming && lastQuestionRef.current) {
+        setRecoverableQuestion(lastQuestionRef.current);
+      }
       // A new chat opens unscoped: filters left behind by the previous
       // conversation's clarify pick (or typed by hand) must not silently scope
       // its first question — the starter pills already clear these; this covers
@@ -136,6 +280,7 @@ function AskView() {
       // reason: its citation belongs to the conversation being left.
       setIngredient("");
       setDosage("");
+      setExtraFilters({});
       setActiveCitation(null);
       return;
     }
@@ -145,6 +290,8 @@ function AskView() {
       // clears the flag -- reset it here, same as the new-chat branch above, or
       // the composer stays disabled with no Stop button to escape it.
       setHistoryLoading(false);
+      // ...and the cancelled load's notice leaves with the flag.
+      setComposerNotice("");
       setActiveSessionId(urlSession);
       return;
     }
@@ -152,16 +299,24 @@ function AskView() {
     // catch return early WITHOUT undoing the optimistic inquiry turn (only stop()
     // does that), so drop it here too: otherwise coming back to this session shows
     // a dangling unanswered question while the server has already persisted both
-    // it and its answer. The question is deliberately NOT handed back to the
-    // composer the way stop() does -- the analyst navigated away, and that text
-    // belongs to the conversation being left.
+    // it and its answer. The question is NOT typed back into the composer the
+    // way stop() does -- the analyst navigated away -- but it is offered back
+    // as a restore chip instead of being silently discarded. (The server may
+    // still persist the interrupted turn into the session being left.)
     const wasStreaming = controllerRef.current !== null;
     controllerRef.current?.abort();
     if (wasStreaming) {
       setTurns((prev) =>
         prev.length && prev[prev.length - 1].role === "user" ? prev.slice(0, -1) : prev,
       );
+      if (lastQuestionRef.current) setRecoverableQuestion(lastQuestionRef.current);
     }
+    // Same as the new-chat branch: a failed send's question survives the
+    // switch behind the restore chip instead of vanishing with its notice.
+    if (failedSendRef.current) {
+      setRecoverableQuestion(failedSendRef.current.question);
+    }
+    clearFailedSend();
     // Close the drawer before swapping threads: browser back/forward changes
     // ?session without a click (the scrim only blocks in-page clicks), and the
     // previous conversation's evidence must not float over the next one.
@@ -169,11 +324,16 @@ function AskView() {
     let cancelled = false;
     setHistoryLoading(true);
     setError(null);
+    // The role=status hint inserted under the composer is fresh DOM, which
+    // VoiceOver often fails to announce; the persistent composer notice
+    // region is the reliable channel, so state the load there too.
+    announceComposer("Opening conversation");
     getSession(urlSession)
       .then((d) => {
         if (cancelled) return;
         sessionIdRef.current = urlSession;
         setSessionId(urlSession);
+        setSessionMeta(d.session);
         setTurns(d.messages.map(turnFromMessage));
         setActiveSessionId(urlSession);
         void refreshSessions();
@@ -187,17 +347,23 @@ function AskView() {
         // a fresh session instead.
         sessionIdRef.current = null;
         setSessionId(null);
+        setSessionMeta(null);
         setActiveSessionId(null);
         setTurns([]);
         setError(e instanceof Error ? e.message : String(e));
       })
       .finally(() => {
-        if (!cancelled) setHistoryLoading(false);
+        if (!cancelled) {
+          setHistoryLoading(false);
+          // The load settled either way; its notice must not linger as if a
+          // conversation were still opening.
+          setComposerNotice("");
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [urlSession, refreshSessions, setActiveSessionId]);
+  }, [urlSession, refreshSessions, setActiveSessionId, clearFailedSend, announceComposer]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Abort any in-flight stream on unmount.
@@ -239,11 +405,28 @@ function AskView() {
       setError(null);
       setStatusFrames([]);
       setDraft(null);
-      // Clear the SR live region so an identical consecutive answer/label still
-      // changes the DOM text and re-announces (polite regions skip unchanged text).
+      // Clear BOTH SR live regions so an identical consecutive answer/label
+      // still changes the DOM text and re-announces (polite regions skip
+      // unchanged text), and a stale composer notice can't outlive the state
+      // it described. A cancelled question is superseded by this new send.
       setAnnouncement("");
+      setComposerNotice("");
+      setRecoverableQuestion(null);
       scrollArmedRef.current = true;
       lastQuestionRef.current = q;
+      // The SSE frames this run settles through, accumulated in the closure:
+      // the statusFrames STATE is wiped in finally before the settled turn
+      // renders, so this array is the only record that can be persisted onto
+      // the turn (provenance status log + fallback notice).
+      const frames: string[] = [];
+      let fellBack = false;
+      // Drafting-milestone throttle for the SR region: the draft row is
+      // aria-hidden, so without these a screen-reader user hears nothing
+      // between the ticker and the settle announcement. Milestones repeat no
+      // sooner than every 15s, and each string differs (a counter suffix) --
+      // polite regions skip textually-unchanged content.
+      let milestoneAt = 0;
+      let milestoneNo = 0;
       // The inquiry joins the thread immediately; the ticker answers it in place.
       setTurns((prev) => [...prev, userTurn(q)]);
       setQuestion("");
@@ -255,16 +438,33 @@ function AskView() {
           {
             onStatus: (text) => {
               if (runSeqRef.current !== seq) return;
+              frames.push(text);
               // The api layer emits this exact status immediately before every
               // stream-failure fallback to plain /query: the dead stream's
               // provisional tokens are contractually discarded, so drop the
               // draft and let the ticker (showing this retry line) take the
               // in-flight slot back for the re-run.
-              if (text === STREAM_FALLBACK_STATUS) setDraft(null);
+              if (text === STREAM_FALLBACK_STATUS) {
+                fellBack = true;
+                setDraft(null);
+              }
               setStatusFrames((prev) => [...prev, text]);
             },
             onToken: (delta) => {
-              if (runSeqRef.current === seq) setDraft((prev) => (prev ?? "") + delta);
+              if (runSeqRef.current !== seq) return;
+              setDraft((prev) => (prev ?? "") + delta);
+              const now = Date.now();
+              if (milestoneNo === 0) {
+                milestoneNo = 1;
+                milestoneAt = now;
+                setAnnouncement(
+                  "Drafting the answer \u2014 citations will be verified before it is shown.",
+                );
+              } else if (now - milestoneAt >= 15000) {
+                milestoneNo += 1;
+                milestoneAt = now;
+                setAnnouncement(`Still drafting \u2014 update ${milestoneNo}`);
+              }
             },
           },
           controller.signal,
@@ -277,13 +477,24 @@ function AskView() {
         setSessionId(next.session_id);
         // Swap the provisional draft for the validated turn in one render batch.
         setDraft(null);
-        setTurns((prev) => [...prev, assistantTurn(next)]);
+        setTurns((prev) => [
+          ...prev,
+          assistantTurn(next, { statusLog: frames, streamFellBack: fellBack }),
+        ]);
         setActiveSessionId(next.session_id);
         refocusRef.current = true;
         const nonAnswer = nonAnswerLabel(next.status, next.refused, next.reason ?? null);
+        // Count-aware clarify arm: the options render ABOVE the composer the
+        // screen-reader user is focused in, so this announcement is their only
+        // discovery mechanism. Legacy zero-option clarifies stay plain.
+        const clarifyCount = next.clarify.length;
         const label =
           next.status === "clarify"
-            ? "Clarification requested"
+            ? clarifyCount > 0
+              ? `Clarification requested \u2014 ${clarifyCount} option${
+                  clarifyCount === 1 ? "" : "s"
+                } to pick from, above the reply box`
+              : "Clarification requested"
             : nonAnswer
               ? `${nonAnswer} — see the reply`
               : next.status === "meta"
@@ -304,11 +515,18 @@ function AskView() {
       } catch (e) {
         // An abort means new chat / session switch already took over the view.
         if (isAbortError(e) || runSeqRef.current !== seq || controller.signal.aborted) return;
-        // The send failed: restore the typed question and drop the optimistic
-        // inquiry turn so the composer is usable to retry (parity with main).
-        setError(e instanceof Error ? e.message : String(e));
-        setQuestion(q);
-        setTurns((prev) => (prev.length && prev[prev.length - 1].role === "user" ? prev.slice(0, -1) : prev));
+        // The send failed: the optimistic inquiry turn STAYS in the thread and
+        // the failure renders under it with a Retry (transport register), so
+        // the typed question keeps its place instead of bouncing back to the
+        // composer. clearFailedSend pops the client-only turn before any next
+        // dispatch or session reset.
+        const failed: FailedSend = {
+          question: q,
+          filters,
+          message: e instanceof Error ? e.message : String(e),
+        };
+        failedSendRef.current = failed;
+        setFailedSend(failed);
         refocusRef.current = true;
       } finally {
         if (runSeqRef.current === seq) {
@@ -331,18 +549,105 @@ function AskView() {
     setDraft(null);
     setTurns((prev) => (prev.length && prev[prev.length - 1].role === "user" ? prev.slice(0, -1) : prev));
     // Hand the in-flight question back — but never clobber text the user has
-    // started typing into the composer mid-query.
-    if (lastQuestionRef.current && !question.trim()) setQuestion(lastQuestionRef.current);
+    // started typing into the composer mid-query: that text wins the composer,
+    // and the cancelled question is parked behind a restore chip instead.
+    if (lastQuestionRef.current && !question.trim()) {
+      setQuestion(lastQuestionRef.current);
+    } else if (lastQuestionRef.current) {
+      setRecoverableQuestion(lastQuestionRef.current);
+      announceComposer("Stopped \u2014 the cancelled question can be restored below.");
+    }
     refocusRef.current = true;
   }
 
   function submitQuestion() {
     const q = question.trim();
     if (!q || busy) return;
-    const filters: Record<string, string> = {};
+    clearFailedSend();
+    // extraFilters first so the two visible fields stay authoritative for
+    // their own keys (a pick never writes those keys into extras anyway).
+    const filters: Record<string, string> = { ...extraFilters };
     if (ingredient.trim()) filters["normalized_name"] = ingredient.trim().toLowerCase();
     if (dosage.trim()) filters["dosage_form"] = dosage.trim();
     void run(q, Object.keys(filters).length ? filters : null);
+  }
+
+  // The single dispatch path for starter pills: examples are authored to run
+  // unscoped, so any leftover scope is cleared FIRST and the clear announced
+  // -- previously pills bypassed the filters entirely while typed sends
+  // honored them (two dispatch semantics).
+  function sendStarter(q: string) {
+    if (busy) return;
+    clearFailedSend();
+    const hadScope =
+      Boolean(ingredient.trim()) || Boolean(dosage.trim()) || Object.keys(extraFilters).length > 0;
+    if (hadScope) {
+      setIngredient("");
+      setDosage("");
+      setExtraFilters({});
+    }
+    void run(q, null);
+    // After run() so its prelude clear is flushed away first; announceComposer
+    // then commits its own clear + set, so even an identical consecutive
+    // notice re-announces.
+    if (hadScope) {
+      announceComposer("Filters cleared \u2014 example questions run unscoped.");
+    }
+  }
+
+  // Re-fires the failed send verbatim (same question AND filters). run()
+  // re-appends the inquiry turn, so the stale one is popped via the shared
+  // clear first -- exactly one user row ever exists for the retried question.
+  function retryFailedSend() {
+    const failed = failedSendRef.current;
+    if (!failed || busy) return;
+    clearFailedSend();
+    void run(failed.question, failed.filters);
+    // The Retry button unmounts the moment loading renders (the ticker takes
+    // the slot back), which would drop focus to <body>; park it in the
+    // composer so keyboard users keep their place.
+    composerRef.current?.focus();
+  }
+
+  // Restore-chip click: fills ONLY an empty composer; typed text always wins.
+  function restoreQuestion() {
+    const q = recoverableQuestion;
+    if (!q) return;
+    if (question.trim()) {
+      announceComposer(
+        "Clear the composer first \u2014 restoring will not overwrite typed text.",
+      );
+      return;
+    }
+    setQuestion(q);
+    setRecoverableQuestion(null);
+    composerRef.current?.focus();
+  }
+
+  // Scope-chip clear: the two structured keys empty their visible fields;
+  // clarify-pick extras leave the persisted map.
+  function clearFilter(key: string) {
+    if (key === "normalized_name") {
+      setIngredient("");
+    } else if (key === "dosage_form") {
+      setDosage("");
+    } else {
+      setExtraFilters((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }
+    // The clicked chip unmounts with its filter, which would drop focus to
+    // <body>; the composer is where a scope edit lands next.
+    composerRef.current?.focus();
+  }
+
+  function onComposerChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
+    setQuestion(e.target.value);
+    // The composer error is history-load-only now; the first edit after it
+    // signals "moving on", so it stops shouting over the new question.
+    if (error) setError(null);
   }
 
   function onSubmit(e: React.FormEvent) {
@@ -381,15 +686,36 @@ function AskView() {
   const onPick = useCallback(
     (opt: Suggestion) => {
       if (busy) return;
+      clearFailedSend();
       // Clarify filters are typed Record<string, unknown> (the backend models
       // them as dict[str, Any]); they are deterministic string maps in practice,
       // so narrow them for the outbound request + the visible filter fields.
       const filters = (opt.filters ?? null) as Record<string, string> | null;
       setIngredient(filters?.normalized_name ?? "");
       setDosage(filters?.dosage_form ?? "");
+      // Keys beyond the two visible fields (e.g. "route") persist into
+      // extraFilters so typed follow-ups stay scoped the way the pick was --
+      // the scope chips then state that truthfully. Only string values ride
+      // along; anything else is not a filter we can echo or resend.
+      const extras: Record<string, string> = {};
+      for (const [k, v] of Object.entries(opt.filters ?? {})) {
+        if (k === "normalized_name" || k === "dosage_form") continue;
+        if (typeof v === "string" && v) extras[k] = v;
+      }
+      setExtraFilters(extras);
+      // The pick request itself still sends opt.filters verbatim.
       void run(opt.query, filters);
+      // Announce the programmatic scoping AFTER run(): its prelude clears the
+      // notice region, and within this event's batch the last write wins.
+      const scoped: string[] = [];
+      if (filters?.normalized_name) scoped.push(`${filterLabel("normalized_name")} ${filters.normalized_name}`);
+      if (filters?.dosage_form) scoped.push(`${filterLabel("dosage_form")} ${filters.dosage_form}`);
+      for (const [k, v] of Object.entries(extras)) scoped.push(`${filterLabel(k)} ${v}`);
+      if (scoped.length > 0) {
+        announceComposer(`Search scoped to ${scoped.join(", ")}.`);
+      }
     },
-    [busy, run],
+    [busy, run, clearFailedSend, announceComposer],
   );
 
   const hasThread = turns.length > 0 || loading || historyLoading;
@@ -404,13 +730,31 @@ function AskView() {
   // actually being on screen.
   const clarifyHasOptions = clarifyPending && (lastAssistant?.clarify.length ?? 0) > 0;
 
-  const filtersActive = [ingredient.trim(), dosage.trim()].filter(Boolean).length;
+  // Every filter the NEXT typed send will carry, in render order: the two
+  // structured fields, then clarify-pick extras. Drives both the chips and
+  // the honest "N active" counter (extras used to be invisible).
+  const activeFilterEntries: Array<[string, string]> = [];
+  // Chips state the value exactly as submitQuestion will SEND it: the
+  // ingredient is lowercased on the wire, so the chip lowercases too --
+  // showing the raw-cased field would misstate the outgoing scope.
+  if (ingredient.trim()) {
+    activeFilterEntries.push(["normalized_name", ingredient.trim().toLowerCase()]);
+  }
+  if (dosage.trim()) activeFilterEntries.push(["dosage_form", dosage.trim()]);
+  for (const [k, v] of Object.entries(extraFilters)) activeFilterEntries.push([k, v]);
+  const filtersActive = activeFilterEntries.length;
   const composer = (
     <div className="composer">
       {error && (
         <p className="composer__error code" role="alert">
           {error}
         </p>
+      )}
+      {recoverableQuestion && !loading && (
+        <button type="button" className="chip composer__restore" onClick={restoreQuestion}>
+          Restore question
+          <span className="composer__restore-quote">{truncateQuote(recoverableQuestion)}</span>
+        </button>
       )}
       <form onSubmit={onSubmit}>
         {/* The ingredient/dosage filters live on, just folded away — the clarify
@@ -434,6 +778,7 @@ function AskView() {
             />
           </div>
         </details>
+        <ScopeChips entries={activeFilterEntries} onClear={clearFilter} />
         <div className="composer__bar">
           <textarea
             id="q"
@@ -441,16 +786,18 @@ function AskView() {
             className="composer__input"
             rows={1}
             placeholder={
-              clarifyHasOptions
-                ? "Pick an option above, or reply in your own words…"
-                : clarifyPending
-                  ? "Reply in your own words…"
-                  : turns.length > 0
-                    ? "Ask a follow-up, or start a new question…"
-                    : "Ask about an FDA guidance, product, or change…"
+              historyLoading
+                ? "Opening conversation\u2026"
+                : clarifyHasOptions
+                  ? "Pick an option above, or reply in your own words\u2026"
+                  : clarifyPending
+                    ? "Reply in your own words\u2026"
+                    : turns.length > 0
+                      ? "Ask a follow-up, or start a new question\u2026"
+                      : "Ask about an FDA guidance, product, or change\u2026"
             }
             value={question}
-            onChange={(e) => setQuestion(e.target.value)}
+            onChange={onComposerChange}
             onInput={autoGrow}
             onKeyDown={onKeyDown}
             aria-label={clarifyPending ? "Reply" : "Ask the guidance corpus"}
@@ -470,6 +817,13 @@ function AskView() {
             </button>
           )}
         </div>
+        {/* While a conversation opens, sending is gated but typing is not --
+            typed work must survive the load. Say so instead of looking stuck. */}
+        {historyLoading && (
+          <p className="composer__hint code" role="status">
+            {"Opening conversation \u2014 sending is paused until it loads."}
+          </p>
+        )}
       </form>
     </div>
   );
@@ -491,10 +845,10 @@ function AskView() {
           <div className="chat__empty rise d2">
             <p className="kicker chat__empty-kicker">Ask the corpus</p>
             <h2 className="chat__empty-lead">What does the FDA guidance say?</h2>
+            {/* The header subtitle already states the contract (cited answers,
+                asks when unclear); this line is the instruction, not an echo. */}
             <p className="chat__empty-note">
-              Plain-language answers over FDA product-specific guidance &mdash; every claim cited to
-              its source. Ask in your own words; if a question is ambiguous it asks rather than
-              guesses.
+              Ask in your own words, or start from an example below.
             </p>
             <div className="chat__starters">
               {EXAMPLE_GROUPS.map((g) => (
@@ -502,15 +856,7 @@ function AskView() {
                   <p className="starter__kind">{g.kind}</p>
                   <div className="chat__examples">
                     {g.items.map((ex) => (
-                      <button
-                        key={ex.q}
-                        className="pill"
-                        onClick={() => {
-                          setIngredient("");
-                          setDosage("");
-                          void run(ex.q, null);
-                        }}
-                      >
+                      <button key={ex.q} className="pill" onClick={() => sendStarter(ex.q)}>
                         {ex.label}
                       </button>
                     ))}
@@ -523,17 +869,51 @@ function AskView() {
 
         {historyLoading && <p className="chat__note code">Opening conversation…</p>}
 
+        {/* Docket header: a reopened conversation states its filed identity
+            (title + opened date) above the transcript, like a case caption.
+            Live-only conversations have no server meta, so none renders. */}
+        {sessionMeta && (
+          <header className="chat__docket">
+            <p className="kicker">Conversation</p>
+            <h2 className="chat__docket-title">{sessionMeta.title}</h2>
+            {/* Only when the wire date parses -- never "Opened" over garbage. */}
+            {parseApiDate(sessionMeta.created_at) !== null && (
+              <p className="chat__docket-date code">Opened {formatFiled(sessionMeta.created_at)}</p>
+            )}
+          </header>
+        )}
+
         {turns.map((t, i) => {
-          // Prefer a stable identity (live assistant turns carry meta.turn_id)
-          // over the array index, so a turn's child state (feedback, details)
-          // tracks the turn rather than its position.
-          const key = `${t.role}-${t.meta?.turn_id ?? i}`;
+          // Prefer a stable identity over the array index, so a turn's child
+          // state (feedback, details) tracks the turn rather than its
+          // position. Live assistant turns carry meta.turn_id; rehydrated
+          // turns WITHOUT meta (pre-Tier-2 rows, user turns) still carry the
+          // server row id, so fall through turn_id -> id -> index.
+          const key = `${t.role}-${t.meta?.turn_id ?? t.id ?? i}`;
           return t.role === "user" ? (
             <UserTurn key={key} content={t.content} live={t.live} />
           ) : (
-            <AssistantTurn key={key} turn={t} sessionId={sessionId} onPick={onPick} onCite={setActiveCitation} busy={busy} />
+            <AssistantTurn
+              key={key}
+              turn={t}
+              sessionId={sessionId}
+              onPick={onPick}
+              onCite={setActiveCitation}
+              busy={busy}
+              threshold={settings?.refusal_score_threshold ?? null}
+            />
           );
         })}
+
+        {/* A send that failed in transport: its inquiry turn stays above (the
+            question keeps its place in the thread), and this right-aligned
+            notice explains + offers Retry. Hidden while a retry is in flight
+            -- the ticker takes the slot back. */}
+        {!loading && failedSend && (
+          <div className="chat-row chat-row--user">
+            <SendFailNotice message={failedSend.message} onRetry={retryFailedSend} />
+          </div>
+        )}
 
         {/* In-flight assistant slot: the docket ticker until the first token,
             then the answer streams in as a provisional draft. The draft is
@@ -541,9 +921,14 @@ function AskView() {
             below — and both are cleared when the validated turn lands. */}
         {loading && (
           <div className="chat-row rise">
-            <span className="avatar" aria-hidden>
-              RW
-            </span>
+            {/* Bare avatar (no marginalia): an in-flight turn has no provenance
+                yet. The margin wrapper keeps the column aligned with settled
+                turns on wide viewports. */}
+            <div className="chat-row__margin">
+              <span className="avatar" aria-hidden>
+                RW
+              </span>
+            </div>
             <div className="msg" aria-hidden={draft != null ? true : undefined}>
               {draft != null ? <ProvisionalDraft text={draft} /> : <StatusTicker frames={statusFrames} />}
             </div>
@@ -555,6 +940,12 @@ function AskView() {
 
       <div className="sr-only" aria-live="polite" aria-atomic="true">
         {announcement}
+      </div>
+      {/* Composer-side notices (programmatic scoping, pill filter clears,
+          question recovery) get their own polite region so they never fight
+          the answer-lifecycle region above for the same DOM text. */}
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {composerNotice}
       </div>
 
       {composer}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { citationIndex, citeKey, pairsIn, segmentCitations } from "@/lib/citations";
+import { citationIndex, citeKey, dedupeCitations, pairsIn, segmentCitations } from "@/lib/citations";
 
 // The tokenizer mirrors the backend grammar (src/regwatch/common/citations.py).
 // These cases pin the contract the stamp renderer relies on.
@@ -51,6 +51,46 @@ describe("segmentCitations", () => {
         pairs: [{ shortName: "PSG_222", page: 2 }],
       },
     ]);
+  });
+});
+
+describe("dedupeCitations", () => {
+  it("keeps the first occurrence per (short_name, page) and preserves order", () => {
+    const a = { short_name: "PSG_020503", page: 3 };
+    const dupA = { short_name: "PSG_020503", page: 3 };
+    const b = { short_name: "PSG_021730", page: 4 };
+    const out = dedupeCitations([a, dupA, b]);
+    expect(out).toEqual([a, b]);
+    // Identity, not just equality: the FIRST object survives -- the same rule
+    // citationIndex numbers by, so [n] positions stay bijective.
+    expect(out[0]).toBe(a);
+  });
+
+  it("keys case-insensitively, matching the backend's IGNORECASE parser", () => {
+    const upper = { short_name: "PSG_020503", page: 3 };
+    const lower = { short_name: "psg_020503", page: 3 };
+    expect(dedupeCitations([upper, lower])).toEqual([upper]);
+  });
+
+  it("never collapses the same source on different pages", () => {
+    expect(
+      dedupeCitations([
+        { short_name: "PSG_020503", page: 3 },
+        { short_name: "PSG_020503", page: 4 },
+      ]),
+    ).toHaveLength(2);
+  });
+
+  it("numbers contiguously through citationIndex after deduping", () => {
+    const deduped = dedupeCitations([
+      { short_name: "PSG_020503", page: 3 },
+      { short_name: "PSG_020503", page: 3 },
+      { short_name: "PSG_021730", page: 4 },
+    ]);
+    const idx = citationIndex(deduped);
+    // Without the dedupe the duplicate would leave a hole ([1] then [3]).
+    expect(idx.get(citeKey("PSG_020503", 3))).toBe(1);
+    expect(idx.get(citeKey("PSG_021730", 4))).toBe(2);
   });
 });
 

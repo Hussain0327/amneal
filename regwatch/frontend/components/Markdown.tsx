@@ -5,7 +5,7 @@ import remarkGfm from "remark-gfm";
 
 import { CitationStamp } from "@/components/CitationStamp";
 import type { Citation } from "@/lib/api";
-import { citationIndex, citeKey, segmentCitations, type CitePair } from "@/lib/citations";
+import { citationIndex, citeKey, dedupeCitations, segmentCitations, type CitePair } from "@/lib/citations";
 import { safeHref } from "@/lib/url";
 
 // Minimal local mdast shapes (we only touch type/value/children), so this file
@@ -96,51 +96,67 @@ function splitTextNode(value: string, index: Map<string, number>): MdNode[] {
   return out;
 }
 
-// Renders model/dossier markdown as editorial prose (see .prose in globals.css).
-// When `citations` + `onCite` are supplied (answer/summary turns only), inline
-// citation tags become clickable stamps wired to the evidence drawer. Omit them
-// (refused / clarify / scope / meta) and the markdown renders verbatim with no
-// stamps and no drawer trigger (INV-2).
+/**
+ * Renders model/dossier markdown as editorial prose (see .prose in globals.css).
+ * When `citations` + `onCite` are supplied (answer/summary turns only), inline
+ * citation tags become clickable stamps wired to the evidence drawer. Omit them
+ * (refused / clarify / scope / meta) and the markdown renders verbatim with no
+ * stamps and no drawer trigger (INV-2). `plainLinks` renders `a` elements as
+ * inert <span> text (no href, no gold register) for UNVALIDATED surfaces --
+ * the streaming draft must never carry a clickable affordance.
+ */
 export function Markdown({
   children,
   citations,
   onCite,
+  plainLinks = false,
 }: {
   children: string;
   citations?: Citation[];
   onCite?: (c: Citation) => void;
-}) {
+  plainLinks?: boolean;
+}): React.JSX.Element {
   const stampable = citations !== undefined && onCite !== undefined && citations.length > 0;
-  const index = stampable ? citationIndex(citations) : null;
-  const plugins = stampable ? [remarkGfm, () => remarkCitationStamps(index!)] : [remarkGfm];
+  // Index AND stamp resolution both come from the SAME deduped list: a
+  // duplicated wire citation must not leave holes in [n] numbering, and [n]
+  // must open the citation the index numbered (bijective, INV-1).
+  const deduped = stampable ? dedupeCitations(citations) : null;
+  const index = deduped ? citationIndex(deduped) : null;
+  const plugins = index ? [remarkGfm, () => remarkCitationStamps(index)] : [remarkGfm];
 
   // The Components map is typed for known HTML tags; our custom "cite-stamp"
   // element isn't in that type, so build the map loosely and cast once.
   const components = {
     // Guard model-authored link schemes (no javascript:/data: click-to-run).
-    a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
-      <a href={safeHref(href)} target="_blank" rel="noreferrer">
-        {children}
-      </a>
-    ),
+    // In plainLinks mode the anchor collapses to inert text entirely: the
+    // draft's muted register must not offer a clickable gold affordance.
+    a: plainLinks
+      ? ({ children }: { children?: React.ReactNode }) => <span>{children}</span>
+      : ({ href, children }: { href?: string; children?: React.ReactNode }) => (
+          <a href={safeHref(href)} target="_blank" rel="noreferrer">
+            {children}
+          </a>
+        ),
     // Custom hast element emitted by remarkCitationStamps. Reads the matched
     // citation back out of the data-* attributes and renders the stamp. Only
     // wired when `stampable`, so refused/meta turns never produce one.
     "cite-stamp": (props: Record<string, unknown>) => {
-      if (!stampable) return null;
+      // deduped is non-null exactly when stampable (narrowing TS can follow).
+      if (!deduped || onCite === undefined) return null;
       const n = Number(props["data-n"]);
       const short = String(props["data-short"]);
       const page = Number(props["data-page"]);
-      // Resolve by n: the 1-based position in the SAME citations array the
-      // index was built from. data-short carries the MODEL-ECHOED casing
-      // (backend validation is case-insensitive), so a strict name match can
-      // miss a valid stamp; the name+page find is only a fallback for an
-      // out-of-range n.
+      // Resolve by n: the 1-based position in the SAME deduped array the index
+      // was built from -- resolving against the raw array would open the wrong
+      // citation whenever a duplicate shifted the numbering. data-short carries
+      // the MODEL-ECHOED casing (backend validation is case-insensitive), so a
+      // strict name match can miss a valid stamp; the name+page find is only a
+      // fallback for an out-of-range n.
       const citation =
-        citations![n - 1] ?? citations!.find((c) => c.short_name === short && c.page === page);
+        deduped[n - 1] ?? deduped.find((c) => c.short_name === short && c.page === page);
       // Defensive: never render a stamp without its backing citation (INV-1).
       if (!citation) return null;
-      return <CitationStamp n={n} citation={citation} onCite={onCite!} />;
+      return <CitationStamp n={n} citation={citation} onCite={onCite} />;
     },
   } as Components;
 
