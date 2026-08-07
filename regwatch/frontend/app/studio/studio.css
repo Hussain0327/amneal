@@ -536,6 +536,59 @@
 }
 
 /* ---------------------------------------------------------------------------
+   Reference library (second tree section: real FDA PSGs from the database)
+   ------------------------------------------------------------------------ */
+
+/* Same voice as .st-tree__title, but inside the scroll: it labels a section,
+   not the rail. */
+.st-tree__section {
+  margin: 0.65rem 0 0.25rem;
+  padding: 0 0.4rem;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--st-text-faint);
+}
+
+.st-tree__section:first-child {
+  margin-top: 0;
+}
+
+.st-tree__retry {
+  display: block;
+  margin-top: 0.45rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--st-gold-deep);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.st-tree__retry:hover {
+  text-decoration: underline;
+}
+
+.st-node__date {
+  flex: none;
+  font-size: 0.68rem;
+  color: var(--st-text-faint);
+}
+
+.st-node__badge--final {
+  color: var(--st-gold-ink);
+  border-color: var(--st-gold-deep);
+}
+
+.st-node__badge--draft {
+  background: var(--st-raise);
+}
+
+/* ---------------------------------------------------------------------------
    THE SIGNATURE -- compliance spine, as a closure gauge
    ----------------------------------------------------------------------------
    A 22px column between the tree and the page carrying one tick per finding at
@@ -708,6 +761,91 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+/* ---------------------------------------------------------------------------
+   PDF pane: a reference PSG on the canvas, read-only
+   ------------------------------------------------------------------------ */
+
+.st-pdf {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--st-panel);
+}
+
+.st-pdf__head {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.6rem 0.9rem;
+  border-bottom: 1px solid var(--st-edge);
+}
+
+.st-pdf__title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--st-text);
+}
+
+.st-pdf__meta {
+  font-size: 0.72rem;
+  color: var(--st-text-faint);
+}
+
+.st-pdf__link {
+  margin-left: auto;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--st-gold-deep);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.st-pdf__link:hover {
+  text-decoration: underline;
+}
+
+/* An inert link (unsafe or missing URL) keeps its slot but drops the voice. */
+.st-pdf__link--inert {
+  margin-left: auto;
+  font-size: 0.78rem;
+  color: var(--st-text-faint);
+  white-space: nowrap;
+}
+
+.st-pdf__frame {
+  flex: 1;
+  width: 100%;
+  border: 0;
+  background: var(--st-raise);
+}
+
+.st-pdf__note {
+  margin: auto;
+  padding: 1rem;
+  font-size: 0.82rem;
+  color: var(--st-text-faint);
+}
+
+.st-pdf__fallback {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 1.2rem;
+  font-size: 0.82rem;
+  color: var(--st-text-faint);
+  text-align: center;
+}
+
+.st-pdf__fallback .st-tree__retry {
+  margin-top: 0;
 }
 
 .st-bar {
