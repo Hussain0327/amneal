@@ -2,15 +2,9 @@ package api
 
 import (
 	"net/http"
+	"slices"
 	"strings"
-
-	"github.com/jackc/pgx/v5/pgtype"
 )
-
-// text builds a non-null pgtype.Text (query param helper).
-func text(s string) pgtype.Text {
-	return pgtype.Text{String: s, Valid: true}
-}
 
 // Routes returns the native route table the proxy mounts ahead of its relay
 // catch-all. Go 1.22 method patterns route the exact method+path pairs below;
@@ -33,7 +27,7 @@ func (s *Server) Routes() map[string]http.Handler {
 		"POST /products":                http.HandlerFunc(s.handleCreateProduct),
 		"DELETE /products/{product_id}": http.HandlerFunc(s.handleDeleteProduct),
 	}
-	if s.cfg.GONativeQuery {
+	if s.cfg.GoNativeQuery {
 		// Step-5 cutover: serve POST /query natively. OFF (default) leaves
 		// /query (and /query/stream) relayed to Python exactly as today.
 		routes["POST /query"] = http.HandlerFunc(s.handleCompleteQuery)
@@ -46,7 +40,7 @@ func (s *Server) Routes() map[string]http.Handler {
 		// which answers OPTIONS itself on every route (the browser never
 		// preflights the prod same-origin /api rewrite path, but local direct-
 		// API dev and the Python parity contract both expect this to exist).
-		path := pattern[strings.Index(pattern, " ")+1:]
+		_, path, _ := strings.Cut(pattern, " ")
 		if !seenPaths[path] {
 			seenPaths[path] = true
 			out["OPTIONS "+path] = http.HandlerFunc(s.handlePreflight)
@@ -74,7 +68,7 @@ func (s *Server) Routes() map[string]http.Handler {
 		"/products":              "GET",
 		"/products/{product_id}": "DELETE",
 	}
-	if s.cfg.GONativeQuery {
+	if s.cfg.GoNativeQuery {
 		// Only when Go owns POST /query: other methods on it 405. With the flag
 		// off, /query has no native handler, so every method must relay.
 		allow405["/query"] = "POST"
@@ -107,15 +101,7 @@ func methodNotAllowed(allow string) http.Handler {
 // allowedOrigin reports whether the request Origin is in the configured
 // allowlist (exact match, like Starlette's non-wildcard allow_origins).
 func (s *Server) allowedOrigin(origin string) bool {
-	if origin == "" {
-		return false
-	}
-	for _, o := range s.cfg.CORSOrigins {
-		if o == origin {
-			return true
-		}
-	}
-	return false
+	return origin != "" && slices.Contains(s.cfg.CORSOrigins, origin)
 }
 
 // corsSimple mirrors CORSMiddleware's simple-response behavior for the routes

@@ -22,6 +22,13 @@ func writeDetail(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"detail": msg})
 }
 
+// Detail strings emitted from more than one handler; both are pinned
+// byte-for-byte by the contract suite.
+const (
+	detailRateLimited     = "rate limit exceeded"
+	detailSessionNotFound = "session not found"
+)
+
 // validationItem is one entry of FastAPI's 422 detail array. Only the three
 // fields the shape guarantees; the frontend treats 422 generically, and the
 // one pytest assertion on this path checks the status code alone.
@@ -33,6 +40,19 @@ type validationItem struct {
 
 func writeValidationError(w http.ResponseWriter, items ...validationItem) {
 	writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"detail": items})
+}
+
+// decodeStrictJSON decodes a request body into v with pydantic's strictness:
+// pydantic rejects trailing data after the JSON value, and Go's Decoder stops
+// at the first complete value, so the More() check must be explicit. On any
+// failure it writes the pinned json_invalid 422 and reports false.
+func decodeStrictJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(v); err != nil || dec.More() {
+		writeValidationError(w, validationItem{Type: "json_invalid", Loc: []string{"body"}, Msg: "Input should be a valid JSON"})
+		return false
+	}
+	return true
 }
 
 // isoNaive renders a naive-UTC DB timestamp the way FastAPI serializes the
@@ -86,4 +106,9 @@ func textOrNull(p *string) pgtype.Text {
 		return pgtype.Text{}
 	}
 	return pgtype.Text{String: *p, Valid: true}
+}
+
+// text builds a non-null pgtype.Text (query param helper).
+func text(s string) pgtype.Text {
+	return pgtype.Text{String: s, Valid: true}
 }

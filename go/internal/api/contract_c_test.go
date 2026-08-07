@@ -238,13 +238,13 @@ func TestSettingsRequiresAuth(t *testing.T) {
 }
 
 func TestSettingsExactWireBody(t *testing.T) {
-	topK := (*int)(nil)
 	h := newHarness(t, Config{
-		SessionTTL:            72 * time.Hour,
-		EmbeddingProvider:     "openai",
-		LLMProvider:           "openai",
-		LLMModel:              "gpt-5.4-nano",
-		RetrievalTopK:         topK,
+		SessionTTL:        72 * time.Hour,
+		EmbeddingProvider: "openai",
+		LLMProvider:       "openai",
+		LLMModel:          "gpt-5.4-nano",
+		// Explicit nil keeps the null-top_k wire-pin intent visible.
+		RetrievalTopK:         nil,
 		RefusalScoreThreshold: 0.30,
 		CompanyName:           "Amneal",
 	})
@@ -664,7 +664,7 @@ func TestPRCPathsMethodMismatch405s(t *testing.T) {
 	// paths must NOT relay (the upstream would 404): FastAPI-shaped 405 with
 	// the empirically-probed first-match Allow values.
 	h := newHarness(t, Config{SessionTTL: 72 * time.Hour})
-	for _, c := range []struct{ method, path, allow string }{
+	wantMethodNotAllowed(t, h, []struct{ method, path, allow string }{
 		{"PUT", "/products", "GET"},
 		{"PATCH", "/products", "GET"},
 		{"GET", "/feedback", "POST"},
@@ -673,19 +673,5 @@ func TestPRCPathsMethodMismatch405s(t *testing.T) {
 		{"DELETE", "/settings", "GET"},
 		{"GET", "/products/1", "DELETE"},
 		{"PATCH", "/products/1", "DELETE"},
-	} {
-		resp := h.do(t, c.method, c.path, "", nil)
-		if resp.StatusCode != 405 {
-			t.Fatalf("%s %s: %d, want 405", c.method, c.path, resp.StatusCode)
-		}
-		if got := resp.Header.Get("Allow"); got != c.allow {
-			t.Fatalf("%s %s Allow=%q, want %q", c.method, c.path, got, c.allow)
-		}
-		if resp.Header.Get("X-Upstream") == "python" {
-			t.Fatalf("%s %s leaked to the relay", c.method, c.path)
-		}
-		if body := decode(t, resp); body["detail"] != "Method Not Allowed" {
-			t.Fatalf("405 body: %v", body)
-		}
-	}
+	})
 }

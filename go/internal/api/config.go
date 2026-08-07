@@ -70,13 +70,15 @@ type Config struct {
 	// Flag-gated cutover: false (default) relays POST /query to Python exactly
 	// as today; true serves it natively via handleCompleteQuery. Flip is an
 	// env change + restart, instantly reversible.
-	GONativeQuery bool
+	GoNativeQuery bool
 }
 
-// envBool mirrors pydantic's bool coercion for the subset of spellings that
+// EnvBool mirrors pydantic's bool coercion for the subset of spellings that
 // appear in this repo's env files ("true"/"false", "1"/"0", "yes"/"no",
-// "on"/"off", any case). Unset or empty -> def.
-func envBool(name string, def bool) (bool, error) {
+// "on"/"off", any case). Unset or empty -> def. Exported because cmd/proxy
+// reads REQUIRE_DATABASE_URL with it, so both runtimes accept the same
+// spellings.
+func EnvBool(name string, def bool) (bool, error) {
 	v := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
 	switch v {
 	case "":
@@ -93,11 +95,11 @@ func envBool(name string, def bool) (bool, error) {
 // boot guard as the Python app (main.py lifespan): refusing to run a
 // production environment with an insecure session cookie.
 func ConfigFromEnv() (Config, error) {
-	cookieSecure, err := envBool("AUTH_COOKIE_SECURE", false)
+	cookieSecure, err := EnvBool("AUTH_COOKIE_SECURE", false)
 	if err != nil {
 		return Config{}, err
 	}
-	trustProxy, err := envBool("TRUST_PROXY_HEADERS", false)
+	trustProxy, err := EnvBool("TRUST_PROXY_HEADERS", false)
 	if err != nil {
 		return Config{}, err
 	}
@@ -185,11 +187,11 @@ func ConfigFromEnv() (Config, error) {
 		}
 		cfg.RAGTimeout = time.Duration(f * float64(time.Second))
 	}
-	nativeQuery, err := envBool("GO_NATIVE_QUERY", false)
+	nativeQuery, err := EnvBool("GO_NATIVE_QUERY", false)
 	if err != nil {
 		return Config{}, err
 	}
-	cfg.GONativeQuery = nativeQuery
+	cfg.GoNativeQuery = nativeQuery
 
 	return cfg, nil
 }
@@ -201,11 +203,4 @@ func envOrDefault(name, def string) string {
 		return v
 	}
 	return def
-}
-
-// EnvBool is the exported pydantic-parity bool parser for callers outside
-// this package (cmd/proxy reads REQUIRE_DATABASE_URL with it, so both
-// runtimes accept the same spellings).
-func EnvBool(name string, def bool) (bool, error) {
-	return envBool(name, def)
 }

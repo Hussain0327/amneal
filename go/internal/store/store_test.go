@@ -379,12 +379,14 @@ func TestEnforceSSLMode(t *testing.T) {
 		{"sqlalchemy-suffix-stripped-local", "postgresql+psycopg://u@localhost:5432/db", "postgresql://u@localhost:5432/db"},
 	}
 	for _, c := range cases {
-		got, err := enforceSSLMode(c.in)
-		if err != nil {
-			t.Fatalf("%s: %v", c.name, err)
-		}
-		if got != c.want {
-			t.Fatalf("%s: got %q want %q", c.name, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			got, err := enforceSSLMode(c.in)
+			if err != nil {
+				t.Fatalf("enforceSSLMode(%q): %v", c.in, err)
+			}
+			if got != c.want {
+				t.Errorf("enforceSSLMode(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
 	}
 }

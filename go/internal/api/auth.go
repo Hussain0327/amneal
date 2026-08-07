@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -97,6 +96,8 @@ type Server struct {
 	perIPLimit    int
 }
 
+// NewServer builds the native auth/session/query surface over pool with cfg,
+// logging handler errors to errLog (log.Default() when nil).
 func NewServer(pool *pgxpool.Pool, cfg Config, errLog *log.Logger) *Server {
 	if errLog == nil {
 		errLog = log.Default()
@@ -143,15 +144,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Email    *string `json:"email"`
 		Password *string `json:"password"`
 	}
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(&body); err != nil {
-		writeValidationError(w, validationItem{Type: "json_invalid", Loc: []string{"body"}, Msg: "Input should be a valid JSON"})
-		return
-	}
-	// pydantic rejects trailing data after the JSON value; Go's Decoder stops
-	// at the first complete value, so the strictness must be explicit.
-	if dec.More() {
-		writeValidationError(w, validationItem{Type: "json_invalid", Loc: []string{"body"}, Msg: "Input should be a valid JSON"})
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 	// Max lengths count CODE POINTS (pydantic max_length semantics), not
@@ -183,7 +176,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// CORRECT password still 429s (pinned by the Python suite).
 	if !s.limiter.Allow("login:"+email, LoginAttemptsPerMinute) ||
 		!s.limiter.Allow("login:ip:"+ip, s.perIPLimit) {
-		writeDetail(w, http.StatusTooManyRequests, "rate limit exceeded")
+		writeDetail(w, http.StatusTooManyRequests, detailRateLimited)
 		return
 	}
 

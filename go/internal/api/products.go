@@ -2,10 +2,8 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -41,7 +39,7 @@ type productRecord struct {
 	RldApplicationNumber *string `json:"rld_application_number"`
 	CompanyStatus        *string `json:"company_status"`
 	Source               string  `json:"source"`
-	SourceUrl            *string `json:"source_url"`
+	SourceURL            *string `json:"source_url"`
 }
 
 func productRecordFromRow(p store.Product) productRecord {
@@ -56,7 +54,7 @@ func productRecordFromRow(p store.Product) productRecord {
 		RldApplicationNumber: textPtr(p.RldApplicationNumber),
 		CompanyStatus:        textPtr(p.CompanyStatus),
 		Source:               p.Source,
-		SourceUrl:            textPtr(p.SourceUrl),
+		SourceURL:            textPtr(p.SourceUrl),
 	}
 }
 
@@ -106,10 +104,10 @@ func orStr(a, b *string) *string {
 	return b
 }
 
-func tooLong(field string, v *string, max int) *validationItem {
-	if v != nil && utf8.RuneCountInString(*v) > max {
+func tooLong(field string, v *string, maxRunes int) *validationItem {
+	if v != nil && utf8.RuneCountInString(*v) > maxRunes {
 		return &validationItem{Type: "string_too_long", Loc: []string{"body", field},
-			Msg: fmt.Sprintf("String should have at most %d characters", max)}
+			Msg: fmt.Sprintf("String should have at most %d characters", maxRunes)}
 	}
 	return nil
 }
@@ -141,11 +139,9 @@ func (s *Server) handleCreateProduct(w http.ResponseWriter, r *http.Request) {
 		RldApplicationNumber *string `json:"rld_application_number"`
 		CompanyStatus        *string `json:"company_status"`
 		Source               *string `json:"source"`
-		SourceUrl            *string `json:"source_url"`
+		SourceURL            *string `json:"source_url"`
 	}
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(&body); err != nil || dec.More() {
-		writeValidationError(w, validationItem{Type: "json_invalid", Loc: []string{"body"}, Msg: "Input should be a valid JSON"})
+	if !decodeStrictJSON(w, r, &body) {
 		return
 	}
 
@@ -189,7 +185,7 @@ func (s *Server) handleCreateProduct(w http.ResponseWriter, r *http.Request) {
 	} else if p := tooLong("source", body.Source, 200); p != nil {
 		problems = append(problems, *p)
 	}
-	if p := tooLong("source_url", body.SourceUrl, 2000); p != nil {
+	if p := tooLong("source_url", body.SourceURL, 2000); p != nil {
 		problems = append(problems, *p)
 	}
 	if len(problems) > 0 {
@@ -251,13 +247,13 @@ func (s *Server) handleCreateProduct(w http.ResponseWriter, r *http.Request) {
 			companyStatus = orStr(body.CompanyStatus, textPtr(matched.CompanyStatus))
 			rldName = orStr(body.RldName, textPtr(matched.RldName))
 			src = *body.Source
-			sourceURL = orStr(body.SourceUrl, textPtr(matched.SourceUrl))
+			sourceURL = orStr(body.SourceURL, textPtr(matched.SourceUrl))
 		} else {
 			// Lower trust may only FILL empty fields; the row keeps its
 			// trusted source label.
 			companyStatus = orStr(textPtr(matched.CompanyStatus), body.CompanyStatus)
 			rldName = orStr(textPtr(matched.RldName), body.RldName)
-			sourceURL = orStr(textPtr(matched.SourceUrl), body.SourceUrl)
+			sourceURL = orStr(textPtr(matched.SourceUrl), body.SourceURL)
 		}
 		if err := qtx.MergeProductIdentityFields(ctx, store.MergeProductIdentityFieldsParams{
 			ID:            matched.ID,
@@ -279,7 +275,7 @@ func (s *Server) handleCreateProduct(w http.ResponseWriter, r *http.Request) {
 			RldApplicationNumber: textOrNull(body.RldApplicationNumber),
 			CompanyStatus:        textOrNull(body.CompanyStatus),
 			Source:               *body.Source,
-			SourceUrl:            textOrNull(body.SourceUrl),
+			SourceUrl:            textOrNull(body.SourceURL),
 			OnWatchlist:          true,
 			AddedAt:              ts(s.now()),
 		}); err != nil {
@@ -316,11 +312,12 @@ func (s *Server) handleDeleteProduct(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.currentUser(w, r); !ok {
 		return
 	}
-	id64, err := strconv.ParseInt(r.PathValue("product_id"), 10, 64)
+	id64, err := strconv.ParseInt(r.PathValue("product_id"), 10, 32)
 	if err != nil {
-		// A syntactically valid integer beyond int64 is ErrRange, not a parse
-		// failure: Python's unbounded int accepts it and 404s on lookup, so
-		// mirror that instead of misreporting it as unparseable.
+		// product.id is a 32-bit integer, so a syntactically valid integer
+		// beyond int32 is ErrRange, not a parse failure: Python's unbounded int
+		// accepts it and 404s on lookup, so mirror that instead of misreporting
+		// it as unparseable (and the int32 conversion below can never wrap).
 		if errors.Is(err, strconv.ErrRange) {
 			writeDetail(w, http.StatusNotFound, "product not found")
 			return
@@ -328,13 +325,6 @@ func (s *Server) handleDeleteProduct(w http.ResponseWriter, r *http.Request) {
 		// FastAPI's int path converter -> pydantic int_parsing item.
 		writeValidationError(w, validationItem{Type: "int_parsing", Loc: []string{"path", "product_id"},
 			Msg: "Input should be a valid integer, unable to parse string as an integer"})
-		return
-	}
-	// product.id is a 32-bit integer; Python accepts arbitrary ints and 404s
-	// on lookup, so an out-of-range id short-circuits to the same 404 rather
-	// than wrapping in the int32 conversion.
-	if id64 > math.MaxInt32 || id64 < math.MinInt32 {
-		writeDetail(w, http.StatusNotFound, "product not found")
 		return
 	}
 	rows, err := s.q.SetProductWatchlist(r.Context(), store.SetProductWatchlistParams{

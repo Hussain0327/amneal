@@ -118,10 +118,10 @@ type auditKwargs struct {
 	TurnID       *string         `json:"turn_id"`
 	UserID       *string         `json:"user_id"`
 	Status       *string         `json:"status"`
-	RouteJson    json.RawMessage `json:"route_json"`
+	RouteJSON    json.RawMessage `json:"route_json"`
 	InputTokens  *int64          `json:"input_tokens"`
 	OutputTokens *int64          `json:"output_tokens"`
-	CostUsd      *float64        `json:"cost_usd"`
+	CostUSD      *float64        `json:"cost_usd"`
 }
 
 // sessionPatch mirrors rag_contract.SessionPatch: the chat-history mutations

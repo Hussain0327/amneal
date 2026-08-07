@@ -56,7 +56,7 @@ func TestPreviouslySilentQueryBranchesAreLogged(t *testing.T) {
 
 	h := newHarness(t, Config{
 		SessionTTL:         72 * time.Hour,
-		GONativeQuery:      true,
+		GoNativeQuery:      true,
 		RAGTimeout:         5 * time.Second,
 		RateLimitPerMinute: 1,
 	})

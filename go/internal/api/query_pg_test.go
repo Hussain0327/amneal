@@ -18,6 +18,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -73,9 +74,9 @@ func TestPersistUserTurnForeignSessionAbortsWithZeroWrites(t *testing.T) {
 	h := newHarness(t, Config{SessionTTL: 72 * time.Hour})
 	t0 := time.Now().UTC().Truncate(time.Microsecond)
 
-	h.seedChat(t, "raced", "999", nil, 0)
+	h.seedChat(t, "raced", "999", 0)
 	sid, err := h.srv.persistUserTurn(t.Context(), "raced", "turn-a", "1", "q?", []byte("{}"), t0)
-	if err != errSessionOwnershipLost {
+	if !errors.Is(err, errSessionOwnershipLost) {
 		t.Fatalf("err = %v, want errSessionOwnershipLost", err)
 	}
 	if sid != "" {
@@ -95,7 +96,7 @@ func TestPersistUserTurnAdoptsNullOwner(t *testing.T) {
 	h := newHarness(t, Config{SessionTTL: 72 * time.Hour})
 	t0 := time.Now().UTC().Truncate(time.Microsecond)
 
-	h.seedChat(t, "legacy", nil, nil, 0)
+	h.seedChat(t, "legacy", nil, 0)
 	sid, err := h.srv.persistUserTurn(t.Context(), "legacy", "turn-b", "1", "q?", []byte("{}"), t0)
 	if err != nil || sid != "legacy" {
 		t.Fatalf("adopt: sid=%q err=%v", sid, err)
@@ -140,7 +141,7 @@ func nativeQueryHarness(t *testing.T, stub http.HandlerFunc) *harness {
 	t.Cleanup(rag.Close)
 	// RAGTimeout is load-bearing: the handler wraps the compute call in
 	// context.WithTimeout(cfg.RAGTimeout), and zero means already-expired.
-	h := newHarness(t, Config{SessionTTL: 72 * time.Hour, GONativeQuery: true, RAGTimeout: 5 * time.Second})
+	h := newHarness(t, Config{SessionTTL: 72 * time.Hour, GoNativeQuery: true, RAGTimeout: 5 * time.Second})
 	h.srv.rag = newRAGClient(rag.URL, "test-token", 5*time.Second)
 	return h
 }

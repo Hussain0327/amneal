@@ -255,11 +255,11 @@ func auditParams(k auditKwargs, at, t0 time.Time) store.InsertQueryLogParams {
 		CitationsJson: jsonbOr(k.Citations, "[]"),
 		Refused:       k.Refused,
 		Status:        textOrNull(k.Status),
-		RouteJson:     jsonbOr(k.RouteJson, "{}"),
+		RouteJson:     jsonbOr(k.RouteJSON, "{}"),
 		ModelName:     k.ModelName,
 		InputTokens:   int4OrNull(k.InputTokens),
 		OutputTokens:  int4OrNull(k.OutputTokens),
-		CostUsd:       float8OrNull(k.CostUsd),
+		CostUsd:       float8OrNull(k.CostUSD),
 		LatencyMs:     latencyMs(t0, at),
 	}
 }

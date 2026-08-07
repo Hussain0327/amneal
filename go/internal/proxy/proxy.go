@@ -1,7 +1,7 @@
 // Package proxy is strangler Step 3 of docs/POLYGLOT_TARGET_2026-07-10.md: a
-// transparent reverse proxy that will front the Python API as a second Fly
-// process group. This slice is deliberately inert -- nothing in fly.toml,
-// the Dockerfile, or deploy.yml runs it yet (see docs/GO_PROXY_ROLLOUT.md).
+// transparent reverse proxy that fronts the Python API as the public-edge
+// Fly process group; wiring lives in fly.toml and the Dockerfile (see
+// docs/GO_PROXY_ROLLOUT.md).
 package proxy
 
 import (
@@ -199,15 +199,6 @@ func NewHandlerWithPreRelay(upstream *url.URL, errLog *log.Logger, native map[st
 		}
 		mux.ServeHTTP(w, r)
 	})
-}
-
-// Run serves the relay-only handler on cfg.Addr -- see Serve for the
-// lifecycle. Kept for the no-native-routes path and existing callers.
-func Run(cfg Config, errLog *log.Logger) error {
-	if errLog == nil {
-		errLog = log.Default()
-	}
-	return Serve(cfg.Addr, NewHandler(cfg.Upstream, errLog), errLog)
 }
 
 // Serve runs handler on addr until SIGTERM/SIGINT, then drains in-flight

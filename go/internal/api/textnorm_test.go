@@ -53,7 +53,6 @@ func TestCanonicalAndStrippedNameParity(t *testing.T) {
 }
 
 func TestIdentityAttrParity(t *testing.T) {
-	sp := func(s string) *string { return &s }
 	cases := []struct {
 		in, want *string
 	}{
@@ -86,8 +85,9 @@ func strOrNil(p *string) any {
 	return *p
 }
 
+func sp(s string) *string { return &s }
+
 func TestIdentityAttrEqual(t *testing.T) {
-	sp := func(s string) *string { return &s }
 	cases := []struct {
 		a, b *string
 		want bool
@@ -112,7 +112,6 @@ func TestIdentityAttrEqual(t *testing.T) {
 // trust gate depends on this; a nil-only implementation would let a
 // lower-trust import "fill" a field the user deliberately blanked.
 func TestOrStrEmptyStringFalsy(t *testing.T) {
-	sp := func(s string) *string { return &s }
 	cases := []struct {
 		a, b, want *string
 	}{

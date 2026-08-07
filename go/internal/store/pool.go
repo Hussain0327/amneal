@@ -70,7 +70,7 @@ func NewPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 
 	cfg, err := pgxpool.ParseConfig(withSSL)
 	if err != nil {
-		return nil, fmt.Errorf("store: parse database url: %w", err)
+		return nil, fmt.Errorf("store: parse pool config: %w", err)
 	}
 
 	if cfg.ConnConfig.RuntimeParams == nil {
