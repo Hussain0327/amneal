@@ -15,7 +15,7 @@ dependencies = [
     # PYSEC-2026-3552 / CVE-2026-69247 (HIGH), which fails both the pip-audit job
     # and the Trivy image scan; 50.0.0 is the fix.
     "cryptography>=50.0.0",
-    "pypdf>=6.14.2",  # 6.13.3 fixes GHSA-jm82-fx9c-mx94 (unbounded stream-length DoS)
+    "pypdf>=6.15.0",  # 6.15.0 fixes CVE-2026-71852
     "sqlmodel>=0.0.39",
     "sqlalchemy>=2.0.51",
     "alembic>=1.18.5",

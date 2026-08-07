@@ -19,6 +19,12 @@ export function StatusTicker({ frames }: { frames: string[] }) {
             className={`ticker__line ${live ? "ticker__line--live" : "ticker__line--past"}`}
             aria-hidden={live ? undefined : true}
           >
+            {/* Step ordinal, zero-padded like the provenance docket log these
+                same frames settle into -- the live run and the kept record
+                share one numbering. */}
+            <span className="ticker__no" aria-hidden>
+              {String(i + 1).padStart(2, "0")}
+            </span>
             <span className="ticker__rule" aria-hidden />
             <span>{text}</span>
             {live && <span className="ticker__dot" aria-hidden />}

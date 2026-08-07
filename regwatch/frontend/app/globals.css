@@ -91,6 +91,9 @@ body::before {
 }
 .measure {
   max-width: var(--maxw);
+  /* With the shell reduced to the spine rail, the reading measure centers in
+     the canvas instead of hugging the old sidebar. */
+  margin-inline: auto;
 }
 
 /* ---------- Accessibility ---------- */
@@ -201,6 +204,11 @@ main:focus {
 .scopebar__clear:hover {
   color: var(--oxblood);
 }
+/* Empty-state "pin one here" reads as part of the sentence, not a control
+   floated to the bar's far edge. */
+.scopebar__clear--flow {
+  margin-left: 0;
+}
 .scopebar__empty {
   font-size: 0.76rem;
   color: var(--ink-faint);
@@ -234,6 +242,11 @@ main:focus {
   flex-direction: column;
   /* Fill the canvas so the composer rests low and pins to the bottom. */
   min-height: calc(100vh - 9rem);
+  /* Same centered measure as the other surfaces (the chat column previously
+     leaned on the wide sidebar to cap its line length). */
+  width: 100%;
+  max-width: var(--maxw);
+  margin-inline: auto;
 }
 .chat__head {
   margin-bottom: 1.1rem;
@@ -658,10 +671,34 @@ main:focus {
   cursor: pointer;
   color: var(--ink-faint);
 }
-.prov__line {
-  margin-top: 0.5rem;
+/* Provenance as a labelled record, not an id dump: small mono definition rows
+   (Audit / Model / Filed / Trace), the raw trace shortened with the full value
+   in its title. */
+.prov__grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+  margin: 0.55rem 0 0;
   font-size: 0.72rem;
   color: var(--ink-soft);
+}
+.prov__row {
+  display: flex;
+  gap: 0.7rem;
+}
+.prov__row dt {
+  flex: none;
+  width: 3.6rem;
+  padding-top: 0.12rem;
+  font-size: 0.6rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.prov__row dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 /* The SSE status frames the answer settled through, numbered like a docket log.
    list-style is restated because the Tailwind preflight strips it. */
@@ -1318,7 +1355,7 @@ button.chip:disabled {
   color: var(--ink-2);
 }
 
-/* ---------- History (sidebar sessions) ---------- */
+/* ---------- History rows (inside the docket panel) ---------- */
 .hist {
   display: flex;
   align-items: center;
@@ -1635,7 +1672,8 @@ button.chip:disabled {
   transition: opacity 0.3s ease, color 0.3s ease;
 }
 .ticker__line--past {
-  opacity: 0.38;
+  /* Superseded steps stay readable — the log is the point — just settled. */
+  opacity: 0.55;
 }
 .ticker__line--live {
   color: var(--ink-2);
@@ -1670,6 +1708,13 @@ button.chip:disabled {
   border-radius: 999px;
   background: var(--gold-deep);
   animation: ticker-pulse 1.6s ease-in-out infinite;
+}
+/* Step ordinal — the same numbering the settled turn's provenance log keeps. */
+.ticker__no {
+  flex: none;
+  width: 1.1rem;
+  font-size: 0.62rem;
+  color: var(--ink-faint);
 }
 
 /* ---------- Memorandum (conversational turn) ----------
@@ -1804,44 +1849,430 @@ button.chip:disabled {
   }
 }
 
-/* ---------- Sidebar geometry (a class, not inline styles, so a media query
-   can actually override it — inline styles can't be) ---------- */
-.sidebar {
+/* ---------- The spine rail ----------
+   The shell reduced to a bound edge: seal, the five chapter numerals, Studio's
+   gold mark, the title lettered down the spine, then the analyst's own things
+   (new chat / history / account). A class, not inline styles, so the media
+   query below can restack it. */
+.rail {
   flex-shrink: 0;
-  width: 18.5rem;
-  background: linear-gradient(180deg, var(--paper-2), var(--paper-3));
-  border-right: 1px solid var(--edge);
-  padding: 2.1rem 1.6rem;
-  display: flex;
-  flex-direction: column;
   position: sticky;
   top: 0;
+  z-index: 6; /* above the sticky scopebar (5) so the flyout labels clear it */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  width: 3.4rem;
   height: 100vh;
+  padding: 0.85rem 0 0.8rem;
+  background: linear-gradient(180deg, var(--paper-2), var(--paper-3));
+  border-right: 1px solid var(--edge);
+}
+.rail__seal {
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+}
+.rail__seal-mark {
+  width: 1.9rem;
+  height: 1.9rem;
+}
+.rail__nav {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.26rem;
+  margin-top: 0.65rem;
+}
+.rail__hair {
+  width: 1.3rem;
+  margin: 0.4rem 0;
+}
+.rail__stop {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 2.3rem;
+  height: 2.1rem;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink-faint);
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+.rail__stop:hover,
+.rail__stop--open {
+  background: var(--paper-bright);
+  color: var(--ink);
+}
+.rail__stop--active {
+  background: var(--paper-bright);
+  color: var(--gold-ink);
+  box-shadow: inset 3px 0 0 var(--gold);
+}
+.rail__no {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+/* Studio wears its own gold mark — a place, not a chapter numeral. */
+.rail__studio-mark {
+  display: grid;
+  place-items: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 5px;
+  font-family: var(--font-display), serif;
+  font-weight: 600;
+  font-size: 0.8rem;
+  color: #3a2600;
+  background: linear-gradient(150deg, var(--gold), var(--gold-deep));
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
+/* The volume's title, lettered down the free run of the spine. */
+.rail__wordmark {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0.8rem 0 0.6rem;
+  writing-mode: vertical-rl;
+  font-size: 0.6rem;
+  font-weight: 500;
+  letter-spacing: 0.52em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  opacity: 0.75;
+  user-select: none;
+  overflow: hidden;
+}
+.rail__foot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.26rem;
+}
+.rail__plus {
+  font-family: var(--font-mono), monospace;
+  font-size: 1.05rem;
+  line-height: 1;
+}
+.rail__account {
+  position: relative;
+}
+.rail__avatar {
+  display: grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--font-mono), monospace;
+  font-size: 0.58rem;
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px rgba(22, 33, 58, 0.4);
+}
+/* Backend-unreachable marker on the account stop; the popover says the rest. */
+.rail__status {
+  position: absolute;
+  right: 0.26rem;
+  bottom: 0.2rem;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--oxblood);
+  box-shadow: 0 0 0 2px var(--paper-2);
+}
+/* Flyout label beside a stop — hover/keyboard only; the aria-label is the
+   accessible name, so the flyout stays decorative. */
+.rail__tip {
+  position: absolute;
+  left: calc(100% + 0.55rem);
+  top: 50%;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.05rem;
+  padding: 0.34rem 0.62rem;
+  border-radius: 3px;
+  background: var(--ink);
+  color: var(--paper);
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(-50%) translateX(-4px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+  pointer-events: none;
+}
+.rail__tip-label {
+  font-family: var(--font-body), sans-serif;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+.rail__tip-note {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(250, 246, 236, 0.78);
+}
+.rail__stop:hover .rail__tip,
+.rail__stop:focus-visible .rail__tip {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
 }
 
-/* ---------- Responsive: stack the shell below the desktop breakpoint ----------
-   The app is desktop-first. Below ~860px (phones, narrow split-screen) the
-   fixed-width sidebar would crush the content column, so stack them: the sidebar
-   becomes a full-width banner on top with a capped, scrollable history, and the
-   content takes the full width. The skip-to-content link lets keyboard / screen-
-   reader users jump straight past the sidebar. (A polished off-canvas drawer is
-   a follow-up; it needs on-device QA.) */
+/* ---------- History docket (slides from the rail) ---------- */
+.histpanel__scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  /* Transparent click-catcher: a quick switcher, not a modal moment. */
+  background: transparent;
+}
+.histpanel {
+  position: fixed;
+  left: 3.4rem;
+  top: 0;
+  bottom: 0;
+  z-index: 121;
+  display: flex;
+  flex-direction: column;
+  width: min(21rem, calc(100vw - 3.4rem));
+  padding: 1.05rem 1.05rem 0.5rem;
+  background: linear-gradient(180deg, var(--paper), var(--paper-2));
+  border-right: 1px solid var(--edge);
+  box-shadow: var(--shadow-lift);
+  animation: panelIn 0.16s ease;
+}
+@keyframes panelIn {
+  from {
+    transform: translateX(-14px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+.histpanel__head {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+.histpanel__head .kicker {
+  flex: 1;
+  font-size: 0.62rem;
+}
+.histpanel__new {
+  font-size: 0.66rem;
+  border-bottom: none;
+}
+.histpanel__close,
+.acct__close {
+  appearance: none;
+  cursor: pointer;
+  flex: none;
+  width: 1.7rem;
+  height: 1.7rem;
+  border: 1px solid var(--edge);
+  border-radius: 7px;
+  background: var(--paper-3);
+  color: var(--ink-soft);
+  font-size: 1rem;
+  line-height: 1;
+}
+.histpanel__close:hover,
+.acct__close:hover {
+  color: var(--ink);
+  background: var(--paper-2);
+}
+.histpanel__search {
+  margin-top: 0.75rem;
+  padding: 0.45rem 0.65rem;
+  font-size: 0.86rem;
+  border-radius: 6px;
+}
+.histpanel__scroll {
+  flex: 1;
+  min-height: 0;
+  margin-top: 0.55rem;
+  padding-bottom: 0.8rem;
+  overflow-y: auto;
+}
+.histpanel__group {
+  margin-top: 0.9rem;
+}
+.histpanel__group:first-child {
+  margin-top: 0.2rem;
+}
+.histpanel__day {
+  margin: 0 0 0.3rem;
+  font-size: 0.58rem;
+  letter-spacing: 0.26em;
+  color: var(--ink-faint);
+}
+.histpanel__note {
+  padding: 0.6rem 0.2rem;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--ink-faint);
+}
+
+/* ---------- Account popover (opens from the rail's foot) ---------- */
+.acct__scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  background: transparent;
+}
+.acct {
+  position: fixed;
+  left: 3.4rem;
+  bottom: 0.7rem;
+  z-index: 121;
+  width: min(19.5rem, calc(100vw - 4.2rem));
+  padding: 1rem 1.1rem;
+  background: linear-gradient(180deg, var(--paper-bright), var(--paper-2));
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  box-shadow: var(--shadow-lift);
+  animation: panelIn 0.16s ease;
+}
+.acct__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+}
+.acct__who {
+  flex: 1;
+  min-width: 0;
+}
+.acct__name {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+.acct__email {
+  margin: 0.15rem 0 0;
+  font-size: 0.7rem;
+  color: var(--ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.acct__signout {
+  margin-top: 0.6rem;
+}
+.acct .hair {
+  margin: 0.85rem 0 0.7rem;
+}
+.acct__kicker {
+  font-size: 0.6rem;
+  color: var(--ink-faint);
+}
+.acct__colophon {
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+  margin: 0.45rem 0 0;
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+}
+.acct__row {
+  display: flex;
+  gap: 0.6rem;
+}
+.acct__row dt {
+  flex: none;
+  width: 6.2rem;
+  padding-top: 0.1rem;
+  font-size: 0.6rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.acct__row dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.acct__note {
+  margin: 0.45rem 0 0;
+  font-size: 0.72rem;
+  color: var(--ink-faint);
+}
+.acct__note--down {
+  color: var(--oxblood);
+}
+.acct__creed {
+  margin: 0.85rem 0 0;
+  font-family: var(--font-display), serif;
+  font-style: italic;
+  font-size: 0.8rem;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+
+/* ---------- Responsive: restack the shell below the desktop breakpoint ----------
+   Below ~860px the spine turns horizontal: a slim top strip with the seal,
+   the numbered stops, and the analyst cluster right-aligned. The flyout labels
+   are hover furniture, so they simply switch off on touch-sized screens (every
+   stop keeps its aria-label). */
 @media (max-width: 860px) {
   .shell {
     flex-direction: column;
     min-height: 100vh;
   }
-  .sidebar {
+  .rail {
     position: static;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.2rem;
     width: 100%;
     height: auto;
+    padding: 0.5rem 0.75rem;
     border-right: 0;
     border-bottom: 1px solid var(--edge);
-    padding: 1.4rem 1.25rem;
   }
-  /* Keep the history list from dominating the stacked banner. */
-  .sidebar__hist-scroll {
-    max-height: 30vh;
+  .rail__nav {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.1rem;
+    margin-top: 0;
+  }
+  .rail__hair {
+    width: 0;
+    height: 1.4rem;
+    margin: 0 0.35rem;
+    border-top: 0;
+    border-left: 1px solid var(--edge);
+  }
+  .rail__wordmark {
+    display: none;
+  }
+  .rail__foot {
+    flex-direction: row;
+    margin-left: auto;
+  }
+  .rail__tip {
+    display: none;
+  }
+  .histpanel {
+    left: 0;
+    width: min(24rem, 100vw);
+  }
+  .acct {
+    left: 0.7rem;
+    bottom: auto;
+    top: 3.6rem;
   }
   .scopebar {
     flex-wrap: wrap;
@@ -1957,7 +2388,9 @@ button.chip:disabled {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .evidence__panel {
+  .evidence__panel,
+  .histpanel,
+  .acct {
     animation: none;
   }
 }

@@ -1,9 +1,10 @@
-// The shell layout must MOUNT SettingsProvider: the Sidebar colophon (and the
-// Ask confidence legend) read useSettings, which throws outside the provider.
-// This renders the REAL app/(shell)/layout.tsx with the established mocks from
-// askPage.test.tsx / sidebarHistory.test.tsx and fails if the
-// <SettingsProvider> mount is ever removed from the layout.
+// The shell layout must MOUNT SettingsProvider: the rail's account popover
+// colophon (and the Ask confidence legend) read useSettings, which throws
+// outside the provider. This renders the REAL app/(shell)/layout.tsx with the
+// established mocks from askPage.test.tsx / historyPanel.test.tsx and fails if
+// the <SettingsProvider> mount is ever removed from the layout.
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PublicSettings } from "@/lib/api";
@@ -72,14 +73,17 @@ afterEach(() => {
 });
 
 describe("shell layout mounts SettingsProvider (A4)", () => {
-  it("renders the Sidebar colophon through context without a useSettings throw", async () => {
+  it("serves the account-popover colophon through context without a useSettings throw", async () => {
+    const user = userEvent.setup();
     render(
       <ShellLayout>
         <div data-testid="page-child" />
       </ShellLayout>,
     );
-    // The colophon resolves via context: if the <SettingsProvider> mount left
-    // the layout, Sidebar's useSettings would throw and this render would fail.
+    // The rail itself reads useSettings (reachability dot): if the
+    // <SettingsProvider> mount left the layout this render would throw.
+    // The colophon now lives behind the account stop.
+    await user.click(screen.getByRole("button", { name: /Account/ }));
     expect(await screen.findByText(/test-embed/)).toBeInTheDocument();
     expect(screen.getByText("test-provider/test-llm")).toBeInTheDocument();
     // The page subtree still renders inside the shell's <main>.
