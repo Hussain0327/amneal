@@ -5,6 +5,11 @@ later flip a flag — for now everything is mechanical):
 
   - recall@k            : 1 if any retrieved chunk's (doc_id, page) is in the
                           gold expected_sources, else 0. Average over questions.
+                          Scored from what RETRIEVAL returned, on every
+                          answerable row -- including rows the system then
+                          declined or failed to synthesize. Retrieval either
+                          found the page or it did not; what happened next is
+                          the business of refusal_accuracy, not of this metric.
   - mrr                 : reciprocal of the rank of the FIRST expected source in
                           the retrieved list (0 if absent). Average over
                           questions. Recall says the evidence was somewhere in
@@ -14,14 +19,20 @@ later flip a flag — for now everything is mechanical):
                           here because only the top `rerank_top_k` passages reach
                           the prompt.
   - citation_precision  : fraction of an answer's citations that point at an
-                          expected source.
+                          expected source. Denominated over rows that PRODUCED
+                          an answer: a turn whose synthesis crashed cited
+                          nothing because it never finished, and scoring that
+                          as "cited the wrong things" is not a measurement.
   - faithfulness        : fraction of an answer's sentences that carry at
                           least one citation (proxy for ungroundedness).
   - fact_recall         : fraction of an item's expected_facts present in the
                           answer (tolerant substring) — scores answer CONTENT,
                           not just which pages were cited.
-  - refusal_accuracy    : fraction of items whose refuse/answer decision was
-                          correct.
+  - refusal_accuracy    : fraction of items whose withhold/answer decision was
+                          correct. A must_refuse item is correct when the answer
+                          was WITHHELD (no claims, no citations) in any shape --
+                          see withheld_answer(). Turns that errored made no
+                          decision and leave the denominator.
 """
 
 from __future__ import annotations
@@ -100,6 +111,16 @@ class Scorecard:
     # the denominator with a notice rather than counted as a wrong decision. Never
     # a silent pass — the offline gate still hard-gates the clarify behavior.
     skipped: int = 0
+    # Items whose TRANSPORT failed (provider 429/5xx/timeout, catalog query), in
+    # any bucket. Such a turn measured nothing, so it leaves every denominator
+    # and is reported instead — see unmeasured_turn. Two distinct lies this
+    # removes: an error was counted as a CORRECT refusal (`_refuse` sets
+    # refused=True), which raised the score between two runs of identical code
+    # (0.710 -> 0.726); and on an answerable row it scored recall 0, which made
+    # a rate-limited CI run look like a retrieval regression (0.814 -> 0.721).
+    # run_eval FAILS the build when this gets large: a run that could not
+    # measure must never be reported as a run that measured well.
+    errored: int = 0
     # Per-category breakdown. An aggregate says quality moved; only this says
     # WHERE, and that is the difference between "the re-chunk regressed" and
     # "the re-chunk regressed table questions specifically". Categories absent
@@ -200,6 +221,74 @@ def fact_recall(answer_text: str, expected_facts: list[str]) -> float:
     return matched / len(expected_facts)
 
 
+def withheld_answer(result: Any) -> bool:
+    """Did the system decline to answer the question it was asked?
+
+    This is the LABELLING POLICY for `must_refuse` rows, adjudicated 2026-08-06
+    (issue #161) and documented in docs/EVAL_STATUS.md. The gold flag asserts
+    "the system must not answer this", which is an INV-1 property of the reply --
+    no claims, no citations -- not a demand for one particular status string.
+
+    Withholding therefore covers three shapes:
+      - "refused"       -- the hard refusal
+      - "scope_warning" -- refuses to advise (INV-3 operational-advice rows)
+      - "clarify" with ZERO citations -- the model declined and the pipeline
+        offered next steps instead. Measured over all 12 seeded-product refusal
+        rows: citations [] and an answer that names the product and asks what the
+        user wants, containing no claim about the question. That is a withheld
+        answer wearing a more useful affordance, and scoring it wrong was
+        measuring the affordance rather than the invariant.
+
+    A clarify that carries citations is NOT withholding: citations are claims
+    about the corpus, and a must_refuse row that produces them is the exact
+    INV-1 failure this metric exists to catch.
+
+    A `malformed_structure` error IS withholding for a must_refuse row: the
+    model's output could not be admitted, so nothing was claimed. Only transport
+    failures leave the denominator (see unmeasured_turn) -- they say nothing
+    about judgment either way.
+    """
+    status = getattr(result, "status", None)
+    if status in ("refused", "scope_warning"):
+        return True
+    if status == "clarify":
+        return not (getattr(result, "citations", None) or [])
+    if status == "error":
+        # An error reply carries no claims and no citations. It is a withhold in
+        # substance; the transport-failure subset never reaches here.
+        return not (getattr(result, "citations", None) or [])
+    return False
+
+
+# Reasons that mean THE SYSTEM'S DEPENDENCIES FAILED, not that the model judged
+# badly: the synthesizer transport raised (429/5xx/timeout), or the dosage-form
+# catalog query did. Deliberately NOT including "malformed_structure" -- that is
+# the model emitting output the claim gate could not admit, which is a real
+# quality defect and must keep scoring against the run (it is a known live issue
+# at ~12% of production turns).
+_TRANSPORT_FAILURE_REASONS = frozenset({"provider_error", "catalog_error"})
+
+
+def unmeasured_turn(result: Any) -> bool:
+    """The turn never ran to completion, so it measured nothing.
+
+    A row where the provider returned 429 tells you nothing about retrieval
+    quality or about judgment -- yet it used to score recall 0, citation
+    precision 0, AND count as a wrong decision, so a rate-limited CI run looked
+    exactly like a quality regression. Live proof: on 2026-08-06 two eval jobs
+    ran concurrently against the same Databricks workspace, five turns came back
+    REQUEST_LIMIT_EXCEEDED, and recall fell 0.814 -> 0.721 with no code change
+    to retrieval. Excluding those five restores 0.816.
+
+    Excluded from every denominator and counted in `Scorecard.errored`, which
+    run_eval prints and fails the build on when it gets large -- a run that
+    could not measure must not be reported as a run that measured well.
+    """
+    return getattr(result, "status", None) == "error" and (
+        getattr(result, "reason", None) in _TRANSPORT_FAILURE_REASONS
+    )
+
+
 _TRACE_PASSAGE_KEYS = ("chunk_id", "doc_id", "version_id", "page", "short_name", "score")
 _TRACE_CITATION_KEYS = ("short_name", "page", "chunk_id", "doc_id", "version_id", "score")
 
@@ -239,6 +328,9 @@ def evaluate(
     refused_incorrectly = 0
     cited_ungrounded = 0
     skipped = 0  # must_clarify items whose product is absent from the corpus
+    errored = 0  # items whose transport failed: measured nothing, any bucket
+    errored_answerable = 0  # the subset that were answerable, for content denominators
+    answer_unmeasured = 0  # answerable rows whose synthesis crashed: no answer to judge
     fact_items = 0  # answered items that actually carry expected_facts
     details: list[dict[str, Any]] = []
 
@@ -251,16 +343,38 @@ def evaluate(
         # to tell a real retrieval regression from a stale expected-source list.
         trace = _trace(result, retrieved, citations)
 
+        # A turn whose transport failed measured nothing, whatever the row
+        # expected. Checked BEFORE the expectation branches so the rule is the
+        # same for every row: scoping it to decision rows only was incoherent,
+        # and the first live run put all five failures on ANSWERABLE rows where
+        # it did not apply.
+        if unmeasured_turn(result):
+            errored += 1
+            if not (it.must_refuse or it.must_clarify):
+                errored_answerable += 1
+            details.append(
+                {
+                    "q": it.question,
+                    "errored": getattr(result, "reason", None) or "error",
+                    "trace": trace,
+                }
+            )
+            continue
+
         # Decision accounting (refuse/clarify items don't contribute to
         # recall/precision/faithfulness — they assert WHICH decision is correct).
         if it.must_refuse:
-            if result.refused:
+            # Scored on whether the answer was WITHHELD, not on which status
+            # string carried it -- see withheld_answer() and docs/EVAL_STATUS.md.
+            held = withheld_answer(result)
+            if held:
                 refusal_correct += 1
             details.append(
                 {
                     "q": it.question,
                     "must_refuse": True,
                     "refused": result.refused,
+                    "withheld": held,
                     "trace": trace,
                 }
             )
@@ -313,11 +427,38 @@ def evaluate(
             continue
         if result.refused:
             refused_incorrectly += 1
+            # RETRIEVAL STILL HAPPENED, and the retrieved list is the evidence of
+            # what it found. Scoring recall 0 here because the turn did not go on
+            # to answer charges a synthesis or decision failure to retrieval --
+            # a category error that cost main a red build on 2026-08-06: two rows
+            # crashed with malformed_structure AFTER retrieving the expected page
+            # at rank 1, and recall_at_k reported 0.791 instead of 0.837.
+            #
+            # Over-refusal still cannot hide. It is now charged where it belongs:
+            # refused_incorrectly, refusal_accuracy (gated at 0.88) and, for a
+            # genuine decline, citation_precision 0 below. A system that refused
+            # every row would score refusal_accuracy 0.31 and fail loudly.
+            r = recall_at_k(retrieved, it.expected_sources)
+            rr = reciprocal_rank(retrieved, it.expected_sources)
+            sums["recall"] += r
+            sums["rr"] += rr
+            # An answer that was never produced cannot be judged for citations or
+            # faithfulness. A turn whose SYNTHESIS CRASHED leaves those two
+            # denominators (there is nothing to score); a deliberate decline stays
+            # in them at 0, because declining to answer an answerable question is
+            # exactly the product failure they exist to measure.
+            if result.status == "error":
+                answer_unmeasured += 1
+            # A deliberate decline adds nothing to either sum and stays in the
+            # denominator, which scores it 0 -- the existing behavior, kept.
             details.append(
                 {
                     "q": it.question,
                     "must_refuse": False,
                     "refused": True,
+                    "recall": r,
+                    "reciprocal_rank": rr,
+                    "answer_unmeasured": result.status == "error",
                     "trace": trace,
                 }
             )
@@ -367,13 +508,24 @@ def evaluate(
     # recall/precision/faithfulness 0 rather than being dropped — otherwise
     # over-refusal is masked. must_clarify joins must_refuse in this exclusion.
     # (Skipped items are must_clarify, so they are already outside `answerable`.)
-    answerable = max(1, n - decision_expected)
-    correct_non_refusals = (n - decision_expected) - refused_incorrectly
-    # refusal_accuracy is the decision-accuracy bucket: a must_refuse that refused,
-    # a must_clarify that clarified, and an answerable item that answered all count.
-    # Corpus-absent must_clarify items are excluded from the denominator (they are
-    # not scorable here), so they neither pass nor fail the gate.
-    scored = max(1, n - skipped)
+    # Transport-failed answerable items leave this denominator too: they have no
+    # "recall" key, so counting them would score them 0 for a failure that says
+    # nothing about retrieval. Over-refusal is untouched by this -- a genuine
+    # over-refusal is status "refused", never a transport failure, and still
+    # scores 0 inside the denominator.
+    answerable = max(1, n - decision_expected - errored_answerable)
+    correct_non_refusals = (n - decision_expected - errored_answerable) - refused_incorrectly
+    # Citation precision and faithfulness judge an ANSWER. A row whose synthesis
+    # crashed produced none, so it leaves their denominator -- scoring it 0 would
+    # say "it cited the wrong things" about a turn that cited nothing because it
+    # never finished. recall/mrr keep the full denominator: retrieval ran.
+    answered = max(1, n - decision_expected - errored_answerable - answer_unmeasured)
+    # refusal_accuracy is the decision-accuracy bucket: a must_refuse that WITHHELD
+    # an answer, a must_clarify that clarified, and an answerable item that answered
+    # all count. Corpus-absent must_clarify items are excluded from the denominator
+    # (they are not scorable here) and so is every transport-failed turn, so
+    # neither passes nor fails the gate.
+    scored = max(1, n - skipped - errored)
     refusal_accuracy = (refusal_correct + clarify_correct + correct_non_refusals) / scored
     return Scorecard(
         n=n,
@@ -382,8 +534,8 @@ def evaluate(
         # answerable item contributes 0 to both, so over-refusal cannot inflate
         # MRR by shrinking its own denominator.
         mrr=sums["rr"] / answerable,
-        citation_precision=sums["precision"] / answerable,
-        faithfulness=sums["faith"] / answerable,
+        citation_precision=sums["precision"] / answered,
+        faithfulness=sums["faith"] / answered,
         fact_recall=sums["fact"] / max(1, fact_items),
         refusal_accuracy=refusal_accuracy,
         refused_correctly=refusal_correct,
@@ -391,6 +543,7 @@ def evaluate(
         refused_incorrectly=refused_incorrectly,
         cited_ungrounded=cited_ungrounded,
         skipped=skipped,
+        errored=errored,
         by_category=_by_category(items, details),
         details=details,
     )
@@ -406,31 +559,44 @@ def _by_category(
     tell a different story from the headline:
       - content metrics average over ANSWERABLE items, counting a wrongly-refused
         one as 0 (it has no "recall" key), so over-refusal cannot hide;
-      - decision accuracy counts a correct refuse/clarify/answer alike, and
-        excludes corpus-absent skipped items from its denominator.
+      - decision accuracy counts a correct withhold/clarify/answer alike, and
+        excludes corpus-absent skipped items and errored turns from its
+        denominator exactly as the aggregate does.
     """
     out: dict[str, dict[str, float]] = {}
     for cat in {it.category for it in items if it.category}:
         pairs = [(it, d) for it, d in zip(items, details, strict=True) if it.category == cat]
-        answerable = [d for it, d in pairs if not it.must_refuse and not it.must_clarify]
-        scored = [d for _it, d in pairs if not d.get("skipped")]
+        answerable = [
+            d
+            for it, d in pairs
+            if not it.must_refuse and not it.must_clarify and not d.get("errored")
+        ]
+        # Mirrors the aggregate: recall/mrr over every answerable row, citation
+        # precision only over rows that produced an answer to judge.
+        answered = [d for d in answerable if not d.get("answer_unmeasured")]
+        scored = [d for _it, d in pairs if not d.get("skipped") and not d.get("errored")]
         correct = sum(
             1
             for it, d in pairs
             if not d.get("skipped")
+            and not d.get("errored")
             and (
-                (it.must_refuse and d.get("refused"))
+                (it.must_refuse and d.get("withheld"))
                 or (it.must_clarify and d.get("status") == "clarify" and d.get("form_pinned"))
-                or (not it.must_refuse and not it.must_clarify and "recall" in d)
+                # Answered, asked directly rather than inferred from the presence
+                # of a "recall" key: refused rows carry one now (retrieval ran
+                # and is scored), so that proxy would count a refusal as correct.
+                or (not it.must_refuse and not it.must_clarify and not d.get("refused"))
             )
         )
         entry: dict[str, float] = {"n": float(len(pairs))}
         if answerable:
             entry["recall_at_k"] = sum(d.get("recall", 0.0) for d in answerable) / len(answerable)
             entry["mrr"] = sum(d.get("reciprocal_rank", 0.0) for d in answerable) / len(answerable)
-            entry["citation_precision"] = sum(
-                d.get("citation_precision", 0.0) for d in answerable
-            ) / len(answerable)
+            if answered:
+                entry["citation_precision"] = sum(
+                    d.get("citation_precision", 0.0) for d in answered
+                ) / len(answered)
         if scored:
             entry["decision_accuracy"] = correct / len(scored)
         out[cat] = entry
