@@ -406,6 +406,14 @@ def _route_json(
         "reason": reason,
         "context_applied": context_applied,
         "response_mode": response_mode,
+        # The stage-1 search ledger, UNCONDITIONAL: empty means the turn ended
+        # before search ran, populated records what ran (mode, scope, profile,
+        # k, returned). "Did we search?" is a VALUE, never key presence: the
+        # same reason declines on BOTH sides of retrieve() -- multi_form fires
+        # at the pre-retrieval form guard and again at the post-retrieval blend
+        # backstop -- so presence could not answer it. Callers that do search
+        # overwrite this default.
+        "retrieval": {},
     }
 
 

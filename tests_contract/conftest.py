@@ -147,7 +147,15 @@ CITATION_KEYS = frozenset(
 RETRIEVED_ITEM_KEYS = frozenset(
     {"chunk_id", "score", "doc_id", "version_id", "page", "normalized_name", "short_name"}
 )
-ROUTE_JSON_KEYS = frozenset({"route", "filters", "reason", "context_applied", "response_mode"})
+# "retrieval" is the stage-1 search ledger and rides on EVERY route, from both
+# producers (grounded_qa._route_json and Go's errorRouteJSON). It is empty when
+# the turn declined before search ran and populated when it ran, so "did stage-1
+# happen" is asserted as a VALUE, never as key presence -- multi_form declines on
+# both sides of retrieve(), so no reason-keyed rule could express it without
+# encoding a false invariant.
+ROUTE_JSON_KEYS = frozenset(
+    {"route", "filters", "reason", "context_applied", "response_mode", "retrieval"}
+)
 # Healthy pre-synthesis non-answer routes carry a constrained router-model
 # ledger. The model selects only an allowlisted next step and existing option
 # ids; it cannot write display prose or alter status, filters, or citations.
