@@ -1309,11 +1309,29 @@ button.chip:disabled {
   margin: 0.7rem 0;
   padding-left: 1.3rem;
 }
+/* Restated because the Tailwind preflight strips list-style (same reason as
+   .prov__log) — without this the gold ::marker below never renders. */
+.prose ul {
+  list-style: disc;
+}
+.prose ol {
+  list-style: decimal;
+}
 .prose li {
   margin: 0.3rem 0;
 }
 .prose li::marker {
   color: var(--gold-deep);
+}
+/* GFM task lists (the dossier's requirements checklist): the checkbox IS the
+   marker, so the disc goes; the box takes the seal gold. */
+.prose li.task-list-item {
+  list-style: none;
+}
+.prose input[type="checkbox"] {
+  accent-color: var(--gold-deep);
+  margin-right: 0.45rem;
+  vertical-align: -0.08em;
 }
 .prose a {
   color: var(--gold-ink);
@@ -2391,6 +2409,444 @@ button.chip:disabled {
   .evidence__panel,
   .histpanel,
   .acct {
+    animation: none;
+  }
+}
+
+/* ---------- Assemble (02): the compilation order ----------
+   The intake reads as a requisition, not a settings form: the active
+   ingredient is the headline, set in the same inquiry serif Ask uses; the two
+   qualifiers sit subordinate beneath it; the seal action closes bottom-right. */
+.order__lead {
+  font-size: clamp(1.45rem, 3vw, 1.9rem);
+}
+.order__opt {
+  margin-left: 0.5rem;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.56rem;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.order__quals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 1rem 1.5rem;
+  margin-top: 1.35rem;
+}
+.order__foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.8rem 1.2rem;
+  margin-top: 1.5rem;
+}
+.order__creed {
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--ink-faint);
+}
+.order__foot .btn {
+  margin-left: auto;
+}
+
+/* ---------- Assemble: the contents plan ----------
+   Before anything compiles, the page promises exactly what a dossier holds —
+   the backend's real lettered sections. Dashed letter tabs are the "not yet
+   filled" state of the solid tabs the compiled dossier wears (the same
+   empty-on-purpose vocabulary as .na / verified-absent). */
+.plan {
+  margin-top: 2.7rem;
+}
+.plan__head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.8rem;
+}
+.plan__count {
+  flex: none;
+  font-size: 0.66rem;
+  color: var(--ink-faint);
+}
+.plan__list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+}
+.plan__row {
+  display: grid;
+  grid-template-columns: 2.1rem 1fr auto;
+  column-gap: 1rem;
+  align-items: start;
+  padding: 0.7rem 0;
+  border-bottom: 1px solid var(--edge);
+}
+.plan__letter {
+  display: grid;
+  place-items: center;
+  width: 1.55rem;
+  height: 1.55rem;
+  margin-top: 0.1rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--gold-ink);
+  border: 1px dashed var(--gold-deep);
+  border-radius: 2px;
+}
+.plan__title {
+  font-weight: 600;
+  font-size: 0.94rem;
+  color: var(--ink);
+}
+.plan__desc {
+  margin: 0.15rem 0 0;
+  max-width: 36rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+.plan__src {
+  margin-top: 0.28rem;
+  font-size: 0.6rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+/* One honest line while the API call runs — no invented per-section progress. */
+.plan__compiling {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-top: 1.1rem;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.74rem;
+  color: var(--ink-2);
+}
+.plan__dot {
+  flex: none;
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 999px;
+  background: var(--gold-deep);
+  animation: ticker-pulse 1.6s ease-in-out infinite;
+}
+
+/* ---------- Assemble: the bound dossier ----------
+   The compiled result is a document, not a markdown dump: a masthead with the
+   scaffold caveat, letter-chip jumps, then each lettered section behind its
+   own solid tab — the filled counterpart of the plan's dashed letters. */
+.dossier {
+  padding: 0;
+}
+.dossier__mast {
+  padding: 1.5rem 1.75rem 1.3rem;
+}
+.dossier__title {
+  margin: 0.4rem 0 0;
+  font-size: clamp(1.45rem, 3vw, 1.95rem);
+}
+/* The epistemic caveat, in the app's established "absent on purpose" dashed
+   register — a caveat, not a refusal, so never oxblood. */
+.dossier__scaffold {
+  display: inline-block;
+  margin-top: 0.85rem;
+  padding: 0.24rem 0.55rem;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.62rem;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  border: 1px dashed var(--ink-soft);
+  border-radius: 2px;
+}
+.dossier__toc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 1rem;
+}
+.dossier__jump {
+  display: grid;
+  place-items: center;
+  min-width: 24px;
+  min-height: 24px;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--gold-ink);
+  background: var(--gold-wash);
+  border: 1px solid var(--gold-deep);
+  border-radius: 2px;
+  text-decoration: none;
+  transition: background 0.15s ease;
+}
+.dossier__jump:hover {
+  background: #f7e6bf;
+}
+.dossier__sec {
+  display: grid;
+  grid-template-columns: 2.9rem 1fr;
+  column-gap: 1rem;
+  padding: 1.2rem 1.75rem 1.2rem 1.1rem;
+  border-top: 1px solid var(--edge);
+  /* Clear the sticky scopebar when a letter chip jumps here. */
+  scroll-margin-top: 3.4rem;
+}
+/* The section you jumped to takes the gold spine — found, not just landed on. */
+.dossier__sec:target {
+  box-shadow: inset 3px 0 0 var(--gold);
+}
+.dossier__tab {
+  justify-self: end;
+  display: grid;
+  place-items: center;
+  width: 1.55rem;
+  height: 1.55rem;
+  margin-top: 0.05rem;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--gold-ink);
+  background: var(--gold-wash);
+  border: 1px solid var(--gold-deep);
+  border-radius: 2px;
+}
+.dossier__body {
+  min-width: 0;
+}
+.dossier__sechead {
+  margin: 0.15rem 0 0.4rem;
+  font-family: var(--font-display), Georgia, serif;
+  font-weight: 600;
+  font-size: 1.14rem;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: var(--ink);
+}
+.dossier__sec .prose {
+  font-size: 0.97rem;
+}
+/* Content-borne h3s ("From <url>", "Sources") stay subordinate to the tabbed
+   section head beside them. */
+.dossier__sec .prose h3 {
+  font-size: 1rem;
+}
+.dossier__raw {
+  font-size: 0.7rem;
+  background: var(--paper-3);
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  padding: 0.8rem;
+  overflow: auto;
+  color: var(--ink-2);
+}
+
+/* ---------- Watch (03): the bulletin ----------
+   One ruled sheet, not a stack of identical sealed cards. Each entry keeps a
+   docket margin on the left — kind stamp, detected date, match score — and
+   only a NEW entry carries the gold spine: on this surface gold marks arrival. */
+.bulletin {
+  margin-top: 1rem;
+}
+.issue-line {
+  margin: 0.55rem 0 0;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.74rem;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+.issue-line__warn {
+  color: var(--oxblood);
+}
+.count-line {
+  font-size: 0.72rem;
+  color: var(--ink-faint);
+}
+.entry {
+  position: relative;
+  display: grid;
+  grid-template-columns: 6rem 1fr;
+  column-gap: 1.2rem;
+  padding: 1.1rem 1.4rem 1.1rem 1.15rem;
+}
+.entry + .entry {
+  border-top: 1px solid var(--edge);
+}
+.entry--new::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: linear-gradient(180deg, var(--gold), var(--gold-deep));
+}
+.entry__rail {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+  padding-top: 0.28rem;
+}
+.entry__kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+/* Hollow ring = a revision to something already known; solid gold = new. */
+.entry__kind::before {
+  content: "";
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--paper-bright);
+  box-shadow: inset 0 0 0 1.5px var(--ink-soft);
+}
+.entry__kind--new {
+  color: var(--gold-ink);
+}
+.entry__kind--new::before {
+  background: var(--gold-deep);
+  box-shadow: none;
+}
+.entry__when,
+.entry__match {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.62rem;
+  color: var(--ink-faint);
+}
+.entry__top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.8rem;
+}
+.entry__name {
+  font-size: 1.12rem;
+  font-weight: 600;
+}
+.entry__id {
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+}
+.entry__scope {
+  margin-left: auto;
+}
+.entry__scope[aria-pressed="true"] {
+  border-color: var(--gold-deep);
+  background: var(--gold-wash);
+  color: var(--gold-ink);
+}
+.entry__sum {
+  margin: 0.45rem 0 0;
+  max-width: 44rem;
+  font-size: 0.95rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+.entry__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 1.2rem;
+  margin-top: 0.55rem;
+}
+.entry__meta .link {
+  font-size: 0.74rem;
+}
+.bulletin-empty {
+  margin-top: 0.9rem;
+  font-size: 0.95rem;
+  color: var(--ink-soft);
+}
+
+/* Segmented kind facet: quiet mono stops; the pressed stop fills navy — gold
+   stays reserved for the NEW stamps in the feed below. */
+.facet {
+  display: inline-flex;
+  background: var(--paper-bright);
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.facet__btn {
+  appearance: none;
+  cursor: pointer;
+  min-height: 24px;
+  padding: 0.32rem 0.85rem;
+  border: 0;
+  border-left: 1px solid var(--edge);
+  background: transparent;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.64rem;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.facet__btn:first-child {
+  border-left: 0;
+}
+.facet__btn:hover:not([aria-pressed="true"]) {
+  background: var(--paper-2);
+  color: var(--ink);
+}
+.facet__btn[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+/* Watchlist ledger refinements: the URL column collapses to a link elsewhere;
+   here the type just tightens. */
+.ledger td {
+  font-size: 0.86rem;
+}
+.ledger td.code {
+  font-size: 0.78rem;
+}
+
+@media (max-width: 700px) {
+  .plan__row {
+    grid-template-columns: 2.1rem 1fr;
+  }
+  .plan__src {
+    grid-column: 2;
+    margin-top: 0.3rem;
+  }
+  .dossier__sec {
+    grid-template-columns: 1fr;
+    padding: 1.1rem 1.25rem;
+  }
+  .dossier__tab {
+    justify-self: start;
+    margin-bottom: 0.5rem;
+  }
+  .entry {
+    grid-template-columns: 1fr;
+    padding: 1rem 1.15rem;
+  }
+  .entry__rail {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 0.9rem;
+    padding-top: 0;
+    margin-bottom: 0.4rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plan__dot {
     animation: none;
   }
 }
