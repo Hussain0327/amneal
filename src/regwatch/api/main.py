@@ -642,6 +642,9 @@ class QueryRequest(BaseModel):
     # request an unbounded k that materializes the whole corpus into one search.
     k: int | None = Field(None, ge=1, le=50)
     session_id: str | None = None
+    # Per-request opt-in for the provisional draft SSE channel. Ignored by the
+    # blocking /query route and whenever the server-side dual gate is off.
+    live_draft: bool = False
 
     @field_validator("filters")
     @classmethod
@@ -902,11 +905,13 @@ async def query(req: QueryRequest, user: User = Depends(require_user)) -> QueryR
 
 
 def _sse_event(name: str, data: dict[str, Any]) -> str:
-    """One Server-Sent Events frame. The Ask client (askQueryStream) parses three
+    """One Server-Sent Events frame. The Ask client (askQueryStream) parses five
     event names: ``status`` (``{"text": ...}`` progress), ``token`` (``{"delta":
-    ...}`` a slice of the already-gated, already-audited answer), and ``result``
-    (the full validated QueryResponse). Any other name is ignored, so we emit
-    only these."""
+    ...}`` a slice of the already-gated, already-audited answer), ``draft``
+    (``{"delta": ...}`` LIVE un-gated provisional prose, dual-gated -- see
+    REGWATCH_LIVE_DRAFT), ``draft_reset`` (``{}``, discard every draft delta
+    received so far), and ``result`` (the full validated QueryResponse). Any
+    other name is ignored, so we emit only these."""
     return f"event: {name}\ndata: {json.dumps(data)}\n\n"
 
 
@@ -950,8 +955,18 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
         # only; the authoritative answer is still the terminal ``result`` frame.
         loop.call_soon_threadsafe(queue.put_nowait, ("token", delta))
 
+    def on_draft(delta: str) -> None:
+        # LIVE un-gated prose from the worker thread - provisional by
+        # contract; the client renders it only as a draft.
+        loop.call_soon_threadsafe(queue.put_nowait, ("draft", delta))
+
+    def on_draft_reset() -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, ("draft_reset", None))
+
     async def _run() -> None:
         try:
+            s = get_settings()
+            draft_on = bool(s.live_draft_enabled and s.prose_synthesis_enabled and req.live_draft)
             result = await _dispatch_ask(
                 question=req.question,
                 filters=req.filters,
@@ -960,6 +975,8 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
                 user_id=user_id,
                 on_progress=on_progress,
                 on_token=on_token,
+                on_draft=on_draft if draft_on else None,
+                on_draft_reset=on_draft_reset if draft_on else None,
             )
             queue.put_nowait(("result", result))
         except HTTPException:
@@ -995,6 +1012,12 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
                 continue
             if kind == "token":
                 yield _sse_event("token", {"delta": payload})
+                continue
+            if kind == "draft":
+                yield _sse_event("draft", {"delta": payload})
+                continue
+            if kind == "draft_reset":
+                yield _sse_event("draft_reset", {})
                 continue
             if kind == "result":
                 try:

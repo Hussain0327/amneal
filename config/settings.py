@@ -146,6 +146,11 @@ class Settings(BaseSettings):
     prose_synthesis_enabled: bool = Field(
         default=False, validation_alias="REGWATCH_PROSE_SYNTHESIS"
     )
+    # Live provisional draft streaming over SSE (owner-amended INV-1,
+    # 2026-08-10). Dark by default; effective only when prose synthesis is
+    # also on AND the request opts in. Alias so the prod flip is a REGWATCH_*
+    # Fly secret like the prose flag.
+    live_draft_enabled: bool = Field(default=False, validation_alias="REGWATCH_LIVE_DRAFT")
     # OpenAI call surface: "responses" (default, GPT-5.x native) or "chat" (legacy
     # Chat Completions). The LLMProvider.complete() interface is identical either way.
     openai_api_mode: str = "responses"
