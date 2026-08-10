@@ -80,6 +80,16 @@ def test_v7_system_prompt_pins_every_reasoning_frame_opener() -> None:
         assert prefix in lowered
 
 
+def test_frame_prefixes_moved_to_turn_gate_and_prose_turn_reexports_it() -> None:
+    """B.10.3.2: the frame vocabulary lives in turn_gate now (both the
+    selective classifier AND render_decline's guard need it, and a
+    turn_gate -> prose_turn import would cycle). prose_turn keeps the same
+    object under its old name so every existing reference still resolves."""
+    from regwatch.generate import turn_gate as tg
+
+    assert pt.REASONING_FRAME_PREFIXES is tg.REASONING_FRAME_PREFIXES
+
+
 # ---------- T-5 (S1 half): selective-without-prose serves the v5 prompt.
 # The warning + admission-unchanged half lands in S4 with the grounded_qa wiring. ----------
 

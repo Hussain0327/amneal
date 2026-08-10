@@ -105,6 +105,52 @@ def materiality_trigger(claim_text: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# v7 selective citation (B.10.3.1): the AIS (attributed-information-source)
+# lexicon. A sentence carrying none of MATERIALITY_WORDS can still be a report
+# of what a source SAYS ("FDA recommends a fasting study.") -- v6 never needed
+# this because it drops every uncited sentence regardless of kind, but v7
+# admits uncited REASONING/CONVERSATION, so this is the second guard that
+# reclassifies such a sentence back to source_fact before it can render
+# unsupported. Verb-anchored, not noun-bearing (B.10.3.1's overturn of the
+# parked B.3 list): a noun list fires on ordinary connective prose ("guidance")
+# and turns "the talking version" back into "the canned version" -- see the
+# module docstring's design note for the measured evidence. Composes with
+# MATERIALITY_WORDS rather than duplicating it (those words already imply an
+# assertion).
+# ---------------------------------------------------------------------------
+SOURCE_ASSERTION_WORDS: tuple[str, ...] = (
+    "according",
+    "advises",
+    "allows",
+    "establishes",
+    "indicates",
+    "permits",
+    "recommend",
+    "recommendation",
+    "recommendations",
+    "recommended",
+    "recommends",
+    "requires",
+    "requiring",
+    "specified",
+    "specifies",
+    "specify",
+    "stated",
+    "states",
+)
+
+_SOURCE_ASSERTION_RE = re.compile(
+    r"\b(?:" + "|".join(SOURCE_ASSERTION_WORDS) + r")\b", re.IGNORECASE
+)
+
+
+def source_assertion_trigger(text: str) -> str | None:
+    """The word that makes ``text`` a report of what a source SAYS, or None."""
+    match = _SOURCE_ASSERTION_RE.search(text or "")
+    return match.group(0).lower() if match is not None else None
+
+
+# ---------------------------------------------------------------------------
 # Verdicts -- what the caller must do with an admitted turn.
 # ---------------------------------------------------------------------------
 VERDICT_ANSWER = "answer"  # every emitted claim was admitted
@@ -139,6 +185,44 @@ CORRECTION_MATERIAL_EXEMPT = "material_exempt"
 # renderer-authored citation markers: these words are written by the gate, never
 # accepted from the model, so a reader can trust the hedge was applied by code.
 REASONING_FRAME = "The guidance does not state this directly; my reading is: "
+
+# Frame openers that mark an uncited sentence as declared REASONING rather than
+# conversation (v7 prompt rule 2; B.10.2). Matched whitespace/case-normalized,
+# prefix-only: a frame buried mid-sentence is not a declaration. Lives HERE
+# (not prose_turn, which imports FROM this module) because both the selective
+# classifier (prose_turn) AND render_decline's guard (this module) need
+# frame-stripping, and a turn_gate -> prose_turn import would be a cycle
+# (B.10.3.2). prose_turn re-exports this tuple so prose_turn.REASONING_FRAME_PREFIXES
+# stays a valid attribute for every existing reference.
+REASONING_FRAME_PREFIXES: tuple[str, ...] = (
+    "the guidance does not state this directly",
+    "reading the guidance together",
+    "my reading is",
+    "beyond the guidance,",
+)
+
+
+def frame_split(text: str) -> tuple[str, str]:
+    """(recognized frame prefix, remaining body). ('', text) when unframed.
+
+    Scanning a framed sentence WHOLE is what makes the recommended frame
+    unusable: "The guidance does not state this directly" carries a materiality
+    word ("not") while asserting nothing. The frame is an allowlisted,
+    content-free hedge, so the lexicons run on the BODY. Applies to
+    gate-authored and model-authored frames alike -- the text is identical
+    either way.
+    """
+    original = text or ""
+    collapsed = " ".join(original.split())
+    lowered = collapsed.lower()
+    for prefix in REASONING_FRAME_PREFIXES:
+        if lowered.startswith(prefix):
+            body = collapsed[len(prefix) :].lstrip(" ")
+            if body[:1] in (";", ",", ":"):
+                body = body[1:]
+            return prefix, body.strip()
+    return "", original
+
 
 # Correction thresholds. Both are required: the FLOOR says the claim must be
 # substantially contained in the winning passage at all, and the MARGIN says the
