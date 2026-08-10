@@ -29,6 +29,7 @@ jobs:
     uses: ./.github/workflows/databricks-eval.yml
     with:
       prose: false
+      selective: false
     secrets: inherit
     concurrency:
       group: databricks-eval
