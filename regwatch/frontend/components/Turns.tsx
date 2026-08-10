@@ -67,7 +67,7 @@ export function ProvisionalDraft({ text }: { text: string }) {
       </div>
       <p className="msg__drafting code">
         <span className="msg__drafting-dot" aria-hidden />
-        Drafting — verifying citations…
+        {"Drafting live \u2014 the verified answer follows."}
       </p>
     </>
   );
@@ -83,7 +83,23 @@ function FallbackNote({ turn }: { turn: Turn }) {
   if (!turn.streamFellBack) return null;
   return (
     <p className="msg__fallback code">
-      {"Connection dropped mid-draft \u2014 answer re-verified over a fresh request."}
+      {"Connection dropped mid-draft \u2014 the answer was re-run over a fresh request and may differ from the draft."}
+    </p>
+  );
+}
+
+// The gate withdrew a provisional draft the analyst had already started
+// reading (refusal, clarify, error, or dropped claims). Keyed ONLY on the
+// server-declared signal - never on diffing draft text against the answer.
+function WithdrawnNote({ turn }: { turn: Turn }) {
+  if (!turn.draftWithdrawn) return null;
+  const why =
+    turn.draftWithdrawn === "partial"
+      ? "some draft statements could not be verified and were dropped"
+      : "it could not be verified against the cited guidance";
+  return (
+    <p className="msg__fallback code">
+      {`The provisional draft was withdrawn \u2014 ${why}. The response below is the verified outcome.`}
     </p>
   );
 }
@@ -216,6 +232,7 @@ export const AssistantTurn = memo(function AssistantTurn({
           </div>
         )}
         <FallbackNote turn={turn} />
+        <WithdrawnNote turn={turn} />
         {/* Was asking the right call? The exact signal the clarify heuristics
             need; gated on audit_id like answer feedback. */}
         {turn.meta && <AnswerFeedback auditId={turn.meta.audit_id} variant="clarify" />}
@@ -241,6 +258,7 @@ export const AssistantTurn = memo(function AssistantTurn({
           <Markdown>{turn.content}</Markdown>
         </div>
         <FallbackNote turn={turn} />
+        <WithdrawnNote turn={turn} />
         <AuditLine turn={turn} />
       </AssistantShell>
     );
@@ -313,6 +331,7 @@ export const AssistantTurn = memo(function AssistantTurn({
           </>
         )}
         <FallbackNote turn={turn} />
+        <WithdrawnNote turn={turn} />
         {/* Was declining the right call? Rating a refusal is the exact
             0.30-threshold signal; gated on audit_id like answer feedback. */}
         {turn.meta && <AnswerFeedback auditId={turn.meta.audit_id} variant="declined" />}
@@ -417,6 +436,7 @@ export const AssistantTurn = memo(function AssistantTurn({
       )}
 
       <FallbackNote turn={turn} />
+      <WithdrawnNote turn={turn} />
 
       {/* Feedback is gated on audit_id (meta) presence, not liveness: Tier-2
           persists audit_id, so a rehydrated answer can still be rated — a saved

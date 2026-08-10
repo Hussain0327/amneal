@@ -133,6 +133,16 @@ function SendFailNotice({ message, onRetry }: { message: string; onRetry: () => 
   );
 }
 
+// Client-side typewriter timing for the live-draft channel (onDraft). Adaptive
+// drain, not a fixed rate: base cadence while caught up, and once the pending
+// buffer crosses the catch-up threshold the per-tick take scales up so the
+// visible text is never more than roughly one catch-up window behind the
+// wire -- hungry when behind, calm once caught up.
+const DRAFT_TICK_MS = 33; // ~30fps
+const DRAFT_CHARS_PER_TICK = 6; // base cadence (~180 chars/s) once caught up
+const DRAFT_CATCHUP_THRESHOLD_CHARS = 400;
+const DRAFT_CATCHUP_WINDOW_MS = 1000;
+
 export default function AskPage() {
   // useSearchParams needs a Suspense boundary during prerender.
   return (
@@ -183,6 +193,58 @@ function AskView() {
   // Rendered as a clearly-provisional "draft" (no citations/drawer/feedback); the
   // validated turn replaces it on the result frame. Reset alongside statusFrames.
   const [draft, setDraft] = useState<string | null>(null);
+  // Client-side typewriter for the LIVE draft channel (onDraft): incoming
+  // deltas land in this buffer and a paced interval drains them into `draft`,
+  // so render cadence stays smooth regardless of wire chunking -- the server
+  // sends deltas as fast as the model writes, which can arrive in bursts.
+  const draftBufRef = useRef("");
+  const draftTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopDraftDrain = useCallback((discardBuffered: boolean) => {
+    if (draftTimerRef.current !== null) {
+      clearInterval(draftTimerRef.current);
+      draftTimerRef.current = null;
+    }
+    if (discardBuffered) draftBufRef.current = "";
+  }, []);
+
+  const ensureDraftDrain = useCallback(() => {
+    if (draftTimerRef.current !== null) return;
+    draftTimerRef.current = setInterval(() => {
+      const buf = draftBufRef.current;
+      if (!buf) {
+        stopDraftDrain(false);
+        return;
+      }
+      // Adaptive take: base rate while caught up; once the backlog crosses
+      // the threshold, take enough per tick to clear it within the catch-up
+      // window instead of falling further behind.
+      const ticksToClear = Math.max(1, Math.round(DRAFT_CATCHUP_WINDOW_MS / DRAFT_TICK_MS));
+      const take =
+        buf.length > DRAFT_CATCHUP_THRESHOLD_CHARS
+          ? Math.max(DRAFT_CHARS_PER_TICK, Math.ceil(buf.length / ticksToClear))
+          : DRAFT_CHARS_PER_TICK;
+      draftBufRef.current = buf.slice(take);
+      setDraft((prev) => (prev ?? "") + buf.slice(0, take));
+    }, DRAFT_TICK_MS);
+  }, [stopDraftDrain]);
+
+  // Single entry point for a live-draft delta: reduced motion skips pacing
+  // entirely (the whole buffer flushes immediately) but still goes through
+  // this buffer, so there is exactly one code path either way.
+  const pushDraftDelta = useCallback(
+    (delta: string) => {
+      draftBufRef.current += delta;
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        const buf = draftBufRef.current;
+        draftBufRef.current = "";
+        setDraft((prev) => (prev ?? "") + buf);
+        return;
+      }
+      ensureDraftDrain();
+    },
+    [ensureDraftDrain],
+  );
   // Polite, screen-reader-only announcement of a settled answer — the visible
   // ticker unmounts on completion, so this is the only "answer ready" cue AT
   // gets (WCAG 4.1.3). A short lead keeps it from re-reading the transcript.
@@ -369,8 +431,13 @@ function AskView() {
   }, [urlSession, refreshSessions, setActiveSessionId, clearFailedSend, announceComposer]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  // Abort any in-flight stream on unmount.
-  useEffect(() => () => controllerRef.current?.abort(), []);
+  // Abort any in-flight stream on unmount, and release the draft pacing
+  // timer with it -- otherwise a still-buffered draft would keep ticking
+  // setDraft on an unmounted component.
+  useEffect(() => () => {
+    controllerRef.current?.abort();
+    stopDraftDrain(true);
+  }, [stopDraftDrain]);
 
   // `draft` is a dependency so the view keeps following the answer while it
   // streams token-by-token — status frames stop once the first token arrives,
@@ -408,6 +475,7 @@ function AskView() {
       setError(null);
       setStatusFrames([]);
       setDraft(null);
+      stopDraftDrain(true);
       // Clear BOTH SR live regions so an identical consecutive answer/label
       // still changes the DOM text and re-announces (polite regions skip
       // unchanged text), and a stale composer notice can't outlive the state
@@ -430,6 +498,21 @@ function AskView() {
       // polite regions skip textually-unchanged content.
       let milestoneAt = 0;
       let milestoneNo = 0;
+      // Shared by onToken and onDraft (whichever lands first): one counter,
+      // so a turn that streams both a live draft and the post-audit replay
+      // still announces the milestone exactly once per 15s window.
+      const announceDraftMilestone = () => {
+        const now = Date.now();
+        if (milestoneNo === 0) {
+          milestoneNo = 1;
+          milestoneAt = now;
+          setAnnouncement("Drafting a provisional answer \u2014 the verified answer will follow.");
+        } else if (now - milestoneAt >= 15000) {
+          milestoneNo += 1;
+          milestoneAt = now;
+          setAnnouncement(`Still drafting \u2014 update ${milestoneNo}`);
+        }
+      };
       // The inquiry joins the thread immediately; the ticker answers it in place.
       setTurns((prev) => [...prev, userTurn(q)]);
       setQuestion("");
@@ -450,26 +533,27 @@ function AskView() {
               if (text === STREAM_FALLBACK_STATUS) {
                 fellBack = true;
                 setDraft(null);
+                stopDraftDrain(true);
               }
               setStatusFrames((prev) => [...prev, text]);
             },
             onToken: (delta) => {
               if (runSeqRef.current !== seq) return;
               setDraft((prev) => (prev ?? "") + delta);
-              const now = Date.now();
-              if (milestoneNo === 0) {
-                milestoneNo = 1;
-                milestoneAt = now;
-                setAnnouncement(
-                  "Drafting the answer \u2014 citations will be verified before it is shown.",
-                );
-              } else if (now - milestoneAt >= 15000) {
-                milestoneNo += 1;
-                milestoneAt = now;
-                setAnnouncement(`Still drafting \u2014 update ${milestoneNo}`);
-              }
+              announceDraftMilestone();
+            },
+            onDraft: (delta) => {
+              if (runSeqRef.current !== seq) return;
+              pushDraftDelta(delta);
+              announceDraftMilestone();
+            },
+            onDraftReset: () => {
+              if (runSeqRef.current !== seq) return;
+              stopDraftDrain(true);
+              setDraft(null);
             },
           },
+          true,
           controller.signal,
         );
         // Superseded by a newer run, or aborted by a new-chat / session switch
@@ -480,9 +564,14 @@ function AskView() {
         setSessionId(next.session_id);
         // Swap the provisional draft for the validated turn in one render batch.
         setDraft(null);
+        stopDraftDrain(true);
         setTurns((prev) => [
           ...prev,
-          assistantTurn(next, { statusLog: frames, streamFellBack: fellBack }),
+          assistantTurn(next, {
+            statusLog: frames,
+            streamFellBack: fellBack,
+            draftWithdrawn: next.draft_withdrawn ?? null,
+          }),
         ]);
         setActiveSessionId(next.session_id);
         refocusRef.current = true;
@@ -536,11 +625,12 @@ function AskView() {
           setLoading(false);
           setStatusFrames([]);
           setDraft(null);
+          stopDraftDrain(true);
           controllerRef.current = null;
         }
       }
     },
-    [busy, urlSession, router, refreshSessions, setActiveSessionId],
+    [busy, urlSession, router, refreshSessions, setActiveSessionId, stopDraftDrain, pushDraftDelta],
   );
 
   // Cancel an in-flight query. Aborting makes run()'s catch return early and
@@ -550,6 +640,7 @@ function AskView() {
     if (!loading) return;
     controllerRef.current?.abort();
     setDraft(null);
+    stopDraftDrain(true);
     setTurns((prev) => (prev.length && prev[prev.length - 1].role === "user" ? prev.slice(0, -1) : prev));
     // Hand the in-flight question back — but never clobber text the user has
     // started typing into the composer mid-query: that text wins the composer,

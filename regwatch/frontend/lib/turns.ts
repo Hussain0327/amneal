@@ -48,6 +48,12 @@ export interface Turn {
   // plain /query fallback: the settled turn owes the analyst an explanation
   // for the draft that vanished mid-type.
   streamFellBack: boolean;
+  // Server-declared: a provisional live-draft frame painted, then the gate
+  // withdrew or partially dropped it ("refused" | "clarify" | "error" |
+  // "meta" | "scope_warning" | "partial"). null on every turn that never
+  // streamed a draft (including all rehydrated history). Never inferred by
+  // diffing draft text against the answer -- only the server's own signal.
+  draftWithdrawn: string | null;
 }
 
 const STATUSES: readonly string[] = [
@@ -92,6 +98,8 @@ export function turnFromMessage(m: ChatMessage): Turn {
     // ticker history and never fell back "again".
     statusLog: [],
     streamFellBack: false,
+    // Same reasoning: no live-draft channel exists on rehydrated history.
+    draftWithdrawn: null,
   };
 }
 
@@ -221,6 +229,7 @@ export function userTurn(q: string): Turn {
     id: null,
     statusLog: [],
     streamFellBack: false,
+    draftWithdrawn: null,
   };
 }
 
@@ -229,6 +238,7 @@ export function userTurn(q: string): Turn {
 interface StreamTrace {
   statusLog?: string[];
   streamFellBack?: boolean;
+  draftWithdrawn?: string | null;
 }
 
 export function assistantTurn(r: QueryResponse, trace: StreamTrace = {}): Turn {
@@ -251,5 +261,6 @@ export function assistantTurn(r: QueryResponse, trace: StreamTrace = {}): Turn {
     id: null,
     statusLog: trace.statusLog ?? [],
     streamFellBack: trace.streamFellBack ?? false,
+    draftWithdrawn: trace.draftWithdrawn ?? null,
   };
 }
