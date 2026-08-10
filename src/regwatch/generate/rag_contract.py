@@ -49,6 +49,17 @@ class ClarifyOption:
     filters: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class ClaimTag:
+    """What the gate ADMITTED, per rendered sentence: its epistemic kind and
+    whether the renderer stamped a citation on it. Python-internal: never
+    enters QueryResponse (api/main.py names every wire field), never
+    persisted (the ledger already carries kind on turn_gate.AdmittedClaim)."""
+
+    kind: str  # turn_gate.CLAIM_KIND_SOURCE_FACT | "reasoning" | "conversation"
+    cited: bool
+
+
 @dataclass
 class RagOutcome:
     """The COMPUTE result of one turn.
@@ -69,6 +80,12 @@ class RagOutcome:
     interpretation: str | None = None
     clarify: list[ClarifyOption] = field(default_factory=list)
     related: list[ClarifyOption] = field(default_factory=list)
+    # Eval-only: the gate's per-claim (kind, cited) ledger, for
+    # eval.metrics.faithfulness's kind-aware denominator. Set only on the
+    # answer path (grounded_qa.py); every decline branch leaves this at its
+    # default, which the metric reads as "untagged" and scores with the
+    # pre-redefinition text rule (eval/metrics.py).
+    claim_tags: tuple[ClaimTag, ...] = ()
 
 
 @dataclass

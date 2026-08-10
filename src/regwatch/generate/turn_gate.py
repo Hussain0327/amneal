@@ -49,7 +49,7 @@ from regwatch.common.citations import strip_all_citations
 from regwatch.common.logging import get_logger
 from regwatch.common.sentences import sentence_count
 from regwatch.common.structured_json import extract_json_blob
-from regwatch.generate.rag_contract import Citation
+from regwatch.generate.rag_contract import Citation, ClaimTag
 from regwatch.generate.turn_schema import GroundedTurn
 from regwatch.retrieve.retriever import RetrievedPassage
 
@@ -679,6 +679,16 @@ def citations(turn: AdmittedTurn) -> list[Citation]:
             seen.add(key)
             out.append(citation)
     return out
+
+
+def claim_tags(turn: AdmittedTurn) -> tuple[ClaimTag, ...]:
+    """One ClaimTag per admitted claim, in render order.
+
+    Render order == ``turn.admitted`` order == ``render_answer``'s sentence
+    order, so a caller can zip this against the rendered sentences. Pure
+    accessor: eval/metrics.faithfulness is the only consumer.
+    """
+    return tuple(ClaimTag(kind=c.kind, cited=bool(c.pairs)) for c in turn.admitted)
 
 
 def _marker(pairs: tuple[tuple[str, int], ...]) -> str:

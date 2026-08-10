@@ -23,8 +23,13 @@ later flip a flag — for now everything is mechanical):
                           an answer: a turn whose synthesis crashed cited
                           nothing because it never finished, and scoring that
                           as "cited the wrong things" is not a measurement.
-  - faithfulness        : fraction of an answer's sentences that carry at
-                          least one citation (proxy for ungroundedness).
+  - faithfulness        : fraction of the gate's admitted SOURCE_FACT claims
+                          that carry a citation (see faithfulness()). Falls
+                          back to sentence_citation_rate -- the pre-PR8,
+                          per-sentence text rule -- when the caller carries no
+                          claim_tags (clarify copy, meta, refusals). Both
+                          numbers are reported; only sentence_citation_rate is
+                          the historical trend line.
   - fact_recall         : fraction of an item's expected_facts present in the
                           answer (tolerant substring) — scores answer CONTENT,
                           not just which pages were cited.
@@ -38,12 +43,13 @@ later flip a flag — for now everything is mechanical):
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from regwatch.common.citations import has_citation, strip_sources_trailer
 from regwatch.common.sentences import split_sentences
+from regwatch.generate.rag_contract import ClaimTag
 
 # Sentence splitting is shared with the turn gate on purpose: the gate admits a
 # claim only when it is ONE sentence by this definition, and this metric then
@@ -172,6 +178,14 @@ class Scorecard:
     mrr: float = 0.0
     citation_precision: float = 0.0
     faithfulness: float = 0.0
+    # The pre-PR8 faithfulness definition, kept alongside the redefinition so
+    # the historical trend line survives it. Reported, never gated -- see
+    # faithfulness()/sentence_citation_rate() below.
+    sentence_citation_rate: float = 0.0
+    # Admitted SOURCE_FACT claims a caller's claim_tags marked uncited, summed
+    # across rows -- the blind spot faithfulness's "no facts -> 1.0" default
+    # cannot see on its own. Reported, never gated.
+    uncited_source_facts: int = 0
     fact_recall: float = 0.0
     refusal_accuracy: float = 0.0
     refused_correctly: int = 0
@@ -258,8 +272,14 @@ def citation_precision(
     return matched / len(answer_citations)
 
 
-def faithfulness(answer_text: str) -> float:
-    """Fraction of declarative sentences that carry at least one citation."""
+def sentence_citation_rate(answer_text: str) -> float:
+    """The PRE-PR8 faithfulness definition, kept as a reported metric.
+
+    Fraction of rendered sentences carrying a marker, renderer-authored
+    disclosure lines included. Retained verbatim so the trend line that
+    produced every recorded scorecard survives the redefinition and so the
+    coincidence claim below is checkable per row rather than asserted.
+    """
     text = (answer_text or "").strip()
     if not text:
         return 1.0
@@ -271,6 +291,27 @@ def faithfulness(answer_text: str) -> float:
         return 1.0
     cited = sum(1 for s in sentences if has_citation(s))
     return cited / len(sentences)
+
+
+def faithfulness(answer_text: str, *, claim_tags: Sequence[ClaimTag] | None = None) -> float:
+    """Fraction of SOURCE_FACT sentences that carry a citation.
+
+    ``claim_tags`` is the gate's per-admitted-claim ledger. Absent (None or
+    empty -> every non-gate path: clarify copy, meta, refusals, historical
+    callers) the pre-PR8 text rule applies unchanged, so no path loses its
+    measurement. Present, the denominator is the sentences the system
+    PRESENTED AS FDA FACTS -- which is the only denominator that stays
+    meaningful once REASONING/CONVERSATION sentences are uncited BY DESIGN
+    (v7). No source facts at all -> 1.0: a turn that asserted nothing about
+    the corpus cannot be unfaithful to it. That blind spot is why
+    ``uncited_source_facts`` and ``sentence_citation_rate`` are reported.
+    """
+    if not claim_tags:
+        return sentence_citation_rate(answer_text)
+    facts = [t for t in claim_tags if t.kind == "source_fact"]
+    if not facts:
+        return 1.0
+    return sum(1 for t in facts if t.cited) / len(facts)
 
 
 def normalize_for_fact(text: str) -> str:
@@ -390,6 +431,10 @@ def _trace(
         "answer": getattr(result, "answer", "") or "",
         "retrieved": [{k: p.get(k) for k in _TRACE_PASSAGE_KEYS} for p in retrieved],
         "citations": [{k: c.get(k) for k in _TRACE_CITATION_KEYS} for c in citations],
+        # Per-claim (kind, cited), so a reviewer can see why the faithfulness
+        # denominator was what it was, row by row -- and so the coincidence
+        # proof (A.3) is re-runnable from an artifact, not just asserted.
+        "claim_tags": [[t.kind, t.cited] for t in getattr(result, "claim_tags", ())],
     }
 
 
@@ -402,7 +447,8 @@ def evaluate(
     """Run the gold set through `ask_callable` and produce a Scorecard."""
     if not items:
         return Scorecard()
-    sums = {"recall": 0.0, "rr": 0.0, "precision": 0.0, "faith": 0.0, "fact": 0.0}
+    sums = {"recall": 0.0, "rr": 0.0, "precision": 0.0, "faith": 0.0, "fact": 0.0, "scr": 0.0}
+    uncited_source_facts = 0
     refusal_correct = 0
     clarify_correct = 0
     refused_incorrectly = 0
@@ -548,11 +594,17 @@ def evaluate(
         r = recall_at_k(retrieved, it.expected_sources)
         rr = reciprocal_rank(retrieved, it.expected_sources)
         p = citation_precision(citations, it.expected_sources)
-        f = faithfulness(result.answer)
+        tags = getattr(result, "claim_tags", None) or None
+        f = faithfulness(result.answer, claim_tags=tags)
+        scr = sentence_citation_rate(result.answer)
         sums["recall"] += r
         sums["rr"] += rr
         sums["precision"] += p
         sums["faith"] += f
+        sums["scr"] += scr
+        uncited_source_facts += sum(
+            1 for t in (tags or ()) if t.kind == "source_fact" and not t.cited
+        )
         if p < 1.0:
             cited_ungrounded += 1
         # Expected-fact scoring only over items that carry facts, with its own
@@ -569,6 +621,8 @@ def evaluate(
                 "reciprocal_rank": rr,
                 "citation_precision": p,
                 "faithfulness": f,
+                "sentence_citation_rate": scr,
+                "claim_tags": [[t.kind, t.cited] for t in (tags or ())],
                 "fact_recall": fr,
                 "n_citations": len(citations),
                 "claim_count": claim_count(result.answer),
@@ -625,6 +679,10 @@ def evaluate(
         mrr=sums["rr"] / answerable,
         citation_precision=sums["precision"] / answered,
         faithfulness=sums["faith"] / answered,
+        # Same denominator as faithfulness, so the two are directly comparable
+        # row for row.
+        sentence_citation_rate=sums["scr"] / answered,
+        uncited_source_facts=uncited_source_facts,
         fact_recall=sums["fact"] / max(1, fact_items),
         refusal_accuracy=refusal_accuracy,
         refused_correctly=refusal_correct,

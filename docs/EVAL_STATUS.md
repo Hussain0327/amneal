@@ -332,3 +332,30 @@ The graph-assisted retrieval proposal in
 [`GRAPH_ASSISTED_RETRIEVAL.md`](GRAPH_ASSISTED_RETRIEVAL.md) adds adaptive
 evidence expansion. It does not remove the need for a calibrated sufficiency
 decision or a representative evaluation set.
+
+## `faithfulness` redefinition (PR8, 2026-08-10)
+
+`faithfulness` is now the fraction of the gate's admitted SOURCE_FACT claims
+that carry a citation (`eval/metrics.faithfulness(text, claim_tags=...)`),
+sourced from `turn_gate.claim_tags` -- Python-internal, no DB column, no wire
+field. Every non-gate caller (clarify copy, meta, refusals, and any historical
+`faithfulness(text)` call site) falls back unchanged to the pre-PR8 per-sentence
+text rule, kept verbatim as `sentence_citation_rate` and still reported
+alongside `faithfulness` on every scorecard. `uncited_source_facts` is reported
+too: the count of admitted SOURCE_FACT claims a caller's tags marked uncited.
+Neither new field is in `THRESHOLDS`.
+
+The two definitions coincide for every turn whose rendered body is exactly its
+admitted claims (today's v5/v6 gate never admits an uncited claim, so this is
+every turn in practice). They diverge on exactly one shape: a turn carrying
+`PARTIAL_DROP_DISCLOSURE` (or `PARTIAL_EVIDENCE_PREFIX`), which the renderer
+appends as an ordinary sentence. That sentence is not a claim, so
+`sentence_citation_rate` counts it uncited while `faithfulness` -- which only
+ever looks at admitted claims -- does not. A local 62-row v6 run
+(`scratchpad/local_v6_scorecard.json`, not the recorded dark-eval artifact)
+measured this directly: of 33 answered rows, 6 carry the disclosure line and
+score `sentence_citation_rate < 1.0` while the reconstructed `faithfulness`
+is 1.0 for all 6; the remaining 27 rows are unchanged, and the one non-answer
+row scored (uncited multi-form clarify copy, `status=clarify`) is unaffected
+because it carries no `claim_tags` and so keeps the old text rule. Zero rows
+diverge for any reason other than the documented disclosure-line shape.
