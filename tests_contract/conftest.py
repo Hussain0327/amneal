@@ -128,6 +128,11 @@ QUERY_RESPONSE_KEYS = frozenset(
         "interpretation",
         "clarify",
         "related",
+        # Null on every turn except a /query/stream turn whose provisional
+        # draft the gate withdrew (2026-08-10 live-draft amendment). Rides the
+        # shared Python serializer, so BOTH the Go-native RawMessage
+        # passthrough and the relay path carry it identically.
+        "draft_withdrawn",
     }
 )
 CITATION_KEYS = frozenset(
