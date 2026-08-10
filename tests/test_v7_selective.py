@@ -429,17 +429,43 @@ def test_v7_framed_material_sentence_rejects_the_whole_answer(
 
 
 def test_v7_heading_sanitize_keep_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sanitize-keep applies to UNCITED claims -- the case B.10.3.4 justified
+    the strip for. A CITED heading-prefixed claim is a separate case (see the
+    corrector-widening regression test below): post-launch-review fix P2
+    guards the strip to `selective and not declared`."""
     _seed_corpus(_CORPUS)
     _v7_mode(monkeypatch, prose=True)
     monkeypatch.setattr(
-        qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm("# Study design [1].")
+        qa_mod,
+        "get_llm_provider",
+        lambda *a, **k: _stub_llm(
+            "Fasting study with subjects [1]. # Happy to dig into the details together."
+        ),
     )
 
     result = qa_mod.ask(_QUESTION)
 
     assert not result.refused
-    assert "Study design [PSG_020503, p.3]." in result.answer
+    assert "Fasting study with subjects [PSG_020503, p.3]." in result.answer
+    assert "Happy to dig into the details together." in result.answer
     assert "#" not in result.answer
+
+
+def test_v7_heading_prefixed_cited_claim_drops_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Post-launch-review regression (P2), end to end: a heading-prefixed
+    claim that DECLARES a cite (here, a fabricated one -- passage [9] does
+    not exist) must not be sanitize-kept and fed to the lexical corrector. It
+    stays on DROP_MARKUP, exactly as v5/v6 would refuse it."""
+    _seed_corpus(_CORPUS)
+    _v7_mode(monkeypatch, prose=True)
+    monkeypatch.setattr(
+        qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm("# Study design [9].")
+    )
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert result.refused
+    assert result.reason == "no_valid_citations"
 
 
 def test_v7_link_markup_still_drops_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -455,3 +481,133 @@ def test_v7_link_markup_still_drops_end_to_end(monkeypatch: pytest.MonkeyPatch) 
 
     assert result.refused
     assert result.reason == "no_valid_citations"
+
+
+# ---------- post-launch-review regression (P0, FIX-1): expanded SOURCE_ASSERTION_WORDS ----------
+# The original 18-word list missed ordinary obligation/attribution phrasing a
+# real model plausibly writes. These are the adversarial INV-1 lens's own
+# probed evidence strings (decline + answer surfaces combined, deduped).
+# "converts 10 of the 15 probed leaks to source_fact" -- verified here as 12
+# of 15 with the actually-implemented (existing-list-union) lexicon; the
+# residual 3 are pinned separately as the documented Checkpoint-2 open item.
+
+_EXPANDED_LEXICON_CAUGHT = [
+    "The applicant should conduct a single-dose fasting study for this product.",
+    "There is no dissolution requirement for this dosage form.",
+    "The guidance would require a fed study for the 45 mcg strength.",
+    "In vivo testing is waived for the lower strengths.",
+    "The guidance says a single-dose fasting study is enough for this product.",
+    "FDA notes that Q1/Q2 sameness supports the in vitro route.",
+    "The PSG calls for a comparative clinical endpoint study.",
+    "Beyond the guidance, the applicant should run a fed study as well.",
+    "The applicant should also run a fed study for the 45 mcg strength.",
+    "There is no dissolution requirement for the capsule form.",
+    "In vivo testing is waived for the two lower strengths.",
+    "The guidance says the sample size is 24 healthy adult volunteers.",
+]
+
+# The 3 residual bald-fact/prepositional sentences (no obligation word, no
+# attribution verb) stay open by design (B.10.3.1) -- also listed verbatim in
+# docs/DECISIONS.md as the Checkpoint-2 human-review item.
+_EXPANDED_LEXICON_RESIDUAL = [
+    "Per the 2019 revision, subjects are dosed under fasting conditions.",
+    "Under the guidance, the sample size is 24 healthy volunteers.",
+    "The dissolution method is Apparatus II at 50 rpm.",
+]
+
+
+@pytest.mark.parametrize("sentence", _EXPANDED_LEXICON_CAUGHT)
+def test_expanded_lexicon_leak_drops_on_the_natural_path(sentence: str) -> None:
+    """Classification surface: the REAL parser (prose_turn.parse, selective
+    classifier) must now read each probed leak as source_fact, and the REAL
+    gate must then drop it uncited -- the natural path, no lied kinds."""
+    parsed = pt.parse(sentence, passages=[], selective=True)
+    assert [c.kind for c in parsed.claims] == ["source_fact"]
+
+    turn = tg.admit_turn(
+        pt.gate_payload(parsed, []),
+        passages=[],
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=[c.kind for c in parsed.claims],
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert turn.admitted == ()
+    assert [d.reason for d in turn.dropped] == [tg.DROP_NO_CITES]
+    assert turn.verdict == tg.VERDICT_NO_VALID_CITATIONS
+
+
+@pytest.mark.parametrize("sentence", _EXPANDED_LEXICON_RESIDUAL)
+def test_residual_bald_fact_sentences_stay_uncaught_by_design(sentence: str) -> None:
+    """Pins the documented Checkpoint-2 open item: these 3 sentences carry
+    neither an obligation word nor an attribution verb, so the classifier
+    reads them as conversation and the gate admits them uncited. Not a
+    regression -- a boundary pin so nobody "fixes" this by guesswork (an
+    overlap-threshold guard is explicitly deferred, B.10.3.1)."""
+    parsed = pt.parse(sentence, passages=[], selective=True)
+    assert [c.kind for c in parsed.claims] == ["conversation"]
+
+
+def test_v7_fix2_dropped_source_fact_plus_filler_refuses_with_canned_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIX-2 (P1) end to end, decline surface. The reviewer's exact stub: a
+    dropped SOURCE FACT (no cites) alongside harmless uncited filler must NOT
+    render as a conversational 'Evidence gap' serving the orphaned filler --
+    it refuses with the canned copy, the same outcome v6 reaches for the
+    identical completion (there the filler would drop too)."""
+    _seed_corpus(_CORPUS)
+    _v7_mode(monkeypatch, prose=True)
+    monkeypatch.setattr(
+        qa_mod,
+        "get_llm_provider",
+        lambda *a, **k: _stub_llm(
+            "FDA recommends a fed study for the 45 mcg strength. "
+            "Let me know if you want the dissolution details as well."
+        ),
+    )
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert result.refused
+    assert result.reason == "no_valid_citations"
+    from config.settings import get_settings
+
+    assert result.answer == get_settings().refusal_text
+    assert "Let me know" not in result.answer
+    assert "fed study" not in result.answer
+    turn = _only_route_json()["turn"]
+    assert turn["verdict"] == "no_valid_citations"
+
+
+def test_v7_fix2_dangling_referent_after_unknown_citation_refuses_with_canned_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIX-2, the dangling-referent case: an unresolvable marker drops its
+    sentence (unknown_citation, the corrector's overlap floor is not cleared
+    on this stub), leaving a filler sentence whose referent was deleted
+    ("That is the same design..."). Must refuse with canned copy, not serve
+    the orphan."""
+    _seed_corpus(_CORPUS)
+    _v7_mode(monkeypatch, prose=True)
+    monkeypatch.setattr(
+        qa_mod,
+        "get_llm_provider",
+        lambda *a, **k: _stub_llm(
+            "FDA recommends a single-dose fasting study [9]. "
+            "That is the same design used for the 25 mg strength."
+        ),
+    )
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert result.refused
+    assert result.reason == "no_valid_citations"
+    from config.settings import get_settings
+
+    assert result.answer == get_settings().refusal_text
+    assert "25 mg strength" not in result.answer
+    turn = _only_route_json()["turn"]
+    assert turn["verdict"] == "no_valid_citations"

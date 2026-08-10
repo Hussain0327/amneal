@@ -446,7 +446,12 @@ def _run_qa(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             question=row["question"],
             correct=prose_mode,
             downgrade_uncited=False,
-            kinds=[c.kind for c in parsed.claims] if prose_mode else None,
+            # Gated on selective, not prose_mode: admit_turn only ever
+            # consults kinds when selective=True, so passing it unconditionally
+            # under v6-prose was inert -- but it diverged from grounded_qa.py's
+            # own v6 call shape (no kinds argument at all), a latent gap the
+            # post-launch review flagged before it could become a real one.
+            kinds=[c.kind for c in parsed.claims] if selective else None,
             selective=selective,
         )
         if isinstance(admitted, tg.GateFailure):

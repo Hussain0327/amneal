@@ -230,7 +230,7 @@ def _parse_selective(raw: str) -> pt.ParsedProseTurn:
         # reports what a source SAYS -- selective mode must not serve this
         # uncited, unlike the v6 table's bald materiality-only residual.
         ("FDA recommends a fasting study.", "source_fact"),
-        ("A clean conversational sentence with no FDA content.", "conversation"),
+        ("A clean conversational sentence with friendly chatter.", "conversation"),
         # Framed and clean on BOTH lexicons -> the uncited reasoning channel.
         ("My reading is that the two designs match.", "reasoning"),
         # Framed but the BODY carries a materiality word -- the frame is

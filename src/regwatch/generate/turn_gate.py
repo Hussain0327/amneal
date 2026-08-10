@@ -124,25 +124,66 @@ def materiality_trigger(claim_text: str) -> str | None:
 # MATERIALITY_WORDS rather than duplicating it (those words already imply an
 # assertion).
 # ---------------------------------------------------------------------------
+#
+# Expanded post-launch-review (adversarial INV-1 lens, finding P0): the
+# original 18-word list missed ordinary obligation/attribution phrasing
+# ("should", "no", "waived", "says", ...) that a real model plausibly writes,
+# letting an uncited FDA assertion classify as conversation/reasoning and
+# render. The expansion is verified against B.10.3.1's own acceptance test:
+# the two lexicons (materiality + source-assertion), frame-stripped, produce
+# ZERO hits on every uncited sentence of the three v7 assistant exemplars
+# (tests/test_v7_selective.py::test_v7_exemplars_survive_their_own_gate).
+# "describe(s)"/"cover(s)" are deliberately EXCLUDED -- they fire on the
+# exemplars' own uncited sentences ("The passages I received cover the
+# dissolution method...", "the two passages describe one dosage form...").
+# MATERIALITY_WORDS is NOT touched here: it is shared with the LIVE v6 path,
+# and any addition there would change prod material-drop behavior.
 SOURCE_ASSERTION_WORDS: tuple[str, ...] = (
+    "acceptable",
     "according",
+    "advise",
     "advises",
     "allows",
+    "calls",
     "establishes",
+    "exempt",
+    "exemption",
+    "exempts",
+    "expected",
+    "expects",
     "indicates",
+    "instructs",
+    "mandates",
+    "no",
+    "notes",
     "permits",
+    "prohibition",
+    "prohibits",
     "recommend",
     "recommendation",
     "recommendations",
     "recommended",
+    "recommending",
     "recommends",
+    "require",
+    "requirement",
+    "requirements",
     "requires",
     "requiring",
+    "say",
+    "says",
+    "sets",
+    "shall",
+    "should",
     "specified",
     "specifies",
     "specify",
     "stated",
     "states",
+    "suggests",
+    "waive",
+    "waived",
+    "waiver",
 )
 
 _SOURCE_ASSERTION_RE = re.compile(
@@ -644,10 +685,18 @@ def admit_turn(
     for index, claim in enumerate(turn.claims):
         declared = tuple((c.short_name, c.page) for c in claim.cites)
         text = _sanitize_claim_text(claim.text)
-        if selective:
+        if selective and not declared:
             # Sanitize-keep, narrowed from the parked draft: only the leading
             # heading marker is stripped here (link/URL markup and any
             # residual bracket still fall through to _MARKUP_RE below).
+            # Post-launch-review fix (P2): scoped to UNCITED claims only --
+            # applying it before the cited branch fed a heading-stripped,
+            # markup-clean text straight into the lexical re-stamp corrector
+            # (correct_unknown_citation), so a claim whose only declared
+            # support was a passage number that does not exist could be
+            # re-stamped and served as a cited FDA fact on a shape v5/v6
+            # refused outright (DROP_MARKUP). A cited claim now stays on
+            # today's DROP_MARKUP path exactly as it did before v7.
             text = _HEADING_PREFIX_RE.sub("", text, count=1)
         # A claim wearing a marker is always an assertion, regardless of what
         # the parser's kind said for it (B.10.3.4). Absent that, the parser's
@@ -802,17 +851,37 @@ def admit_turn(
         # claims this generator is empty and material_word is None, which is
         # what the old `elif not dropped` branch hardcoded.
         material_word = next((d.material_word for d in dropped if d.material_word), None)
+        no_source_fact_admitted = selective and not any(
+            c.kind == CLAIM_KIND_SOURCE_FACT for c in admitted
+        )
         if material_word:
             # MATERIAL_DROP outranks the v7 decline (B.10.1.1): a turn that
             # dropped an obligation-bearing sentence must say so specifically,
             # not launder it into a chatty "I could not find that".
             verdict = VERDICT_MATERIAL_DROP
-        elif selective and not any(c.kind == CLAIM_KIND_SOURCE_FACT for c in admitted):
+        elif no_source_fact_admitted and not dropped:
             # v7 found-nothing: every admitted claim is uncited
-            # reasoning/conversation, so nothing was asserted about the
-            # corpus. selective=False makes this branch unreachable, so
-            # v5/v6 verdicts are byte-identical.
+            # reasoning/conversation, NOTHING was dropped either, so nothing
+            # was asserted about the corpus at all. selective=False makes
+            # this branch unreachable, so v5/v6 verdicts are byte-identical.
             verdict = VERDICT_CONVERSATIONAL_DECLINE
+        elif no_source_fact_admitted:
+            # Post-launch-review fix (P1): the decline must not outrank a
+            # dropped claim. Here the model DID assert a source fact, the
+            # gate dropped it (unsupported/unknown cite), and only harmless
+            # filler survived alongside it -- e.g. "FDA recommends a fed
+            # study... Let me know if you want the dissolution details as
+            # well." with the first sentence dropped for no_cites. Serving
+            # the filler alone as a conversational "Evidence gap" would
+            # mislabel a citation failure as reason=model_refusal and orphan
+            # a dangling referent ("That is the same design..." with its
+            # antecedent deleted). v6 reaches the SAME refusal for the
+            # identical completion: there the filler would drop too (v6
+            # never admits anything uncited), landing on `not admitted` ->
+            # VERDICT_NO_VALID_CITATIONS below. Treat v7 the same way rather
+            # than rendering the orphaned filler.
+            verdict = VERDICT_NO_VALID_CITATIONS
+            kept_labels = []
         elif dropped:
             verdict = VERDICT_PARTIAL
         else:
@@ -869,9 +938,27 @@ def render_answer(turn: AdmittedTurn) -> str:
 
     Callers must check ``turn.verdict`` first: for a non-renderable verdict
     there are no admitted claims and this returns "".
+
+    Post-launch-review fix (P0): an uncited admitted claim (reasoning/
+    conversation) re-crosses the gate boundary HERE too, mirroring
+    ``render_decline``'s guard -- this is the answer-path twin of that
+    function's defense in depth, closing the asymmetry where a decline was
+    re-scanned before serving but an answer was not, even though the answer
+    path serves with ``refused=False`` under a ``Sources:`` header. A hit
+    drops the sentence and folds to the same disclosure a gate-level drop
+    gets (OD-5): silently dropping would hand back a confident answer with
+    the qualifier deleted, same as any other drop.
     """
     sentences: list[str] = []
+    render_time_drop = False
     for claim in turn.admitted:
+        if not claim.pairs:
+            # Only uncited claims are re-scanned: a claim carrying pairs is a
+            # cite-validated source_fact already, not this guard's concern.
+            scan = frame_split(claim.text)[1] or claim.text
+            if materiality_trigger(scan) is not None or source_assertion_trigger(scan) is not None:
+                render_time_drop = True
+                continue
         body = claim.text
         terminator = "."
         if body and body[-1] in ".!?":
@@ -884,7 +971,9 @@ def render_answer(turn: AdmittedTurn) -> str:
             # Unreachable under v5/v6 -- :531-532's DROP_NO_CITES drops every
             # zero-pair claim before it can be admitted, and no live v5/v6
             # caller enables the uncited-downgrade path either -- so flag-off
-            # rendering is provably byte-identical without a flag check here.
+            # rendering is provably byte-identical without a flag check here
+            # (the scan above is unreachable flag-off for the same reason:
+            # `claim.pairs` is never empty for an admitted v5/v6 claim).
             sentences.append(f"{body}{terminator}")
     if not sentences:
         return ""
@@ -892,7 +981,7 @@ def render_answer(turn: AdmittedTurn) -> str:
     parts = [" ".join(sentences)]
     if turn.unsupported:
         parts.append(f"\n{PARTIAL_EVIDENCE_PREFIX} {', '.join(turn.unsupported)}.")
-    if turn.verdict == VERDICT_PARTIAL:
+    if turn.verdict == VERDICT_PARTIAL or render_time_drop:
         # OD-5: the user is told that something was removed, in plain language
         # and with no implementation detail. Silence would hand back a
         # confident, fully-cited answer with an exception deleted from it.

@@ -540,3 +540,32 @@ The eval was RED on the real corpus (`recall@8=0.667, citation_precision=0.000, 
   scored by the exact code that scored v6, so the comparison is legitimate.
   `sentence_citation_rate` is expected to fall (uncited reasoning/
   conversation is the feature); kind-aware `faithfulness` must not.
+
+### Post-launch adversarial review fixes (Aug 10 2026)
+
+An adversarial review of the dark build found and this PR fixed four gate
+bugs, all in the background citation-admission machinery, not in the
+conversational feature itself: `SOURCE_ASSERTION_WORDS` was missing ordinary
+obligation/attribution phrasing ("should", "no", "waived", "says", "notes",
+"calls", "require", ...), so some uncited FDA assertions could render;
+`render_answer` didn't re-scan uncited claims the way `render_decline`
+already did, so that same leak class could reach the answer surface too; the
+conversational decline could outrank a dropped claim, serving an orphaned
+filler sentence as an "Evidence gap" instead of the canned refusal a dropped
+source fact should produce; and the heading sanitize-keep applied to cited
+claims too, letting a fabricated citation on a heading-prefixed sentence
+reach the lexical corrector. All four are fixed and regression-tested.
+
+Three sentences remain open by design after the lexicon expansion -- no
+obligation word, no attribution verb, so neither lexicon fires:
+"Per the 2019 revision, subjects are dosed under fasting conditions.",
+"Under the guidance, the sample size is 24 healthy volunteers.", and
+"The dissolution method is Apparatus II at 50 rpm." An overlap-threshold
+guard for this residual is explicitly deferred (B.10.3.1); don't add one by
+guesswork. Checkpoint 2 must treat this as a manual step: a green
+databricks-eval run certifies only the recall/precision thresholds. The
+reviewer must download the `dark-eval-scorecard-v7` artifact and read
+`uncited_source_facts` (must be 0), `forbidden_violations` (0),
+`rejection_reasons` (refusal-attributable `malformed_structure` 0), and
+eyeball every uncited rendered sentence and decline body -- the scorecard
+alone does not certify this residual.
