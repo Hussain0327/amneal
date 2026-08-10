@@ -491,6 +491,12 @@ function AskView() {
       // the turn (provenance status log + fallback notice).
       const frames: string[] = [];
       let fellBack = false;
+      // True once any live-draft delta arrived this run. The post-audit token
+      // replay carries the SAME answer the terminal result frame will (with
+      // rewritten citations), so re-typing it under a draft the analyst has
+      // already read would "double-type" the turn: the draft stands until the
+      // result swap instead, and token frames are ignored.
+      let sawDraft = false;
       // Drafting-milestone throttle for the SR region: the draft row is
       // aria-hidden, so without these a screen-reader user hears nothing
       // between the ticker and the settle announcement. Milestones repeat no
@@ -539,11 +545,13 @@ function AskView() {
             },
             onToken: (delta) => {
               if (runSeqRef.current !== seq) return;
+              if (sawDraft) return; // live draft already painted this answer
               setDraft((prev) => (prev ?? "") + delta);
               announceDraftMilestone();
             },
             onDraft: (delta) => {
               if (runSeqRef.current !== seq) return;
+              sawDraft = true;
               pushDraftDelta(delta);
               announceDraftMilestone();
             },
