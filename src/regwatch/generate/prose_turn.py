@@ -30,25 +30,19 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from regwatch.common.citations import iter_psg_citations
 from regwatch.common.sentences import split_sentences
-from regwatch.generate.turn_gate import materiality_trigger
+
+# Re-exported: parse's public vocabulary. Aliased to itself so mypy's strict
+# no-implicit-reexport treats this as an intentional re-export, not an unused
+# import -- every existing `prose_turn.REASONING_FRAME_PREFIXES` reference
+# must keep resolving after the B.10.3.2 move to turn_gate.
+from regwatch.generate.turn_gate import REASONING_FRAME_PREFIXES as REASONING_FRAME_PREFIXES
+from regwatch.generate.turn_gate import frame_split, materiality_trigger, source_assertion_trigger
 from regwatch.retrieve.retriever import RetrievedPassage
 
 # The exact single-sentence completion the v6 prose prompt instructs the model
 # to emit when the passages do not answer the question. Defined HERE as the
 # single source of truth; the prompt and the echo provider must import it.
 PROSE_NO_EVIDENCE_SENTINEL = "NO_EVIDENCE."
-
-# Frame openers that mark an uncited sentence as declared REASONING rather than
-# conversation. Matched whitespace/case-normalized, prefix-only: a frame buried
-# mid-sentence is not a declaration. Deliberately short -- an opener earns its
-# place here, it is not guessed -- because the materiality guard below, not this
-# list, is what stops a frame from laundering a factual claim (finding F3).
-REASONING_FRAME_PREFIXES: tuple[str, ...] = (
-    "the guidance does not state this directly",
-    "reading the guidance together",
-    "my reading is",
-    "beyond the guidance,",
-)
 
 # One numeric marker bracket body: "1", "1, 2". Digits only, so the pair
 # grammar ([PSG_..., p.N]) and prose brackets ("[see appendix]") never match.
@@ -212,7 +206,32 @@ def _classify_uncited(text: str) -> ClaimKind:
     return "conversation"
 
 
-def parse(raw_text: str, *, passages: list[RetrievedPassage]) -> ParsedProseTurn:
+def _classify_uncited_selective(text: str) -> ClaimKind:
+    """v7 epistemic kind for a sentence with no trailing marker (B.10.3.3).
+
+    Reachable only when the caller passes ``selective=True`` (v6 stays on
+    ``_classify_uncited``, byte-identical). Two lexicons, not one: a bald
+    obligation/permission word (MATERIALITY_WORDS) OR an attribution verb
+    reporting what a source SAYS (SOURCE_ASSERTION_WORDS) reclassifies the
+    sentence back to an unsupported source_fact, on the gate's drop-or-correct
+    path -- v7 admits uncited reasoning/conversation, so this is what stops an
+    uncited FDA assertion from reaching that channel (P1). The scan runs on
+    the FRAME-STRIPPED body when the sentence is framed, because the frame
+    itself is allowlisted, content-free hedge text that can carry a
+    materiality word ("does NOT state this directly") without asserting
+    anything (P0/F3) -- scanning it whole would fail the recommended frame
+    100% of the time.
+    """
+    frame, body = frame_split(text)
+    scan = body if frame else text
+    if materiality_trigger(scan) is not None or source_assertion_trigger(scan) is not None:
+        return "source_fact"
+    return "reasoning" if frame else "conversation"
+
+
+def parse(
+    raw_text: str, *, passages: list[RetrievedPassage], selective: bool = False
+) -> ParsedProseTurn:
     """Parse one prose completion against the passages sent this turn.
 
     ``passages`` is the ORDERED list the model was shown; marker [n] is 1-based
@@ -220,7 +239,12 @@ def parse(raw_text: str, *, passages: list[RetrievedPassage]) -> ParsedProseTurn
     resolves what the model declared, and everything it cannot resolve is
     either carried as declared-but-unresolvable (numeric) or dropped with its
     sentence (everything else).
+
+    ``selective=False`` (every v5/v6 caller) keeps today's classification
+    exactly; ``selective=True`` (v7) is the only way to reach
+    ``_classify_uncited_selective``.
     """
+    classify_uncited = _classify_uncited_selective if selective else _classify_uncited
     text = raw_text or ""
     if " ".join(text.split()) == PROSE_NO_EVIDENCE_SENTINEL:
         return ParsedProseTurn(turn_type="NO_EVIDENCE")
@@ -251,7 +275,7 @@ def parse(raw_text: str, *, passages: list[RetrievedPassage]) -> ParsedProseTurn
             if "[" in flat or "]" in flat:
                 leftover.append(flat)
                 continue
-            claims.append(ProseClaim(text=flat, kind=_classify_uncited(flat)))
+            claims.append(ProseClaim(text=flat, kind=classify_uncited(flat)))
             continue
 
         resolved = _resolve_group(match.group("group"), passages, pair_index)

@@ -490,3 +490,82 @@ The eval was RED on the real corpus (`recall@8=0.667, citation_precision=0.000, 
   retrieval, response rendering, or session updates. Even the reserved `live`
   value is forced to effective `shadow` until PR12. Non-residency failures are
   logged, counted, and ignored; a D1 residency violation stays fail closed.
+
+## v7 selective citation ships dark; the NO_EVIDENCE sentinel is abolished for v7 (Aug 10 2026)
+
+- **A policy change, not another format A/B.** `REGWATCH_SELECTIVE_CITATION`
+  (default off, honored only when `REGWATCH_PROSE_SYNTHESIS` is also on)
+  replaces v6's refuse-or-cite policy with three epistemic kinds per sentence:
+  SOURCE FACT (cite-required, unchanged from v6), REASONING (model-framed,
+  admitted uncited), and CONVERSATION (plain, admitted uncited). A turn with
+  zero admitted source facts renders as the model's own conversational
+  decline rather than the shared `NO_EVIDENCE` code word -- v7 has no
+  sentinel to mangle, which is the direct fix for the 11-of-11 v6 refusal
+  defect (a bare `NO_EVIDENCE` with no terminal period truncates to zero
+  parsed sentences and degrades to `malformed_structure`).
+- **Two lexicons keep INV-1 intact once uncited text is admitted by design.**
+  `turn_gate.MATERIALITY_WORDS` (existing) and the new
+  `SOURCE_ASSERTION_WORDS` (verb-anchored -- "recommends", "requires",
+  "states", not noun-bearing "guidance"/"fda", which measurably fired on 3 of
+  the design's own 4 uncited exemplar sentences) both reclassify an uncited
+  sentence back to `source_fact` before it can render, on the gate's
+  drop-or-correct path. An admitted `source_fact` is unaffected by any of
+  this: still cite-required, still `DROP_NO_CITES` when uncited, never
+  downgraded.
+- **The decline re-crosses the gate boundary.** `turn_gate.render_decline`
+  re-scans every sentence of an admitted conversational-decline turn against
+  both lexicons immediately before it can be served, independent of whatever
+  `kinds` the caller supplied. A guard fire falls back to the existing
+  canned refusal copy (never partial disclosure of the guarded text) and is
+  ledgered (`decline_guard`) so the fallback rate is measurable. On the
+  natural path (parser and gate agree) the guard essentially never fires --
+  a materially-worded or source-asserting sentence is already reclassified
+  `source_fact` upstream and drops on `no_valid_citations` before reaching
+  this function.
+- **Every new byte is conditional, so flag-off stays byte-identical.**
+  `renderer_version` (2, `RENDERER_VERSION_SELECTIVE`) and the ledger's
+  `kind_counts`/`decline_guard` keys are emitted only when selective mode
+  actually ran; the `prose_parse.kinds` telemetry key is emitted only under
+  selective, protecting `tests/test_prose_synthesis.py`'s exact-dict pin on
+  the v6 ledger shape. A full `pytest -q` run with both flags off is
+  byte-for-byte the same suite that passed before this build.
+- **The decline never forks to clarify.** `VERDICT_NO_EVIDENCE`'s existing
+  resolved-by-name clarify branch is untouched; the new
+  `VERDICT_CONVERSATIONAL_DECLINE` always calls `_refuse`, never `_clarify`,
+  because `_clarify` replaces the answer text with application copy and
+  would discard the model's prose -- the entire feature. The accepted
+  product delta: a resolved-by-name v7 decline no longer offers clarify
+  pills; a later PR owns humanizing that affordance.
+- **`eval/metrics.py` and `eval/run_eval.py` are untouched.** The v7 arm is
+  scored by the exact code that scored v6, so the comparison is legitimate.
+  `sentence_citation_rate` is expected to fall (uncited reasoning/
+  conversation is the feature); kind-aware `faithfulness` must not.
+
+### Post-launch adversarial review fixes (Aug 10 2026)
+
+An adversarial review of the dark build found and this PR fixed four gate
+bugs, all in the background citation-admission machinery, not in the
+conversational feature itself: `SOURCE_ASSERTION_WORDS` was missing ordinary
+obligation/attribution phrasing ("should", "no", "waived", "says", "notes",
+"calls", "require", ...), so some uncited FDA assertions could render;
+`render_answer` didn't re-scan uncited claims the way `render_decline`
+already did, so that same leak class could reach the answer surface too; the
+conversational decline could outrank a dropped claim, serving an orphaned
+filler sentence as an "Evidence gap" instead of the canned refusal a dropped
+source fact should produce; and the heading sanitize-keep applied to cited
+claims too, letting a fabricated citation on a heading-prefixed sentence
+reach the lexical corrector. All four are fixed and regression-tested.
+
+Three sentences remain open by design after the lexicon expansion -- no
+obligation word, no attribution verb, so neither lexicon fires:
+"Per the 2019 revision, subjects are dosed under fasting conditions.",
+"Under the guidance, the sample size is 24 healthy volunteers.", and
+"The dissolution method is Apparatus II at 50 rpm." An overlap-threshold
+guard for this residual is explicitly deferred (B.10.3.1); don't add one by
+guesswork. Checkpoint 2 must treat this as a manual step: a green
+databricks-eval run certifies only the recall/precision thresholds. The
+reviewer must download the `dark-eval-scorecard-v7` artifact and read
+`uncited_source_facts` (must be 0), `forbidden_violations` (0),
+`rejection_reasons` (refusal-attributable `malformed_structure` 0), and
+eyeball every uncited rendered sentence and decline body -- the scorecard
+alone does not certify this residual.

@@ -13,6 +13,7 @@ from regwatch.generate.prompt_identity import identify_prompt
 from regwatch.generate.prompts import (
     GROUNDED_QA_PROMPT,
     GROUNDED_QA_PROMPT_V6,
+    GROUNDED_QA_PROMPT_V7,
     GROUNDED_QA_SYSTEM,
     GROUNDED_QA_USER,
     QUERY_GUIDANCE_SYSTEM,
@@ -163,6 +164,67 @@ def test_qa_eval_flag_on_runs_the_prose_chain(monkeypatch: pytest.MonkeyPatch) -
         ]
         assert prompt_eval._run_qa(rows) == [
             {"id": "prose-echo-1", "passed": True, "model": "echo"}
+        ]
+    finally:
+        cs.get_settings.cache_clear()
+
+
+def test_manifest_reports_v7_when_both_flags_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v7 is a distinct identity too (own sha256, own version literal), and
+    only served when BOTH prose and selective are on -- the manifest describes
+    what the deployment SERVES."""
+    monkeypatch.setenv("REGWATCH_PROSE_SYNTHESIS", "1")
+    monkeypatch.setenv("REGWATCH_SELECTIVE_CITATION", "1")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
+    try:
+        manifest = generation_prompt_manifest()
+        assert manifest["regwatch.grounded_qa"] == GROUNDED_QA_PROMPT_V7.as_dict()
+        assert manifest["regwatch.grounded_qa"]["version"] == "7"
+        assert GROUNDED_QA_PROMPT_V7.sha256 not in {
+            GROUNDED_QA_PROMPT.sha256,
+            GROUNDED_QA_PROMPT_V6.sha256,
+        }
+    finally:
+        cs.get_settings.cache_clear()
+
+
+def test_qa_eval_flag_on_runs_the_selective_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v7 twin of test_qa_eval_flag_on_runs_the_prose_chain: v7 prompt ->
+    selective prose parse (kinds honored by the gate) -> rendered scoring.
+
+    The echo provider keys on the v7 system sentinel and answers a cited
+    SOURCE_FACT plus an uncited CONVERSATION sentence; the row still passes
+    because nothing is dropped (the v7 policy admits the uncited sentence
+    rather than dropping it) and the expected fact/citation are both present
+    in the RENDERED string.
+    """
+    monkeypatch.setenv("REGWATCH_PROSE_SYNTHESIS", "1")
+    monkeypatch.setenv("REGWATCH_SELECTIVE_CITATION", "1")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
+    try:
+        rows = [
+            {
+                "id": "selective-echo-1",
+                "question": "What study design is recommended?",
+                "passages": [
+                    {
+                        "short_name": "PSG_020503",
+                        "page": 3,
+                        "text": "Fasting BE study with 36 subjects.",
+                        "section": "II.A",
+                    }
+                ],
+                "expected_turn_type": "ANSWER",
+                "expected_citations": [["PSG_020503", 3]],
+                "expected_facts": ["ECHO grounded test answer"],
+            }
+        ]
+        assert prompt_eval._run_qa(rows) == [
+            {"id": "selective-echo-1", "passed": True, "model": "echo"}
         ]
     finally:
         cs.get_settings.cache_clear()

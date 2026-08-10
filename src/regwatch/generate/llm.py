@@ -184,7 +184,14 @@ class EchoLLMProvider:
         is_route = any(m.role == "system" and "[REGWATCH_ROUTE_V1]" in m.content for m in messages)
         # F19: the v6 prose synthesizer is keyed on its system sentinel, like
         # the guidance branch -- NOT on marker-shape + response_format, which
-        # would misfire on the deficiency chat_completion seam.
+        # would misfire on the deficiency chat_completion seam. v7 gets its
+        # OWN sentinel (checked first, below) rather than piggybacking on
+        # is_prose_qa: the two literals never overlap, so which check runs
+        # first never matters for correctness, but v7 is checked first to
+        # match B.10.2's stated order.
+        is_v7_qa = any(
+            m.role == "system" and "[REGWATCH_GROUNDED_QA_V7]" in m.content for m in messages
+        )
         is_prose_qa = any(
             m.role == "system" and "[REGWATCH_GROUNDED_QA_V6]" in m.content for m in messages
         )
@@ -303,6 +310,37 @@ class EchoLLMProvider:
                 ),
                 model="echo",
                 usage=usage,
+            )
+        if is_v7_qa:
+            # v7 selective citation. Own sentinel, own shapes -- FORCE_REFUSAL
+            # is a conversational decline (two clean, uncited sentences), NOT
+            # the shared NO_EVIDENCE token (B.10.1.8: v7 has no sentinel).
+            if self._flag("REGWATCH_ECHO_FORCE_MALFORMED"):
+                return LLMResponse(
+                    text="an unterminated prose fragment with no terminal punctuation at all",
+                    model="echo",
+                    usage=usage,
+                )
+            if self._force_refusal():
+                return LLMResponse(
+                    text=(
+                        "ECHO has nothing on that question in these passages. "
+                        "Want me to try a different phrasing?"
+                    ),
+                    model="echo",
+                    usage=usage,
+                )
+            if marker is not None:
+                return LLMResponse(
+                    text=(
+                        "ECHO grounded test answer [1]. Let me know if you want the "
+                        "dissolution details as well."
+                    ),
+                    model="echo",
+                    usage=usage,
+                )
+            return LLMResponse(
+                text="ECHO prose synthesis without passages.", model="echo", usage=usage
             )
         if is_prose_qa:
             # v6 prose synthesis. The lazy import avoids a module cycle

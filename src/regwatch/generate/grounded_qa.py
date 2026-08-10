@@ -71,12 +71,16 @@ from regwatch.generate.llm import (
 )
 from regwatch.generate.prompts import (
     GROUNDED_QA_EXEMPLARS_V6,
+    GROUNDED_QA_EXEMPLARS_V7,
     GROUNDED_QA_PROMPT,
     GROUNDED_QA_PROMPT_V6,
+    GROUNDED_QA_PROMPT_V7,
     GROUNDED_QA_SYSTEM,
     GROUNDED_QA_SYSTEM_V6,
+    GROUNDED_QA_SYSTEM_V7,
     GROUNDED_QA_USER,
     GROUNDED_QA_USER_V6,
+    GROUNDED_QA_USER_V7,
 )
 
 # The core/shell contract types live in rag_contract (a pipeline-free module so
@@ -2059,8 +2063,25 @@ def _synthesize_and_admit(
     # flag is a Fly secret flip with no deploy, and the audit row must stamp
     # the identity of the path that actually produced it.
     prose_mode = bool(getattr(s, "prose_synthesis_enabled", False))
-    active_prompt = GROUNDED_QA_PROMPT_V6 if prose_mode else GROUNDED_QA_PROMPT
-    if prose_mode:
+    # v7 selective citation is a POLICY change on top of v6's FORMAT change,
+    # and only makes sense as a prose prompt -- honored only when prose is
+    # also on. A misconfigured selective-without-prose is inert (this reads
+    # False and the turn runs the v5 path exactly) but observable (risk 6).
+    selective_mode = prose_mode and bool(getattr(s, "selective_citation_enabled", False))
+    if bool(getattr(s, "selective_citation_enabled", False)) and not prose_mode:
+        log.warning("selective_citation_without_prose")
+    active_prompt = (
+        GROUNDED_QA_PROMPT_V7
+        if selective_mode
+        else (GROUNDED_QA_PROMPT_V6 if prose_mode else GROUNDED_QA_PROMPT)
+    )
+    if selective_mode:
+        user_prompt = GROUNDED_QA_USER_V7.format(
+            recent_context=recent_context,
+            question=question,
+            passages=_format_passages_numbered(evidence_passages),
+        )
+    elif prose_mode:
         user_prompt = GROUNDED_QA_USER_V6.format(
             recent_context=recent_context,
             question=question,
@@ -2077,7 +2098,17 @@ def _synthesize_and_admit(
     _emit("Composing a cited answer…")
     log.info("llm_prompt", role="synthesizer", **active_prompt.log_fields())
     provider = get_llm_provider(role="synthesizer")
-    if prose_mode:
+    if selective_mode:
+        # v7 sends NO schema message either, like v6 -- see the v6 comment
+        # below for why. Own system prompt and own exemplar set (B.10.2), same
+        # user/assistant message shape.
+        synth_messages = [LLMMessage(role="system", content=GROUNDED_QA_SYSTEM_V7)]
+        synth_messages.extend(
+            LLMMessage(role=exemplar_role, content=exemplar_text)
+            for exemplar_role, exemplar_text in GROUNDED_QA_EXEMPLARS_V7
+        )
+        synth_messages.append(LLMMessage(role="user", content=user_prompt))
+    elif prose_mode:
         # v6 sends NO schema message anywhere -- the schema is the server-side
         # parser now -- and the few-shot exemplars ride between the system
         # prompt and the live turn as real user/assistant pairs. The tail
@@ -2166,7 +2197,9 @@ def _synthesize_and_admit(
     admitted: AdmittedTurn | GateFailure
     parsed_prose: prose_turn.ParsedProseTurn | None = None
     if prose_mode:
-        parsed_prose = prose_turn.parse(answer, passages=evidence_passages)
+        parsed_prose = prose_turn.parse(
+            answer, passages=evidence_passages, selective=selective_mode
+        )
         # Nested under the existing "synthesis" telemetry block on purpose: the
         # route_json TOP-level key set is contract-pinned, and the parse record
         # is synthesis forensics (INV-6) -- what the parser killed and why.
@@ -2175,6 +2208,10 @@ def _synthesize_and_admit(
             "killed": [t[:400] for t in parsed_prose.leftover_brackets],
             "truncated_material": parsed_prose.truncated_material,
         }
+        if selective_mode:
+            # CONDITIONAL: emitted only under v7, so v6's ledger bytes (and
+            # tests/test_prose_synthesis.py:102-106's exact-dict pin) never move.
+            synth_telemetry["prose_parse"]["kinds"] = [c.kind for c in parsed_prose.claims]
         killed_material: str | None = None
         for killed in parsed_prose.leftover_brackets:
             killed_material = tg.materiality_trigger(killed)
@@ -2207,6 +2244,16 @@ def _synthesize_and_admit(
             # "no sentences parsed", not "schema violation".
             admitted = GateFailure(
                 "malformed_structure", "no sentences parsed from prose completion"
+            )
+        elif selective_mode:
+            admitted = admit_turn(
+                prose_turn.gate_payload(parsed_prose, evidence_passages),
+                passages=evidence_passages,
+                question=question,
+                correct=True,
+                downgrade_uncited=False,
+                kinds=[c.kind for c in parsed_prose.claims],
+                selective=True,
             )
         else:
             admitted = admit_turn(
@@ -2261,6 +2308,20 @@ def _synthesize_and_admit(
 
     log.info("qa_turn_gate", **_gate_log_fields(admitted))
 
+    # v7 found-nothing: the model's own decline text, re-scanned against the
+    # materiality/source-assertion lexicons before it can be served (B.10.1.2).
+    # Computed here (only for the one verdict render_decline is documented to
+    # accept) so the ledger below can carry the guard on every branch.
+    decline_text: str | None = None
+    decline_guard: str | None = None
+    if admitted.verdict == tg.VERDICT_CONVERSATIONAL_DECLINE:
+        decline_text, decline_guard = tg.render_decline(admitted)
+        if decline_guard is not None:
+            # The parser and the gate disagreed (a caller passing kinds that
+            # do not match the texts) -- defense in depth fired. Never serves
+            # the guarded text; the caller below falls back to canned copy.
+            log.warning("qa_decline_guard_fallback", guard=decline_guard)
+
     # OD-5's operator half rides on EVERY post-gate audit row, not just the
     # answer path. The decline branches below are exactly the turns where a
     # claim was DROPPED (no_valid_citations, material_drop), so persisting the
@@ -2270,7 +2331,15 @@ def _synthesize_and_admit(
     # once here so the answer and decline paths cannot drift.
     turn_route = {
         **synth_route,
-        "turn": tg.ledger(admitted, model=response.model, prompt_version=active_prompt.version),
+        "turn": tg.ledger(
+            admitted,
+            model=response.model,
+            prompt_version=active_prompt.version,
+            renderer_version=(
+                tg.RENDERER_VERSION_SELECTIVE if selective_mode else tg.RENDERER_VERSION
+            ),
+            decline_guard=decline_guard,
+        ),
     }
 
     if admitted.verdict == tg.VERDICT_NO_EVIDENCE:
@@ -2337,6 +2406,28 @@ def _synthesize_and_admit(
             passages=passages,
             model_name=response.model,
             answer_text=tg.MATERIAL_DROP_TEXT,
+            usage=response.usage,
+            route_extra=turn_route,
+            guide=False,
+        )
+
+    if admitted.verdict == tg.VERDICT_CONVERSATIONAL_DECLINE:
+        # v7 found-nothing: the model says so in its own words. Wire shape is
+        # the v5/v6 refusal contract exactly (refused, citations=[], reason
+        # model_refusal); only the TEXT is model-authored, and only after
+        # render_decline re-scanned every sentence it is about to serve. Never
+        # forks to _clarify (AMENDMENT 1, B.10.1.3): that REPLACES the answer
+        # text with application copy plus options, which would discard the
+        # model's prose -- the entire feature.
+        return _decline(
+            _refuse,
+            reason="model_refusal",
+            response_mode="refused",
+            passages=passages,
+            model_name=response.model,
+            # None (a guard fired) -> _refuse serves s.refusal_text (the
+            # canned copy), never the guarded text.
+            answer_text=decline_text,
             usage=response.usage,
             route_extra=turn_route,
             guide=False,

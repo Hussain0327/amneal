@@ -228,6 +228,30 @@ def test_inv1_material_drop_rejects_the_whole_answer(
     assert dropped[0]["bad_cites"] == ["PSG_999999,p.7"]
 
 
+def test_inv1_v7_serves_no_uncited_source_fact(monkeypatch: pytest.MonkeyPatch) -> None:
+    """INV-1 holds under v7 too (B.10 build): a sentence that reports what the
+    guidance SAYS must never reach the user uncited, selective citation or
+    not. Under both flags, an uncited source-assertion sentence is dropped by
+    the gate -- it never enters the admitted, renderable text."""
+    _seed_corpus([("Fasting bioequivalence study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
+    monkeypatch.setenv("REGWATCH_PROSE_SYNTHESIS", "1")
+    monkeypatch.setenv("REGWATCH_SELECTIVE_CITATION", "1")
+    monkeypatch.setenv("REFUSAL_SCORE_THRESHOLD", "0.0")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        qa_mod,
+        "get_llm_provider",
+        lambda *a, **k: _stub_llm("FDA recommends a fed study for the 45 mcg strength."),
+    )
+
+    result = qa_mod.ask("What study design is recommended?")
+
+    assert "fed study" not in result.answer
+    assert "recommends" not in result.answer
+    dropped = [c for c in _only_route_json()["turn"]["claims"] if not c["admitted"]]
+    assert [c["drop_reason"] for c in dropped] == [tg.DROP_NO_CITES]
+
+
 # ---------- INV-2: Refuse over guess ----------
 
 

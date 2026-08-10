@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from regwatch.eval.metrics import faithfulness
+from regwatch.eval.metrics import faithfulness, sentence_citation_rate
 from regwatch.generate import turn_gate as tg
 from regwatch.generate.rag_contract import ClaimTag
 from regwatch.retrieve.retriever import RetrievedPassage
@@ -433,6 +433,33 @@ def test_claim_tags_mirror_admitted_order() -> None:
         ClaimTag(kind="source_fact", cited=True),
         ClaimTag(kind="source_fact", cited=True),
     )
+
+
+def test_selective_faithfulness_is_one_while_sentence_citation_rate_is_partial() -> None:
+    """Selective-mode TWIN of the two tests above (E10): faithfulness
+    (kind-aware, #178) measures only what was PRESENTED AS FACT, while
+    sentence_citation_rate (the pre-PR8 text rule) still penalizes every
+    uncited sentence regardless of kind. The two diverge BY DESIGN once
+    REASONING/CONVERSATION sentences are uncited on purpose."""
+    turn = tg.admit_turn(
+        synth_turn_json(
+            [
+                ("A fasting study is recommended", [("PSG_020503", 3)]),
+                ("Happy to help with anything else", []),
+            ]
+        ),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["source_fact", "conversation"],
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    answer = tg.render_answer(turn)
+
+    assert faithfulness(answer, claim_tags=tg.claim_tags(turn)) == 1.0
+    assert sentence_citation_rate(answer) < 1.0
 
 
 def test_citation_binds_the_top_ranked_chunk_for_a_shared_page() -> None:
@@ -924,3 +951,561 @@ def test_ledger_serializes_the_correction_fields() -> None:
     assert row["original_cites"] == ["PSG_999999,p.7"]
     assert row["cites"] == ["PSG_020503,p.3"]
     assert row["downgraded"] is False
+
+
+# ---------- v7 selective citation (B.10.3.4, B.10.1.1/2/4), flag-gated ----------
+# admit_turn's kinds=/selective= keywords, the new VERDICT_CONVERSATIONAL_DECLINE
+# ordering, render_decline's guard, and ledger's conditional keys. Every test
+# here passes selective=True explicitly -- selective=False (every existing
+# test above) is untouched by any of it.
+
+
+def test_selective_uncited_reasoning_is_admitted_not_dropped() -> None:
+    """T-12: framed benign served. The P0 regression test for E4 -- a correctly
+    framed reasoning sentence with no materiality/source-assertion hit must be
+    ADMITTED uncited, not dropped."""
+    turn = tg.admit_turn(
+        synth_turn_json(
+            [
+                ("A fasting study is recommended", [("PSG_020503", 3)]),
+                ("My reading is that the two designs match", []),
+            ]
+        ),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["source_fact", "reasoning"],
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert turn.dropped == ()
+    assert turn.verdict == tg.VERDICT_ANSWER
+    assert [c.kind for c in turn.admitted] == ["source_fact", "reasoning"]
+    second = turn.admitted[1]
+    assert second.pairs == ()
+    assert second.citations == ()
+    rendered = tg.render_answer(turn)
+    assert "My reading is that the two designs match." in rendered
+    assert tg.REASONING_FRAME not in rendered
+
+
+def test_selective_uncited_source_fact_is_still_dropped_never_downgraded() -> None:
+    """INV-1 unit form: an uncited source_fact is UNAFFECTED by the uncited-kind
+    admit path -- it still falls to DROP_NO_CITES, and correct=True never
+    downgrades it (the corrector's DROP_NO_CITES branch only fires when
+    allow_downgrade is set, and the v7 caller always passes
+    downgrade_uncited=False)."""
+    turn = tg.admit_turn(
+        synth_turn_json([("A fed study is required", [])]),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["source_fact"],
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert turn.admitted == ()
+    assert [d.reason for d in turn.dropped] == [tg.DROP_NO_CITES]
+    assert turn.verdict == tg.VERDICT_NO_VALID_CITATIONS
+
+
+def test_selective_kinds_arity_mismatch_forces_source_fact_and_warns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Length mismatch ignores kinds entirely (the strict direction: more
+    citation enforcement, never less) and is logged, never silent."""
+    warnings: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(tg.log, "warning", lambda event, **kw: warnings.append((event, kw)))
+    turn = tg.admit_turn(
+        synth_turn_json(
+            [
+                ("A fasting study is recommended", [("PSG_020503", 3)]),
+                ("Let me know if that helps", []),
+            ]
+        ),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["source_fact"],  # length 1, but 2 claims were emitted
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert [d.reason for d in turn.dropped] == [tg.DROP_NO_CITES]
+    assert ("gate_kind_arity_mismatch", {"declared": 1, "claims": 2}) in warnings
+
+
+def test_selective_claim_with_cites_forced_to_source_fact_regardless_of_kinds() -> None:
+    """A sentence wearing a marker is an assertion, no matter what a
+    (potentially wrong) kinds= entry says for it."""
+    turn = tg.admit_turn(
+        synth_turn_json([("A fasting study is recommended", [("PSG_020503", 3)])]),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["conversation"],  # deliberately wrong
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert turn.admitted[0].kind == tg.CLAIM_KIND_SOURCE_FACT
+    assert turn.admitted[0].pairs == (("PSG_020503", 3),)
+
+
+def test_render_answer_selective_no_bracket_and_no_empty_sources_trailer() -> None:
+    """Renderer emits no ``[]`` and no dangling empty ``Sources:`` header for an
+    all-uncited turn -- unreachable flag-off (a v5/v6 admitted claim always
+    carries >= 1 pair), so no flag check is needed inside the renderer."""
+    turn = tg.admit_turn(
+        synth_turn_json([("Let me know if that helps", [])]),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["conversation"],
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    answer = tg.render_answer(turn)
+    assert answer == "Let me know if that helps."
+    assert "[]" not in answer
+    assert "Sources:" not in answer
+
+
+def test_one_cited_sentence_is_not_a_conversational_decline() -> None:
+    """T-11 boundary: a turn with >= 1 admitted source_fact is a normal answer,
+    never a decline, even when every other sentence is uncited conversation."""
+    turn = tg.admit_turn(
+        synth_turn_json(
+            [
+                ("Fasting study with subjects", [("PSG_020503", 3)]),
+                ("Happy to dig into the details together", []),
+            ]
+        ),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["source_fact", "conversation"],
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert turn.verdict == tg.VERDICT_ANSWER
+    answer = tg.render_answer(turn)
+    assert "[PSG_020503, p.3]" in answer
+    assert tg.PARTIAL_DROP_DISCLOSURE not in answer
+
+
+def test_selective_framed_material_sentence_is_material_exempt_and_drops() -> None:
+    """T-13, gate half: a framed-but-material sentence the parser already
+    reclassified to source_fact (B.10.3.3) drops on the material-exempt path,
+    never re-stamped or downgraded (F1/F3)."""
+    turn = tg.admit_turn(
+        synth_turn_json(
+            [
+                ("Fasting study with subjects", [("PSG_020503", 3)]),
+                (
+                    "The guidance does not state this directly; my reading is "
+                    "that a fed study is not required",
+                    [],
+                ),
+            ]
+        ),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        # As the parser would emit: a framed sentence whose BODY carries a
+        # materiality word is reclassified to source_fact before the gate.
+        kinds=["source_fact", "source_fact"],
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert turn.verdict == tg.VERDICT_MATERIAL_DROP
+    assert len(turn.dropped) == 1
+    dropped = turn.dropped[0]
+    assert dropped.reason == tg.DROP_NO_CITES
+    assert dropped.correction_method == tg.CORRECTION_MATERIAL_EXEMPT
+    assert dropped.material_word == "not"
+
+
+def test_material_drop_outranks_conversational_decline() -> None:
+    """Verdict ordering (B.10.1.1): MATERIAL_DROP wins even when every
+    ADMITTED claim is uncited conversation -- a turn that dropped an
+    obligation-bearing sentence must say so specifically, never launder it
+    into a chatty "I could not find that"."""
+    turn = tg.admit_turn(
+        synth_turn_json(
+            [
+                ("A fed study is not required", []),
+                ("Happy to help with anything else", []),
+            ]
+        ),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["source_fact", "conversation"],
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert turn.verdict == tg.VERDICT_MATERIAL_DROP
+    assert [c.kind for c in turn.admitted] == ["conversation"]
+    assert [d.material_word for d in turn.dropped] == ["not"]
+
+
+def test_selective_heading_prefix_is_sanitize_kept_not_dropped() -> None:
+    """T-14: a leading markdown heading is stripped, not dropped, in selective
+    mode -- for an UNCITED claim, the case B.10.3.4 justified the strip for.
+    A CITED claim is a separate case (see the corrector-widening regression
+    pair below): the strip must not feed the lexical corrector."""
+    turn = tg.admit_turn(
+        synth_turn_json([("# Happy to help with anything else", [])]),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["conversation"],
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert turn.dropped == ()
+    assert tg.render_answer(turn) == "Happy to help with anything else."
+
+
+def test_selective_link_markup_still_drops_the_claim() -> None:
+    """T-14: link/URL markup and any residual bracket are NOT sanitize-kept --
+    only the heading marker is."""
+    turn = tg.admit_turn(
+        synth_turn_json([("See https://example.com for details", [("PSG_020503", 3)])]),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["source_fact"],
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert [d.reason for d in turn.dropped] == [tg.DROP_MARKUP]
+
+
+def test_heading_prefix_still_drops_the_claim_when_not_selective() -> None:
+    """The sanitize-keep is selective-mode only: v5/v6 (selective=False, the
+    default) keeps today's DROP_MARKUP behavior for a heading-shaped claim."""
+    turn = _admit(synth_turn_json([("# Study design", [("PSG_020503", 3)])]))
+    assert [d.reason for d in turn.dropped] == [tg.DROP_MARKUP]
+
+
+def test_selective_heading_prefixed_cited_claim_stays_on_drop_markup_not_corrected() -> None:
+    """Post-launch-review regression (P2): the heading strip must not feed the
+    lexical corrector. A cited claim whose declared cite is unknown, with a
+    leading heading, must stay DROP_MARKUP -- never re-stamped onto an
+    unrelated passage by token overlap and served as a cited FDA fact on a
+    shape v5/v6 refused outright."""
+    passages = [
+        _uniform_passage(3, "chunk-best", _BEST_TEXT),
+        _uniform_passage(4, "chunk-other", _OFF_TOPIC_TEXT),
+    ]
+    heading_claim = f"# {_CORRECTABLE_CLAIM}"
+    turn = tg.admit_turn(
+        synth_turn_json([(heading_claim, [("PSG_999999", 7)])]),
+        passages=passages,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["source_fact"],
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert turn.admitted == ()
+    assert [d.reason for d in turn.dropped] == [tg.DROP_MARKUP]
+    assert turn.verdict == tg.VERDICT_NO_VALID_CITATIONS
+
+
+def test_heading_prefixed_cited_claim_with_unknown_cite_drops_when_not_selective() -> None:
+    """The selective=False companion to the regression above: same shape,
+    same DROP_MARKUP outcome -- selective=True and selective=False now agree
+    for a CITED claim (the strip guard is `selective and not declared`)."""
+    passages = [
+        _uniform_passage(3, "chunk-best", _BEST_TEXT),
+        _uniform_passage(4, "chunk-other", _OFF_TOPIC_TEXT),
+    ]
+    heading_claim = f"# {_CORRECTABLE_CLAIM}"
+    turn = _admit(synth_turn_json([(heading_claim, [("PSG_999999", 7)])]), passages, correct=True)
+    assert turn.admitted == ()
+    assert [d.reason for d in turn.dropped] == [tg.DROP_MARKUP]
+
+
+def test_render_decline_guard_catches_material_text_a_mis_keyed_kind_admitted() -> None:
+    """T-10 unit half: render_decline is defense in depth at the boundary that
+    owns it -- reachable only when the parser and the gate disagree. Modeled
+    here with a deliberately wrong kinds= entry so the gate admits material
+    text uncited, and render_decline's own re-scan is what catches it."""
+    turn = tg.admit_turn(
+        synth_turn_json([("A fed study is not required for this product", [])]),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["conversation"],  # mis-keyed: a real parser would say source_fact
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert turn.verdict == tg.VERDICT_CONVERSATIONAL_DECLINE
+    text, guard = tg.render_decline(turn)
+    assert text is None
+    assert guard == tg.DECLINE_GUARD_MATERIAL
+
+
+def test_render_decline_guard_catches_source_assertion_text_a_mis_keyed_kind_admitted() -> None:
+    turn = tg.admit_turn(
+        synth_turn_json([("According to the passages, a fed study applies", [])]),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["conversation"],  # mis-keyed: a real parser would say source_fact
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert turn.verdict == tg.VERDICT_CONVERSATIONAL_DECLINE
+    text, guard = tg.render_decline(turn)
+    assert text is None
+    assert guard == tg.DECLINE_GUARD_SOURCE_ASSERTION
+
+
+def test_render_decline_renders_a_clean_decline_verbatim_with_no_trailer() -> None:
+    """The natural path: every admitted claim is clean, so render_decline joins
+    the sentences verbatim with no marker, no unsupported tail, no PARTIAL
+    disclosure, and no Sources: trailer."""
+    turn = tg.admit_turn(
+        synth_turn_json(
+            [
+                ("I have nothing here about storage conditions", []),
+                ("Want me to look for a storage section instead", []),
+            ]
+        ),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["conversation", "conversation"],
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert turn.verdict == tg.VERDICT_CONVERSATIONAL_DECLINE
+    text, guard = tg.render_decline(turn)
+    assert guard is None
+    assert text == (
+        "I have nothing here about storage conditions. "
+        "Want me to look for a storage section instead."
+    )
+    assert "Sources:" not in (text or "")
+    assert "[" not in (text or "")
+
+
+def test_ledger_flag_off_is_byte_stable_with_renderer_version_one() -> None:
+    """Golden flag-off byte-stability (T-15, turn_gate half): calling
+    admit_turn/ledger with none of the v7 keywords reproduces EXACTLY what
+    main's ledger produced before this build -- renderer_version == 1, and
+    kind_counts/decline_guard are ABSENT, not null."""
+    turn = _admit(synth_turn_json([("A fasting study is recommended", [("PSG_020503", 3)])]))
+    row = tg.ledger(turn, model="stub-model", prompt_version="5")
+
+    assert row["renderer_version"] == 1
+    assert "kind_counts" not in row
+    assert "decline_guard" not in row
+    assert row == {
+        "renderer_version": 1,
+        "turn_type": "ANSWER",
+        "verdict": "answer",
+        "model": "stub-model",
+        "prompt_version": "5",
+        "emitted": 1,
+        "admitted": 1,
+        "dropped": 0,
+        "material_word": None,
+        "unsupported_kept": [],
+        "unsupported_dropped": [],
+        "claims": [
+            {
+                "index": 0,
+                "admitted": True,
+                "drop_reason": None,
+                "text_prefix": "A fasting study is recommended",
+                "cites": ["PSG_020503,p.3"],
+                "bad_cites": [],
+                "material_word": None,
+                "passage_overlap": turn.admitted[0].overlap,
+                "kind": "source_fact",
+                "correction_method": None,
+                "original_cites": None,
+                "downgraded": False,
+            }
+        ],
+    }
+    assert tg.render_answer(turn) == (
+        "A fasting study is recommended [PSG_020503, p.3].\n\nSources:\n- [PSG_020503, p.3]"
+    )
+
+
+def test_ledger_selective_mode_carries_kind_counts() -> None:
+    turn = tg.admit_turn(
+        synth_turn_json(
+            [
+                ("A fasting study is recommended", [("PSG_020503", 3)]),
+                ("Happy to help with anything else", []),
+            ]
+        ),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["source_fact", "conversation"],
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    row = tg.ledger(
+        turn,
+        model="stub-model",
+        prompt_version="7",
+        renderer_version=tg.RENDERER_VERSION_SELECTIVE,
+    )
+    assert row["renderer_version"] == 2
+    assert row["kind_counts"] == {"source_fact": 1, "conversation": 1}
+    assert "decline_guard" not in row
+
+
+def test_ledger_carries_decline_guard_only_when_set() -> None:
+    turn = _admit(synth_turn_json([("A fasting study is recommended", [("PSG_020503", 3)])]))
+
+    row_without = tg.ledger(turn, model="stub-model", prompt_version="5")
+    assert "decline_guard" not in row_without
+
+    row_with = tg.ledger(
+        turn, model="stub-model", prompt_version="7", decline_guard=tg.DECLINE_GUARD_MATERIAL
+    )
+    assert row_with["decline_guard"] == tg.DECLINE_GUARD_MATERIAL
+
+
+# ---------- post-launch-review regressions ----------
+
+
+def test_render_answer_drops_and_folds_an_uncited_leak_via_the_render_time_scan() -> None:
+    """FIX-1 (P0), second half: render_answer re-scans uncited admitted
+    claims before serving, mirroring render_decline's guard -- the
+    answer-path twin closing the asymmetry where a decline was re-scanned
+    but an answer was not, even though the answer path serves with
+    refused=False under a Sources: header. Force-admit one of the reviewer's
+    leak sentences as uncited 'conversation' (as if a caller mis-keyed kinds,
+    or a future narrowing of the lexicon missed it again) alongside a real
+    cited claim, and prove render_answer drops it and folds to the PARTIAL
+    disclosure rather than serving an uncited FDA assertion."""
+    turn = tg.admit_turn(
+        synth_turn_json(
+            [
+                ("A fasting study is recommended", [("PSG_020503", 3)]),
+                ("The guidance says the sample size is 24 healthy adult volunteers", []),
+            ]
+        ),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=[
+            "source_fact",
+            "conversation",
+        ],  # mis-keyed: the real classifier would say source_fact
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    # Gate level: nothing dropped, both claims admitted -- the leak is caught
+    # only at RENDER time, which is exactly the asymmetry this fix closes.
+    assert turn.dropped == ()
+    assert turn.verdict == tg.VERDICT_ANSWER
+
+    answer = tg.render_answer(turn)
+    assert "sample size" not in answer
+    assert "24 healthy adult volunteers" not in answer
+    assert "A fasting study is recommended [PSG_020503, p.3]." in answer
+    assert tg.PARTIAL_DROP_DISCLOSURE in answer
+
+
+def test_render_answer_scan_is_unreachable_flag_off() -> None:
+    """The render-time scan only ever inspects a claim with empty pairs, and
+    no v5/v6 admitted claim can have empty pairs (DROP_NO_CITES removes them
+    before admission) -- so a materially-worded CITED claim renders exactly
+    as before, unaffected by the new scan."""
+    turn = _admit(
+        synth_turn_json([("A fed study is not required for this product", [("PSG_020503", 3)])])
+    )
+    assert turn.dropped == ()
+    answer = tg.render_answer(turn)
+    assert "A fed study is not required for this product [PSG_020503, p.3]." in answer
+    assert tg.PARTIAL_DROP_DISCLOSURE not in answer
+
+
+def test_render_decline_guard_catches_an_expanded_lexicon_leak() -> None:
+    """FIX-1 (P0): the decline surface's existing guard (render_decline) must
+    also catch the newly-expanded lexicon's leaks when mis-keyed, not just
+    the words already in the list before this fix."""
+    turn = tg.admit_turn(
+        synth_turn_json([("In vivo testing is waived for the lower strengths", [])]),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["conversation"],  # mis-keyed: the real classifier would say source_fact
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert turn.verdict == tg.VERDICT_CONVERSATIONAL_DECLINE
+    text, guard = tg.render_decline(turn)
+    assert text is None
+    assert guard == tg.DECLINE_GUARD_SOURCE_ASSERTION
+
+
+def test_dropped_source_fact_plus_uncited_filler_is_no_valid_citations_not_decline() -> None:
+    """FIX-2 (P1): the conversational decline must not outrank a dropped
+    claim. A dropped SOURCE FACT (no cites) alongside harmless admitted
+    filler is the v6 outcome for the identical completion (there the filler
+    drops too) -- VERDICT_NO_VALID_CITATIONS, never a served 'Evidence gap'
+    wearing the orphaned filler as its entire reply."""
+    turn = tg.admit_turn(
+        synth_turn_json(
+            [
+                ("FDA recommends a fed study for the 45 mcg strength", []),
+                ("Let me know if you want the dissolution details as well", []),
+            ]
+        ),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["source_fact", "conversation"],
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert turn.verdict == tg.VERDICT_NO_VALID_CITATIONS
+    assert [c.kind for c in turn.admitted] == ["conversation"]
+    assert [d.reason for d in turn.dropped] == [tg.DROP_NO_CITES]
+
+
+def test_conversational_decline_still_fires_when_nothing_was_dropped() -> None:
+    """FIX-2 boundary: the decline is still reachable, exactly when the
+    reviewer's fix text requires -- selective, zero admitted source facts,
+    and NOTHING dropped at all."""
+    turn = tg.admit_turn(
+        synth_turn_json([("Happy to help with anything else", [])]),
+        passages=_PASSAGES,
+        question=_QUESTION,
+        correct=True,
+        downgrade_uncited=False,
+        kinds=["conversation"],
+        selective=True,
+    )
+    assert isinstance(turn, tg.AdmittedTurn)
+    assert turn.dropped == ()
+    assert turn.verdict == tg.VERDICT_CONVERSATIONAL_DECLINE

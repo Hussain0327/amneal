@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -62,6 +63,11 @@ log = get_logger(__name__)
 # Bumped whenever the rendered answer's SHAPE changes, so a stored answer can be
 # read back against the renderer that produced it.
 RENDERER_VERSION = 1
+# v7 selective citation. NOT a flat bump of RENDERER_VERSION -- that would
+# mis-stamp every v5/v6 row for the whole dark window, when those rows are
+# still produced by the v1 renderer. ledger() takes it as a parameter, passed
+# by the ONE caller only when selective_mode is true (B.10.1.4).
+RENDERER_VERSION_SELECTIVE = 2
 
 # ---------------------------------------------------------------------------
 # OD-4: materiality.
@@ -105,6 +111,93 @@ def materiality_trigger(claim_text: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# v7 selective citation (B.10.3.1): the AIS (attributed-information-source)
+# lexicon. A sentence carrying none of MATERIALITY_WORDS can still be a report
+# of what a source SAYS ("FDA recommends a fasting study.") -- v6 never needed
+# this because it drops every uncited sentence regardless of kind, but v7
+# admits uncited REASONING/CONVERSATION, so this is the second guard that
+# reclassifies such a sentence back to source_fact before it can render
+# unsupported. Verb-anchored, not noun-bearing (B.10.3.1's overturn of the
+# parked B.3 list): a noun list fires on ordinary connective prose ("guidance")
+# and turns "the talking version" back into "the canned version" -- see the
+# module docstring's design note for the measured evidence. Composes with
+# MATERIALITY_WORDS rather than duplicating it (those words already imply an
+# assertion).
+# ---------------------------------------------------------------------------
+#
+# Expanded post-launch-review (adversarial INV-1 lens, finding P0): the
+# original 18-word list missed ordinary obligation/attribution phrasing
+# ("should", "no", "waived", "says", ...) that a real model plausibly writes,
+# letting an uncited FDA assertion classify as conversation/reasoning and
+# render. The expansion is verified against B.10.3.1's own acceptance test:
+# the two lexicons (materiality + source-assertion), frame-stripped, produce
+# ZERO hits on every uncited sentence of the three v7 assistant exemplars
+# (tests/test_v7_selective.py::test_v7_exemplars_survive_their_own_gate).
+# "describe(s)"/"cover(s)" are deliberately EXCLUDED -- they fire on the
+# exemplars' own uncited sentences ("The passages I received cover the
+# dissolution method...", "the two passages describe one dosage form...").
+# MATERIALITY_WORDS is NOT touched here: it is shared with the LIVE v6 path,
+# and any addition there would change prod material-drop behavior.
+SOURCE_ASSERTION_WORDS: tuple[str, ...] = (
+    "acceptable",
+    "according",
+    "advise",
+    "advises",
+    "allows",
+    "calls",
+    "establishes",
+    "exempt",
+    "exemption",
+    "exempts",
+    "expected",
+    "expects",
+    "indicates",
+    "instructs",
+    "mandates",
+    "no",
+    "notes",
+    "permits",
+    "prohibition",
+    "prohibits",
+    "recommend",
+    "recommendation",
+    "recommendations",
+    "recommended",
+    "recommending",
+    "recommends",
+    "require",
+    "requirement",
+    "requirements",
+    "requires",
+    "requiring",
+    "say",
+    "says",
+    "sets",
+    "shall",
+    "should",
+    "specified",
+    "specifies",
+    "specify",
+    "stated",
+    "states",
+    "suggests",
+    "waive",
+    "waived",
+    "waiver",
+)
+
+_SOURCE_ASSERTION_RE = re.compile(
+    r"\b(?:" + "|".join(SOURCE_ASSERTION_WORDS) + r")\b", re.IGNORECASE
+)
+
+
+def source_assertion_trigger(text: str) -> str | None:
+    """The word that makes ``text`` a report of what a source SAYS, or None."""
+    match = _SOURCE_ASSERTION_RE.search(text or "")
+    return match.group(0).lower() if match is not None else None
+
+
+# ---------------------------------------------------------------------------
 # Verdicts -- what the caller must do with an admitted turn.
 # ---------------------------------------------------------------------------
 VERDICT_ANSWER = "answer"  # every emitted claim was admitted
@@ -112,6 +205,7 @@ VERDICT_PARTIAL = "partial"  # some dropped, immaterial -> render + disclose
 VERDICT_MATERIAL_DROP = "material_drop"  # some dropped, material -> reject whole answer
 VERDICT_NO_VALID_CITATIONS = "no_valid_citations"  # nothing admitted
 VERDICT_NO_EVIDENCE = "no_evidence"  # the model declined
+VERDICT_CONVERSATIONAL_DECLINE = "conversational_decline"  # v7: admitted, but zero source facts
 
 # Drop reasons. These are OPERATOR strings (the route_json ledger and logs); no
 # drop reason ever reaches a user.
@@ -139,6 +233,44 @@ CORRECTION_MATERIAL_EXEMPT = "material_exempt"
 # renderer-authored citation markers: these words are written by the gate, never
 # accepted from the model, so a reader can trust the hedge was applied by code.
 REASONING_FRAME = "The guidance does not state this directly; my reading is: "
+
+# Frame openers that mark an uncited sentence as declared REASONING rather than
+# conversation (v7 prompt rule 2; B.10.2). Matched whitespace/case-normalized,
+# prefix-only: a frame buried mid-sentence is not a declaration. Lives HERE
+# (not prose_turn, which imports FROM this module) because both the selective
+# classifier (prose_turn) AND render_decline's guard (this module) need
+# frame-stripping, and a turn_gate -> prose_turn import would be a cycle
+# (B.10.3.2). prose_turn re-exports this tuple so prose_turn.REASONING_FRAME_PREFIXES
+# stays a valid attribute for every existing reference.
+REASONING_FRAME_PREFIXES: tuple[str, ...] = (
+    "the guidance does not state this directly",
+    "reading the guidance together",
+    "my reading is",
+    "beyond the guidance,",
+)
+
+
+def frame_split(text: str) -> tuple[str, str]:
+    """(recognized frame prefix, remaining body). ('', text) when unframed.
+
+    Scanning a framed sentence WHOLE is what makes the recommended frame
+    unusable: "The guidance does not state this directly" carries a materiality
+    word ("not") while asserting nothing. The frame is an allowlisted,
+    content-free hedge, so the lexicons run on the BODY. Applies to
+    gate-authored and model-authored frames alike -- the text is identical
+    either way.
+    """
+    original = text or ""
+    collapsed = " ".join(original.split())
+    lowered = collapsed.lower()
+    for prefix in REASONING_FRAME_PREFIXES:
+        if lowered.startswith(prefix):
+            body = collapsed[len(prefix) :].lstrip(" ")
+            if body[:1] in (";", ",", ":"):
+                body = body[1:]
+            return prefix, body.strip()
+    return "", original
+
 
 # Correction thresholds. Both are required: the FLOOR says the claim must be
 # substantially contained in the winning passage at all, and the MARGIN says the
@@ -175,6 +307,15 @@ _UNSUPPORTED_LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 /,()'&-]*")
 # so any of these would render as chrome or as a clickable off-corpus pointer
 # sitting beside real citation stamps.
 _MARKUP_RE = re.compile(r"(?:^\s*#)|(?:\]\()|(?:\bhttps?://)|(?:\bwww\.)", re.IGNORECASE)
+# v7 sanitize-keep (B.10.3.4), selective mode only: a leading markdown heading
+# is stripped BEFORE the _MARKUP_RE check rather than dropping the whole claim,
+# because a heading-shaped sentence is common conversational structure in
+# free-form prose and costs nothing to keep once the "#" itself is gone. Link/
+# URL markup and any residual bracket still DROP_MARKUP unchanged -- only the
+# heading marker is sanitize-kept. Emphasis (**bold**/*italic*/_underscore_) is
+# NOT touched: it already passes _MARKUP_RE today, so stripping it would be a
+# v7-only text change with no safety value.
+_HEADING_PREFIX_RE = re.compile(r"^#{1,6}\s+")
 # Numbered forms ("1. ", "2) ") are stripped alongside the dash/star/plus bullets
 # because a surviving "1." reads as a sentence terminator to _SENT_SPLIT: the
 # claim then counts as two sentences and is dropped for DROP_MULTI_SENTENCE, even
@@ -447,6 +588,8 @@ def admit_turn(
     question: str,
     correct: bool = False,
     downgrade_uncited: bool | None = None,
+    kinds: Sequence[str] | None = None,
+    selective: bool = False,
 ) -> AdmittedTurn | GateFailure:
     """Parse one structured completion and admit its claims.
 
@@ -462,6 +605,20 @@ def admit_turn(
     refuse-or-cite -- serving a gate-framed UNCITED sentence is the v7
     selective-citation policy shift (and the renderer's marker line assumes a
     non-empty pair set until v7 changes it).
+
+    ``kinds``/``selective`` (v7, B.10.3.4): ``kinds`` is the parser's per-claim
+    epistemic reading, positional against ``turn.claims`` (the bridge emits
+    claims in parse order, so the correspondence is exact). Reachable ONLY with
+    ``selective=True`` -- a v5/v6 caller that happened to pass ``kinds`` would
+    still get today's behavior. A length mismatch against ``turn.claims``
+    ignores ``kinds`` entirely (logged, never silent) and treats every claim as
+    ``source_fact``: the strict direction, more citation enforcement, never
+    less. A claim carrying declared cites is ALWAYS ``source_fact`` regardless
+    of what ``kinds`` says for it -- a sentence wearing a marker is an
+    assertion. An uncited claim whose kind is ``reasoning``/``conversation`` is
+    admitted with no pairs/citations rather than dropped; an uncited
+    ``source_fact`` is unaffected (still ``DROP_NO_CITES``, never downgraded --
+    INV-1).
 
     NO json_repair, deliberately, and this divergence from the shipped
     deficiency ladder must not be "harmonized" later. The usual argument
@@ -514,9 +671,41 @@ def admit_turn(
     metadata_uniform = correct and _metadata_uniform(passages)
     allow_downgrade = correct if downgrade_uncited is None else (correct and downgrade_uncited)
 
+    # v7 (B.10.3.4): the parser's per-claim kinds, positional against
+    # turn.claims. An arity mismatch is the strict-direction fallback (every
+    # claim reads as source_fact) rather than a guess at which index means
+    # what.
+    claim_kinds: list[str] | None = None
+    if kinds is not None:
+        if len(kinds) == len(turn.claims):
+            claim_kinds = list(kinds)
+        else:
+            log.warning("gate_kind_arity_mismatch", declared=len(kinds), claims=len(turn.claims))
+
     for index, claim in enumerate(turn.claims):
         declared = tuple((c.short_name, c.page) for c in claim.cites)
         text = _sanitize_claim_text(claim.text)
+        if selective and not declared:
+            # Sanitize-keep, narrowed from the parked draft: only the leading
+            # heading marker is stripped here (link/URL markup and any
+            # residual bracket still fall through to _MARKUP_RE below).
+            # Post-launch-review fix (P2): scoped to UNCITED claims only --
+            # applying it before the cited branch fed a heading-stripped,
+            # markup-clean text straight into the lexical re-stamp corrector
+            # (correct_unknown_citation), so a claim whose only declared
+            # support was a passage number that does not exist could be
+            # re-stamped and served as a cited FDA fact on a shape v5/v6
+            # refused outright (DROP_MARKUP). A cited claim now stays on
+            # today's DROP_MARKUP path exactly as it did before v7.
+            text = _HEADING_PREFIX_RE.sub("", text, count=1)
+        # A claim wearing a marker is always an assertion, regardless of what
+        # the parser's kind said for it (B.10.3.4). Absent that, the parser's
+        # reading governs ONLY in selective mode; every other caller keeps
+        # every claim as source_fact, matching AdmittedClaim's own default.
+        if declared or not selective:
+            claim_kind = CLAIM_KIND_SOURCE_FACT
+        else:
+            claim_kind = claim_kinds[index] if claim_kinds is not None else CLAIM_KIND_SOURCE_FACT
         reason: str | None = None
         bad: tuple[tuple[str, int], ...] = ()
 
@@ -533,7 +722,11 @@ def admit_turn(
             # strictly WEAKER than the segment splitter it replaces.
             reason = DROP_MULTI_SENTENCE
         elif not declared:
-            reason = DROP_NO_CITES
+            # v7 uncited admit (B.10.3.4): reasoning/conversation, no cites ->
+            # admitted below with pairs=()/citations=(), never dropped. An
+            # uncited source_fact is UNAFFECTED -- it still falls to
+            # DROP_NO_CITES exactly as before (INV-1: never downgraded).
+            reason = None if claim_kind != CLAIM_KIND_SOURCE_FACT else DROP_NO_CITES
         else:
             bad = tuple((s, p) for (s, p) in declared if (s.upper(), p) not in allowed)
             if bad:
@@ -638,6 +831,7 @@ def admit_turn(
                 pairs=tuple(pairs),
                 citations=tuple(citations),
                 overlap=_overlap(text, cited_passages),
+                kind=claim_kind,
             )
         )
 
@@ -652,12 +846,46 @@ def admit_turn(
         verdict = VERDICT_NO_VALID_CITATIONS
         material_word = None
         kept_labels = []
-    elif not dropped:
-        verdict = VERDICT_ANSWER
-        material_word = None
     else:
+        # Identical to today for every non-selective turn: with no dropped
+        # claims this generator is empty and material_word is None, which is
+        # what the old `elif not dropped` branch hardcoded.
         material_word = next((d.material_word for d in dropped if d.material_word), None)
-        verdict = VERDICT_MATERIAL_DROP if material_word else VERDICT_PARTIAL
+        no_source_fact_admitted = selective and not any(
+            c.kind == CLAIM_KIND_SOURCE_FACT for c in admitted
+        )
+        if material_word:
+            # MATERIAL_DROP outranks the v7 decline (B.10.1.1): a turn that
+            # dropped an obligation-bearing sentence must say so specifically,
+            # not launder it into a chatty "I could not find that".
+            verdict = VERDICT_MATERIAL_DROP
+        elif no_source_fact_admitted and not dropped:
+            # v7 found-nothing: every admitted claim is uncited
+            # reasoning/conversation, NOTHING was dropped either, so nothing
+            # was asserted about the corpus at all. selective=False makes
+            # this branch unreachable, so v5/v6 verdicts are byte-identical.
+            verdict = VERDICT_CONVERSATIONAL_DECLINE
+        elif no_source_fact_admitted:
+            # Post-launch-review fix (P1): the decline must not outrank a
+            # dropped claim. Here the model DID assert a source fact, the
+            # gate dropped it (unsupported/unknown cite), and only harmless
+            # filler survived alongside it -- e.g. "FDA recommends a fed
+            # study... Let me know if you want the dissolution details as
+            # well." with the first sentence dropped for no_cites. Serving
+            # the filler alone as a conversational "Evidence gap" would
+            # mislabel a citation failure as reason=model_refusal and orphan
+            # a dangling referent ("That is the same design..." with its
+            # antecedent deleted). v6 reaches the SAME refusal for the
+            # identical completion: there the filler would drop too (v6
+            # never admits anything uncited), landing on `not admitted` ->
+            # VERDICT_NO_VALID_CITATIONS below. Treat v7 the same way rather
+            # than rendering the orphaned filler.
+            verdict = VERDICT_NO_VALID_CITATIONS
+            kept_labels = []
+        elif dropped:
+            verdict = VERDICT_PARTIAL
+        else:
+            verdict = VERDICT_ANSWER
 
     return AdmittedTurn(
         turn_type="ANSWER",
@@ -710,7 +938,93 @@ def render_answer(turn: AdmittedTurn) -> str:
 
     Callers must check ``turn.verdict`` first: for a non-renderable verdict
     there are no admitted claims and this returns "".
+
+    Post-launch-review fix (P0): an uncited admitted claim (reasoning/
+    conversation) re-crosses the gate boundary HERE too, mirroring
+    ``render_decline``'s guard -- this is the answer-path twin of that
+    function's defense in depth, closing the asymmetry where a decline was
+    re-scanned before serving but an answer was not, even though the answer
+    path serves with ``refused=False`` under a ``Sources:`` header. A hit
+    drops the sentence and folds to the same disclosure a gate-level drop
+    gets (OD-5): silently dropping would hand back a confident answer with
+    the qualifier deleted, same as any other drop.
     """
+    sentences: list[str] = []
+    render_time_drop = False
+    for claim in turn.admitted:
+        if not claim.pairs:
+            # Only uncited claims are re-scanned: a claim carrying pairs is a
+            # cite-validated source_fact already, not this guard's concern.
+            scan = frame_split(claim.text)[1] or claim.text
+            if materiality_trigger(scan) is not None or source_assertion_trigger(scan) is not None:
+                render_time_drop = True
+                continue
+        body = claim.text
+        terminator = "."
+        if body and body[-1] in ".!?":
+            terminator = body[-1]
+            body = body[:-1].rstrip()
+        if claim.pairs:
+            sentences.append(f"{body} {_marker(claim.pairs)}{terminator}")
+        else:
+            # v7 uncited kinds (reasoning/conversation): no marker to write.
+            # Unreachable under v5/v6 -- :531-532's DROP_NO_CITES drops every
+            # zero-pair claim before it can be admitted, and no live v5/v6
+            # caller enables the uncited-downgrade path either -- so flag-off
+            # rendering is provably byte-identical without a flag check here
+            # (the scan above is unreachable flag-off for the same reason:
+            # `claim.pairs` is never empty for an admitted v5/v6 claim).
+            sentences.append(f"{body}{terminator}")
+    if not sentences:
+        return ""
+
+    parts = [" ".join(sentences)]
+    if turn.unsupported:
+        parts.append(f"\n{PARTIAL_EVIDENCE_PREFIX} {', '.join(turn.unsupported)}.")
+    if turn.verdict == VERDICT_PARTIAL or render_time_drop:
+        # OD-5: the user is told that something was removed, in plain language
+        # and with no implementation detail. Silence would hand back a
+        # confident, fully-cited answer with an exception deleted from it.
+        parts.append(f"\n{PARTIAL_DROP_DISCLOSURE}")
+
+    cited = citations(turn)
+    if not cited:
+        # v7: an all-uncited turn (every admitted claim is reasoning/
+        # conversation) has nothing to list -- a dangling "Sources:" header
+        # with an empty body would be worse than omitting the trailer.
+        # Unreachable under v5/v6 by the same construction as the marker
+        # branch above: an admitted turn there always carries >= 1 pair.
+        return "".join(parts)
+    trailer = "\n".join(f"- {_marker(((c.short_name, c.page),))}" for c in cited)
+    return "".join(parts) + "\n\nSources:\n" + trailer
+
+
+DECLINE_GUARD_MATERIAL = "material_in_decline"
+DECLINE_GUARD_SOURCE_ASSERTION = "source_assertion_in_decline"
+
+
+def render_decline(turn: AdmittedTurn) -> tuple[str | None, str | None]:
+    """(conversational decline text, guard reason). Exactly one is None.
+
+    The v7 decline is MODEL text, so it re-crosses the gate boundary here
+    rather than being trusted from the parser: the parser scanned its own
+    pre-sanitization bytes, and ``kinds`` is caller-supplied. A hit on either
+    lexicon returns ``(None, reason)`` and the caller serves the fixed refusal
+    copy -- an uncited sentence that asserts what a source says, or that
+    carries obligation wording, must never be served, and a decline is the
+    one shape where nothing else on the turn would disclose it.
+
+    Callers must check ``turn.verdict == VERDICT_CONVERSATIONAL_DECLINE`` first;
+    by that verdict's construction no admitted claim carries pairs, so this
+    never has to decide what to do with a marker.
+    """
+    for claim in turn.admitted:
+        scan = frame_split(claim.text)[1] or claim.text
+        if materiality_trigger(scan) is not None:
+            return None, DECLINE_GUARD_MATERIAL
+        if source_assertion_trigger(scan) is not None:
+            return None, DECLINE_GUARD_SOURCE_ASSERTION
+
     sentences: list[str] = []
     for claim in turn.admitted:
         body = claim.text
@@ -718,24 +1032,21 @@ def render_answer(turn: AdmittedTurn) -> str:
         if body and body[-1] in ".!?":
             terminator = body[-1]
             body = body[:-1].rstrip()
-        sentences.append(f"{body} {_marker(claim.pairs)}{terminator}")
-    if not sentences:
-        return ""
-
-    parts = [" ".join(sentences)]
-    if turn.unsupported:
-        parts.append(f"\n{PARTIAL_EVIDENCE_PREFIX} {', '.join(turn.unsupported)}.")
-    if turn.verdict == VERDICT_PARTIAL:
-        # OD-5: the user is told that something was removed, in plain language
-        # and with no implementation detail. Silence would hand back a
-        # confident, fully-cited answer with an exception deleted from it.
-        parts.append(f"\n{PARTIAL_DROP_DISCLOSURE}")
-
-    trailer = "\n".join(f"- {_marker(((c.short_name, c.page),))}" for c in citations(turn))
-    return "".join(parts) + "\n\nSources:\n" + trailer
+        sentences.append(f"{body}{terminator}")
+    # No marker, no unsupported tail, no PARTIAL disclosure, and no Sources:
+    # trailer -- a decline states nothing about the corpus, so none of
+    # render_answer's evidence-disclosure machinery applies.
+    return " ".join(sentences), None
 
 
-def ledger(turn: AdmittedTurn, *, model: str, prompt_version: str) -> dict[str, Any]:
+def ledger(
+    turn: AdmittedTurn,
+    *,
+    model: str,
+    prompt_version: str,
+    renderer_version: int = RENDERER_VERSION,
+    decline_guard: str | None = None,
+) -> dict[str, Any]:
     """The operator-facing record of what the gate saw and what it decided.
 
     OD-5's operator half. Every identifier the owner named maps onto something
@@ -752,9 +1063,18 @@ def ledger(turn: AdmittedTurn, *, model: str, prompt_version: str) -> dict[str, 
     answer is declined by writing the refusal text with citations=[], so the
     model's draft and its markers are recorded NOWHERE and only a count
     survives in the logs.
+
+    ``renderer_version``/``decline_guard`` (v7) are CONDITIONAL keys, present
+    only when they carry information: ``kind_counts`` only when
+    ``renderer_version == RENDERER_VERSION_SELECTIVE`` (under v5/v6 every
+    admitted claim is a cited source fact, so the counts are zero-information
+    and emitting them would move every v5 row's persisted ledger bytes for
+    nothing), and ``decline_guard`` only when not None. Both exist to make
+    flag-off ledger bytes IDENTICAL to main's -- the golden byte-stability
+    test pins exactly that.
     """
-    return {
-        "renderer_version": RENDERER_VERSION,
+    payload: dict[str, Any] = {
+        "renderer_version": renderer_version,
         "turn_type": turn.turn_type,
         "verdict": turn.verdict,
         "model": model,
@@ -807,3 +1127,11 @@ def ledger(turn: AdmittedTurn, *, model: str, prompt_version: str) -> dict[str, 
             for claim in turn.dropped
         ],
     }
+    if renderer_version == RENDERER_VERSION_SELECTIVE:
+        counts: dict[str, int] = {}
+        for claim in turn.admitted:
+            counts[claim.kind] = counts.get(claim.kind, 0) + 1
+        payload["kind_counts"] = counts
+    if decline_guard is not None:
+        payload["decline_guard"] = decline_guard
+    return payload

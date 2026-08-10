@@ -22,12 +22,26 @@ on:
         type: boolean
         default: false
         required: false
+      selective:
+        description: >-
+          run the eval with REGWATCH_SELECTIVE_CITATION=1 (the v7 selective-citation
+          arm; requires prose)
+        type: boolean
+        default: false
+        required: false
   workflow_dispatch:
     inputs:
       prose:
         description: run the eval with REGWATCH_PROSE_SYNTHESIS=1 (the v6 prose arm)
         type: boolean
         default: true
+        required: false
+      selective:
+        description: >-
+          run the eval with REGWATCH_SELECTIVE_CITATION=1 (the v7 selective-citation
+          arm; requires prose)
+        type: boolean
+        default: false
         required: false
 
 permissions:
@@ -58,6 +72,11 @@ jobs:
       # env as unset); "1" flips synthesis to the prose+markers chain, which is
       # the whole point of the dark dispatch run.
       REGWATCH_PROSE_SYNTHESIS: ${{ inputs.prose && '1' || '' }}
+      # The v7 selective-citation POLICY, on top of v6's FORMAT. Empty means
+      # OFF, same convention as the prose flag above. Inert without prose (the
+      # guard step below refuses a selective-without-prose dispatch rather
+      # than silently running v5).
+      REGWATCH_SELECTIVE_CITATION: ${{ inputs.selective && '1' || '' }}
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -86,6 +105,12 @@ jobs:
 
       - name: sync deps
         run: uv sync --extra dev --extra llm --extra local-embeddings
+
+      - name: guard selective requires prose
+        if: ${{ inputs.selective && !inputs.prose }}
+        run: |
+          echo "::error::selective requires prose (v7 is a prose prompt); refusing to burn a live eval slot"
+          exit 1
 
       # Live eval. Two arms, and the Databricks one is the point: production
       # embeds queries with Databricks-hosted Qwen3, so a gate that only ever
@@ -185,12 +210,13 @@ jobs:
       # The scorecard is also written to the eval_run ledger, but that lands in
       # the CI Postgres service container, which is destroyed with the job. The
       # artifact is what survives for a human comparing two runs; the dark v6
-      # arm uploads under its own name so a Checkpoint packet can cite it.
+      # and v7 arms upload under their own names so a Checkpoint packet can
+      # cite them.
       - name: upload eval scorecard
         if: always() && steps.eval_arm.outputs.arm != 'none'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: ${{ inputs.prose && 'dark-eval-scorecard' || 'eval-scorecard' }}
+          name: ${{ inputs.selective && 'dark-eval-scorecard-v7' || (inputs.prose && 'dark-eval-scorecard' || 'eval-scorecard') }}
           path: eval-scorecard.json
           if-no-files-found: ignore
 

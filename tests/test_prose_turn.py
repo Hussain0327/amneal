@@ -214,6 +214,88 @@ def test_uncited_sentence_classification(raw: str, kind: str) -> None:
     assert claim.raw_markers == []
 
 
+# ---------- v7 selective classification (B.10.3.3), flag-gated ----------
+# v6's table above is untouched by any of this: selective=True is the only way
+# to reach _classify_uncited_selective, so the v6 path stays byte-identical.
+
+
+def _parse_selective(raw: str) -> pt.ParsedProseTurn:
+    return pt.parse(raw, passages=_PASSAGES, selective=True)
+
+
+@pytest.mark.parametrize(
+    ("raw", "kind"),
+    [
+        # AIS guard (P1): an attribution verb with no obligation word still
+        # reports what a source SAYS -- selective mode must not serve this
+        # uncited, unlike the v6 table's bald materiality-only residual.
+        ("FDA recommends a fasting study.", "source_fact"),
+        ("A clean conversational sentence with friendly chatter.", "conversation"),
+        # Framed and clean on BOTH lexicons -> the uncited reasoning channel.
+        ("My reading is that the two designs match.", "reasoning"),
+        # Framed but the BODY carries a materiality word -- the frame is
+        # content-free hedge text and must not launder it (F3/P0).
+        ("My reading is that a fed study is not required.", "source_fact"),
+        # Framed but the BODY carries a source-assertion word.
+        ("Beyond the guidance, FDA recommends a fed study.", "source_fact"),
+    ],
+)
+def test_selective_uncited_sentence_classification(raw: str, kind: str) -> None:
+    turn = _parse_selective(raw)
+    claim = turn.claims[0]
+    assert claim.kind == kind
+    assert claim.cite_indices == []
+    assert claim.raw_markers == []
+
+
+# ---------- frame_split (moved to turn_gate, B.10.3.2; re-exported here) ----------
+
+
+def test_frame_split_unframed_returns_original_text() -> None:
+    from regwatch.generate.turn_gate import frame_split
+
+    assert frame_split("Let me know if you want more detail.") == (
+        "",
+        "Let me know if you want more detail.",
+    )
+
+
+def test_frame_split_strips_the_matched_prefix_and_leading_punctuation() -> None:
+    from regwatch.generate.turn_gate import frame_split
+
+    assert frame_split("My reading is that the two documents align.") == (
+        "my reading is",
+        "that the two documents align.",
+    )
+    # A trailing comma already inside the frame prefix leaves no extra
+    # punctuation for the body strip to remove.
+    assert frame_split("Beyond the guidance, sponsors add a pilot study.") == (
+        "beyond the guidance,",
+        "sponsors add a pilot study.",
+    )
+    # The semicolon joining the two-clause frame is exactly what the leading
+    # ;/,/: strip exists for.
+    assert frame_split(
+        "The guidance does not state this directly; my reading is that forms differ."
+    ) == ("the guidance does not state this directly", "my reading is that forms differ.")
+
+
+def test_frame_split_is_whitespace_and_case_normalized() -> None:
+    from regwatch.generate.turn_gate import frame_split
+
+    prefix, body = frame_split("  MY   READING    IS   that combos match.  ")
+    assert prefix == "my reading is"
+    assert body == "that combos match."
+
+
+def test_prose_turn_reexports_the_same_frame_prefixes_object() -> None:
+    """prose_turn.REASONING_FRAME_PREFIXES must stay a valid attribute for every
+    existing reference after the B.10.3.2 move to turn_gate."""
+    from regwatch.generate import turn_gate as tg
+
+    assert pt.REASONING_FRAME_PREFIXES is tg.REASONING_FRAME_PREFIXES
+
+
 # ---------- truncation rule ----------
 
 

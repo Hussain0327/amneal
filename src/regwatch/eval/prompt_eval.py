@@ -25,10 +25,13 @@ from regwatch.generate.prompts import (
     BE_EXTRACTION_SYSTEM,
     BE_EXTRACTION_USER,
     GROUNDED_QA_EXEMPLARS_V6,
+    GROUNDED_QA_EXEMPLARS_V7,
     GROUNDED_QA_SYSTEM,
     GROUNDED_QA_SYSTEM_V6,
+    GROUNDED_QA_SYSTEM_V7,
     GROUNDED_QA_USER,
     GROUNDED_QA_USER_V6,
+    GROUNDED_QA_USER_V7,
     generation_prompt_manifest,
 )
 from regwatch.generate.rag_contract import ClarifyOption
@@ -234,6 +237,24 @@ def _qa_user_v6(row: dict[str, Any]) -> str:
     )
 
 
+def _qa_user_v7(row: dict[str, Any]) -> str:
+    """The v7 numbered-passage user prompt for one eval row.
+
+    Same numbered-passage builder as _qa_user_v6 -- the shape is identical,
+    only the tail paragraph differs (GROUNDED_QA_USER_V7 vs _V6).
+    """
+    blocks = []
+    for position, passage in enumerate(row["passages"], start=1):
+        section = f" ({passage['section']})" if passage.get("section") else ""
+        blocks.append(
+            f"[{position}] [{passage['short_name']}, p.{passage['page']}]{section}\n"
+            f"{passage['text']}\n"
+        )
+    return GROUNDED_QA_USER_V7.format(
+        recent_context="", question=row["question"], passages="\n---\n".join(blocks)
+    )
+
+
 def _qa_passages(row: dict[str, Any]) -> list[RetrievedPassage]:
     """Synthetic passages in the shape the gate validates against.
 
@@ -367,18 +388,29 @@ def _run_qa(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # rendered string (rendering is unchanged, so iter_psg_citations scoring
     # stays valid).
     prose_mode = bool(getattr(settings, "prose_synthesis_enabled", False))
+    # Same topology as grounded_qa: v7 is a POLICY change on top of v6's
+    # FORMAT, so it is only honored when prose is also on.
+    selective = prose_mode and bool(getattr(settings, "selective_citation_enabled", False))
     provider = get_llm_provider(role="synthesizer")
     details: list[dict[str, Any]] = []
     for row in rows:
         passages = _qa_passages(row)
-        if prose_mode:
+        if selective:
+            messages = [LLMMessage(role="system", content=GROUNDED_QA_SYSTEM_V7)]
+            messages.extend(
+                LLMMessage(role=exemplar_role, content=exemplar_text)
+                for exemplar_role, exemplar_text in GROUNDED_QA_EXEMPLARS_V7
+            )
+            messages.append(LLMMessage(role="user", content=_qa_user_v7(row)))
+            response_format: str | None = None
+        elif prose_mode:
             messages = [LLMMessage(role="system", content=GROUNDED_QA_SYSTEM_V6)]
             messages.extend(
                 LLMMessage(role=exemplar_role, content=exemplar_text)
                 for exemplar_role, exemplar_text in GROUNDED_QA_EXEMPLARS_V6
             )
             messages.append(LLMMessage(role="user", content=_qa_user_v6(row)))
-            response_format: str | None = None
+            response_format = None
         else:
             messages = [
                 LLMMessage(role="system", content=GROUNDED_QA_SYSTEM),
@@ -395,7 +427,7 @@ def _run_qa(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         raw_completion = response.text.strip()
         killed_sentences: list[str] = []
         if prose_mode:
-            parsed = prose_turn.parse(raw_completion, passages=passages)
+            parsed = prose_turn.parse(raw_completion, passages=passages, selective=selective)
             material_kill = parsed.truncated_material or any(
                 tg.materiality_trigger(t) is not None for t in parsed.leftover_brackets
             )
@@ -414,14 +446,29 @@ def _run_qa(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             question=row["question"],
             correct=prose_mode,
             downgrade_uncited=False,
+            # Gated on selective, not prose_mode: admit_turn only ever
+            # consults kinds when selective=True, so passing it unconditionally
+            # under v6-prose was inert -- but it diverged from grounded_qa.py's
+            # own v6 call shape (no kinds argument at all), a latent gap the
+            # post-launch review flagged before it could become a real one.
+            kinds=[c.kind for c in parsed.claims] if selective else None,
+            selective=selective,
         )
         if isinstance(admitted, tg.GateFailure):
             details.append({"id": row["id"], "passed": False, "model": response.model})
             continue
         # Every text assertion runs against the RENDERED string -- what a user
-        # would actually read -- not against the model's raw draft.
-        text = tg.render_answer(admitted)
-        turn_type = "NO_EVIDENCE" if admitted.verdict == tg.VERDICT_NO_EVIDENCE else "ANSWER"
+        # would actually read -- not against the model's raw draft. A v7
+        # conversational decline has no render_answer shape (no admitted
+        # source fact to render), so it is scored on its own decline text and
+        # treated as the NO_EVIDENCE turn type it functionally is.
+        if admitted.verdict == tg.VERDICT_CONVERSATIONAL_DECLINE:
+            text, _ = tg.render_decline(admitted)
+            text = text or ""
+            turn_type = "NO_EVIDENCE"
+        else:
+            text = tg.render_answer(admitted)
+            turn_type = "NO_EVIDENCE" if admitted.verdict == tg.VERDICT_NO_EVIDENCE else "ANSWER"
         citations = {(name.upper(), page) for name, page in iter_psg_citations(text)}
         expected_citations = {
             (str(name).upper(), int(page)) for name, page in row["expected_citations"]
