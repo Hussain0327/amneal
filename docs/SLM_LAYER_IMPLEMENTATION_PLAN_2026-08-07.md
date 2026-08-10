@@ -1,6 +1,8 @@
 # slm-layer execution plan -- prompt-layer redesign (research doc section 3)
 
-Date: 2026-08-07. Status: plan only, no code changed, nothing committed.
+Date: 2026-08-07. Status: execution in progress; v6 prose synthesis landed
+dark on 2026-08-10, and the first M3 scope-contract PR is intentionally
+runtime-dark.
 
 PACE AMENDMENT (owner decision, 2026-08-07, supersedes the pacing below but
 none of the ordering or safety content): FAST PATH. The 18 PRs are batched
@@ -15,6 +17,15 @@ exposing uncited turns) stays a manual owner flip. Unchanged in any pace:
 the build ordering (parser/corrector before flip, faithfulness before
 selective citation, converse guard measured before converse), both P0
 fixes, wire stability, and commit-only-with-owner-go-ahead.
+
+SCOPE AMENDMENT (owner decision, 2026-08-10): explicit corpus-wide FDA
+guidance questions are supported through a bounded, current-version corpus
+policy. The route model proposes `mode` and `scope_hint`; it never authorizes
+filters or documents. Application code compiles a validated scope to
+`EXACT_SCOPED`, `EXACT_CORPUS`, `CLARIFY`, or `CONVERSE`. Missing product is
+not corpus intent. There is no unbounded corpus fallback, and corpus scope
+never overwrites the session's current product. This amendment supersedes
+the broad-retrieval language below; the PR descriptions incorporate it.
 Companion: docs/PROMPT_LAYER_RESEARCH_2026-08-07.md (the why); this doc is
 the how. Produced by a 12-agent pass: 6 code-seam maps, 2 competing drafts
 (risk-first vs product-first), a judge merge, then 3 adversarial critics
@@ -44,8 +55,9 @@ Goal. Ship research-doc section 3 in increments: (a) synthesis moves from
 claims[]-JSON to natural prose with model-facing [n] markers, parsed
 server-side into claims[] and validated/corrected by a deterministic gate
 (INV-1 stays in the deterministic layer); (b) a small route call (history
--> standalone question + advisory mode) replaces the heuristic
-pre-retrieval stack; (c) declines become conversational, clarifications
+-> standalone question + advisory mode and scope hint), followed by a
+deterministic scope compiler, replaces the heuristic pre-retrieval stack;
+(c) declines become conversational, clarifications
 name retrieved candidates; (d) true converse mode ships so "hello" gets a
 greeting. Owner-visible wins in delivery order: answers read like a
 colleague (Phases A/B), clarifies name candidates and declines stop being
@@ -83,6 +95,8 @@ Non-goals (explicit):
 - Streaming redesign (buffered synthesis + post-audit replay stays).
 - Removing the 0.30 threshold (becomes an evidence-strength signal; value
   stays provisional pending re-sweep, section 6).
+- Unbounded corpus search, model-authored document/version filters, or a
+  `no_product` -> search-everything fallback.
 
 ## 2. Decision defaults taken + flip points
 
@@ -97,6 +111,8 @@ Non-goals (explicit):
 | D7 | refusal_accuracy removal | Deferred to Phase D, with the 3 must_clarify gold rows explicitly re-homed (finding F8) | Executes in PR14 when decline behavior actually changes; already un-gated. |
 | D8 | CI eval arms | Blocking CI eval measures the prod-default path; the flag-ON arm is a workflow_dispatch job in a DEDICATED non-canceling concurrency group shared with the blocking eval job (finding F15) | Every default flip gets its own PR whose green blocking eval is the proof (PR6/PR10/PR12b/PR15b pattern, finding F16). |
 | D9 | Renderer version | RENDERER_VERSION 1 -> 2 at v7 (PR9), where the rendered shape actually changes | None. |
+| D10 | Scope authority | The model emits advisory `scope_hint`; a deterministic compiler alone may produce `EXACT_SCOPED` or a bounded `EXACT_CORPUS` | Corpus execution remains behind `REGWATCH_CORPUS_SCOPE`; an empty or conflicting policy compiles to clarification. |
+| D11 | Session scope | Product scope and audited corpus scope are distinct. Corpus turns never overwrite the active product; corpus inheritance requires a prior audited corpus turn | No model-only inheritance and no implicit carry from a product-less turn. |
 
 ## 3. PR sequence
 
@@ -318,10 +334,33 @@ PR10 -- v7 default-on + pin move.
 
 ### Phase C -- route call (shadow-first; can interleave after PR1)
 
-PR11 -- route module + shadow logging, flag off.
-- New src/regwatch/generate/route.py mirroring guidance.py:34-57:
+PR11a -- dark route/scope contracts and fixtures (FIRST M3 CODE PR; zero
+runtime behavior).
+- Add the strict route contract and prompt identity, including advisory
+  `mode`, `scope_hint`, `product_hint`, and `corpus_policy_hint`. Cross-field
+  validation rejects contradictory hints; the schema has no executable
+  filters, document IDs, or version IDs.
+- Add a pure deterministic scope contract/compiler. Product execution requires
+  the existing resolver's validated result. Corpus execution requires both a
+  positively detected explicit-corpus cue and an application-allowlisted
+  policy expanded to a non-empty bounded set of current version IDs.
+- Compiled outcomes are only EXACT_SCOPED, EXACT_CORPUS, CLARIFY, or CONVERSE.
+  The contract performs no SQL, catalog I/O, production provider call, or
+  session write.
+- Add offline fixtures for the five #163 corpus rows, the product-scoped
+  beclomethasone control, an ambiguous no-product control, audited inheritance,
+  and converse. Offline validation is the default; an explicit prompt-eval CLI
+  run may call the configured router and fingerprints the dark route prompt in
+  its eval artifact without adding it to the served-prompt manifest. DARK MEANS
+  DARK: no setting, grounded_qa caller, retrieval change, or production behavior
+  delta. Size M.
+
+PR11b -- route shadow logging, flag off.
+- Wire src/regwatch/generate/route.py (introduced dark in PR11a):
   RouteDecision(extra="forbid") { standalone_question, mode:
-  converse|lookup|lookup_clarify, product_hint? }; ROUTE_SCHEMA_MESSAGE;
+  converse|lookup|lookup_clarify, scope_hint:
+  product|corpus|inherit|unknown, product_hint?, corpus_policy_hint? };
+  ROUTE_SCHEMA_MESSAGE;
   ROUTE_PROMPT = identify_prompt("regwatch.route", "1", ...) INCLUDING
   the schema message text; sentinel [REGWATCH_ROUTE_V1]; parse with
   guidance's ValueError vocabulary.
@@ -338,35 +377,47 @@ PR11 -- route module + shadow logging, flag off.
   reasoning tokens; reasoning_effort is sent on every role,
   llm.py:742-750) and set the cap comfortably above floor + JSON body;
   a mis-budgeted cap yields a quietly all-failure shadow week.
-- Result written to route_json["route_call"] = {prompt, mode,
-  standalone_question, agrees_with_gates, latency_ms} -- a nested new
+- Result written to route_json["route_call"] = {prompt, mode, scope_hint,
+  standalone_question, agrees_with_mode, agrees_with_scope, latency_ms} -- a nested new
   top-level key; the single route_json["prompt"] identity per row is
   untouched. Contract env keeps shadow off; the key-set pin update ships
   in the PR that turns it on there (PR12b).
-- Eval: prompt_sets/route.jsonl + _run_route runner + closed-set update.
+- Eval: prompt_sets/route.jsonl + _run_route runner + closed-set update;
+  score the joint mode/scope confusion matrix, not mode alone.
 - Tests: new tests/test_route_call.py -- parse vocabulary, allowlist
   rejection, sentinel round-trip, D1 re-raise, shadow-never-overrides,
   failure-counted. Size M.
 - Ops (no PR): enable shadow via Fly secret on a traffic sample;
-  collect mode-vs-gate agreement + QPS/latency >= 1 week. ALSO logged
+  collect joint mode/scope-vs-gate agreement + QPS/latency. ALSO logged
   during shadow (finding F5): the would-be converse-guard materiality
   trigger rate on converse-shaped turns, so PR15's guard is designed
   against measured data, not the deliberately-broad lexicon's economics.
 
-> OWNER CHECKPOINT 3 -- route promotion. Evidence: shadow agreement
-> confusion matrix, added latency p95, QPS headroom, route failure rate.
+> OWNER CHECKPOINT 3 -- route promotion. Evidence: joint mode/scope confusion
+> matrix, added latency p95, QPS headroom, route failure rate, and zero unsafe
+> corpus authorizations in reviewed shadow traces.
 
-PR12 -- route standalone_question live (mode still advisory-logged).
-- Flag live: search_query from RouteDecision.standalone_question
-  (capped/stripped like _retrieval_query); route failure fails OPEN to
-  the existing heuristics (_retrieval_query + _looks_like_follow_up stay
-  as fallback until PR16); retrieval_query_rewritten semantics preserved;
-  the two session carry-over sites stay the source of
-  context_applied/resolved_by_name with identical audit semantics.
-- Eval: recall_at_k 0.80 is the proof that the model rewrite >= the
-  heuristic. Tests: follow-up cases parametrized over route mode;
-  context_applied/resolved_by_name parity; contract S6 re-verified.
-- Rollback: REGWATCH_ROUTE_CALL=shadow. Size M.
+PR12 -- route standalone_question live + deterministic scope compiler;
+explicit corpus execution has a separate dark flag.
+- `REGWATCH_ROUTE_CALL=live` may supply the capped standalone retrieval
+  question. The application, never the model, compiles execution scope.
+- Existing product resolution produces EXACT_SCOPED. A corpus hint produces
+  EXACT_CORPUS only when explicit corpus intent is positively validated and
+  an allowlisted policy expands from the catalog to a non-empty bounded set
+  of current `version_id`s. Every corpus retrieval includes that allowlist.
+- `REGWATCH_CORPUS_SCOPE` defaults off independently of route-call mode. With
+  it off, a would-be corpus turn remains audited/dark and follows the existing
+  clarify/no-product path. Route rewriting can be promoted independently.
+- Route failure or an unvalidated, empty, or conflicting scope falls back to
+  deterministic product resolution or clarification -- never broad retrieval.
+- A corpus turn does not update active product session filters. `inherit` may
+  compile to corpus only from a prior audited corpus scope. The audit supplies
+  intent/policy provenance; the compiler re-expands and validates the current
+  version set on every turn. Model output alone cannot create inheritance.
+- Eval: recall_at_k >= 0.80 for rewrite parity plus scope-decision accuracy,
+  bounded-set membership, and outside-set leakage = 0. Tests cover product,
+  corpus, ambiguous, conflict, empty policy, and audited inheritance paths.
+- Rollback: REGWATCH_CORPUS_SCOPE=false and REGWATCH_ROUTE_CALL=shadow. Size L.
 
 PR12b -- route default flip (finding F16; mirrors PR6/PR10).
 - settings default live; contract env route-on; route_json key-set pin
@@ -392,7 +443,12 @@ losing catalog completeness.
     disclosed in the reply, or the clarify fires, even if top-k is
     single-product.
   - post-retrieval mixed_products/multi_form tripwires (:1842-1879) stay
-    as defense-in-depth; incomplete-metadata skip preserved.
+    as defense-in-depth for ProductScope; incomplete-metadata skip preserved.
+- MAKE THE MIXED-PRODUCT GUARD SCOPE-AWARE. Multiple products remain forbidden
+  for ProductScope/EXACT_SCOPED. They are expected for a validated
+  CorpusScope/EXACT_CORPUS; that path instead rejects any passage whose
+  `(doc_id, version_id)` is outside the compiler's allowed current-version set.
+  Document, application, and version provenance remain attached per passage.
 - Clarify copy names retrieved candidates via build_form_options/
   _options_from_names + passages= audit plumbing. The model's
   lookup_clarify mode stays a hint; deterministic logic decides.
@@ -410,11 +466,13 @@ PR14 -- decline humanization + resolver-advisory + guidance shrink +
 refusal_accuracy removal.
 - low_top_score becomes conversational what-I-could-not-find + nearest
   candidates (status stays refused, reason stays low_top_score -- copy
-  only). vague_input/no_product copy softened; no_product collapses
-  toward lookup-broad -> weak-retrieval copy.
-- Resolver gates advisory: ambiguous (:1601), did_you_mean (:1647),
-  brand_lookup (:1656) stop terminal-blocking; resolver output becomes a
-  filter hint + clarify-copy context, under the PR13 disclosure rule.
+  only). vague_input/no_product copy is softened. `no_product` is bypassed
+  only when the deterministic compiler has positively validated a bounded
+  CorpusScope; every other product-less or ambiguous lookup clarifies.
+- Resolver gates become conversational rather than dead-end ceremonies:
+  did_you_mean/brand_lookup supply clarify-copy context, while unresolved or
+  ambiguous product scope still cannot execute ProductScope. Resolver output
+  never becomes permission for unbounded retrieval.
 - model_refusal (:2009) rendered conversationally; status unchanged.
 - scope_warning gate (:1566) dies HERE: its replacement (cited
   requirements + framed reasoning on the v7 lookup path) is already
@@ -497,9 +555,10 @@ PR16 -- cleanup + docs (pure deletion, after >= 1 week converse soak).
   _meta_answer_text (converse now owns capability questions;
   tests/test_meta_questions.py replaced by converse-mode equivalents;
   contract S13 rewritten); _retrieval_query/_looks_like_follow_up
-  fallback (route-failure fallback becomes: one bounded retry, else
-  broad retrieval on the raw question with carried filters -- defined,
-  not silent); _FILLER/_FOLLOW_UP_*/_DRILL_DOWN_WORDS/
+  heuristic fallback. Route failure gets one bounded retry, then returns to
+  deterministic product resolution or clarification. DELETE the proposed
+  broad-retrieval fallback entirely; raw-question corpus search is forbidden.
+  Also delete _FILLER/_FOLLOW_UP_*/_DRILL_DOWN_WORDS/
   _carries_own_topic/_combo_from_question/_looks_vague (their PR13/PR14
   survivors re-homed or retired with vague_input's replacement trigger);
   remaining flags (REGWATCH_ROUTE_CALL collapses, REGWATCH_CONVERSE_MODE
@@ -538,8 +597,13 @@ PR16 -- cleanup + docs (pure deletion, after >= 1 week converse soak).
   that produced it through every dual-path window;
   correction_method/original_cites/downgraded/converse_guard make every
   corrector and guard action reconstructable (INV-6).
+- Scope continuity is asymmetric: product filters remain the session's active
+  scope after a corpus turn. A corpus follow-up is eligible only when the
+  immediately relevant prior turn carries an audited, validated corpus-policy
+  and version-set ledger; the catalog is re-expanded to current versions before
+  execution. Route-model `inherit` alone has no authority.
 
-## 5. Risk register (top 8, post-verification)
+## 5. Risk register (top 9, post-verification)
 
 | # | Risk | Mitigation |
 |---|---|---|
@@ -551,6 +615,7 @@ PR16 -- cleanup + docs (pure deletion, after >= 1 week converse soak).
 | 6 | Missed byte-pin or fixture breaks a flip PR late | Pin-move checklist per PR; stub consolidation in PR4 (F10); synth_turn_json untouched until PR7 (F14); S9 and meta-row dispositions explicit (F13, F11). |
 | 7 | +1 Databricks call/turn against shared QPS; eval collisions | Shadow on a sample, max_tokens sized above the probed reasoning floor with a failure-rate alert (F17); promotion gated on measured headroom; one live eval at a time via the databricks-eval group (F15); converse turns skip retrieval+synthesis, offsetting load. |
 | 8 | CI measures a pipeline prod is not running during Phases D-E | Dedicated default-flip PRs PR12b/PR15b close each window; PR16 is pure deletion (F16). |
+| 9 | Product-less or follow-up turns accidentally widen to the whole corpus | Separate corpus flag; explicit-intent + allowlisted-policy compiler; bounded current-version IDs on every query; zero outside-set leakage gate; no broad fallback; audited-only corpus inheritance. |
 
 Watch-list: D1 residency -- every new call re-raises D1ResidencyError
 before any degrade (route call copies the guidance pattern, tested in
@@ -579,6 +644,13 @@ validation (F12).
 - Dark eval gates: the PR5 workflow_dispatch harness produces a recorded
   scorecard before Checkpoints 1, 2 and the PR12 recall proof --
   serialized via the databricks-eval concurrency group.
+- #163 acceptance battery after corpus execution is enabled: all five corpus
+  rows route as explicit corpus queries, execute EXACT_CORPUS with a bounded
+  current-version set, retrieve zero passages outside that set, and preserve
+  every document/application association; the beclomethasone control remains
+  EXACT_SCOPED; `What are the bioequivalence requirements?` clarifies. Report
+  per-row ranks, citations, and distinct expected-source coverage before any
+  duplicate-cap decision.
 - Refusal-phrasing A/B before PR14: each new decline/not-found/clarify
   copy variant run over the gold decision rows + a paraphrase set
   (abstention is a prompt artifact); winner pinned in tests_contract

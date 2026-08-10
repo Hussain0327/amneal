@@ -32,6 +32,16 @@ from regwatch.generate.prompts import (
     generation_prompt_manifest,
 )
 from regwatch.generate.rag_contract import ClarifyOption
+from regwatch.generate.route import (
+    ROUTE_PROMPT,
+    CorpusPolicyHint,
+    RouteHistoryTurn,
+    RouteRequest,
+    ScopeHint,
+    TurnMode,
+    build_route_request,
+    parse_route_decision,
+)
 from regwatch.generate.turn_schema import TURN_SCHEMA_MESSAGE
 from regwatch.process.change_detector import summarize_change
 from regwatch.process.extractor import FIELD_NAMES, _passages_for_prompt, _validate_field_citation
@@ -42,11 +52,19 @@ _SET_DIR = Path(__file__).with_name("prompt_sets")
 _SET_FILES = {
     "qa": _SET_DIR / "qa.jsonl",
     "guidance": _SET_DIR / "guidance.jsonl",
+    "route": _SET_DIR / "route.jsonl",
     "extraction": _SET_DIR / "extraction.jsonl",
     "changes": _SET_DIR / "changes.jsonl",
 }
 _PARTIAL_PREFIX = "Evidence not found in the supplied passages for:"
 _PAGE_SEP = "\n\f\n"
+
+
+def _prompt_manifest() -> dict[str, dict[str, str]]:
+    """Served prompts plus dark contracts exercised only by this eval harness."""
+    manifest = generation_prompt_manifest()
+    manifest[ROUTE_PROMPT.prompt_id] = ROUTE_PROMPT.as_dict()
+    return manifest
 
 
 @dataclass(frozen=True)
@@ -95,6 +113,15 @@ def validate_prompt_sets() -> dict[str, dict[str, Any]]:
             "expected_next_steps",
             "expected_first_option_ids",
         },
+        "route": {
+            "question",
+            "recent_turns",
+            "trusted_product_context",
+            "expected_modes",
+            "expected_scope_hints",
+            "expected_corpus_policies",
+            "expected_standalone_terms",
+        },
         "extraction": {"pages", "expected", "expected_null"},
         "changes": {"previous_pages", "current_pages", "expected_terms", "expected_markers"},
     }
@@ -128,6 +155,40 @@ def validate_prompt_sets() -> dict[str, dict[str, Any]]:
                 if not set(expected_options).issubset(request.option_ids):
                     raise ValueError(
                         f"guidance:{row['id']}: expected option ids must be route-allowlisted"
+                    )
+            if name == "route":
+                route_request = _route_request(row)
+                expected_modes = row["expected_modes"]
+                expected_scopes = row["expected_scope_hints"]
+                expected_policies = row["expected_corpus_policies"]
+                expected_terms = row["expected_standalone_terms"]
+                if (
+                    not isinstance(expected_modes, list)
+                    or not expected_modes
+                    or not set(expected_modes).issubset({mode.value for mode in TurnMode})
+                ):
+                    raise ValueError(f"route:{row['id']}: invalid expected_modes")
+                if (
+                    not isinstance(expected_scopes, list)
+                    or not expected_scopes
+                    or not set(expected_scopes).issubset({scope.value for scope in ScopeHint})
+                ):
+                    raise ValueError(f"route:{row['id']}: invalid expected_scope_hints")
+                policy_values = {policy.value for policy in route_request.allowed_corpus_policies}
+                if (
+                    not isinstance(expected_policies, list)
+                    or not expected_policies
+                    or any(
+                        policy is not None and policy not in policy_values
+                        for policy in expected_policies
+                    )
+                ):
+                    raise ValueError(f"route:{row['id']}: invalid expected_corpus_policies")
+                if not isinstance(expected_terms, list) or not all(
+                    isinstance(term, str) and term.strip() for term in expected_terms
+                ):
+                    raise ValueError(
+                        f"route:{row['id']}: expected_standalone_terms must be strings"
                     )
     return {name: {"count": len(item.rows), "sha256": item.sha256} for name, item in loaded.items()}
 
@@ -239,6 +300,61 @@ def _guidance_request(row: dict[str, Any]) -> GuidanceRequest:
         product=product,
         clarify=_guidance_options(row, "clarify"),
         related=_guidance_options(row, "related"),
+    )
+
+
+def _route_request(row: dict[str, Any]) -> RouteRequest:
+    question = row["question"]
+    trusted_product = row["trusted_product_context"]
+    raw_turns = row["recent_turns"]
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError(f"route:{row['id']}: question must be a non-empty string")
+    if trusted_product is not None and (
+        not isinstance(trusted_product, str) or not trusted_product.strip()
+    ):
+        raise ValueError(f"route:{row['id']}: trusted_product_context must be null or non-empty")
+    if not isinstance(raw_turns, list):
+        raise ValueError(f"route:{row['id']}: recent_turns must be a list")
+    turns: list[RouteHistoryTurn] = []
+    for index, raw_turn in enumerate(raw_turns):
+        if not isinstance(raw_turn, dict):
+            raise ValueError(f"route:{row['id']}: recent_turns[{index}] must be an object")
+        prior_question = raw_turn.get("question")
+        answer = raw_turn.get("answer")
+        scope_kind = raw_turn.get("scope_kind", "none")
+        scope_audited = raw_turn.get("scope_audited", False)
+        raw_policy = raw_turn.get("corpus_policy")
+        if not isinstance(prior_question, str) or not isinstance(answer, str):
+            raise ValueError(f"route:{row['id']}: recent_turns[{index}] needs question and answer")
+        if scope_kind not in {"none", "product", "corpus"}:
+            raise ValueError(f"route:{row['id']}: invalid prior scope_kind")
+        if not isinstance(scope_audited, bool):
+            raise ValueError(f"route:{row['id']}: scope_audited must be boolean")
+        try:
+            policy = CorpusPolicyHint(raw_policy) if raw_policy is not None else None
+        except ValueError as exc:
+            raise ValueError(f"route:{row['id']}: invalid prior corpus_policy") from exc
+        turns.append(
+            RouteHistoryTurn(
+                question=prior_question,
+                answer=answer,
+                scope_kind=scope_kind,
+                scope_audited=scope_audited,
+                corpus_policy=policy,
+            )
+        )
+    raw_allowed = row.get("allowed_corpus_policies", [CorpusPolicyHint.INHALATION_PSG.value])
+    if not isinstance(raw_allowed, list):
+        raise ValueError(f"route:{row['id']}: allowed_corpus_policies must be a list")
+    try:
+        allowed = tuple(CorpusPolicyHint(value) for value in raw_allowed)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"route:{row['id']}: invalid allowed_corpus_policies") from exc
+    return build_route_request(
+        question=question,
+        recent_turns=tuple(turns),
+        trusted_product_context=trusted_product,
+        allowed_corpus_policies=allowed,
     )
 
 
@@ -375,6 +491,57 @@ def _run_guidance(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return details
 
 
+def _run_route(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Score advisory mode and scope jointly; do not execute either one."""
+    provider = get_llm_provider(role="router")
+    details: list[dict[str, Any]] = []
+    for row in rows:
+        request = _route_request(row)
+        response = provider.complete(
+            request.messages,
+            temperature=0.0,
+            # This is an opt-in synthetic eval budget, not the runtime shadow
+            # budget. PR11b still probes the endpoint's reasoning floor before
+            # choosing the production setting.
+            max_tokens=1200,
+            response_format="json",
+        )
+        try:
+            decision = parse_route_decision(response.text, request)
+        except ValueError as exc:
+            details.append(
+                {
+                    "id": row["id"],
+                    "passed": False,
+                    "model": response.model,
+                    "failure": str(exc),
+                }
+            )
+            continue
+        policy = decision.corpus_policy_hint.value if decision.corpus_policy_hint else None
+        mode_ok = decision.mode.value in row["expected_modes"]
+        scope_ok = decision.scope_hint.value in row["expected_scope_hints"]
+        policy_ok = policy in row["expected_corpus_policies"]
+        standalone_ok = _contains_all(
+            decision.standalone_question, row["expected_standalone_terms"]
+        )
+        details.append(
+            {
+                "id": row["id"],
+                "passed": mode_ok and scope_ok and policy_ok and standalone_ok,
+                "model": response.model,
+                "mode": decision.mode.value,
+                "scope_hint": decision.scope_hint.value,
+                "corpus_policy_hint": policy,
+                "mode_ok": mode_ok,
+                "scope_ok": scope_ok,
+                "policy_ok": policy_ok,
+                "standalone_ok": standalone_ok,
+            }
+        )
+    return details
+
+
 def _run_extraction(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     provider = get_llm_provider(role="extractor")
     details: list[dict[str, Any]] = []
@@ -443,9 +610,7 @@ def _run_changes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def validate_command() -> None:
     """Validate committed sets without a database, API key, or model call."""
     typer.echo(
-        json.dumps(
-            {"sets": validate_prompt_sets(), "prompts": generation_prompt_manifest()}, indent=2
-        )
+        json.dumps({"sets": validate_prompt_sets(), "prompts": _prompt_manifest()}, indent=2)
     )
 
 
@@ -458,12 +623,13 @@ def run_command(
     results = {
         "qa": _run_qa(sets["qa"].rows),
         "guidance": _run_guidance(sets["guidance"].rows),
+        "route": _run_route(sets["route"].rows),
         "extraction": _run_extraction(sets["extraction"].rows),
         "changes": _run_changes(sets["changes"].rows),
     }
     artifact = {
         "artifact_schema_version": 1,
-        "prompts": generation_prompt_manifest(),
+        "prompts": _prompt_manifest(),
         "sets": {
             name: {"count": len(item.rows), "sha256": item.sha256} for name, item in sets.items()
         },

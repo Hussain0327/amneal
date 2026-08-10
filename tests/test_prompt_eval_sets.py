@@ -19,6 +19,7 @@ from regwatch.generate.prompts import (
     QUERY_GUIDANCE_USER,
     generation_prompt_manifest,
 )
+from regwatch.generate.route import ROUTE_PROMPT
 from regwatch.generate.turn_schema import TURN_SCHEMA_MESSAGE
 from regwatch.retrieve.retriever import RetrievedPassage
 from tests.conftest import synth_turn_json
@@ -27,9 +28,10 @@ from tests.conftest import synth_turn_json
 def test_prompt_eval_sets_are_nonempty_unique_and_schema_valid() -> None:
     manifest = validate_prompt_sets()
 
-    assert set(manifest) == {"qa", "guidance", "extraction", "changes"}
+    assert set(manifest) == {"qa", "guidance", "route", "extraction", "changes"}
     assert all(item["count"] >= 3 for item in manifest.values())
     assert manifest["guidance"]["count"] >= 7
+    assert manifest["route"]["count"] >= 10
     assert all(len(item["sha256"]) == 64 for item in manifest.values())
 
 
@@ -45,6 +47,19 @@ def test_guidance_prompt_set_covers_non_answer_routes() -> None:
         "scope_warning",
         "meta",
     }.issubset({row["reason"] for row in rows})
+
+
+def test_route_prompt_set_covers_issue_163_and_safety_controls() -> None:
+    rows = prompt_eval._load_jsonl(prompt_eval._SET_FILES["route"]).rows
+    by_id = {row["id"]: row for row in rows}
+
+    corpus_rows = [row for row in rows if row["id"].startswith("route_corpus_")]
+    assert len(corpus_rows) == 5
+    assert all(row["expected_scope_hints"] == ["corpus"] for row in corpus_rows)
+    assert all(row["expected_corpus_policies"] == ["inhalation_psg"] for row in corpus_rows)
+    assert by_id["route_product_beclomethasone"]["expected_scope_hints"] == ["product"]
+    assert by_id["route_ambiguous_be_requirements"]["expected_scope_hints"] == ["unknown"]
+    assert by_id["route_inherit_audited_corpus"]["recent_turns"][0]["scope_audited"] is True
 
 
 def test_generation_prompt_manifest_is_versioned_and_hashed() -> None:
@@ -64,6 +79,15 @@ def test_generation_prompt_manifest_is_versioned_and_hashed() -> None:
         "regwatch.change_summary": "2",
     }
     assert all(len(item["sha256"]) == 64 for item in manifest.values())
+
+
+def test_prompt_eval_manifest_fingerprints_the_dark_route_contract() -> None:
+    served = generation_prompt_manifest()
+    eval_manifest = prompt_eval._prompt_manifest()
+
+    assert "regwatch.route" not in served
+    assert set(eval_manifest) == {*served, "regwatch.route"}
+    assert eval_manifest["regwatch.route"] == ROUTE_PROMPT.as_dict()
 
 
 def test_manifest_reports_the_flag_active_prose_identity(
@@ -207,6 +231,91 @@ def _guidance_eval_row() -> dict[str, object]:
         "expected_next_steps": ["choose_product"],
         "expected_first_option_ids": ["clarify:0"],
     }
+
+
+def _route_eval_row() -> dict[str, object]:
+    return {
+        "id": "unit_route",
+        "question": "How do the inhalation product-specific guidances define ISM?",
+        "recent_turns": [],
+        "trusted_product_context": None,
+        "expected_modes": ["lookup"],
+        "expected_scope_hints": ["corpus"],
+        "expected_corpus_policies": ["inhalation_psg"],
+        "expected_standalone_terms": ["inhalation", "ISM"],
+    }
+
+
+def test_route_eval_scores_mode_and_scope_jointly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _GuidanceProvider(
+        json.dumps(
+            {
+                "standalone_question": (
+                    "How do the inhalation product-specific guidances define ISM?"
+                ),
+                "mode": "lookup",
+                "scope_hint": "corpus",
+                "product_hint": None,
+                "corpus_policy_hint": "inhalation_psg",
+            }
+        )
+    )
+    roles: list[str] = []
+
+    def _provider_for_role(*, role: str) -> _GuidanceProvider:
+        roles.append(role)
+        return provider
+
+    monkeypatch.setattr(prompt_eval, "get_llm_provider", _provider_for_role)
+
+    details = prompt_eval._run_route([_route_eval_row()])
+
+    assert roles == ["router"]
+    assert len(provider.calls) == 1
+    _messages, kwargs = provider.calls[0]
+    assert kwargs == {"temperature": 0.0, "max_tokens": 1200, "response_format": "json"}
+    assert details == [
+        {
+            "id": "unit_route",
+            "passed": True,
+            "model": "guidance-stub",
+            "mode": "lookup",
+            "scope_hint": "corpus",
+            "corpus_policy_hint": "inhalation_psg",
+            "mode_ok": True,
+            "scope_ok": True,
+            "policy_ok": True,
+            "standalone_ok": True,
+        }
+    ]
+    assert not ({"filters", "document_ids", "version_ids"} & details[0].keys())
+
+
+def test_route_eval_does_not_hide_a_scope_misclassification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _GuidanceProvider(
+        json.dumps(
+            {
+                "standalone_question": (
+                    "How do the inhalation product-specific guidances define ISM?"
+                ),
+                "mode": "lookup",
+                "scope_hint": "product",
+                "product_hint": "ISM",
+                "corpus_policy_hint": None,
+            }
+        )
+    )
+    monkeypatch.setattr(prompt_eval, "get_llm_provider", lambda *, role: provider)
+
+    details = prompt_eval._run_route([_route_eval_row()])
+
+    assert details[0]["mode_ok"] is True
+    assert details[0]["scope_ok"] is False
+    assert details[0]["passed"] is False
 
 
 def test_guidance_eval_uses_router_and_records_only_bounded_selections(
