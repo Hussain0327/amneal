@@ -94,11 +94,16 @@ R2. Three in-process ask() callers exist today: POST /query, the /assemble
     persistence routes diverge after Python loses write creds (CompleteQuery
     for the API path; the WP/assemble paths ride CommitWhitepaperRun -
     which is why WP persistence moves last).
-R3. SSE relay: /query/stream streams provisional tokens pre-validation with
-    a sentinel guard (INV-1 lives in the post-validation path). The Go
-    gateway must relay token frames + the terminal frame without reordering
-    or buffering. Keep /query/stream a pass-through proxy until CompleteQuery
-    is proven, then move the terminal-frame persistence only.
+R3. SSE relay: pre-validation provisional token streaming was deliberately
+    reversed at commit 0a96f7e (the per-sentence gate that guarded it could
+    not survive the structured-turn contract). Provisional streaming returns
+    only as the flag-gated `draft` channel under the owner-amended INV-1
+    (2026-08-10) -- see
+    docs/superpowers/specs/2026-08-10-ask-sse-live-draft-design.md. The Go
+    gateway must relay `status`/`token`/`draft`/`draft_reset`/`result` frames
+    without reordering or buffering. Keep /query/stream a pass-through proxy
+    until CompleteQuery is proven, then move the terminal-frame persistence
+    only.
 R4. Auth split-brain must be resolved at step 4: custom cookie auth is live;
     Supabase Auth is half-staged (2 dangling users). Decision folded in:
     remove the Supabase Auth remnants; if IT's IdP timeline is real,

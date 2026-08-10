@@ -2236,8 +2236,10 @@ def ask_core(
 
     ``on_progress`` behaves exactly as documented on ``ask()``: cosmetic,
     best-effort, never answer-bearing. There is deliberately NO token sink here
-    -- answer text is replayed by the shell after the audit write, so the core
-    emits no user-visible bytes at all.
+    -- answer text is replayed by the shell after the audit write. The ONLY
+    un-gated bytes the core may emit ride the dual-gated provisional draft
+    channel (``on_draft``/``on_draft_reset``, owner-amended INV-1, 2026-08-10);
+    they are never presented as validated.
     """
     s = get_settings()
 

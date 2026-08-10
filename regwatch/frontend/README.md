@@ -95,12 +95,10 @@ text.
   thumbs-down offers a one-line optional note). Turns restored from session
   history have no `audit_id`, so they render without the affordance.
 
-  Sends go through `askQueryStream`, which posts to `/query/stream` and falls
-  back transparently to the blocking `POST /query` on any stream-level failure.
-  There is **no `/query/stream` endpoint in the backend today**, so every send
-  currently takes the fallback path — nothing streams token-by-token. While the
-  query runs, the assistant slot shows an honest status ticker (real docket
-  motion, not a faked token stream). See `docs/ROADMAP.md` for real streaming.
+  `POST /query/stream` (SSE) streams `status` progress frames, post-audit
+  `token` replay frames, optional flag-gated provisional `draft` /
+  `draft_reset` frames, and exactly one terminal `result` frame; the client
+  falls back to plain `POST /query` if the stream fails (lib/api.ts).
 - **Assemble** (`/assemble`) — cited dossier for a target product.
 - **Watch** (`/watch`) — recent change-feed alerts + the watchlist; a row can
   set the current product scope.
