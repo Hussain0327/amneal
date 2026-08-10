@@ -11,12 +11,22 @@ S-stage-appropriate subset of each assertion.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
+from regwatch.generate import grounded_qa as qa_mod
 from regwatch.generate import prompts
 from regwatch.generate import prose_turn as pt
+from regwatch.generate import turn_gate as tg
+from regwatch.generate.llm import LLMResponse
+from regwatch.retrieve.retriever import RetrievedPassage
+from tests.test_invariants import _meta, _only_route_json, _seed_corpus
 
 pytestmark = pytest.mark.invariants
+
+_QUESTION = "What study design does the albuterol sulfate PSG recommend?"
+_CORPUS = [("Fasting BE study with 36 subjects.", _meta(1, 3, "PSG_020503"))]
 
 
 def _v7_mode(monkeypatch: pytest.MonkeyPatch, *, prose: bool = True) -> None:
@@ -33,6 +43,16 @@ def _v7_mode(monkeypatch: pytest.MonkeyPatch, *, prose: bool = True) -> None:
     import config.settings as cs
 
     cs.get_settings.cache_clear()
+
+
+def _stub_llm(text: str) -> Any:
+    class _LLM:
+        name = "stub"
+
+        def complete(self, *a: object, **kw: object) -> LLMResponse:
+            return LLMResponse(text=text, model="stub")
+
+    return _LLM()
 
 
 # ---------- T-1: identity pins ----------
@@ -90,6 +110,68 @@ def test_frame_prefixes_moved_to_turn_gate_and_prose_turn_reexports_it() -> None
     assert pt.REASONING_FRAME_PREFIXES is tg.REASONING_FRAME_PREFIXES
 
 
+# ---------- T-4: exemplars survive their own gate ----------
+
+
+def _dummy_passages(n: int) -> list[RetrievedPassage]:
+    return [
+        RetrievedPassage(
+            chunk_id=f"chunk-{i}",
+            text="x",
+            score=1.0,
+            doc_id=i,
+            version_id=i,
+            page=i,
+            section_path=None,
+            normalized_name="exemplostat",
+            source_url="http://example/x.pdf",
+            short_name=f"PSG_EXAMPLE{i}",
+            metadata={},
+        )
+        for i in range(1, n + 1)
+    ]
+
+
+def test_v7_exemplars_survive_their_own_gate() -> None:
+    """T-4: every uncited sentence in the three assistant exemplars must pass
+    BOTH lexicons the gate runs, and _classify_uncited_selective must give
+    exactly the kinds B.10.2's table says -- an exemplar the gate would drop
+    teaches the model a shape that never renders."""
+    from regwatch.generate.turn_gate import (
+        frame_split,
+        materiality_trigger,
+        source_assertion_trigger,
+    )
+
+    cases = [
+        (
+            prompts.GROUNDED_QA_V7_EXEMPLAR_ANSWER_ASSISTANT,
+            2,
+            ["source_fact", "source_fact", "reasoning", "conversation"],
+        ),
+        (
+            prompts.GROUNDED_QA_V7_EXEMPLAR_CLARIFY_ASSISTANT,
+            2,
+            ["source_fact", "source_fact", "conversation"],
+        ),
+        (
+            prompts.GROUNDED_QA_V7_EXEMPLAR_NO_EVIDENCE_ASSISTANT,
+            0,
+            ["conversation", "conversation", "conversation"],
+        ),
+    ]
+    for text, n_passages, expected_kinds in cases:
+        parsed = pt.parse(text, passages=_dummy_passages(n_passages), selective=True)
+        assert [c.kind for c in parsed.claims] == expected_kinds
+        assert parsed.leftover_brackets == []
+        for claim in parsed.claims:
+            if claim.cite_indices:
+                continue
+            scan = frame_split(claim.text)[1] or claim.text
+            assert materiality_trigger(scan) is None
+            assert source_assertion_trigger(scan) is None
+
+
 # ---------- T-5 (S1 half): selective-without-prose serves the v5 prompt.
 # The warning + admission-unchanged half lands in S4 with the grounded_qa wiring. ----------
 
@@ -111,3 +193,265 @@ def test_prose_alone_still_serves_v6_prompt(monkeypatch: pytest.MonkeyPatch) -> 
 
     cs.get_settings.cache_clear()
     assert prompts.active_grounded_qa_prompt() is prompts.GROUNDED_QA_PROMPT_V6
+
+
+def test_selective_without_prose_warns_and_admission_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-5, S4 half: risk 6 end to end. The turn runs the v5 path exactly
+    (proven by the canonical v5 echo shape) and the misconfiguration is
+    observable, not silent."""
+    _seed_corpus(_CORPUS)
+    _v7_mode(monkeypatch, prose=False)
+    warnings: list[str] = []
+    monkeypatch.setattr(qa_mod.log, "warning", lambda event, **kw: warnings.append(event))
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert not result.refused
+    assert result.status == "answer"
+    assert "ECHO grounded test answer [PSG_020503, p.3]." in result.answer
+    assert "selective_citation_without_prose" in warnings
+
+
+# ---------- T-6: echo answer end-to-end ----------
+
+
+def test_v7_echo_answer_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_corpus(_CORPUS)
+    _v7_mode(monkeypatch, prose=True)
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert not result.refused
+    assert result.status == "answer"
+    assert "ECHO grounded test answer [PSG_020503, p.3]." in result.answer
+    assert "Let me know if you want the dissolution details as well." in result.answer
+    assert "[1]" not in result.answer
+    assert "\n\nSources:\n" in result.answer
+    route = _only_route_json()
+    assert route["prompt"]["version"] == "7"
+    turn = route["turn"]
+    assert turn["renderer_version"] == 2
+    assert turn["claims"][1]["kind"] == "conversation"
+    assert turn["claims"][1]["cites"] == []
+    assert turn["kind_counts"] == {"source_fact": 1, "conversation": 1}
+
+
+# ---------- T-7: served conversational decline ----------
+
+
+def test_v7_served_conversational_decline(monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_corpus(_CORPUS)
+    _v7_mode(monkeypatch, prose=True)
+    monkeypatch.setenv("REGWATCH_ECHO_FORCE_REFUSAL", "1")
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert result.status == "refused"
+    assert result.reason == "model_refusal"
+    assert result.refused is True
+    assert result.citations == []
+    assert result.answer == (
+        "ECHO has nothing on that question in these passages. "
+        "Want me to try a different phrasing?"
+    )
+    assert "Sources:" not in result.answer
+    from config.settings import get_settings
+
+    assert result.answer != get_settings().refusal_text
+    turn = _only_route_json()["turn"]
+    assert turn["verdict"] == "conversational_decline"
+    assert turn["renderer_version"] == 2
+    assert "decline_guard" not in turn
+
+
+# ---------- T-8/T-9: natural-path declines fall back to canned copy ----------
+
+
+def test_v7_ais_decline_uses_canned_copy_natural_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T-8: the parser reclassifies the uncited attribution sentence to
+    source_fact (P1/AIS guard) before the gate ever runs, so it drops on
+    no_cites -- never a guard fire, exactly as B.10.1.6 states."""
+    _seed_corpus(_CORPUS)
+    _v7_mode(monkeypatch, prose=True)
+    monkeypatch.setattr(
+        qa_mod,
+        "get_llm_provider",
+        lambda *a, **k: _stub_llm("FDA recommends a fed study for the 45 mcg strength."),
+    )
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert result.refused
+    assert result.reason == "no_valid_citations"
+    from config.settings import get_settings
+
+    assert result.answer == get_settings().refusal_text
+    assert "fed study" not in result.answer
+    dropped = [c for c in _only_route_json()["turn"]["claims"] if not c["admitted"]]
+    assert [c["drop_reason"] for c in dropped] == ["no_cites"]
+
+
+def test_v7_material_decline_uses_canned_copy_natural_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T-9: same shape as T-8, via the materiality lexicon instead of AIS."""
+    _seed_corpus(_CORPUS)
+    _v7_mode(monkeypatch, prose=True)
+    monkeypatch.setattr(
+        qa_mod,
+        "get_llm_provider",
+        lambda *a, **k: _stub_llm("A fed study is not required for this product."),
+    )
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert result.refused
+    assert result.reason == "no_valid_citations"
+    from config.settings import get_settings
+
+    assert result.answer == get_settings().refusal_text
+    dropped = [c for c in _only_route_json()["turn"]["claims"] if not c["admitted"]]
+    assert [c["drop_reason"] for c in dropped] == ["no_cites"]
+    assert [c["material_word"] for c in dropped] == ["not"]
+    assert [c["correction_method"] for c in dropped] == ["material_exempt"]
+
+
+# ---------- T-10: guard fires, end-to-end twin ----------
+
+
+def test_v7_decline_guard_fallback_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Monkeypatch the classifier itself so the parser and the gate disagree
+    (as if a caller passed mismatched kinds) -- proving render_decline's
+    defense in depth actually reaches the wire: canned copy is served and the
+    ledger records the guard."""
+    _seed_corpus(_CORPUS)
+    _v7_mode(monkeypatch, prose=True)
+    monkeypatch.setattr(
+        qa_mod,
+        "get_llm_provider",
+        lambda *a, **k: _stub_llm("A fed study is not required for this product."),
+    )
+    monkeypatch.setattr(pt, "_classify_uncited_selective", lambda text: "conversation")
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert result.refused
+    assert result.reason == "model_refusal"
+    from config.settings import get_settings
+
+    assert result.answer == get_settings().refusal_text
+    assert "fed study" not in result.answer
+    turn = _only_route_json()["turn"]
+    assert turn["verdict"] == "conversational_decline"
+    assert turn["decline_guard"] == tg.DECLINE_GUARD_MATERIAL
+
+
+# ---------- T-11: boundary, end-to-end twin ----------
+
+
+def test_v7_one_cited_sentence_plus_conversation_is_a_normal_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn with >= 1 admitted source fact renders as a normal answer, never
+    a decline, even with an uncited conversational sentence alongside it."""
+    _seed_corpus(_CORPUS)
+    _v7_mode(monkeypatch, prose=True)
+    monkeypatch.setattr(
+        qa_mod,
+        "get_llm_provider",
+        lambda *a, **k: _stub_llm(
+            "Fasting study with subjects [1]. Happy to dig into the details together."
+        ),
+    )
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert not result.refused
+    assert result.status == "answer"
+    assert "Fasting study with subjects [PSG_020503, p.3]." in result.answer
+    assert "Happy to dig into the details together." in result.answer
+    assert tg.PARTIAL_DROP_DISCLOSURE not in result.answer
+    assert _only_route_json()["turn"]["verdict"] == "answer"
+
+
+# ---------- T-12: framed benign served, end-to-end twin ----------
+
+
+def test_v7_framed_benign_reasoning_served_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_corpus(_CORPUS)
+    _v7_mode(monkeypatch, prose=True)
+    monkeypatch.setattr(
+        qa_mod,
+        "get_llm_provider",
+        lambda *a, **k: _stub_llm(
+            "Fasting study with subjects [1]. My reading is that the two designs match."
+        ),
+    )
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert not result.refused
+    assert "My reading is that the two designs match." in result.answer
+    assert tg.REASONING_FRAME not in result.answer
+    claims = _only_route_json()["turn"]["claims"]
+    assert claims[1]["kind"] == "reasoning"
+    assert claims[1]["cites"] == []
+
+
+# ---------- T-13: framed material caught, end-to-end twin ----------
+
+
+def test_v7_framed_material_sentence_rejects_the_whole_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_corpus(_CORPUS)
+    _v7_mode(monkeypatch, prose=True)
+    monkeypatch.setattr(
+        qa_mod,
+        "get_llm_provider",
+        lambda *a, **k: _stub_llm(
+            "Fasting study with subjects [1]. The guidance does not state this "
+            "directly; my reading is that a fed study is not required."
+        ),
+    )
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert result.refused
+    assert result.reason == "material_drop"
+    assert result.answer == tg.MATERIAL_DROP_TEXT
+    dropped = [c for c in _only_route_json()["turn"]["claims"] if not c["admitted"]]
+    assert [c["correction_method"] for c in dropped] == ["material_exempt"]
+    assert [c["material_word"] for c in dropped] == ["not"]
+
+
+# ---------- T-14: markup sanitize-keep, end-to-end twin ----------
+
+
+def test_v7_heading_sanitize_keep_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_corpus(_CORPUS)
+    _v7_mode(monkeypatch, prose=True)
+    monkeypatch.setattr(
+        qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm("# Study design [1].")
+    )
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert not result.refused
+    assert "Study design [PSG_020503, p.3]." in result.answer
+    assert "#" not in result.answer
+
+
+def test_v7_link_markup_still_drops_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_corpus(_CORPUS)
+    _v7_mode(monkeypatch, prose=True)
+    monkeypatch.setattr(
+        qa_mod,
+        "get_llm_provider",
+        lambda *a, **k: _stub_llm("See https://example.com for details [1]."),
+    )
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert result.refused
+    assert result.reason == "no_valid_citations"
