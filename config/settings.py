@@ -167,6 +167,15 @@ class Settings(BaseSettings):
         le=SYNTH_MAX_TOKENS_CEILING,
         validation_alias="REGWATCH_ROUTE_MAX_TOKENS",
     )
+    # v7 selective citation (slm-layer Phase B). False = v6's refuse-or-cite
+    # policy. True = SOURCE_FACT cite-required, REASONING framed-uncited,
+    # CONVERSATION plain, found-nothing conversational -- the POLICY change on
+    # top of v6's FORMAT change. Only honored when prose_synthesis_enabled is
+    # also true (v7 is a prose prompt). Aliased so the flip reads as a
+    # REGWATCH_* Fly secret.
+    selective_citation_enabled: bool = Field(
+        default=False, validation_alias="REGWATCH_SELECTIVE_CITATION"
+    )
     # OpenAI call surface: "responses" (default, GPT-5.x native) or "chat" (legacy
     # Chat Completions). The LLMProvider.complete() interface is identical either way.
     openai_api_mode: str = "responses"
@@ -245,10 +254,11 @@ class Settings(BaseSettings):
         "qwen_embedding_dimension",
         # The prose flag's rollback story is "unset the Fly secret"; a secret
         # set to the empty string must read as OFF, not take the app down at
-        # boot with a bool_parsing error.
+        # boot with a bool_parsing error. Same story for the v7 flag it gates.
         "prose_synthesis_enabled",
         "route_call_mode",
         "route_call_max_tokens",
+        "selective_citation_enabled",
         mode="before",
     )
     @classmethod
