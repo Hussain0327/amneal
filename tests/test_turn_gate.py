@@ -13,6 +13,7 @@ import pytest
 
 from regwatch.eval.metrics import faithfulness
 from regwatch.generate import turn_gate as tg
+from regwatch.generate.rag_contract import ClaimTag
 from regwatch.retrieve.retriever import RetrievedPassage
 from tests.conftest import synth_turn_json
 
@@ -411,6 +412,27 @@ def test_faithfulness_is_one_for_an_all_admitted_turn() -> None:
     )
 
     assert faithfulness(tg.render_answer(turn)) == 1.0
+
+
+def test_claim_tags_mirror_admitted_order() -> None:
+    """tg.claim_tags is a pure per-claim accessor: kind + whether a marker
+    survived. Every admitted claim in the current (non-selective) gate is a
+    cited source_fact -- DROP_NO_CITES removes anything else before it can be
+    admitted -- so this also pins the "by construction" half of PR8's
+    coincidence proof (A.3)."""
+    turn = _admit(
+        synth_turn_json(
+            [
+                ("A fasting study is recommended", [("PSG_020503", 3)]),
+                ("The dissolution method is the USP paddle", [("PSG_020503", 4)]),
+            ]
+        )
+    )
+
+    assert tg.claim_tags(turn) == (
+        ClaimTag(kind="source_fact", cited=True),
+        ClaimTag(kind="source_fact", cited=True),
+    )
 
 
 def test_citation_binds_the_top_ranked_chunk_for_a_shared_page() -> None:

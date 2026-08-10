@@ -32,6 +32,7 @@ from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import PsgDocument, PsgVersion
 from regwatch.store.vector_store import add_chunks
 from tests.conftest import synth_turn_json
+from tests.test_invariants import _meta, _seed_corpus
 
 pytestmark = pytest.mark.invariants
 
@@ -214,6 +215,63 @@ def test_eval_gate_passes_on_deterministic_corpus(monkeypatch: pytest.MonkeyPatc
     # regression in grounding or fact coverage trips the gate.
     assert sc.faithfulness == 1.0, sc.details
     assert sc.fact_recall == 1.0, sc.details
+
+
+class _MixedProseStub:
+    """Stands in for the v6 PROSE synthesizer (REGWATCH_PROSE_SYNTHESIS=1).
+
+    Returns one cited SOURCE_FACT sentence plus one uncited, materiality-free
+    sentence that the parser classifies "conversation" (prose_turn.py). The
+    gate admits the first (kind=source_fact, cited) and drops the second --
+    DROP_NO_CITES, immaterial, downgrade_uncited=False on the v6 path -- so
+    the turn renders VERDICT_PARTIAL with PARTIAL_DROP_DISCLOSURE appended as
+    an ordinary uncited sentence. That is the ONE scored divergence between
+    the old text rule and the tag-based redefinition (F-c / A.3): the
+    disclosure line drags sentence_citation_rate below 1.0 while
+    faithfulness -- which only ever looks at ADMITTED claims -- stays 1.0.
+    """
+
+    name = "mixed-prose-stub"
+
+    def complete(self, *_a: object, **_kw: object) -> LLMResponse:
+        return LLMResponse(
+            text=("Fasting BE study with 36 subjects [1]. Let me know if you want more detail."),
+            model=self.name,
+        )
+
+
+def test_eval_gate_reports_kind_aware_faithfulness_on_a_mixed_prose_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR8's redefinition, through the real gate rather than a unit stub.
+
+    faithfulness reads 1.0 off the tags (one admitted claim, cited) while
+    sentence_citation_rate -- computed from the same rendered text -- reads
+    below 1.0 because it also counts the renderer's disclosure sentence.
+    uncited_source_facts stays 0: nothing ADMITTED was left uncited, only a
+    non-fact sentence was dropped before rendering.
+    """
+    monkeypatch.setenv("REGWATCH_PROSE_SYNTHESIS", "1")
+    monkeypatch.setenv("REFUSAL_SCORE_THRESHOLD", "0.0")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _MixedProseStub())
+    _seed_corpus([("Fasting BE study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
+
+    gold = [
+        GoldItem(
+            question="What study design does the albuterol sulfate PSG recommend?",
+            expected_sources=[{"short_name": "PSG_020503", "page": 3}],
+        )
+    ]
+    sc = evaluate(gold, ask_callable=lambda q: qa_mod.ask(q))
+
+    assert sc.faithfulness == 1.0, sc.details
+    assert sc.uncited_source_facts == 0, sc.details
+    row = sc.details[0]
+    assert row["sentence_citation_rate"] < 1.0, sc.details
+    assert row["claim_tags"] == [["source_fact", True]], sc.details
 
 
 # Synthetic two-form drug — one normalized_name, two distinct (dosage_form, route)

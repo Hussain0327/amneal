@@ -203,6 +203,9 @@ def _print_scorecard(sc: Scorecard) -> None:
         "mrr",
         "citation_precision",
         "faithfulness",
+        # No threshold: the pre-PR8 text rule, kept for trend continuity. See
+        # eval/metrics.sentence_citation_rate.
+        "sentence_citation_rate",
         "fact_recall",
         "refusal_accuracy",
     ):

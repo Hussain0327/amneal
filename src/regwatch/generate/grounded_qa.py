@@ -87,6 +87,7 @@ from regwatch.generate.prompts import (
 # form.
 from regwatch.generate.rag_contract import (
     AuditPayload,
+    ClaimTag,
     RagOutcome,
     SessionPatch,
 )
@@ -162,6 +163,8 @@ class QAResult:
     related: list[ClarifyOption] = field(default_factory=list)
     session_id: str | None = None
     turn_id: str | None = None
+    # Eval-only ledger passthrough; see RagOutcome.claim_tags.
+    claim_tags: tuple[ClaimTag, ...] = ()
 
 
 # Filler words that carry no topic; if a question is only these plus the drug
@@ -1084,6 +1087,7 @@ def _persist_turn(
         related=outcome.related,
         session_id=outcome.session_id,
         turn_id=outcome.turn_id,
+        claim_tags=outcome.claim_tags,
     )
     _apply_session_patch(patch, audit_id=audit_id)
     return result
@@ -2161,6 +2165,7 @@ def _synthesize_and_admit(
         reason=route_json.get("reason"),
         session_id=session_id,
         turn_id=turn_id,
+        claim_tags=tg.claim_tags(admitted),
     )
     audit = AuditPayload(
         mode="qa",

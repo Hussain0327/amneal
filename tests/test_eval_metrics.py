@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
+
 from regwatch.eval.metrics import (
     GoldItem,
     citation_precision,
@@ -17,7 +19,10 @@ from regwatch.eval.metrics import (
     reciprocal_rank,
     redundancy,
     rejection_reasons,
+    sentence_citation_rate,
 )
+from regwatch.generate.rag_contract import ClaimTag
+from regwatch.generate.turn_gate import PARTIAL_DROP_DISCLOSURE
 
 
 @dataclass
@@ -47,6 +52,7 @@ class _FakeResult:
     status: str = "answer"
     reason: str | None = None
     clarify: list[_FakeOpt] = field(default_factory=list)
+    claim_tags: tuple[ClaimTag, ...] = ()
 
 
 def test_recall_at_k_match() -> None:
@@ -113,14 +119,95 @@ def test_citation_precision_partial() -> None:
     assert citation_precision(citations, expected) == 0.5
 
 
-def test_faithfulness_full() -> None:
+def test_sentence_citation_rate_full() -> None:
+    """The PRE-PR8 rule, pinned verbatim: it must never move under the redefinition."""
     text = "Claim A [PSG_001, p.3]. Claim B [PSG_001, p.4]."
-    assert faithfulness(text) == 1.0
+    assert sentence_citation_rate(text) == 1.0
 
 
-def test_faithfulness_partial() -> None:
+def test_sentence_citation_rate_partial() -> None:
     text = "Claim A [PSG_001, p.3]. Uncited claim with no source."
-    assert faithfulness(text) == 0.5
+    assert sentence_citation_rate(text) == 0.5
+
+
+# ---------- faithfulness redefinition (PR8, kind-aware) ----------
+#
+# claim_tags is the gate's per-admitted-claim (kind, cited) ledger. Absent, the
+# metric is byte-identical to sentence_citation_rate (every non-gate caller:
+# clarify copy, meta, refusals, and every historical caller of faithfulness()).
+# Present, only SOURCE_FACT sentences are in the denominator -- REASONING and
+# CONVERSATION are uncited BY DESIGN under v7 selective citation, and counting
+# them would penalize the policy the redefinition exists to support.
+
+
+def test_faithfulness_all_source_facts_cited_is_one() -> None:
+    tags = (ClaimTag("source_fact", True), ClaimTag("source_fact", True))
+    assert faithfulness("ignored", claim_tags=tags) == 1.0
+
+
+def test_faithfulness_one_uncited_source_fact_is_half() -> None:
+    tags = (ClaimTag("source_fact", True), ClaimTag("source_fact", False))
+    assert faithfulness("ignored", claim_tags=tags) == 0.5
+
+
+def test_faithfulness_excludes_uncited_non_facts_from_the_denominator() -> None:
+    """The point of the redefinition: an uncited REASONING/CONVERSATION sentence
+    is not a broken promise, so it must not drag the score down the way the old
+    per-sentence rule would."""
+    text = "A fasting study is recommended [PSG_001, p.3]. My reading is this generalizes. Let me know if that helps."
+    tags = (
+        ClaimTag("source_fact", True),
+        ClaimTag("reasoning", False),
+        ClaimTag("conversation", False),
+    )
+    assert faithfulness(text, claim_tags=tags) == 1.0
+    assert sentence_citation_rate(text) == pytest.approx(1 / 3)
+
+
+def test_faithfulness_zero_source_facts_is_one() -> None:
+    """A turn that asserted nothing about the corpus cannot be unfaithful to it."""
+    tags = (ClaimTag("reasoning", False), ClaimTag("conversation", False))
+    assert faithfulness("ignored", claim_tags=tags) == 1.0
+
+
+def test_faithfulness_none_tags_falls_back_to_sentence_citation_rate() -> None:
+    text = "Claim A [PSG_001, p.3]. Uncited claim with no source."
+    assert faithfulness(text, claim_tags=None) == sentence_citation_rate(text)
+
+
+def test_faithfulness_empty_tags_falls_back_to_sentence_citation_rate() -> None:
+    text = "Claim A [PSG_001, p.3]. Uncited claim with no source."
+    assert faithfulness(text, claim_tags=()) == sentence_citation_rate(text)
+
+
+# ---------- A.3 coincidence proof, unit half ----------
+#
+# Layer 2 of the three-layer proof (by construction / by test / by
+# measurement): pin equality on the coincident v6 shape, and pin the ONE
+# documented divergence explicitly rather than leaving it implicit.
+
+
+def test_coincidence_all_cited_no_disclosure_matches_the_old_rule() -> None:
+    """A v6-shaped rendered answer: every admitted claim is a cited source_fact
+    and the renderer added no disclosure line. Old and new definitions coincide
+    exactly -- this is the "behavior delta: none" case F-c narrows to."""
+    text = (
+        "A fasting study is recommended [PSG_001, p.3]. The paddle method is used [PSG_001, p.4]."
+    )
+    tags = (ClaimTag("source_fact", True), ClaimTag("source_fact", True))
+    assert faithfulness(text, claim_tags=tags) == sentence_citation_rate(text) == 1.0
+
+
+def test_coincidence_diverges_only_on_a_renderer_disclosure_line() -> None:
+    """The ONE intended divergence (F-c). PARTIAL_DROP_DISCLOSURE is
+    renderer-authored, deterministic, and not a claim: render_answer appends it
+    as an ordinary sentence, so the OLD text rule counts it uncited while the
+    tag-based rule -- which only ever looks at admitted claims -- does not.
+    Cannot flip a gate: faithfulness is not in THRESHOLDS."""
+    text = f"A fasting study is recommended [PSG_001, p.3].\n{PARTIAL_DROP_DISCLOSURE}"
+    tags = (ClaimTag("source_fact", True),)
+    assert sentence_citation_rate(text) < 1.0
+    assert faithfulness(text, claim_tags=tags) == 1.0
 
 
 def test_fact_recall_all_present() -> None:
@@ -764,3 +851,26 @@ def test_a_crashed_turn_leaves_the_citation_denominator_but_a_decline_does_not()
     assert declined.citation_precision == 0.5, "a decline cited nothing and is scored for it"
     # Retrieval is measured identically in both: it ran and it worked.
     assert crashed.recall_at_k == declined.recall_at_k == 1.0
+
+
+def test_refused_answerable_row_still_scores_zero_faithfulness_despite_tags() -> None:
+    """Over-refusal cannot hide behind the redefinition.
+
+    The `if result.refused:` branch never calls faithfulness()/reads
+    claim_tags -- a wrongly-refused row contributes nothing to sums["faith"]
+    but stays in the `answered` denominator, so it still drags the aggregate
+    down even when it carries (fabricated, here) all-cited claim_tags.
+    """
+    gold = [GoldItem(question="q1", expected_sources=[{"short_name": "PSG_001", "page": 3}])]
+
+    def _ask(_q: str) -> _FakeResult:
+        return _FakeResult(
+            answer="refused",
+            citations=[],
+            refused=True,
+            claim_tags=(ClaimTag("source_fact", True),),
+        )
+
+    sc = evaluate(gold, ask_callable=_ask)
+    assert sc.faithfulness == 0.0
+    assert sc.uncited_source_facts == 0

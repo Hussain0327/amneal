@@ -100,6 +100,9 @@ def test_trace_records_retrieved_citations_and_answer() -> None:
     assert trace["citations"][0]["chunk_id"] == "c1"
     assert trace["answer"] == "Two-way crossover [PSG_1, p.4]."
     assert trace["status"] == "answer"
+    # _Result carries no claim_tags -- the trace must report that as empty,
+    # not raise (see eval/metrics._trace's getattr default).
+    assert trace["claim_tags"] == []
 
 
 def test_trace_excludes_passage_and_snippet_text() -> None:
