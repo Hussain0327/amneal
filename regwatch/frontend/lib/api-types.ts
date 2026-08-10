@@ -793,6 +793,11 @@ export interface components {
             } | null;
             /** K */
             k?: number | null;
+            /**
+             * Live Draft
+             * @default false
+             */
+            live_draft: boolean;
             /** Question */
             question: string;
             /** Session Id */
@@ -811,6 +816,8 @@ export interface components {
              * @default []
              */
             clarify: components["schemas"]["ClarifyOptionOut"][];
+            /** Draft Withdrawn */
+            draft_withdrawn?: string | null;
             /** Interpretation */
             interpretation?: string | null;
             /** Model Name */
