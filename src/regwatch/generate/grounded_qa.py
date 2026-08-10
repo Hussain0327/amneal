@@ -876,6 +876,98 @@ def _complete_structured(
         )
 
 
+def _stream_structured(
+    provider: LLMProvider,
+    messages: list[LLMMessage],
+    *,
+    max_tokens: int,
+    telemetry: dict[str, Any] | None = None,
+    on_delta: Callable[[str], None],
+    on_reset: Callable[[], None],
+) -> LLMResponse:
+    """Streaming twin of ``_complete_structured`` -- prose mode only.
+
+    Forwards scrubbed deltas to ``on_delta`` while the model writes, then
+    returns the terminal LLMResponse; the parse/admit gate downstream always
+    operates on that COMPLETE text, exactly as on the buffered path. The
+    sentinel hold lives HERE, provider-agnostically (Echo streams too): no
+    delta is forwarded while the accumulated text is still a prefix of
+    PROSE_NO_EVIDENCE_SENTINEL, so a refusal never paints. Truncation keeps
+    the same one-2x-retry policy; because attempt 1's deltas may already be
+    on the wire, the retry emits ``on_reset`` first (the client discards the
+    partial draft) and re-streams. D1ResidencyError re-raises first, exactly
+    like the buffered twin.
+    """
+    from regwatch.generate.prose_turn import PROSE_NO_EVIDENCE_SENTINEL
+
+    capped = min(max_tokens, _SYNTH_MAX_TOKENS_CEILING)
+    if telemetry is not None:
+        telemetry["first_budget"] = capped
+
+    def _attempt(budget: int) -> tuple[LLMResponse | None, bool]:
+        """(terminal response | None, any_delta_forwarded)."""
+        held = ""
+        holding = True
+        forwarded = False
+
+        def _forward(text: str) -> None:
+            nonlocal forwarded
+            if not text:
+                return
+            forwarded = True
+            try:
+                on_delta(text)
+            except Exception:  # broad: a draft sink is cosmetic, never fatal
+                log.debug("on_draft_failed", exc_info=True)
+
+        response: LLMResponse | None = None
+        for chunk in provider.stream(messages, temperature=_SYNTH_TEMPERATURE, max_tokens=budget):
+            if chunk.reset:
+                held, holding = "", True
+                if forwarded:
+                    try:
+                        on_reset()
+                    except Exception:
+                        log.debug("on_draft_reset_failed", exc_info=True)
+                continue
+            if chunk.done:
+                response = chunk.response
+                break
+            if holding:
+                held += chunk.delta
+                if PROSE_NO_EVIDENCE_SENTINEL.startswith(held):
+                    continue  # still a possible refusal prefix - keep holding
+                holding = False
+                _forward(held)
+                held = ""
+                continue
+            _forward(chunk.delta)
+        return response, forwarded
+
+    try:
+        response, _ = _attempt(capped)
+    except D1ResidencyError:
+        raise
+    except RuntimeError as exc:
+        retry_budget = min(capped * 2, _SYNTH_MAX_TOKENS_CEILING)
+        if retry_budget <= capped:
+            raise
+        if telemetry is not None:
+            telemetry["synthesis_retried"] = True
+            telemetry["retry_budget"] = retry_budget
+        log.warning(
+            "qa_synthesis_truncation_retry", old=capped, new=retry_budget, error=str(exc)[:200]
+        )
+        try:
+            on_reset()
+        except Exception:
+            log.debug("on_draft_reset_failed", exc_info=True)
+        response, _ = _attempt(retry_budget)
+    if response is None:
+        raise RuntimeError("provider stream ended without a terminal response chunk")
+    return response
+
+
 def _gate_failure_class(detail: str) -> str:
     """Bucket a gate parse failure into a cause an operator can act on.
 
@@ -1848,6 +1940,8 @@ def _synthesize_and_admit(
     _decline: Callable[..., tuple[RagOutcome, AuditPayload, SessionPatch]],
     _emit: Callable[[str], None],
     _recent_turns: Callable[[], list[PriorTurn]],
+    _emit_draft: Callable[[str], None] | None = None,
+    _emit_draft_reset: Callable[[], None] | None = None,
 ) -> tuple[RagOutcome, AuditPayload, SessionPatch]:
     """Prompt build + the one synthesis call + the admit gate + verdicts.
 
@@ -1928,13 +2022,28 @@ def _synthesize_and_admit(
     synth_telemetry: dict[str, Any] = {"max_output_tokens": s.synthesizer_max_tokens}
     synth_route: dict[str, Any] = {"synthesis": synth_telemetry}
     try:
-        response = _complete_structured(
-            provider,
-            synth_messages,
-            max_tokens=s.synthesizer_max_tokens,
-            response_format=None if prose_mode else "json",
-            telemetry=synth_telemetry,
-        )
+        if prose_mode and _emit_draft is not None:
+            response = _stream_structured(
+                provider,
+                synth_messages,
+                max_tokens=s.synthesizer_max_tokens,
+                telemetry=synth_telemetry,
+                on_delta=_emit_draft,
+                # A missing reset sink degrades to a no-op, not a hold: the
+                # caller opted into drafts but not the retroactive-discard
+                # signal (e.g. a direct ask() call in tests), and
+                # _stream_structured's own try/except already treats a
+                # failing sink as cosmetic.
+                on_reset=_emit_draft_reset or (lambda: None),
+            )
+        else:
+            response = _complete_structured(
+                provider,
+                synth_messages,
+                max_tokens=s.synthesizer_max_tokens,
+                response_format=None if prose_mode else "json",
+                telemetry=synth_telemetry,
+            )
     except Exception as exc:  # provider transport error (timeout / 429 / 5xx)
         # B2: a synthesizer failure must NOT return a naked 500 with no audit
         # row — that would break INV-6 exactly when the system misbehaves. We
@@ -2225,6 +2334,8 @@ def ask_core(
     load_session_filters: Callable[[], dict[str, Any]],
     load_recent_turns: Callable[[], list[PriorTurn]],
     on_progress: Callable[[str], None] | None = None,
+    on_draft: Callable[[str], None] | None = None,
+    on_draft_reset: Callable[[], None] | None = None,
 ) -> tuple[RagOutcome, AuditPayload, SessionPatch]:
     """The PURE compute half of a turn: load context -> compute -> describe.
 
@@ -2241,8 +2352,10 @@ def ask_core(
 
     ``on_progress`` behaves exactly as documented on ``ask()``: cosmetic,
     best-effort, never answer-bearing. There is deliberately NO token sink here
-    -- answer text is replayed by the shell after the audit write, so the core
-    emits no user-visible bytes at all.
+    -- answer text is replayed by the shell after the audit write. The ONLY
+    un-gated bytes the core may emit ride the dual-gated provisional draft
+    channel (``on_draft``/``on_draft_reset``, owner-amended INV-1, 2026-08-10);
+    they are never presented as validated.
     """
     s = get_settings()
 
@@ -2458,6 +2571,8 @@ def ask_core(
         _decline=_decline,
         _emit=_emit,
         _recent_turns=_recent_turns,
+        _emit_draft=on_draft,
+        _emit_draft_reset=on_draft_reset,
     )
 
 
@@ -2472,6 +2587,8 @@ def ask(
     bind_session: bool = True,
     on_progress: Callable[[str], None] | None = None,
     on_token: Callable[[str], None] | None = None,
+    on_draft: Callable[[str], None] | None = None,
+    on_draft_reset: Callable[[], None] | None = None,
 ) -> QAResult:
     """Grounded Q&A entry point — answer with citations, clarify, or refuse.
 
@@ -2495,6 +2612,12 @@ def ask(
     an answer/summary turn, so every byte it emits is gated, rendered and
     audited — a declined or retracted draft can never reach it. A missing sink
     changes nothing else about the turn.
+
+    ``on_draft`` / ``on_draft_reset`` (optional) receive LIVE, un-gated,
+    provisional prose deltas (and retroactive discard signals) during
+    synthesis, prose mode only -- the dual-gated draft channel under the
+    owner-amended INV-1 (2026-08-10). Never validated, never replayed on
+    declines the way on_token is; the terminal result stays authoritative.
     """
     # Touch settings/model-name BEFORE any write, matching pre-split ask(): both
     # are lru_cache-backed (near-free on every call after the first) but a first-
@@ -2553,6 +2676,8 @@ def ask(
             load_session_filters=lambda: get_session_filters(sid),
             load_recent_turns=lambda: get_recent_turns(sid, limit=3, exclude_turn_id=tid),
             on_progress=on_progress,
+            on_draft=on_draft,
+            on_draft_reset=on_draft_reset,
         )
     except Exception as exc:
         # The SAME audited-error boundary compute_turn owns for the Go control

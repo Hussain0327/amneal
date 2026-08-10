@@ -3,6 +3,10 @@
 This module is the reliability boundary: it is the ONLY place model-authored
 bytes can become user-visible text, and it admits them one claim at a time.
 
+Amended 2026-08-10: the flag-gated live-draft SSE channel (REGWATCH_LIVE_DRAFT,
+see grounded_qa._stream_structured) may emit un-gated PROVISIONAL bytes; the
+gate remains the only source of VALIDATED user-visible text.
+
 Pure. No DB, no settings, no provider. Input: the raw completion text, the
 passages that were actually sent this turn, and the question. Output: an
 ``AdmittedTurn`` (what the caller may render) or a ``GateFailure`` (the payload

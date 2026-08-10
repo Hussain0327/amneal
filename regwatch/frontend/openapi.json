@@ -840,6 +840,11 @@
             ],
             "title": "K"
           },
+          "live_draft": {
+            "default": false,
+            "title": "Live Draft",
+            "type": "boolean"
+          },
           "question": {
             "maxLength": 4000,
             "minLength": 2,
@@ -888,6 +893,17 @@
             },
             "title": "Clarify",
             "type": "array"
+          },
+          "draft_withdrawn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Withdrawn"
           },
           "interpretation": {
             "anyOf": [

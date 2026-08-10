@@ -73,6 +73,14 @@ Non-technical regulatory professionals. They will not read JSON or run scripts. 
 These encode both FDA expectations (the Jan 2025 draft guidance treats AI that supports a regulatory decision very differently from AI that only improves operational efficiency) and hard-won lessons. They are invariants, not features.
 
 - **INV-1 Grounding.** Every factual claim in any output must be traceable to a retrieved source passage with a document id and page number. No ungrounded claims, ever.
+
+  Amendment (owner, 2026-08-07, implemented 2026-08-10): live un-gated prose
+  MAY stream to the client as an explicitly provisional draft on the dedicated
+  `draft` SSE channel, dual-gated by REGWATCH_LIVE_DRAFT and a per-request
+  opt-in and available only in prose-synthesis mode. Nothing un-audited may be
+  PRESENTED AS VALIDATED: draft frames carry no citations, no audit id, and no
+  validated affordances, and the terminal `result` frame remains the only
+  validated artifact. See docs/superpowers/specs/2026-08-10-ask-sse-live-draft-design.md.
 - **INV-2 Refuse over guess.** If retrieval does not surface a sufficiently relevant passage (Section 11), the system returns an explicit refusal ("Not found in the current FDA guidance corpus"). It never fabricates an answer.
 - **INV-3 Operational only.** The system surfaces, organizes, compares, and cites public information. It never authors submission content and never renders a regulatory judgment.
 - **INV-4 No fabricated execution.** The system must never report or narrate a process, run, or result it did not actually execute. A match that was not fetched does not exist.

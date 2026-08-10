@@ -63,6 +63,7 @@ const ANSWER: Turn = {
   createdAt: "2026-01-07T14:32:00Z",
   statusLog: [],
   streamFellBack: false,
+  draftWithdrawn: null,
   id: null,
   meta: META,
 };
@@ -107,6 +108,7 @@ const REFUSAL: Turn = {
   createdAt: "2026-01-07T14:41:00Z",
   statusLog: [],
   streamFellBack: false,
+  draftWithdrawn: null,
   id: null,
   meta: { ...META, audit_id: 4218 },
 };
@@ -141,6 +143,7 @@ const CLARIFY: Turn = {
   createdAt: "2026-01-07T14:47:00Z",
   statusLog: [],
   streamFellBack: false,
+  draftWithdrawn: null,
   id: null,
   meta: { ...META, audit_id: 4220 },
 };
@@ -160,6 +163,7 @@ const SCOPE: Turn = {
   createdAt: "2026-01-07T14:52:00Z",
   statusLog: [],
   streamFellBack: false,
+  draftWithdrawn: null,
   id: null,
   meta: { ...META, audit_id: 4221 },
 };

@@ -10,7 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { QueryResponse, SessionDetail } from "@/lib/api";
 
-type StreamCallbacks = { onStatus?: (text: string) => void; onToken?: (delta: string) => void };
+type StreamCallbacks = {
+  onStatus?: (text: string) => void;
+  onToken?: (delta: string) => void;
+  onDraft?: (delta: string) => void;
+  onDraftReset?: () => void;
+};
 
 // The factories below only CALL these at runtime (after vi.mock hoists), so
 // they never read them during hoist — same pattern as WatchPage.test.tsx.
@@ -20,6 +25,7 @@ const askQueryStreamMock = vi.fn<
     filters: Record<string, string> | null,
     sessionId: string | null,
     callbacks?: StreamCallbacks,
+    liveDraft?: boolean,
     signal?: AbortSignal,
   ) => Promise<QueryResponse>
 >();
@@ -298,7 +304,7 @@ describe("AskPage -- fallback notice + status log persist onto the settled turn 
     // statusFrames STATE is cleared in run()'s finally -- only the closure-local
     // copy stamped onto the turn can render these.
     expect(container.querySelector(".msg__fallback")?.textContent).toBe(
-      "Connection dropped mid-draft \u2014 answer re-verified over a fresh request.",
+      "Connection dropped mid-draft \u2014 the answer was re-run over a fresh request and may differ from the draft.",
     );
     // Children of the (closed) Provenance details are still queryable in jsdom.
     const frames = [...container.querySelectorAll(".prov__log li")].map((li) => li.textContent);
@@ -328,6 +334,78 @@ describe("AskPage -- fallback notice + status log persist onto the settled turn 
   });
 });
 
+describe("AskPage -- live-draft channel (withdrawal note, reset)", () => {
+  it("renders the withdrawal note when the result carries draft_withdrawn", async () => {
+    const user = userEvent.setup();
+    askQueryStreamMock.mockResolvedValue(
+      makeResponse({
+        status: "refused",
+        refused: true,
+        citations: [],
+        answer: "No matching guidance was found for this product.",
+        draft_withdrawn: "refused",
+      } as Partial<QueryResponse>),
+    );
+    const { container } = render(<AskPage />);
+
+    await submit(user, "a question");
+    await screen.findByText("No matching guidance was found for this product.");
+
+    const notes = [...container.querySelectorAll(".msg__fallback")].map((n) => n.textContent);
+    expect(notes).toContain(
+      "The provisional draft was withdrawn \u2014 it could not be verified against the cited guidance. The response below is the verified outcome.",
+    );
+  });
+
+  it("says statements were dropped when draft_withdrawn is 'partial'", async () => {
+    const user = userEvent.setup();
+    askQueryStreamMock.mockResolvedValue(
+      makeResponse({ draft_withdrawn: "partial" } as Partial<QueryResponse>),
+    );
+    const { container } = render(<AskPage />);
+
+    await submit(user, "a question");
+    await screen.findByText(ANSWER_TEXT);
+
+    expect(container.querySelector(".msg__fallback")?.textContent).toBe(
+      "The provisional draft was withdrawn \u2014 some draft statements could not be verified and were dropped. The response below is the verified outcome.",
+    );
+  });
+
+  it("renders no withdrawal note when draft_withdrawn is absent (control)", async () => {
+    const user = userEvent.setup();
+    askQueryStreamMock.mockResolvedValue(makeResponse());
+    const { container } = render(<AskPage />);
+
+    await submit(user, "a question");
+    await screen.findByText(ANSWER_TEXT);
+
+    expect(container.querySelector(".msg__fallback")).toBeNull();
+  });
+
+  it("clears the visible draft on a mid-stream draft_reset", async () => {
+    // Reduced motion for this test only: onDraft deltas land in the DOM
+    // immediately (still through the shared buffer function), so the
+    // assertion doesn't depend on the pacing interval's cadence.
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true } as MediaQueryList);
+    const user = userEvent.setup();
+    const stream = pendingStream();
+    const { container } = render(<AskPage />);
+
+    await submit(user, "a question");
+    act(() => stream.cb?.onDraft?.("half a sentence that will be discarded"));
+    expect(container.querySelector(".msg__body--draft")?.textContent).toBe(
+      "half a sentence that will be discarded",
+    );
+
+    act(() => stream.cb?.onDraftReset?.());
+    expect(container.querySelector(".msg__body--draft")).toBeNull();
+
+    act(() => stream.resolve?.(makeResponse()));
+    await screen.findByText(ANSWER_TEXT);
+  });
+});
+
 describe("AskPage -- drafting milestones for the SR region (B10)", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -348,7 +426,7 @@ describe("AskPage -- drafting milestones for the SR region (B10)", () => {
 
     act(() => stream.cb?.onToken?.("first"));
     expect(region?.textContent).toBe(
-      "Drafting the answer \u2014 citations will be verified before it is shown.",
+      "Drafting a provisional answer \u2014 the verified answer will follow.",
     );
 
     act(() => {
@@ -567,7 +645,7 @@ describe("AskPage — session identity across switches", () => {
     // Realistic: the abort rejects the in-flight stream, which makes run()'s catch
     // return early WITHOUT undoing the optimistic turn -- only stop() does that.
     askQueryStreamMock.mockImplementation(
-      (_q, _f, _s, _cb, signal) =>
+      (_q, _f, _s, _cb, _liveDraft, signal) =>
         new Promise<QueryResponse>((_resolve, reject) => {
           signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), {
             once: true,
@@ -620,7 +698,7 @@ describe("AskPage -- New Chat resets (restore chip, extra filters, failed sends)
     const user = userEvent.setup();
     // Same abort-aware stream as the session-switch mirror above.
     askQueryStreamMock.mockImplementation(
-      (_q, _f, _s, _cb, signal) =>
+      (_q, _f, _s, _cb, _liveDraft, signal) =>
         new Promise<QueryResponse>((_resolve, reject) => {
           signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), {
             once: true,
@@ -919,7 +997,7 @@ describe("AskPage -- stop/session-switch hand the question back (C14)", () => {
   // Abort-aware stream: rejects like the real api layer so run() settles.
   function abortableStream() {
     askQueryStreamMock.mockImplementation(
-      (_q, _f, _s, _cb, signal) =>
+      (_q, _f, _s, _cb, _liveDraft, signal) =>
         new Promise<QueryResponse>((_resolve, reject) => {
           signal?.addEventListener(
             "abort",

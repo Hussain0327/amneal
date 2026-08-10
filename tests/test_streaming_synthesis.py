@@ -18,6 +18,12 @@ refusal-sentinel guard. Both are gone -- the model no longer writes prose, so
 there is no sentinel to hold back and no provisional token to guard. The safety
 property they protected (a refusal/retraction is never painted as an answer) is
 now structural and is pinned here at its new home, the replay.
+
+Amended 2026-08-10: these pins now describe the DEFAULT (flag-off) contract.
+The dual-gated live-draft channel (REGWATCH_LIVE_DRAFT + prose + request
+opt-in) may stream provisional model prose BEFORE the gate; its own pins
+live in tests/test_live_draft.py. Every guarantee above still holds verbatim
+whenever the draft gate is closed - which is every turn in prod today.
 """
 
 from __future__ import annotations

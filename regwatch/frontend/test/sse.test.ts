@@ -202,7 +202,7 @@ describe("consumeSse (via askQueryStream)", () => {
     failOnFallback();
 
     const controller = new AbortController();
-    const promise = askQueryStream("q", null, null, { onStatus }, controller.signal);
+    const promise = askQueryStream("q", null, null, { onStatus }, false, controller.signal);
     // Abort only after the stream is provably mid-body (first frame delivered).
     await vi.waitFor(() => expect(onStatus).toHaveBeenCalledWith("working"));
     controller.abort();
@@ -266,6 +266,102 @@ describe("consumeSse (via askQueryStream)", () => {
     expect(res.answer).toBe("both");
     expect(onStatus).toHaveBeenCalledWith("searching");
     expect(onToken).toHaveBeenCalledWith("chunk");
+  });
+
+  it("delivers draft deltas in order, then resolves with the result", async () => {
+    const onDraft = vi.fn();
+    const payload = JSON.stringify(resultFrameData("final"));
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([
+        `event: draft\ndata: ${JSON.stringify({ delta: "A fasting " })}\n\n`,
+        `event: draft\ndata: ${JSON.stringify({ delta: "study [1]." })}\n\n`,
+        `event: result\ndata: ${payload}\n\n`,
+      ]),
+    );
+    failOnFallback();
+
+    const res = await askQueryStream("q", null, null, { onDraft }, true);
+    expect(res.answer).toBe("final");
+    // Raw, un-gated deltas arrived in order, strictly before the result.
+    expect(onDraft.mock.calls.map((c) => c[0])).toEqual(["A fasting ", "study [1]."]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a malformed draft frame and still resolves (draft is cosmetic)", async () => {
+    const onDraft = vi.fn();
+    const payload = JSON.stringify(resultFrameData("ok"));
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([
+        "event: draft\ndata: {not valid json}\n\n",
+        `event: draft\ndata: ${JSON.stringify({ delta: "real" })}\n\n`,
+        `event: result\ndata: ${payload}\n\n`,
+      ]),
+    );
+    failOnFallback();
+
+    const res = await askQueryStream("q", null, null, { onDraft }, true);
+    expect(res.answer).toBe("ok");
+    expect(onDraft.mock.calls.map((c) => c[0])).toEqual(["real"]);
+  });
+
+  it("invokes onDraftReset on a draft_reset frame, with no payload to parse", async () => {
+    const onDraft = vi.fn();
+    const onDraftReset = vi.fn();
+    const payload = JSON.stringify(resultFrameData("final"));
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([
+        `event: draft\ndata: ${JSON.stringify({ delta: "partial " })}\n\n`,
+        "event: draft_reset\ndata: {}\n\n",
+        `event: draft\ndata: ${JSON.stringify({ delta: "restarted" })}\n\n`,
+        `event: result\ndata: ${payload}\n\n`,
+      ]),
+    );
+    failOnFallback();
+
+    const res = await askQueryStream("q", null, null, { onDraft, onDraftReset }, true);
+    expect(res.answer).toBe("final");
+    expect(onDraft.mock.calls.map((c) => c[0])).toEqual(["partial ", "restarted"]);
+    expect(onDraftReset).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores an unknown SSE event name and still resolves", async () => {
+    const onStatus = vi.fn();
+    const payload = JSON.stringify(resultFrameData("still-ok"));
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([
+        `event: mystery\ndata: ${JSON.stringify({ whatever: 1 })}\n\n`,
+        `event: status\ndata: ${JSON.stringify({ text: "searching" })}\n\n`,
+        `event: result\ndata: ${payload}\n\n`,
+      ]),
+    );
+    failOnFallback();
+
+    const res = await askQueryStream("q", null, null, { onStatus });
+    expect(res.answer).toBe("still-ok");
+    expect(onStatus).toHaveBeenCalledWith("searching");
+  });
+});
+
+describe("askQueryStream request body -- live_draft opt-in", () => {
+  it("carries live_draft: true only when the caller requests it", async () => {
+    const payload = JSON.stringify(resultFrameData("a"));
+    fetchMock.mockResolvedValueOnce(sseResponse([`event: result\ndata: ${payload}\n\n`]));
+    failOnFallback();
+
+    await askQueryStream("q", null, null, undefined, true);
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body).toEqual({ question: "q", filters: null, session_id: null, live_draft: true });
+  });
+
+  it("omits live_draft entirely when not requested (default false)", async () => {
+    const payload = JSON.stringify(resultFrameData("b"));
+    fetchMock.mockResolvedValueOnce(sseResponse([`event: result\ndata: ${payload}\n\n`]));
+    failOnFallback();
+
+    await askQueryStream("q", null, null);
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body).toEqual({ question: "q", filters: null, session_id: null });
+    expect(body.live_draft).toBeUndefined();
   });
 });
 

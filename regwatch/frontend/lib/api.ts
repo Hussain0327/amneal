@@ -42,7 +42,15 @@ export type Citation = Schemas["QueryCitation"];
 export type ClarifyOption = Schemas["ClarifyOptionOut"];
 // A grounded clarify pick: tapping it resends {query, filters} in-session.
 export type Suggestion = ClarifyOption;
-export type QueryResponse = Schemas["QueryResponse"];
+// Not yet in the generated OpenAPI snapshot (lands with the backend lane that
+// adds it to the pydantic model and regenerates api-types.ts) -- intersected
+// by hand, same pattern as the other hand-narrowed wire shapes in this file.
+// Set only on /query/stream turns that painted a provisional draft frame the
+// gate later withdrew (refused/clarify/error/meta/scope_warning) or partially
+// dropped; null/absent means no draft was ever shown or it was never withdrawn.
+export type QueryResponse = Schemas["QueryResponse"] & {
+  draft_withdrawn?: string | null;
+};
 // "answer" | "summary" | "clarify" | "scope_warning" | "refused" | "error" —
 // by construction from the backend Literal. No "conversational".
 export type QueryStatus = QueryResponse["status"];
@@ -50,8 +58,11 @@ export type QueryStatus = QueryResponse["status"];
 // clarify is the only array the wire may omit (backend default []); guarantee
 // it so consumers never branch on undefined. suggestions/unanswered no longer
 // exist — the generated type makes referencing them a compile error.
+// draft_withdrawn defaults to null so an old server (or a plain /query turn,
+// which never streams a draft) never leaves it undefined for turns.ts to trip
+// on.
 function normalizeQuery(r: QueryResponse): QueryResponse {
-  return { ...r, clarify: r.clarify ?? [] };
+  return { ...r, clarify: r.clarify ?? [], draft_withdrawn: r.draft_withdrawn ?? null };
 }
 
 export type AssembleResponse = Schemas["AssembleResponse"];
@@ -440,6 +451,12 @@ function isAbortError(e: unknown): boolean {
 export interface StreamCallbacks {
   onStatus?: (text: string) => void;
   onToken?: (delta: string) => void;
+  // LIVE un-gated provisional prose (flag-gated server-side, per-request
+  // opt-in). Never the authoritative answer; rendered only as a draft.
+  onDraft?: (delta: string) => void;
+  // Retroactive discard: everything received via onDraft so far is invalid
+  // (truncation retry or upstream reset). Clear the draft and start over.
+  onDraftReset?: () => void;
 }
 
 // Status line emitted immediately before every stream-failure fallback to plain
@@ -503,6 +520,19 @@ async function consumeSse(
       } catch {
         // a malformed token frame is cosmetic (provisional draft) — keep reading
       }
+      return null;
+    }
+    if (name === "draft") {
+      try {
+        const d = JSON.parse(payload) as { delta?: unknown };
+        if (typeof d.delta === "string") callbacks?.onDraft?.(d.delta);
+      } catch {
+        // malformed draft frame is cosmetic - keep reading
+      }
+      return null;
+    }
+    if (name === "draft_reset") {
+      callbacks?.onDraftReset?.();
       return null;
     }
     if (name === "result") return JSON.parse(payload) as QueryResponse;
@@ -572,6 +602,10 @@ export async function askQueryStream(
   filters: Record<string, string> | null = null,
   session_id: string | null = null,
   callbacks?: StreamCallbacks,
+  // Per-request opt-in for the provisional draft SSE channel. Ignored server-
+  // side unless the dual gate (REGWATCH_LIVE_DRAFT + prose synthesis) is also
+  // on. Defaulted false so every existing caller stays byte-identical.
+  liveDraft: boolean = false,
   signal?: AbortSignal,
 ): Promise<QueryResponse> {
   const path = "/query/stream";
@@ -600,7 +634,11 @@ export async function askQueryStream(
       res = await fetch(`${apiBase()}${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-        body: JSON.stringify({ question, filters, session_id }),
+        body: JSON.stringify(
+          liveDraft
+            ? { question, filters, session_id, live_draft: true }
+            : { question, filters, session_id },
+        ),
         credentials: "include",
         signal: ctl.signal,
       });

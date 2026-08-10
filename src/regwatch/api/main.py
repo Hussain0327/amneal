@@ -642,6 +642,9 @@ class QueryRequest(BaseModel):
     # request an unbounded k that materializes the whole corpus into one search.
     k: int | None = Field(None, ge=1, le=50)
     session_id: str | None = None
+    # Per-request opt-in for the provisional draft SSE channel. Ignored by the
+    # blocking /query route and whenever the server-side dual gate is off.
+    live_draft: bool = False
 
     @field_validator("filters")
     @classmethod
@@ -716,6 +719,11 @@ class QueryResponse(BaseModel):
     # UI renders them as plain pills, never citation chips. Never carries passage
     # text/score; refused/citations are unaffected (the refusal contract holds).
     related: list[ClarifyOptionOut] = []
+    # Set only on /query/stream turns that painted at least one provisional
+    # draft frame which the gate then withdrew (refuse/clarify/error/meta/
+    # scope_warning) or partially dropped. The client keys its withdrawal
+    # note on this server-declared value -- never on text diffing.
+    draft_withdrawn: str | None = None
 
 
 def _authorize_session_access(session_id: str, user_id: str) -> None:
@@ -902,11 +910,13 @@ async def query(req: QueryRequest, user: User = Depends(require_user)) -> QueryR
 
 
 def _sse_event(name: str, data: dict[str, Any]) -> str:
-    """One Server-Sent Events frame. The Ask client (askQueryStream) parses three
+    """One Server-Sent Events frame. The Ask client (askQueryStream) parses five
     event names: ``status`` (``{"text": ...}`` progress), ``token`` (``{"delta":
-    ...}`` a slice of the already-gated, already-audited answer), and ``result``
-    (the full validated QueryResponse). Any other name is ignored, so we emit
-    only these."""
+    ...}`` a slice of the already-gated, already-audited answer), ``draft``
+    (``{"delta": ...}`` LIVE un-gated provisional prose, dual-gated -- see
+    REGWATCH_LIVE_DRAFT), ``draft_reset`` (``{}``, discard every draft delta
+    received so far), and ``result`` (the full validated QueryResponse). Any
+    other name is ignored, so we emit only these."""
     return f"event: {name}\ndata: {json.dumps(data)}\n\n"
 
 
@@ -950,8 +960,18 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
         # only; the authoritative answer is still the terminal ``result`` frame.
         loop.call_soon_threadsafe(queue.put_nowait, ("token", delta))
 
+    def on_draft(delta: str) -> None:
+        # LIVE un-gated prose from the worker thread - provisional by
+        # contract; the client renders it only as a draft.
+        loop.call_soon_threadsafe(queue.put_nowait, ("draft", delta))
+
+    def on_draft_reset() -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, ("draft_reset", None))
+
     async def _run() -> None:
         try:
+            s = get_settings()
+            draft_on = bool(s.live_draft_enabled and s.prose_synthesis_enabled and req.live_draft)
             result = await _dispatch_ask(
                 question=req.question,
                 filters=req.filters,
@@ -960,6 +980,8 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
                 user_id=user_id,
                 on_progress=on_progress,
                 on_token=on_token,
+                on_draft=on_draft if draft_on else None,
+                on_draft_reset=on_draft_reset if draft_on else None,
             )
             queue.put_nowait(("result", result))
         except HTTPException:
@@ -975,6 +997,7 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
             queue.put_nowait(("error", None))
 
     worker = asyncio.create_task(_run())
+    draft_frames_sent = False
     try:
         yield _sse_event("status", {"text": "Consulting the corpus…"})
         while True:
@@ -996,6 +1019,13 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
             if kind == "token":
                 yield _sse_event("token", {"delta": payload})
                 continue
+            if kind == "draft":
+                draft_frames_sent = True
+                yield _sse_event("draft", {"delta": payload})
+                continue
+            if kind == "draft_reset":
+                yield _sse_event("draft_reset", {})
+                continue
             if kind == "result":
                 try:
                     # Recency enrichment does DB I/O — build the response off
@@ -1004,6 +1034,13 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
                 except HTTPException:
                     log.warning("query_stream_missing_session_metadata")
                     return  # close without a result frame -> client falls back
+                if draft_frames_sent:
+                    from regwatch.generate.turn_gate import PARTIAL_DROP_DISCLOSURE
+
+                    if response.status not in ("answer", "summary"):
+                        response.draft_withdrawn = response.status
+                    elif PARTIAL_DROP_DISCLOSURE in response.answer:
+                        response.draft_withdrawn = "partial"
                 yield f"event: result\ndata: {response.model_dump_json()}\n\n"
                 return
             # kind == "error": close without a result frame -> client falls back.

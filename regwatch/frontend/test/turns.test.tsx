@@ -151,6 +151,7 @@ function nonAnswerTurn(overrides: Partial<Turn>): Turn {
     id: null,
     statusLog: [],
     streamFellBack: false,
+    draftWithdrawn: null,
     ...overrides,
   };
 }
@@ -387,7 +388,7 @@ describe("ProvisionalDraft — the streaming draft (INV-1/INV-2)", () => {
     expect(container.querySelector(".cite")).toBeNull();
     expect(container.querySelector(".cite-stamp")).toBeNull();
     expect(container.querySelector(".confidence")).toBeNull();
-    expect(container.textContent).toContain("verifying citations");
+    expect(container.textContent).toContain("Drafting live");
   });
 
   it("renders as markdown (same typography it settles into) with zero interactive stamps", () => {
@@ -708,7 +709,7 @@ describe("stream-fallback notice + provenance status log (B8)", () => {
       <AssistantTurn turn={turn} sessionId={null} onPick={() => {}} onCite={() => {}} busy={false} threshold={null} />,
     );
     expect(container.querySelector(".msg__fallback")?.textContent).toBe(
-      "Connection dropped mid-draft \u2014 answer re-verified over a fresh request.",
+      "Connection dropped mid-draft \u2014 the answer was re-run over a fresh request and may differ from the draft.",
     );
   });
 
