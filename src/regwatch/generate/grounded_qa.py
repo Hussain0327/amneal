@@ -100,12 +100,23 @@ from regwatch.generate.rag_contract import (
 from regwatch.generate.rag_contract import (
     QueryStatusLiteral as QueryStatusLiteral,
 )
+from regwatch.generate.route import (
+    ROUTE_PROMPT,
+    CorpusPolicyHint,
+    RouteHistoryTurn,
+)
+from regwatch.generate.route_shadow import (
+    RouteShadowObservation,
+    finalize_route_observation,
+    observe_route,
+)
 from regwatch.generate.turn_gate import AdmittedTurn, GateFailure, admit_turn
 from regwatch.generate.turn_schema import TURN_SCHEMA_MESSAGE
 from regwatch.retrieve.mode import RetrievalPlan, RetrievalScope, default_mode_for_scope
 from regwatch.retrieve.reranker import rerank_passages
 from regwatch.retrieve.resolver import resolve_brand, resolve_product, suggest_products
 from regwatch.retrieve.retriever import RetrievedPassage, retrieve
+from regwatch.retrieve.scope_catalog import load_corpus_policy_snapshots
 from regwatch.store.db import session_scope
 from regwatch.store.models import PsgDocument
 from regwatch.store.queries import count_documents, current_dosage_form_routes
@@ -1521,6 +1532,78 @@ class TurnState:
     # Populated once stage-1 search runs; read by _decline so a turn that
     # declines AFTER retrieving still records which retrieval mode ran.
     retrieval_block: dict[str, Any] = field(default_factory=dict)
+    # PR11b observation only. The model result cannot steer any field above;
+    # its finalized JSON is copied into the audit route immediately before the
+    # existing path returns or retrieves.
+    route_shadow: RouteShadowObservation | None = None
+    route_shadow_audit: dict[str, Any] | None = None
+
+
+_ROUTE_CLARIFY_REASONS = frozenset(
+    {
+        "ambiguous_product",
+        "brand_lookup",
+        "did_you_mean",
+        "mixed_products",
+        "multi_form",
+        "no_product",
+        "scope_warning",
+        "vague_input",
+    }
+)
+
+
+def _route_history(turns: list[PriorTurn]) -> tuple[RouteHistoryTurn, ...]:
+    """Convert persisted history to the bounded, application-labelled prompt shape."""
+
+    history: list[RouteHistoryTurn] = []
+    for turn in turns:
+        scope_kind = turn.scope_kind if turn.scope_audited else "none"
+        policy: CorpusPolicyHint | None = None
+        if scope_kind == "corpus" and turn.corpus_policy:
+            try:
+                policy = CorpusPolicyHint(turn.corpus_policy)
+            except ValueError:
+                # Bad historical metadata cannot make the shadow call fail or
+                # manufacture inheritance. Downgrade it to unscoped context.
+                scope_kind = "none"
+        if scope_kind not in {"product", "corpus"}:
+            scope_kind = "none"
+        history.append(
+            RouteHistoryTurn(
+                question=turn.question,
+                answer=turn.answer,
+                scope_kind=scope_kind,
+                scope_audited=turn.scope_audited and scope_kind != "none",
+                corpus_policy=policy,
+            )
+        )
+    return tuple(history)
+
+
+def _current_mode_for_shadow(*, reason: str, response_mode: str) -> str:
+    """Describe today's pre-model action using the route contract vocabulary."""
+
+    if response_mode == "meta":
+        return "converse"
+    if response_mode in {"clarify", "scope_warning"} or reason in _ROUTE_CLARIFY_REASONS:
+        return "lookup_clarify"
+    return "lookup"
+
+
+def _current_scope_for_shadow(state: TurnState, *, response_mode: str) -> str:
+    """Describe the authoritative scope that today's path actually reached."""
+
+    if response_mode == "meta":
+        return "converse"
+    if state.active_filters.get("normalized_name"):
+        return "product"
+    return "clarify"
+
+
+def _attach_route_shadow(state: TurnState, route_json: dict[str, Any]) -> None:
+    if state.route_shadow_audit is not None:
+        route_json["route_call"] = dict(state.route_shadow_audit)
 
 
 # The stage functions keep the ask_core closure names (_decline/_emit/
@@ -1812,6 +1895,7 @@ def _retrieve_and_group(
         context_applied=state.context_applied,
         response_mode=state.response_mode,
     )
+    _attach_route_shadow(state, route_json)
     _emit("Searching the FDA guidance corpus…")
     _maybe_inject_fault("retrieve")
     # The MODE is this layer's decision, not a side effect of whether a filter
@@ -2406,6 +2490,41 @@ def ask_core(
 
     response_mode: QueryStatusLiteral = "summary" if _is_summary_request(question) else "answer"
     state = TurnState(active_filters=active_filters, response_mode=response_mode)
+    # Shadow context uses independent reads. It must never populate the
+    # authoritative memo above before today's deterministic pipeline reaches
+    # its normal read point: doing so would shift the snapshot used by a
+    # concurrent-session follow-up and could change real behavior.
+    route_shadow_session_filters: dict[str, Any] = {}
+
+    def _finalize_route_shadow(*, reason: str, response_mode: str) -> None:
+        """Compile and compare once, without changing any authoritative state."""
+
+        if state.route_shadow is None or state.route_shadow_audit is not None:
+            return
+        finalized = finalize_route_observation(
+            state.route_shadow,
+            original_question=question,
+            resolved_product_filters=(
+                state.active_filters if state.active_filters.get("normalized_name") else None
+            ),
+            session_product_filters=route_shadow_session_filters,
+            load_corpus_policies=load_corpus_policy_snapshots,
+            current_mode=_current_mode_for_shadow(
+                reason=reason,
+                response_mode=response_mode,
+            ),
+            current_scope=_current_scope_for_shadow(
+                state,
+                response_mode=response_mode,
+            ),
+            current_reason=reason,
+        )
+        state.route_shadow_audit = finalized.audit
+        if finalized.error is not None:
+            log.warning(
+                "qa_route_shadow_compile_error",
+                error_type=type(finalized.error).__name__,
+            )
 
     def _decline(
         maker: Callable[..., tuple[RagOutcome, AuditPayload]],
@@ -2442,6 +2561,8 @@ def ask_core(
             rj["retrieval"] = dict(state.retrieval_block)
         if route_extra:
             rj.update(route_extra)
+        _finalize_route_shadow(reason=reason, response_mode=response_mode)
+        _attach_route_shadow(state, rj)
         kw.setdefault("model_name", model_name)
         outcome, audit = maker(
             question=question,
@@ -2539,6 +2660,53 @@ def ask_core(
                     }
         return outcome, audit, _build_patch(outcome, filters=state.active_filters, route_json=rj)
 
+    if s.route_call_mode != "off":
+        if s.route_call_mode == "live":
+            log.warning("qa_route_live_reserved_shadow")
+        context_failures: list[str] = []
+        try:
+            route_shadow_session_filters = load_session_filters()
+        except Exception as exc:
+            context_failures.append("session_filters")
+            log.warning(
+                "qa_route_shadow_context_failed",
+                context="session_filters",
+                error_type=type(exc).__name__,
+            )
+        try:
+            route_shadow_recent_turns = load_recent_turns()
+        except Exception as exc:
+            route_shadow_recent_turns = []
+            context_failures.append("recent_turns")
+            log.warning(
+                "qa_route_shadow_context_failed",
+                context="recent_turns",
+                error_type=type(exc).__name__,
+            )
+        trusted_product = (
+            str(state.active_filters.get("normalized_name") or "").strip()
+            or str(route_shadow_session_filters.get("normalized_name") or "").strip()
+            or None
+        )
+        log.info("llm_prompt", role="router", **ROUTE_PROMPT.log_fields())
+        state.route_shadow = observe_route(
+            provider_factory=lambda: get_llm_provider(role="router"),
+            configured_model_name=current_model_name(role="router"),
+            configured_mode=s.route_call_mode,
+            question=question,
+            recent_turns=_route_history(route_shadow_recent_turns),
+            trusted_product_context=trusted_product,
+            max_tokens=s.route_call_max_tokens,
+        )
+        if context_failures:
+            state.route_shadow.audit["context_failures"] = context_failures
+        if state.route_shadow.error is not None:
+            log.warning(
+                "qa_route_shadow_failed",
+                outcome=state.route_shadow.audit.get("outcome"),
+                error_type=type(state.route_shadow.error).__name__,
+            )
+
     routed = _pre_retrieval_route(
         state,
         question=question,
@@ -2548,6 +2716,8 @@ def ask_core(
     )
     if not isinstance(routed, TurnState):
         return routed
+
+    _finalize_route_shadow(reason="retrieval", response_mode=state.response_mode)
 
     grouped = _retrieve_and_group(
         state,

@@ -44,6 +44,29 @@ def test_real_values_still_parse() -> None:
     assert s.qwen_embedding_model == "custom/model"
 
 
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_route_shadow_settings_fall_back_to_dark_defaults(blank: str) -> None:
+    s = _settings(
+        REGWATCH_ROUTE_CALL=blank,
+        REGWATCH_ROUTE_MAX_TOKENS=blank,
+    )
+
+    assert s.route_call_mode == "off"
+    assert s.route_call_max_tokens == 1200
+
+
+def test_route_shadow_settings_accept_staged_values_and_reject_typos() -> None:
+    assert (
+        _settings(REGWATCH_ROUTE_CALL="shadow", REGWATCH_ROUTE_MAX_TOKENS="1400").route_call_mode
+        == "shadow"
+    )
+    assert _settings(REGWATCH_ROUTE_CALL="live").route_call_mode == "live"
+    with pytest.raises(ValidationError):
+        _settings(REGWATCH_ROUTE_CALL="enabled")
+    with pytest.raises(ValidationError):
+        _settings(REGWATCH_ROUTE_MAX_TOKENS="200")
+
+
 def test_a_genuinely_invalid_dimension_still_fails() -> None:
     """Blank means 'unset'; garbage still means garbage."""
     with pytest.raises(ValidationError):

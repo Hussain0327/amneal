@@ -10,6 +10,7 @@ import re
 from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -151,6 +152,21 @@ class Settings(BaseSettings):
     # also on AND the request opts in. Alias so the prod flip is a REGWATCH_*
     # Fly secret like the prose flag.
     live_draft_enabled: bool = Field(default=False, validation_alias="REGWATCH_LIVE_DRAFT")
+    # Conversational route-call rollout. PR11b observes only: both ``shadow``
+    # and the reserved ``live`` value execute as shadow and cannot steer Ask.
+    # PR12 is the first change allowed to give ``live`` executable meaning.
+    route_call_mode: Literal["off", "shadow", "live"] = Field(
+        default="off", validation_alias="REGWATCH_ROUTE_CALL"
+    )
+    # Sized above the recorded ~761-token reasoning floor plus the small JSON
+    # body. Operators must still probe the actually served endpoint before
+    # enabling shadow; this remains configurable without a deploy.
+    route_call_max_tokens: int = Field(
+        default=1200,
+        ge=256,
+        le=SYNTH_MAX_TOKENS_CEILING,
+        validation_alias="REGWATCH_ROUTE_MAX_TOKENS",
+    )
     # OpenAI call surface: "responses" (default, GPT-5.x native) or "chat" (legacy
     # Chat Completions). The LLMProvider.complete() interface is identical either way.
     openai_api_mode: str = "responses"
@@ -231,6 +247,8 @@ class Settings(BaseSettings):
         # set to the empty string must read as OFF, not take the app down at
         # boot with a bool_parsing error.
         "prose_synthesis_enabled",
+        "route_call_mode",
+        "route_call_max_tokens",
         mode="before",
     )
     @classmethod

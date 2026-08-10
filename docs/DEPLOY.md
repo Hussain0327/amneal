@@ -444,7 +444,59 @@ cleanly (no failures, no invented URLs). This complements — does not
 replace — the external monitor: GitHub cron schedules can lag or pause on
 inactive repos.
 
-### 6.3 Refusal-threshold revalidation
+### 6.3 Route/scope shadow rollout (PR11b)
+
+This rollout measures the conversational router before it is allowed to change
+anything. The code default is `REGWATCH_ROUTE_CALL=off`; with `shadow`, the
+additional route decision and deterministic scope compile are recorded under
+`query_log.route_json.route_call`, while the existing product resolver,
+retrieval query/mode/filters, response, citations, and session update remain
+authoritative. The reserved value `live` is intentionally shadow-equivalent in
+PR11b and must not be treated as a promotion.
+
+Before enabling it, probe the actual Databricks endpoint's effective reasoning
+floor. The earlier qwen35-122b observation was about 761 reasoning tokens, so
+the committed default is 1200, but the served endpoint is the authority. Set a
+cap comfortably above its measured floor plus the small JSON body:
+
+```bash
+fly secrets set REGWATCH_ROUTE_CALL=shadow REGWATCH_ROUTE_MAX_TOKENS=1200 -a amneal
+```
+
+Start with a small traffic window and inspect `/metrics`:
+
+- `regwatch_route_shadow_calls_total{outcome=...}` separates `success`,
+  `provider_error`, `invalid`, and `request_error`;
+- `regwatch_route_shadow_failures_total` is the sum of unsuccessful calls; and
+- `regwatch_route_shadow_compilations_total{status=...}` separates successful,
+  failed, and unattempted deterministic scope compiles.
+
+Alert only after enough traffic to make the ratio meaningful: at least 20 calls
+in 15 minutes and
+`increase(regwatch_route_shadow_failures_total[15m]) /
+clamp_min(sum(increase(regwatch_route_shadow_calls_total[15m])), 1) > 0.02`.
+Also monitor Ask latency p95 and Databricks QPS: shadow adds one sequential model
+call per enabled turn even though it cannot change the answer.
+
+The promotion packet for owner checkpoint 3 must contain the joint
+`(mode, scope)` confusion matrix, failure rate, route latency p95, QPS headroom,
+and a manual review showing zero unsafe corpus authorizations. For #163, verify
+that the five corpus-wide rows propose/compile bounded `EXACT_CORPUS`, the
+beclomethasone control compiles `EXACT_SCOPED`, and the ambiguous generic BE
+question compiles clarification. None of those compiled results executes in
+this PR.
+
+Rollback is immediate and requires no deploy:
+
+```bash
+fly secrets unset REGWATCH_ROUTE_CALL REGWATCH_ROUTE_MAX_TOKENS -a amneal
+```
+
+A provider, request, parse, or catalog failure is audit-only and falls through
+to today's deterministic turn. `D1ResidencyError` remains deliberately
+fail-closed; never weaken that exception to improve the shadow success rate.
+
+### 6.4 Refusal-threshold revalidation
 
 `REFUSAL_SCORE_THRESHOLD` (default `0.30`) gates the `low_top_score` refusal in
 `grounded_qa.ask`: a question is refused when the best retrieved passage's cosine
@@ -516,7 +568,7 @@ and negative distributions. There is no gate and no auto-tune — over-tuning th
 refusal cutoff trades directly against INV safety, so it is an explicit
 operator decision.
 
-### 6.4 Staging + restore drill (monthly, ~30 min)
+### 6.5 Staging + restore drill (monthly, ~30 min)
 
 A backup you have never restored is a hope, not a backup.
 

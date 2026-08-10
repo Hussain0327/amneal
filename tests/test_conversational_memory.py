@@ -34,7 +34,15 @@ pytestmark = pytest.mark.invariants
 
 
 def _seed_turn(
-    session_id: str, *, q: str, a: str, status: str | None = "answer", order: int
+    session_id: str,
+    *,
+    q: str,
+    a: str,
+    status: str | None = "answer",
+    order: int,
+    filters: dict[str, object] | None = None,
+    audit_id: int | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> str:
     """Insert a completed (user, assistant) turn with explicit, ordered timestamps."""
     tid = f"turn-{order}"
@@ -58,6 +66,9 @@ def _seed_turn(
                 role="assistant",
                 content=a,
                 status=status,
+                filters_json=filters or {},
+                audit_id=audit_id,
+                metadata_json=metadata or {},
                 created_at=base + timedelta(seconds=1),
             )
         )
@@ -111,6 +122,72 @@ def test_get_recent_turns_excludes_current_and_non_answers() -> None:
     turns = get_recent_turns(sid, limit=9, exclude_turn_id=current)
     # refused + clarify dropped; current excluded; answer + summary kept, oldest-first.
     assert [t.question for t in turns] == ["Q1", "Q4"]
+
+
+def test_recent_product_scope_label_requires_persisted_filter_and_audit() -> None:
+    init_db()
+    sid = "sess-scope-label"
+    conv.ensure_session(sid)
+    _seed_turn(
+        sid,
+        q="What does the beclomethasone guidance require?",
+        a="A cited answer.",
+        order=1,
+        filters={"normalized_name": "beclomethasone dipropionate"},
+        audit_id=731,
+    )
+    _seed_turn(
+        sid,
+        q="A skip-audited answer",
+        a="No durable audit row.",
+        order=2,
+        filters={"normalized_name": "albuterol sulfate"},
+        audit_id=-1,
+    )
+
+    turns = get_recent_turns(sid, limit=3)
+
+    assert turns[0].scope_kind == "product"
+    assert turns[0].scope_audited is True
+    assert turns[0].audit_id == 731
+    assert turns[1].scope_kind == "none"
+    assert turns[1].scope_audited is False
+    assert turns[1].audit_id is None
+
+
+def test_shadow_corpus_guess_never_becomes_inheritable_history() -> None:
+    init_db()
+    sid = "sess-shadow-corpus-label"
+    conv.ensure_session(sid)
+    _seed_turn(
+        sid,
+        q="Across the inhalation guidances, define ISM",
+        a="The current deterministic no-product response.",
+        status="answer",
+        order=1,
+        audit_id=812,
+        metadata={
+            "route": {
+                "route_call": {
+                    "outcome": "success",
+                    "compiled_scope": {
+                        "kind": "corpus",
+                        "corpus_policy": "inhalation_psg",
+                    },
+                }
+            }
+        },
+    )
+
+    turn = get_recent_turns(sid, limit=1)[0]
+
+    # PR11b reads only executed, application-owned product filters. It never
+    # promotes advisory metadata into an audited scope. PR12 must add a
+    # distinct executed-corpus ledger before corpus inheritance can exist.
+    assert turn.scope_kind == "none"
+    assert turn.scope_audited is False
+    assert turn.corpus_policy is None
+    assert turn.audit_id is None
 
 
 def test_get_recent_turns_empty_and_bad_inputs() -> None:

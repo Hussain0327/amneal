@@ -92,6 +92,22 @@ class PriorTurn:
     question: str
     answer: str
     status: str | None
+    # Application-owned labels for the advisory route prompt. Product scope is
+    # derived from the persisted assistant filters and a real audit id. Corpus
+    # is deliberately never inferred from route-call shadow output; PR12 may
+    # populate it only after a corpus scope actually executes and is audited.
+    scope_kind: str = "none"
+    scope_audited: bool = False
+    corpus_policy: str | None = None
+    audit_id: int | None = None
+
+
+@dataclass(frozen=True)
+class _StoredMessage:
+    content: str
+    status: str | None
+    filters: dict[str, Any]
+    audit_id: int | None
 
 
 def get_recent_turns(
@@ -129,7 +145,19 @@ def get_recent_turns(
             # Extract plain fields WHILE the session is open — the ORM rows detach
             # and their attributes expire once the scope commits/closes, so all
             # column access must happen here, not in the folding loop below.
-            raw = [(m.turn_id, m.role, m.content or "", m.status) for m in rows]
+            raw = [
+                (
+                    m.turn_id,
+                    m.role,
+                    _StoredMessage(
+                        content=m.content or "",
+                        status=m.status,
+                        filters=_safe_filters(dict(m.filters_json or {})),
+                        audit_id=m.audit_id,
+                    ),
+                )
+                for m in rows
+            ]
     except Exception:
         # Conversational memory is an ergonomic aid, never required for
         # correctness -- degrade to no memory rather than fail the turn. But a
@@ -139,15 +167,15 @@ def get_recent_turns(
         return []
 
     # `raw` is newest-first; fold into turns keyed by turn_id, preserving order.
-    by_turn: dict[str, dict[str, tuple[str, str | None]]] = {}
+    by_turn: dict[str, dict[str, _StoredMessage]] = {}
     order: list[str] = []
-    for turn_id, role, content, status in raw:
+    for turn_id, role, stored in raw:
         if exclude_turn_id and turn_id == exclude_turn_id:
             continue
         if turn_id not in by_turn:
             by_turn[turn_id] = {}
             order.append(turn_id)
-        by_turn[turn_id].setdefault(role, (content, status))  # keep newest per role
+        by_turn[turn_id].setdefault(role, stored)  # keep newest per role
 
     turns: list[PriorTurn] = []
     for tid in order:  # newest-first
@@ -156,12 +184,26 @@ def get_recent_turns(
         assistant = slot.get("assistant")
         if user is None or assistant is None:
             continue
-        answer, a_status = assistant
+        answer, a_status = assistant.content, assistant.status
         # An answer/summary is the only kind of prior turn with a fact to thread;
         # None-status (older/legacy rows) is treated as an answer, not dropped.
         if (a_status or "answer") not in ("answer", "summary"):
             continue
-        turns.append(PriorTurn(question=user[0].strip(), answer=answer.strip(), status=a_status))
+        product_audited = bool(
+            assistant.audit_id is not None
+            and assistant.audit_id > 0
+            and assistant.filters.get("normalized_name")
+        )
+        turns.append(
+            PriorTurn(
+                question=user.content.strip(),
+                answer=answer.strip(),
+                status=a_status,
+                scope_kind="product" if product_audited else "none",
+                scope_audited=product_audited,
+                audit_id=assistant.audit_id if product_audited else None,
+            )
+        )
         if len(turns) >= limit:
             break
     turns.reverse()  # oldest-first for the prompt
