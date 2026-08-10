@@ -62,6 +62,11 @@ class LLMStreamChunk:
     delta: str = ""
     done: bool = False
     response: LLMResponse | None = None
+    # True = retroactive invalidation: a late close-delimiter revealed that
+    # earlier deltas may have been private reasoning. Consumers discard every
+    # delta received so far and start over; the terminal response is
+    # unaffected (it is always built from the full buffered scrub).
+    reset: bool = False
 
 
 def _usage_from(resp: Any, input_attr: str, output_attr: str) -> LLMUsage:
@@ -557,6 +562,92 @@ def _visible_gemma_text(text: str) -> str:
     return cleaned.replace("<|think|>", "").strip()
 
 
+class _StreamScrubber:
+    """Incremental twin of ``_visible_gemma_text`` for live draft streaming.
+
+    ``push()`` returns ``(visible_delta, retroactive_reset)``. It never emits
+    text inside a private reasoning block, never emits a tail that could
+    still grow into a delimiter split across wire chunks, and signals
+    ``reset=True`` on a stray close-delimiter (everything already emitted may
+    have been reasoning; the consumer discards it -- mirroring the buffered
+    scrubber's keep-only-after-the-last-close rule). ``flush()`` drops an
+    unterminated private block, mirroring the buffered scrubber's
+    conservative choice, and releases any held benign tail.
+    """
+
+    # Literal delimiter probes a held tail could still be a prefix of. The
+    # Gemma opener regex allows an optional trailing newline, so the literal
+    # opener itself is the longest prefix worth holding for.
+    _PROBES = ("<|channel>thought", "<think>", "</think>", "<channel|>", "<|think|>")
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._closer: str | None = None  # inside a private block when set
+
+    def _hold_len(self) -> int:
+        """Chars at the buffer tail that could still become a delimiter."""
+        limit = min(max(len(p) for p in self._PROBES), len(self._buf))
+        for size in range(limit, 0, -1):
+            tail = self._buf[-size:]
+            if any(p.startswith(tail) for p in self._PROBES):
+                return size
+        return 0
+
+    def push(self, chunk: str) -> tuple[str, bool]:
+        self._buf += chunk
+        visible: list[str] = []
+        reset = False
+        while True:
+            if self._closer is not None:
+                close = self._buf.find(self._closer)
+                if close < 0:
+                    # Keep only enough tail to complete the closer.
+                    keep = len(self._closer) - 1
+                    self._buf = self._buf[-keep:] if keep else ""
+                    return ("".join(visible), reset)
+                self._buf = self._buf[close + len(self._closer) :]
+                self._closer = None
+                continue
+            opener_match: re.Match[str] | None = None
+            opener_closer = ""
+            for start, closer in (
+                (_GEMMA_THOUGHT_START, "<channel|>"),
+                (_GEMMA_XML_THOUGHT_START, "</think>"),
+            ):
+                m = start.search(self._buf)
+                if m and (opener_match is None or m.start() < opener_match.start()):
+                    opener_match, opener_closer = m, closer
+            # Stray closers: everything before one is suspect (buffered rule).
+            stray_at = self._buf.find("<channel|>")
+            stray_len = len("<channel|>")
+            think_at = self._buf.lower().find("</think>")
+            if think_at != -1 and (stray_at == -1 or think_at < stray_at):
+                stray_at, stray_len = think_at, len("</think>")
+            if opener_match is not None and (stray_at == -1 or opener_match.start() < stray_at):
+                visible.append(self._buf[: opener_match.start()])
+                self._buf = self._buf[opener_match.end() :]
+                self._closer = opener_closer
+                continue
+            if stray_at != -1:
+                visible.clear()
+                reset = True
+                self._buf = self._buf[stray_at + stray_len :]
+                continue
+            break
+        hold = self._hold_len()
+        out = self._buf[: len(self._buf) - hold] if hold else self._buf
+        self._buf = self._buf[len(self._buf) - hold :] if hold else ""
+        visible.append(out.replace("<|think|>", ""))
+        return ("".join(visible), reset)
+
+    def flush(self) -> str:
+        if self._closer is not None:
+            self._buf = ""
+            return ""
+        out, self._buf = self._buf, ""
+        return out.replace("<|think|>", "")
+
+
 def _chat_content_text(content: Any) -> str:
     """Extract visible candidate text without accepting reasoning content parts."""
     if isinstance(content, str):
@@ -883,47 +974,79 @@ class DatabricksProvider:
             usage=_usage_from(resp, "prompt_tokens", "completion_tokens"),
         )
 
-    def _complete_stream(
+    def stream(
         self,
         messages: list[LLMMessage],
         *,
-        temperature: float,
-        max_tokens: int,
-    ) -> LLMResponse:
-        """Consume a stream into a private buffer, then expose only final-answer text.
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> Iterator[LLMStreamChunk]:
+        """True incremental streaming with an in-adapter reasoning scrubber.
 
-        Buffering is intentional: Gemma's opening/closing thought delimiters can
-        be split across arbitrary SSE chunks. Emitting candidate content before
-        seeing the closing delimiter could leak reasoning that cannot be
-        retracted.
+        Deltas are scrubbed by _StreamScrubber, so control/reasoning markup is
+        parsed out at this boundary and never reaches a consumer. The D1 check
+        binds on the FIRST event that reports ``model`` (owner decision
+        2026-08-10: deltas are NOT held waiting for late metadata; a stream
+        that never reports raises at the end exactly like complete()). After
+        the first yielded delta the buffered fallback is DISABLED -- a re-send
+        would paint the whole answer twice.
 
-        The D1 residency check runs HERE, on the raw reported value BEFORE the
-        `or self.model` substitution (the alias is allowlisted by construction,
-        so the collapsed value would launder a no-report stream) and BEFORE the
-        shape/truncation raises, mirroring complete(): a truncated answer from
-        an off-perimeter model is still an off-perimeter disclosure, and the
-        exact deployment this guard targets -- an alias repointed to a reasoning
-        model -- truncates on EVERY turn, so a check placed after the
-        finish_reason raise would never fire for it.
+        The terminal chunk's response is built from the full buffered scrub of
+        every raw part, so it stays byte-identical to the pre-streaming
+        implementation on every input.
         """
         client = self._client_or_create()
-        events = client.chat.completions.create(
-            **self._request_kwargs(
-                messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=True,
+        try:
+            events = client.chat.completions.create(
+                **self._request_kwargs(
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=True,
+                )
             )
-        )
+        except Exception:
+            # Endpoint without SSE/stream_options support; nothing yielded yet.
+            yield from _buffered_stream(
+                self, messages, temperature=temperature, max_tokens=max_tokens
+            )
+            return
+        scrub = _StreamScrubber()
         parts: list[str] = []
         usage = LLMUsage()
         finish_reason: Any = None
         last_event: Any = None
         served: str | None = None
+        d1_checked = False
+        yielded = False
         saw_choice = False
-        for event in events:
+        iterator = iter(events)
+        while True:
+            try:
+                event = next(iterator)
+            except StopIteration:
+                break
+            except D1ResidencyError:
+                raise
+            except Exception:
+                if yielded:
+                    # No re-send after first yield: a fallback would repaint
+                    # the full answer after a partial one.
+                    raise
+                yield from _buffered_stream(
+                    self, messages, temperature=temperature, max_tokens=max_tokens
+                )
+                return
             last_event = event
-            served = getattr(event, "model", None) or served
+            reported = getattr(event, "model", None)
+            if reported:
+                served = reported
+                if not d1_checked:
+                    # Raises D1ResidencyError pre-yield when the wire reports
+                    # early (the G1-recorded common case); a late report binds
+                    # here mid-stream instead of holding deltas.
+                    self._check_served_model(reported)
+                    d1_checked = True
             event_usage = _usage_from(event, "prompt_tokens", "completion_tokens")
             if event_usage.input_tokens is not None:
                 usage.input_tokens = event_usage.input_tokens
@@ -939,54 +1062,33 @@ class DatabricksProvider:
                 finish_reason = candidate_finish
             delta = getattr(choice, "delta", None)
             # Deliberately ignore delta.reasoning_content / reasoning / thinking.
-            parts.append(_chat_content_text(getattr(delta, "content", None)))
-
-        self._check_served_model(served)
+            raw = _chat_content_text(getattr(delta, "content", None))
+            parts.append(raw)
+            visible, reset = scrub.push(raw)
+            if reset:
+                yielded = True
+                yield LLMStreamChunk(reset=True)
+            if visible:
+                yielded = True
+                yield LLMStreamChunk(delta=visible)
+        tail = scrub.flush()
+        if tail:
+            yielded = True
+            yield LLMStreamChunk(delta=tail)
+        if not d1_checked:
+            self._check_served_model(served)  # raises under enforcement; logs otherwise
         if not saw_choice:
             raise RuntimeError("databricks chat stream returned no choices")
         self._raise_for_finish_reason(finish_reason)
-        return LLMResponse(
-            text=_visible_gemma_text("".join(parts)),
-            model=served or self.model,
-            raw=_safe_chat_raw(last_event, finish_reason=finish_reason),
-            usage=usage,
+        yield LLMStreamChunk(
+            done=True,
+            response=LLMResponse(
+                text=_visible_gemma_text("".join(parts)),
+                model=served or self.model,
+                raw=_safe_chat_raw(last_event, finish_reason=finish_reason),
+                usage=usage,
+            ),
         )
-
-    def stream(
-        self,
-        messages: list[LLMMessage],
-        *,
-        temperature: float = 0.0,
-        max_tokens: int = 1024,
-    ) -> Iterator[LLMStreamChunk]:
-        try:
-            resp = self._complete_stream(
-                messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-        except D1ResidencyError:
-            # Never falls back: the fallback below would re-send the analyst
-            # question to the very endpoint the guard exists to fence off.
-            # Nothing has been yielded yet, so nothing is painted then
-            # retracted -- the raise reaches grounded_qa's audited boundary.
-            raise
-        except Exception:
-            # Some custom Databricks endpoints do not implement SSE or
-            # stream_options. Since no candidate text has been yielded yet, a
-            # normal completion is a safe, duplicate-free user-visible fallback.
-            # complete() runs the same residency check, so falling back never
-            # skips the guard.
-            yield from _buffered_stream(
-                self,
-                messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            return
-        if resp.text:
-            yield LLMStreamChunk(delta=resp.text)
-        yield LLMStreamChunk(done=True, response=resp)
 
 
 # ---------- anthropic provider ----------

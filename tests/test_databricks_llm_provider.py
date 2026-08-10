@@ -337,7 +337,10 @@ def test_stream_buffers_split_thought_delimiters_and_accounts_for_usage() -> Non
 
     chunks = list(_provider(completions).stream([LLMMessage("user", "question")]))
 
-    assert [chunk.delta for chunk in chunks if not chunk.done] == ["Grounded answer."]
+    # True incremental streaming: each wire event that yields visible text
+    # produces its own delta (the "<|channel>tho" prefix of event 1 is held
+    # back as a possible delimiter start and folds into event 2's delta).
+    assert [chunk.delta for chunk in chunks if not chunk.done] == ["Grounded ", "answer."]
     terminal = chunks[-1]
     assert terminal.done is True
     assert terminal.response is not None
@@ -384,10 +387,11 @@ def test_stream_rejects_truncated_output() -> None:
     with pytest.raises(RuntimeError, match="finish_reason=length"):
         list(_provider(completions).stream([LLMMessage("user", "question")]))
 
-    # Known, pre-existing cost, pinned so it is visible: stream()'s SSE-fallback
-    # cannot tell truncation from "endpoint has no SSE", so a truncated turn
-    # pays for a SECOND full completion before the caller sees the refusal.
-    assert [call.get("stream", False) for call in completions.calls] == [True, False]
+    # Incremental streaming (2026-08-10): the "partial" delta is visible and
+    # yielded to the consumer BEFORE the truncation check runs, so the
+    # buffered-fallback re-send is correctly skipped -- resending would paint
+    # the whole answer a second time after a partial one. One upstream call.
+    assert [call.get("stream", False) for call in completions.calls] == [True]
 
 
 # ---------- reasoning budget (DATABRICKS_REASONING_EFFORT) ----------
