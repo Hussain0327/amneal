@@ -17,6 +17,7 @@ Scenario matrix (SNN test names):
   S17-S18, S29     test_sessions_cross_runtime.py session contract; S29 = NULL-owner
                                                   legacy-session adoption via /query
   S19-S21a, S23    test_query_stream.py           /query/stream frame grammar
+  S31, S31b        test_query_stream.py           live-draft frame grammar
   (relay parity)   test_query_relay_parity.py     GO_NATIVE_QUERY=false smoke
 Deletion-PR hardenings (docs/STEP5_INV_TEST_MAPPING.md gap list): S5 also pins
 owner-preservation on a hijack (GAP-4) and S18 the second-user fresh rate-limit
@@ -592,6 +593,18 @@ _FLAVOR_OVERRIDES: dict[str, dict[str, str]] = {
     # other fault stages) so both the native and relay paths must serve the
     # defined 503 busy contract instead of queueing.
     "saturate": {"REGWATCH_FAULT_INJECT": "saturate"},
+    # S31: both server halves of the live-draft dual gate on; echo streams its
+    # deterministic two-chunk prose so draft frames are wire-reachable with no
+    # external model. Fenced from prod by REGWATCH_ALLOW_TEST_PROVIDERS.
+    "live_draft": {"REGWATCH_PROSE_SYNTHESIS": "1", "REGWATCH_LIVE_DRAFT": "1"},
+    # S31b: refusal under the live-draft gate (echo emits the prose
+    # NO_EVIDENCE sentinel, which _stream_structured's prefix hold must
+    # swallow entirely -- a refusal never paints as a draft).
+    "live_draft_refusal": {
+        "REGWATCH_PROSE_SYNTHESIS": "1",
+        "REGWATCH_LIVE_DRAFT": "1",
+        "REGWATCH_ECHO_FORCE_REFUSAL": "1",
+    },
 }
 
 # The relay has NO response timeout by design (a hung upstream would hang an
@@ -1018,6 +1031,16 @@ def forced_refusal_stack(harness: Harness) -> Stack:
 @pytest.fixture
 def fault_retrieve_stack(harness: Harness) -> Stack:
     return harness.stack("fault_retrieve")
+
+
+@pytest.fixture
+def live_draft_stack(harness: Harness) -> Stack:
+    return harness.stack("live_draft")
+
+
+@pytest.fixture
+def live_draft_refusal_stack(harness: Harness) -> Stack:
+    return harness.stack("live_draft_refusal")
 
 
 @pytest.fixture

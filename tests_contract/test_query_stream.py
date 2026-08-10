@@ -209,3 +209,74 @@ def test_s23_synthesis_refusal_streams_zero_tokens_and_lands_as_model_refusal(
     for key in ("answer", "refused", "status", "reason", "citations"):
         assert result[key] == blocking[key], f"stream/blocking divergence on {key!r}"
     assert query_log_count() == 2
+
+
+def test_s31_live_draft_frame_grammar(
+    live_draft_stack: Stack, edge_login: Callable[..., EdgeClient]
+) -> None:
+    """The dual-gated draft channel over the real edge: opted-in turns stream
+    provisional ``draft`` frames BEFORE the post-audit replay, the terminal
+    grammar is unchanged (one ``result``, last), exactly one audit row lands,
+    and the same server emits ZERO draft frames without the request opt-in.
+    Go relays the new event name byte-transparently -- this test only passes
+    if the proxy needed no change."""
+    seed_answerable_corpus()
+    client = edge_login(live_draft_stack)
+
+    rows_before = query_log_count()
+    status, content_type, sse = _stream_to_eof(
+        client, {"question": ANSWERABLE_QUESTION, "live_draft": True}
+    )
+    assert status == 200
+    assert "text/event-stream" in content_type
+
+    events = sse.events()
+    assert set(events) <= {"status", "draft", "draft_reset", "token", "result"}
+    assert events.count("draft") >= 1, "the opted-in turn streams provisional draft frames"
+    assert events.count("token") >= 1, "the post-audit replay still rides beside the draft"
+    result = sse.single_result()  # exactly one result frame, and it is last
+
+    # Draft frames precede every token frame: the live channel fires during
+    # synthesis, the replay only after the audit write.
+    assert max(i for i, e in enumerate(events) if e == "draft") < events.index("token")
+    for data in sse.data_for("draft"):
+        assert set(json.loads(data).keys()) == {"delta"}
+    # Drafts are the RAW prose (echo's [n]-marker form), never the rendered
+    # answer: the gate rewrites markers, so the draft text differs from the
+    # validated answer while the replay reassembles to it exactly.
+    drafted = "".join(json.loads(d)["delta"] for d in sse.data_for("draft"))
+    assert drafted, "at least one non-empty draft delta"
+    replayed = "".join(json.loads(d)["delta"] for d in sse.data_for("token"))
+    assert replayed == result["answer"]
+    assert result["status"] == "answer"
+    assert result["draft_withdrawn"] is None
+    assert query_log_count() == rows_before + 1, "exactly one audit row per streamed turn"
+
+    # Same flag-on server, NO request opt-in: zero draft frames, S19 grammar.
+    _, _, sse2 = _stream_to_eof(client, {"question": ANSWERABLE_QUESTION})
+    assert "draft" not in sse2.events()
+    assert sse2.single_result()["draft_withdrawn"] is None
+
+
+def test_s31b_live_draft_refusal_paints_nothing(
+    live_draft_refusal_stack: Stack, edge_login: Callable[..., EdgeClient]
+) -> None:
+    """A refusal under the live-draft gate: the sentinel prefix hold swallows
+    the whole completion, so the wire carries ZERO draft frames and ZERO token
+    frames -- a refusal never paints and then vanishes -- and no withdrawal is
+    declared because nothing was shown."""
+    seed_answerable_corpus()
+    client = edge_login(live_draft_refusal_stack)
+
+    status, _, sse = _stream_to_eof(client, {"question": ANSWERABLE_QUESTION, "live_draft": True})
+    assert status == 200
+    events = sse.events()
+    assert "draft" not in events
+    assert "token" not in events
+    result = sse.single_result()
+    assert result["refused"] is True
+    assert result["answer"] == REFUSAL_TEXT
+    assert result["draft_withdrawn"] is None
+    # No fragment of the refusal appears before the result frame.
+    pre_result = "".join(d for e, d in sse.frames if e != "result")
+    assert REFUSAL_TEXT[:15] not in pre_result
