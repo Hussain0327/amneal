@@ -1,4 +1,4 @@
-"""Dark route contract tests: classification only, no runtime caller."""
+"""Route contract tests: strict advisory output, never executable model scope."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
+from regwatch.generate.llm import EchoLLMProvider
 from regwatch.generate.prompt_identity import identify_prompt
 from regwatch.generate.route import (
     ROUTE_PROMPT,
@@ -217,3 +218,39 @@ def test_enum_values_are_the_closed_route_vocabulary() -> None:
         "inherit",
         "unknown",
     }
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_mode", "expected_scope"),
+    [
+        ("Hello, can you help me?", "converse", "unknown"),
+        (
+            "Across the FDA inhalation product-specific guidances, how is ISM defined?",
+            "lookup",
+            "corpus",
+        ),
+        (
+            "What does the beclomethasone dipropionate guidance require?",
+            "lookup",
+            "product",
+        ),
+        ("What are the bioequivalence requirements?", "lookup_clarify", "unknown"),
+    ],
+)
+def test_echo_route_sentinel_round_trips_the_strict_schema(
+    question: str,
+    expected_mode: str,
+    expected_scope: str,
+) -> None:
+    request = build_route_request(question=question)
+
+    response = EchoLLMProvider().complete(
+        request.messages,
+        temperature=0.0,
+        max_tokens=1200,
+        response_format="json",
+    )
+    decision = parse_route_decision(response.text, request)
+
+    assert decision.mode.value == expected_mode
+    assert decision.scope_hint.value == expected_scope

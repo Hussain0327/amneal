@@ -16,6 +16,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from regwatch.api import main
+from regwatch.store.db import session_scope
+from regwatch.store.models import QueryLog
 from tests.conftest import create_user, session_client
 
 if TYPE_CHECKING:
@@ -125,6 +127,52 @@ def test_metrics_empty_query_log_exposes_zero() -> None:
     body = _anon().get("/metrics").text
     assert "regwatch_queries_total 0" in body
     assert "regwatch_queries_refused_total 0" in body
+    assert 'regwatch_route_shadow_calls_total{outcome="success"} 0' in body
+    assert "regwatch_route_shadow_failures_total 0" in body
+
+
+def test_metrics_counts_nested_route_shadow_outcomes_and_compilations() -> None:
+    with session_scope() as session:
+        session.add_all(
+            [
+                QueryLog(
+                    mode="qa",
+                    query_text="Across inhalation PSGs, define ISM",
+                    answer_text="Existing no-product response",
+                    refused=True,
+                    status="refused",
+                    route_json={
+                        "route_call": {
+                            "outcome": "success",
+                            "compile_status": "success",
+                        }
+                    },
+                    model_name="route-model",
+                ),
+                QueryLog(
+                    mode="qa",
+                    query_text="Ambiguous question",
+                    answer_text="Existing clarification",
+                    refused=False,
+                    status="clarify",
+                    route_json={
+                        "route_call": {
+                            "outcome": "invalid",
+                            "compile_status": "not_attempted",
+                        }
+                    },
+                    model_name="route-model",
+                ),
+            ]
+        )
+
+    body = _anon().get("/metrics").text
+
+    assert 'regwatch_route_shadow_calls_total{outcome="success"} 1' in body
+    assert 'regwatch_route_shadow_calls_total{outcome="invalid"} 1' in body
+    assert "regwatch_route_shadow_failures_total 1" in body
+    assert 'regwatch_route_shadow_compilations_total{status="success"} 1' in body
+    assert 'regwatch_route_shadow_compilations_total{status="not_attempted"} 1' in body
 
 
 def test_metrics_degrades_to_zero_on_db_error(monkeypatch: pytest.MonkeyPatch) -> None:

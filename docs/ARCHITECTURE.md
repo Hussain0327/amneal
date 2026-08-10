@@ -358,7 +358,10 @@ which application code owns every safety decision and every branch writes exactl
 one audit row. Every healthy, valid Ask message gets exactly one AI role and
 contract: either grounded synthesis or constrained guidance, never both. The
 existing bounded retry may repeat that same structured completion after a
-truncation, but it never crosses roles.
+truncation, but it never crosses roles. The default-off PR11b route shadow is
+the sole instrumentation exception: while explicitly enabled it makes one
+additional advisory classifier call, records it, and leaves this authoritative
+pipeline byte-for-byte in control.
 
 ### Flow
 
@@ -419,6 +422,34 @@ Weak retrieved text is supplied to neither contract: below-threshold passages
 stay in retrieval/audit data only. A synthesis failure also does not trigger a
 second model role. This preserves the one-turn authority boundary and prevents a
 real but irrelevant citation from laundering an unsupported claim.
+
+### Route/scope shadow (PR11b; default off)
+
+`REGWATCH_ROUTE_CALL=shadow` observes the proposed conversation-first router
+without granting it authority. After caller filters are canonicalized, one
+bounded `router` call proposes `standalone_question`, `mode`, and `scope_hint`.
+Application code then compiles that hint against the existing deterministic
+resolver/session state and an allowlisted current-version corpus catalog. The
+result is written only to `route_json["route_call"]`; the retrieval question,
+filters, retrieval mode, status, response copy, citations, and session patch all
+continue through the existing path.
+
+The model cannot emit filters, document IDs, version IDs, or an executable
+mode. The initial `inhalation_psg` catalog expansion retains each
+`(doc_id, version_id, appl_no, short_name)` association and fails closed if the
+set is empty, stale, unbounded, or missing provenance. Even a successfully
+compiled `EXACT_CORPUS` remains observational in PR11b: a corpus-wide question
+still reaches today's `no_product` branch and never retrieves. Corpus scope is
+not persisted to conversation history, so it cannot be inherited from a shadow
+guess or overwrite the active product.
+
+`off` makes no call and preserves the prior audit shape. `live` is a reserved
+configuration value but remains effective `shadow` until PR12. Provider,
+request, parse, and catalog failures are counted and fail open to the existing
+turn; `D1ResidencyError` is deliberately re-raised and remains fail closed. A
+`converse_guard_probe` records the broad materiality trigger rate on
+converse-classified inputs so PR15 can be designed from traffic rather than
+guesswork; it has no enforcement effect here.
 
 ### Why entity resolution precedes retrieval
 
@@ -806,7 +837,9 @@ form, clarify) that backstops any caller who bypassed the resolver.
 - **Token/cost accounting:** `query_log.input_tokens` / `output_tokens` /
   `cost_usd` capture the turn's single Ask model completion (synthesizer or
   guidance planner); `estimate_cost_usd` prices it from a settings table,
-  leaving the column `NULL` rather than guessing.
+  leaving the column `NULL` rather than guessing. While route shadow is enabled,
+  its separate model/usage/cost/latency fields live under
+  `route_json["route_call"]` and never replace the authoritative turn totals.
 - **Runbook:** rollback one-liner, restore drill, and operations notes live in
   [`DEPLOY.md`](DEPLOY.md) §6.
 - **Docker:** the CRA template `.docx` is gitignored (internal), so it is never
@@ -870,6 +903,8 @@ for the annotated surface. The load-bearing knobs:
 | `D1_ENFORCED` / `D1_ALLOWED_LLM_MODELS` | Residency tripwires: boot guard on half-migrated config + per-response served-model check. List BOTH the UC alias and the served model id |
 | `ROUTER_MODEL` / `SYNTHESIZER_MODEL` / `EXTRACTOR_MODEL` | OpenAI role-specific models (cheap classifier, capable synthesizer/extractor) |
 | `SYNTHESIZER_MAX_TOKENS` (3000) | Synthesis output cap, buffered and streamed alike; a reasoning model's thought and answer share it |
+| `REGWATCH_ROUTE_CALL` (`off`) | PR11b route/scope observation: `shadow` records one advisory call; reserved `live` is still shadow-equivalent until PR12 and cannot steer retrieval or response behavior |
+| `REGWATCH_ROUTE_MAX_TOKENS` (1200) | Route-call budget; probe the served reasoning floor before enabling shadow and keep the cap above that floor plus the strict JSON body |
 | `VECTOR_TOP_K` (50) / `RERANK_TOP_K` (8) / `RERANKER_ENABLED` (false) | Two-stage retrieval sizing |
 | `REFUSAL_SCORE_THRESHOLD` (0.30) | The refuse-over-guess line (INV-2) |
 | `AUTH_COOKIE_SECURE` / `AUTH_SESSION_TTL_HOURS` / `RATE_LIMIT_PER_MINUTE` | Auth + abuse controls |

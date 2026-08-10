@@ -533,25 +533,40 @@ def ready(response: Response) -> dict[str, Any]:
 # ---------- /metrics ----------
 def _query_log_counters() -> dict[str, int]:
     """Aggregate query_log into counters for /metrics in ONE grouped query (no
-    N+1). Keys: total, refused, and per-mode totals (qa/assemble/whitepaper/...).
+    N+1). Keys: total, refused, per-mode totals, and route-shadow outcomes.
     A DB error yields an empty dict so /metrics degrades to the static help/type
     lines rather than 500-ing the scrape.
     """
     counters: dict[str, int] = {}
     try:
         with session_scope() as s:
-            for mode, refused, n in s.execute(
+            route_outcome = col(QueryLog.route_json)["route_call"]["outcome"].as_string()
+            compile_status = col(QueryLog.route_json)["route_call"]["compile_status"].as_string()
+            for mode, refused, shadow_outcome, shadow_compile, n in s.execute(
                 sa_select(
                     col(QueryLog.mode),
                     col(QueryLog.refused),
+                    route_outcome,
+                    compile_status,
                     func.count(),
-                ).group_by(col(QueryLog.mode), col(QueryLog.refused))
+                ).group_by(
+                    col(QueryLog.mode),
+                    col(QueryLog.refused),
+                    route_outcome,
+                    compile_status,
+                )
             ):
                 count = int(n)
                 counters["total"] = counters.get("total", 0) + count
                 if refused:
                     counters["refused"] = counters.get("refused", 0) + count
                 counters[f"mode:{mode}"] = counters.get(f"mode:{mode}", 0) + count
+                if shadow_outcome:
+                    key = f"route_shadow:{shadow_outcome}"
+                    counters[key] = counters.get(key, 0) + count
+                if shadow_compile:
+                    key = f"route_compile:{shadow_compile}"
+                    counters[key] = counters.get(key, 0) + count
     except Exception as exc:
         log.warning("metrics_query_failed", error_type=type(exc).__name__)
         return {}
@@ -585,6 +600,29 @@ def _render_prometheus(counters: dict[str, int]) -> str:
         "# TYPE regwatch_queries_refused_total counter",
         f"regwatch_queries_refused_total {refused}",
     ]
+    route_outcomes = ("success", "provider_error", "invalid", "request_error")
+    lines += [
+        "# HELP regwatch_route_shadow_calls_total Audited route-shadow calls by outcome.",
+        "# TYPE regwatch_route_shadow_calls_total counter",
+    ]
+    for outcome in route_outcomes:
+        value = counters.get(f"route_shadow:{outcome}", 0)
+        lines.append(f'regwatch_route_shadow_calls_total{{outcome="{outcome}"}} {value}')
+    failures = sum(
+        counters.get(f"route_shadow:{outcome}", 0)
+        for outcome in route_outcomes
+        if outcome != "success"
+    )
+    lines += [
+        "# HELP regwatch_route_shadow_failures_total Audited unsuccessful route-shadow calls.",
+        "# TYPE regwatch_route_shadow_failures_total counter",
+        f"regwatch_route_shadow_failures_total {failures}",
+        "# HELP regwatch_route_shadow_compilations_total Route-shadow scope compilations by status.",
+        "# TYPE regwatch_route_shadow_compilations_total counter",
+    ]
+    for status in ("success", "error", "not_attempted"):
+        value = counters.get(f"route_compile:{status}", 0)
+        lines.append(f'regwatch_route_shadow_compilations_total{{status="{status}"}} {value}')
     return "\n".join(lines) + "\n"
 
 

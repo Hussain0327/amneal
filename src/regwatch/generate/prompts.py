@@ -440,16 +440,22 @@ def generation_prompt_manifest() -> dict[str, dict[str, str]]:
     # Imported lazily to avoid a module cycle: guidance builds its identity from
     # the generated JSON Schema as well as these prompt templates.
     from regwatch.generate.guidance import QUERY_GUIDANCE_PROMPT
+    from regwatch.generate.route import ROUTE_PROMPT
 
-    return {
-        identity.prompt_id: identity.as_dict()
-        for identity in (
-            # Flag-active: the manifest describes what the deployment SERVES,
-            # so scorecards and eval artifacts stamp the identity that actually
-            # produced their answers.
-            active_grounded_qa_prompt(),
-            QUERY_GUIDANCE_PROMPT,
-            BE_EXTRACTION_PROMPT,
-            CHANGE_SUMMARY_PROMPT,
-        )
-    }
+    identities = [
+        # Flag-active: the manifest describes what the deployment SERVES,
+        # so scorecards and eval artifacts stamp the identity that actually
+        # produced their answers.
+        active_grounded_qa_prompt(),
+        QUERY_GUIDANCE_PROMPT,
+        BE_EXTRACTION_PROMPT,
+        CHANGE_SUMMARY_PROMPT,
+    ]
+    # PR11a kept the route prompt eval-only because no runtime caller existed.
+    # Once shadow is enabled it is a served prompt and belongs in the manifest,
+    # while the default-off manifest stays byte-compatible with the prior one.
+    from config.settings import get_settings
+
+    if get_settings().route_call_mode != "off":
+        identities.append(ROUTE_PROMPT)
+    return {identity.prompt_id: identity.as_dict() for identity in identities}

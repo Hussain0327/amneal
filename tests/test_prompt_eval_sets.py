@@ -90,6 +90,23 @@ def test_prompt_eval_manifest_fingerprints_the_dark_route_contract() -> None:
     assert eval_manifest["regwatch.route"] == ROUTE_PROMPT.as_dict()
 
 
+def test_served_manifest_adds_route_identity_only_while_shadow_is_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REGWATCH_ROUTE_CALL", "shadow")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
+    try:
+        served = generation_prompt_manifest()
+        eval_manifest = prompt_eval._prompt_manifest()
+
+        assert served["regwatch.route"] == ROUTE_PROMPT.as_dict()
+        assert eval_manifest == served
+    finally:
+        cs.get_settings.cache_clear()
+
+
 def test_manifest_reports_the_flag_active_prose_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

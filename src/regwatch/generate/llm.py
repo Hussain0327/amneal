@@ -181,6 +181,7 @@ class EchoLLMProvider:
         is_guidance = any(
             m.role == "system" and "[REGWATCH_QUERY_GUIDANCE_V1]" in m.content for m in messages
         )
+        is_route = any(m.role == "system" and "[REGWATCH_ROUTE_V1]" in m.content for m in messages)
         # F19: the v6 prose synthesizer is keyed on its system sentinel, like
         # the guidance branch -- NOT on marker-shape + response_format, which
         # would misfire on the deficiency chat_completion seam.
@@ -197,6 +198,64 @@ class EchoLLMProvider:
         if response_format == "json":
             if self._flag("REGWATCH_ECHO_FORCE_MALFORMED"):
                 return LLMResponse(text="not json at all {", model="echo", usage=usage)
+            if is_route:
+                # Deterministic local/contract behavior for the advisory route
+                # schema. Lazy imports avoid the route -> llm module cycle.
+                try:
+                    from regwatch.retrieve.scope import detect_explicit_corpus_policy
+
+                    context = json.loads(last_user)
+                    question = str(context["untrusted_question"])
+                    trusted_product = str(context.get("trusted_product_context") or "").strip()
+                    recent_turns = list(context.get("recent_turns") or [])
+                    allowed_policies = set(context.get("allowed_corpus_policies") or [])
+                    lowered = question.lower()
+                    prior = recent_turns[-1] if recent_turns else None
+                    standalone = question
+                    product_hint: str | None = None
+                    corpus_policy_hint: str | None = None
+                    if any(
+                        word in lowered for word in ("hello", "hi ", "help me")
+                    ) and "guidance" not in lowered.replace("guidance question", ""):
+                        mode = "converse"
+                        scope_hint = "unknown"
+                    elif detect_explicit_corpus_policy(question) is not None:
+                        mode = "lookup"
+                        scope_hint = "corpus"
+                        corpus_policy_hint = "inhalation_psg"
+                        if corpus_policy_hint not in allowed_policies:
+                            return LLMResponse(text="{}", model="echo", usage=usage)
+                    elif (
+                        isinstance(prior, dict)
+                        and prior.get("scope_audited") is True
+                        and prior.get("scope_kind") in {"product", "corpus"}
+                    ):
+                        mode = "lookup"
+                        scope_hint = "inherit"
+                        if trusted_product and prior.get("scope_kind") == "product":
+                            standalone = f"{trusted_product}: {question}"
+                    elif trusted_product or "beclomethasone" in lowered:
+                        mode = "lookup"
+                        scope_hint = "product"
+                        product_hint = trusted_product or "beclomethasone dipropionate"
+                    else:
+                        mode = "lookup_clarify"
+                        scope_hint = "unknown"
+                except (json.JSONDecodeError, KeyError, TypeError, IndexError):
+                    return LLMResponse(text="{}", model="echo", usage=usage)
+                return LLMResponse(
+                    text=json.dumps(
+                        {
+                            "standalone_question": standalone,
+                            "mode": mode,
+                            "scope_hint": scope_hint,
+                            "product_hint": product_hint,
+                            "corpus_policy_hint": corpus_policy_hint,
+                        }
+                    ),
+                    model="echo",
+                    usage=usage,
+                )
             if is_guidance:
                 # Test/local parity for the constrained guidance planner. The
                 # user message is the exact JSON context built by guidance.py;

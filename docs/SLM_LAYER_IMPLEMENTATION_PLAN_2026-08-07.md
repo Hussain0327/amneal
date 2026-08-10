@@ -366,7 +366,10 @@ PR11b -- route shadow logging, flag off.
   guidance's ValueError vocabulary.
 - llm.py echo: route branch (sentinel-keyed) returning valid route JSON.
 - config/settings.py: route_call_mode off|shadow|live (env
-  REGWATCH_ROUTE_CALL, default off).
+  REGWATCH_ROUTE_CALL, default off) and a separately configurable bounded
+  `REGWATCH_ROUTE_MAX_TOKENS` (default 1200). In PR11b both `shadow` and the
+  reserved `live` value have effective mode `shadow`; only PR12 may make
+  `live` executable.
 - grounded_qa.py shadow: ONE bounded role="router" call after filter
   canonicalization: response_format="json", D1ResidencyError re-raised
   FIRST before any degrade, other failures logged-and-ignored BUT
@@ -377,20 +380,35 @@ PR11b -- route shadow logging, flag off.
   reasoning tokens; reasoning_effort is sent on every role,
   llm.py:742-750) and set the cap comfortably above floor + JSON body;
   a mis-budgeted cap yields a quietly all-failure shadow week.
-- Result written to route_json["route_call"] = {prompt, mode, scope_hint,
-  standalone_question, agrees_with_mode, agrees_with_scope, latency_ms} -- a nested new
-  top-level key; the single route_json["prompt"] identity per row is
-  untouched. Contract env keeps shadow off; the key-set pin update ships
-  in the PR that turns it on there (PR12b).
+- A successful hint is run through the PR11a deterministic compiler only for
+  observation. The initial application-owned `inhalation_psg` catalog policy
+  expands to the latest version of every matching document and retains each
+  `(doc_id, version_id, appl_no, short_name)` association. Empty, unbounded,
+  stale, or incomplete membership compiles closed and is logged; it cannot
+  steer retrieval.
+- Result written to route_json["route_call"] = {prompt, configured_mode,
+  effective_mode, outcome, model, usage/cost, mode, scope_hint,
+  standalone_question, compiled_scope, current_mode, current_scope,
+  current_reason, agrees_with_mode, agrees_with_scope, latency_ms} -- a nested
+  new top-level key; failures carry a stable reason/type but never raw model
+  output. The single route_json["prompt"] identity per row is untouched.
+  Contract env keeps shadow off; the key-set pin update ships in the PR that
+  turns it on there (PR12b).
 - Eval: prompt_sets/route.jsonl + _run_route runner + closed-set update;
   score the joint mode/scope confusion matrix, not mode alone.
-- Tests: new tests/test_route_call.py -- parse vocabulary, allowlist
-  rejection, sentinel round-trip, D1 re-raise, shadow-never-overrides,
-  failure-counted. Size M.
+- Tests: tests/test_route_contract.py plus new tests/test_route_shadow.py and
+  tests/test_scope_catalog.py -- parse vocabulary, allowlist rejection,
+  sentinel round-trip, D1 re-raise, provider-construction/call fail-open,
+  corpus provenance validation, shadow-never-overrides, original-query
+  retrieval parity, no product-session overwrite, and failure-counted. Size M.
 - Ops (no PR): enable shadow via Fly secret on a traffic sample;
-  collect joint mode/scope-vs-gate agreement + QPS/latency. ALSO logged
-  during shadow (finding F5): the would-be converse-guard materiality
-  trigger rate on converse-shaped turns, so PR15's guard is designed
+  collect joint mode/scope-vs-gate agreement + QPS/latency. `/metrics` exposes
+  `regwatch_route_shadow_calls_total`,
+  `regwatch_route_shadow_failures_total`, and
+  `regwatch_route_shadow_compilations_total`; alert when the 15-minute failure
+  ratio exceeds 2% after at least 20 calls. `converse_guard_probe` also logs
+  the broad materiality trigger/token on converse-shaped turns (finding F5),
+  so PR15's guard is designed
   against measured data, not the deliberately-broad lexicon's economics.
 
 > OWNER CHECKPOINT 3 -- route promotion. Evidence: joint mode/scope confusion

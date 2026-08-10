@@ -457,11 +457,12 @@ The eval was RED on the real corpus (`recall@8=0.667, citation_precision=0.000, 
 
 ## Conversation-first routing with application-validated scope (Aug 10 2026)
 
-- **Explicit bounded corpus questions are supported.** A user may ask across
-  the inhalation PSG corpus without naming one drug. This is not a
-  search-everything escape hatch: corpus intent must be positive, map to an
+- **The accepted design supports explicit bounded corpus questions.** A user
+  may ask across the inhalation PSG corpus without naming one drug. This is not
+  a search-everything escape hatch: corpus intent must be positive, map to an
   allowlisted corpus policy, and expand to a non-empty bounded set of current
-  document versions before retrieval can execute as `EXACT_CORPUS`.
+  document versions before retrieval can execute as `EXACT_CORPUS`. Execution
+  remains deferred to PR12; the PR11b stage below only measures the proposal.
 - **The model proposes; the application authorizes.** The route contract may
   return a standalone question, conversational mode, scope hint, product hint,
   and allowlisted corpus-policy hint. It cannot return filters, document IDs,
@@ -483,3 +484,9 @@ The eval was RED on the real corpus (`recall@8=0.667, citation_precision=0.000, 
   application provenance must survive. Duplicate capping remains deferred
   unless those executed traces show duplicate members displacing required
   evidence from the top eight.
+- **PR11b is observation only.** `REGWATCH_ROUTE_CALL` defaults to `off`.
+  `shadow` makes one bounded route call and deterministically compiles its hint
+  for audit, but neither the standalone rewrite nor compiled scope is read by
+  retrieval, response rendering, or session updates. Even the reserved `live`
+  value is forced to effective `shadow` until PR12. Non-residency failures are
+  logged, counted, and ignored; a D1 residency violation stays fail closed.
