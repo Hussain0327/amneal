@@ -719,6 +719,11 @@ class QueryResponse(BaseModel):
     # UI renders them as plain pills, never citation chips. Never carries passage
     # text/score; refused/citations are unaffected (the refusal contract holds).
     related: list[ClarifyOptionOut] = []
+    # Set only on /query/stream turns that painted at least one provisional
+    # draft frame which the gate then withdrew (refuse/clarify/error/meta/
+    # scope_warning) or partially dropped. The client keys its withdrawal
+    # note on this server-declared value -- never on text diffing.
+    draft_withdrawn: str | None = None
 
 
 def _authorize_session_access(session_id: str, user_id: str) -> None:
@@ -992,6 +997,7 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
             queue.put_nowait(("error", None))
 
     worker = asyncio.create_task(_run())
+    draft_frames_sent = False
     try:
         yield _sse_event("status", {"text": "Consulting the corpus…"})
         while True:
@@ -1014,6 +1020,7 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
                 yield _sse_event("token", {"delta": payload})
                 continue
             if kind == "draft":
+                draft_frames_sent = True
                 yield _sse_event("draft", {"delta": payload})
                 continue
             if kind == "draft_reset":
@@ -1027,6 +1034,13 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
                 except HTTPException:
                     log.warning("query_stream_missing_session_metadata")
                     return  # close without a result frame -> client falls back
+                if draft_frames_sent:
+                    from regwatch.generate.turn_gate import PARTIAL_DROP_DISCLOSURE
+
+                    if response.status not in ("answer", "summary"):
+                        response.draft_withdrawn = response.status
+                    elif PARTIAL_DROP_DISCLOSURE in response.answer:
+                        response.draft_withdrawn = "partial"
                 yield f"event: result\ndata: {response.model_dump_json()}\n\n"
                 return
             # kind == "error": close without a result frame -> client falls back.

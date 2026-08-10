@@ -7,6 +7,7 @@ operates on the COMPLETE text; flag-off turns are byte-identical to today.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 
 import pytest
@@ -153,8 +154,38 @@ def test_query_stream_emits_draft_frames_only_when_dual_gated(
         events = [e for e, _ in frames]
         assert "draft" in events
         assert events[-1] == "result"
+        result_data = next(d for e, d in frames if e == "result")
+        assert json.loads(result_data)["draft_withdrawn"] is None
         # Opt-out request on the same flag-on server: zero draft frames.
         frames2 = _parse_sse(_stream(client, _QUESTION).text)
         assert "draft" not in [e for e, _ in frames2]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_result_carries_draft_withdrawn_when_a_painted_draft_dies(
+    monkeypatch: pytest.MonkeyPatch, prose_mode: None
+) -> None:
+    """A stub that streams fluent prose which the gate then REFUSES (its one
+    citation is fabricated) must stamp draft_withdrawn='refused' on the result
+    frame -- and a clean answer turn must stamp nothing."""
+    from tests.conftest import create_user, session_client
+    from tests.test_query_stream import _parse_sse, _stream
+
+    monkeypatch.setenv("REGWATCH_LIVE_DRAFT", "1")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
+    _seed_corpus(_CORPUS)
+    _use(monkeypatch, _StreamingStub("A fabricated dose claim [7]."))
+    client = session_client(create_user())
+    try:
+        frames = _parse_sse(_stream(client, _QUESTION, live_draft=True).text)
+        events = [e for e, _ in frames]
+        assert "draft" in events  # the fluent draft painted
+        result_data = next(d for e, d in frames if e == "result")
+        result = json.loads(result_data)
+        assert result["refused"] is True
+        assert result["draft_withdrawn"] == "refused"
     finally:
         client.__exit__(None, None, None)

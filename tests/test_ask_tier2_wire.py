@@ -279,7 +279,9 @@ def test_answer_round_trips_audit_id(monkeypatch: pytest.MonkeyPatch) -> None:
         # PR-1 promise: the structured synthesizer changed how the answer is
         # PRODUCED, not what the wire says. Same key set, same status vocabulary,
         # no new response key -- pinned exactly so a "just one more field" leak
-        # fails here rather than in the Go/TS clients.
+        # fails here rather than in the Go/TS clients. draft_withdrawn joined
+        # the set 2026-08-10 (live-draft SSE channel); it is always null on
+        # this buffered /query route, which never streams drafts.
         assert set(body) == {
             "answer",
             "citations",
@@ -293,6 +295,7 @@ def test_answer_round_trips_audit_id(monkeypatch: pytest.MonkeyPatch) -> None:
             "interpretation",
             "clarify",
             "related",
+            "draft_withdrawn",
         }
         # INV-1 at the wire: the model authored NO marker (see ANSWER_TURN); the
         # renderer stamps one from the validated passage, so the answer the user
