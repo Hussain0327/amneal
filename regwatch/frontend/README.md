@@ -97,7 +97,8 @@ text.
 
   `POST /query/stream` (SSE) streams `status` progress frames, post-audit
   `token` replay frames, optional flag-gated provisional `draft` /
-  `draft_reset` frames, and exactly one terminal `result` frame; the client
+  `draft_reset` frames (2026-08-10 amendment; dark behind REGWATCH_LIVE_DRAFT
+  until the flag flips), and exactly one terminal `result` frame; the client
   falls back to plain `POST /query` if the stream fails (lib/api.ts).
 - **Assemble** (`/assemble`) — cited dossier for a target product.
 - **Watch** (`/watch`) — recent change-feed alerts + the watchlist; a row can
