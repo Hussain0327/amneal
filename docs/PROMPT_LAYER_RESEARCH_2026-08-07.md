@@ -1,9 +1,16 @@
 # Prompt engineering research for the conversational AI layer (slm-layer)
 
 Date: 2026-08-07
-Status: research deliverable, no code changed. Grounded in a full audit of the
-current prompt surface on this branch plus three deep literature/product
-research passes (selective citation, clarification dialogue, SLM prompting).
+Status: research deliverable, amended 2026-08-10 as implementation began.
+Grounded in a full audit of the current prompt surface on this branch plus
+three deep literature/product research passes (selective citation,
+clarification dialogue, SLM prompting).
+
+Owner scope amendment (2026-08-10): "use retrieval" means scope-constrained
+retrieval, never an unbounded search when product resolution fails. Explicit
+corpus-wide questions are supported through an application-validated,
+current-version corpus policy. The model proposes intent and scope; deterministic
+code alone authorizes filters and document/version membership.
 
 ## 0. The philosophy change this research serves
 
@@ -302,22 +309,34 @@ user turn
   v
 [rewrite + route call]  (small, schema-constrained -- the good JSON quadrant)
   in:  contract header + running goal summary + last N turns + question
-  out: { standalone_question, mode: converse | lookup | lookup_clarify }
-       (mode is advisory; deterministic checks below can override)
+  out: { standalone_question, mode: converse | lookup | lookup_clarify,
+         scope_hint: product | corpus | inherit | unknown,
+         product_hint?, corpus_policy_hint? }
+       (all fields are advisory; there are no executable filters or doc IDs)
+  |
+  v
+[deterministic scope compiler]
+  caller-pinned product or validated resolver result -> EXACT_SCOPED
+  explicit corpus cue + allowlisted policy + current version set
+                                                -> EXACT_CORPUS
+  inherit + prior audited validated scope       -> same bounded scope
+  missing, conflicting, empty, or ambiguous     -> CLARIFY
   |
   +-- converse: no retrieval needed and no factual FDA claim implied
   |     -> [respond call] natural prose, no documents block, no citations
   |
-  +-- lookup (default whenever the turn may depend on the corpus):
-  |     retrieve BROADLY on standalone_question (resolver output becomes a
-  |     filter hint, never a gate)
+  +-- lookup (only after a scope compiles):
+  |     retrieve on standalone_question inside EXACT_SCOPED or EXACT_CORPUS
+  |     EXACT_CORPUS always carries the compiler's allowed current version IDs
   |     group passages by (ingredient, dosage form, route)
   |       1 group, scores adequate -> [respond call] with documents block
-  |       multiple groups, answers would differ -> either answer across
-  |         facets (few) or ask ONE question naming the retrieved
+  |       multiple groups under ProductScope -> ask ONE question naming the
   |         candidates (this is lookup_clarify, decided deterministically
   |         from group structure -- NOT by asking the model if it is
   |         ambiguous, per 2.3)
+  |       multiple groups under CorpusScope -> expected; reject any passage
+  |         outside the allowed document/version set, then synthesize across
+  |         sources without collapsing their provenance
   |       all scores weak -> conversational "what I could not find" +
   |         nearest candidates (the old low_top_score refusal, humanized)
   |
@@ -379,8 +398,10 @@ message, since Gemma folds all of this into the user turn anyway.
 ### 3.3 Output format decision
 
 - Respond call: free natural prose with inline [n] markers. No JSON.
-- Route call: strict json_schema, three fields (standalone_question, mode,
-  optional product_hint). Classification-shaped, the good quadrant.
+- Route call: strict json_schema with `standalone_question`, `mode`,
+  `scope_hint`, optional `product_hint`, and optional allowlisted
+  `corpus_policy_hint`. Classification-shaped, the good quadrant. It cannot
+  emit filters, document IDs, version IDs, or an executable retrieval mode.
 - Server derives claims[] by sentence-splitting + marker parsing (the
   existing `common/sentences.py` splitter already makes one claim = one
   rendered sentence a shared definition). Audit rows, frontend contract and
@@ -405,6 +426,12 @@ belongs): every [n] span verified against its chunk post-hoc; unsupported
 SOURCE FACTS get corrected, downgraded to framed reasoning, or dropped;
 material-language drops still reject the turn. The prompt's job is voice
 and epistemic framing; the validator's job is truth-to-source. The
+scope compiler is a second deterministic boundary: `no_product` is not corpus
+authorization; EXACT_CORPUS requires explicit intent plus a non-empty bounded
+current-version allowlist, and route failure returns to product resolution or
+clarification rather than broad retrieval. Corpus turns do not overwrite the
+session's active product, and corpus inheritance requires a prior audited
+corpus-scoped turn plus a fresh current-catalog expansion. The
 scope-warning gate dies, but INV-3-as-amended survives as prompt rule 2 +
 the existing cited-recommendation discipline: strategy talk is allowed,
 clearly framed as reasoning, with the FDA-fact substrate cited.
@@ -433,6 +460,12 @@ clearly framed as reasoning, with the FDA-fact substrate cited.
    failure), one-question cap, history-not-evidence (existing
    test_conversational_memory.py pattern survives), refusal-phrasing A/B
    stability (2.1), repetition check if temperature moves off 0.0.
+7. Route/scope eval separates model classification from authorization: score
+   `mode` and `scope_hint` jointly, then test the deterministic compiled scope.
+   The #163 battery requires five explicit corpus rows on bounded
+   EXACT_CORPUS, the beclomethasone control on EXACT_SCOPED, zero passages
+   outside the allowed current-version set, preserved source/application
+   associations, and an ambiguous no-product question on clarification.
 
 ## 5. Open decisions for the owner
 

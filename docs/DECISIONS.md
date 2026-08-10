@@ -454,3 +454,32 @@ The eval was RED on the real corpus (`recall@8=0.667, citation_precision=0.000, 
   back to the default instead of failing settings validation at boot -- the
   rollback story is "unset the secret", and a blank value must not become an
   outage.
+
+## Conversation-first routing with application-validated scope (Aug 10 2026)
+
+- **Explicit bounded corpus questions are supported.** A user may ask across
+  the inhalation PSG corpus without naming one drug. This is not a
+  search-everything escape hatch: corpus intent must be positive, map to an
+  allowlisted corpus policy, and expand to a non-empty bounded set of current
+  document versions before retrieval can execute as `EXACT_CORPUS`.
+- **The model proposes; the application authorizes.** The route contract may
+  return a standalone question, conversational mode, scope hint, product hint,
+  and allowlisted corpus-policy hint. It cannot return filters, document IDs,
+  version IDs, or an executable retrieval mode. Deterministic product
+  resolution and scope compilation alone may produce `EXACT_SCOPED` or
+  `EXACT_CORPUS`; missing, conflicting, or ambiguous scope clarifies.
+- **No product is not corpus permission.** `What are the bioequivalence
+  requirements?` remains ambiguous and must clarify. Route failure returns to
+  deterministic product resolution or clarification; there is no raw-question
+  broad-retrieval fallback.
+- **Session scopes do not contaminate each other.** A corpus turn never
+  overwrites the active product filters. Corpus scope may be inherited only
+  from a prior audited corpus-scoped turn carrying its validated policy and
+  prior version ledger, never from a model guess; executable membership is
+  re-expanded against the current-version catalog on every follow-up.
+- **#163 measures routing before ranking.** The five product-less rows must
+  first reach bounded `EXACT_CORPUS`; the beclomethasone row must remain
+  `EXACT_SCOPED`; outside-set passage leakage must be zero and per-source
+  application provenance must survive. Duplicate capping remains deferred
+  unless those executed traces show duplicate members displacing required
+  evidence from the top eight.
