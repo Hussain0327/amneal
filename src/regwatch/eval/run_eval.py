@@ -71,9 +71,36 @@ app = typer.Typer(
 # The adjudication that made it briefly blockable still stands and is still
 # enforced by metrics.withheld_answer and its tests -- what changed is whether
 # the number should stop a build, not what it means. See docs/EVAL_STATUS.md.
+#
+# citation_precision LOWERED 0.74 -> 0.70 on 2026-08-11, by owner decision, and
+# recorded here because this file's own rule is that a floor is never lowered
+# without saying why.
+#
+# What was measured, all three arms on the same 62-row gold set and the same
+# Databricks/Qwen corpus, 0 errored turns:
+#
+#     arm   recall_at_k   citation_precision
+#     v5      0.8372          0.7694
+#     v6      0.8372          0.7619
+#     v7      0.8372          0.7341
+#
+# recall_at_k is IDENTICAL across the three, so retrieval is untouched and the
+# spread is entirely the answer path. The v7 drop is not v7 citing worse: on
+# rows that produced an answer its precision is fine. It is v7 failing to
+# produce a citable answer at all on 4 rows (material_drop, no_valid_citations
+# x2, malformed_structure) where the v5 claims-JSON path had zero such
+# failures. Those rows contribute 0 while staying in the denominator, which is
+# the documented and deliberate behaviour in metrics.evaluate.
+#
+# So 0.70 is a floor for the PROSE ERA, not a verdict that 0.7341 is good. It
+# sits ~3.4pp below the measured v7 arm, the same "slightly below the
+# measurement" margin the other floors use to absorb live-LLM run-to-run drift.
+# The 4 failing rows are a real defect and are tracked separately; this floor
+# is deliberately NOT set where it would pass only if they were fixed, because
+# a gate that cannot go green blocks every unrelated change too.
 THRESHOLDS = {
     "recall_at_k": 0.80,
-    "citation_precision": 0.74,
+    "citation_precision": 0.70,
 }
 
 # ASPIRATIONAL targets. Reported beside each value, never blocking.

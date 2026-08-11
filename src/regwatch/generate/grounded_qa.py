@@ -1081,6 +1081,46 @@ def _usage_fields(model_name: str, usage: LLMUsage | None) -> dict[str, Any]:
 # Fixed, non-LLM copy for the status="error" refusal family (provider transport
 # failure, catalog read failure, audit write failure). One literal so every
 # degrade path stays in sync with the tests that assert on it.
+# The corrective turn appended for the ONE bounds repair (issue #183). Phrased
+# as a normal follow-up rather than an error report: the model is being asked
+# to say the same thing more concisely, not told it violated a schema. No
+# character count is quoted -- a number invites the model to pad up to it.
+#
+# Appended AFTER the original messages, so attempt 1's prompt bytes (and its
+# prompt fingerprint) are untouched. Only a repaired turn carries the extra
+# pair, and synth_telemetry stamps that it happened.
+_BOUNDS_REPAIR_TURN: dict[str, tuple[LLMMessage, ...]] = {
+    "sentence_too_long": (
+        LLMMessage(
+            role="user",
+            content=(
+                "One of those sentences ran far too long. Say the same thing "
+                "again, keeping every fact and every [n] marker exactly as you "
+                "had them, but break it into ordinary-length sentences."
+            ),
+        ),
+    ),
+    "answer_too_long": (
+        LLMMessage(
+            role="user",
+            content=(
+                "That answer ran far too long overall. Give the same answer "
+                "again, keeping every fact and every [n] marker exactly as you "
+                "had them, but say it more concisely and without repeating "
+                "yourself."
+            ),
+        ),
+    ),
+}
+
+# Audit-only reason codes. Greppable, and deliberately distinct from
+# malformed_structure so the ~12% prod parse-failure baseline stays comparable
+# and a bounds breach never hides inside it.
+_BOUNDS_REASON = {
+    "sentence_too_long": "oversize_sentence",
+    "answer_too_long": "oversize_answer",
+}
+
 _SERVICE_UNAVAILABLE_TEXT = (
     "The answer service is temporarily unavailable. Your question was "
     "not answered — please try again in a moment."
@@ -2146,11 +2186,18 @@ def _synthesize_and_admit(
     # fills it in during the call, and every branch below reads it afterwards.
     synth_telemetry: dict[str, Any] = {"max_output_tokens": s.synthesizer_max_tokens}
     synth_route: dict[str, Any] = {"synthesis": synth_telemetry}
-    try:
+
+    def _run_synthesis(messages: list[LLMMessage]) -> Any:
+        """One synthesis completion over ``messages``.
+
+        Extracted so the bounds repair below can issue its second attempt
+        through the SAME branch logic (streamed vs buffered, prose vs JSON)
+        rather than a copy that could drift from it.
+        """
         if prose_mode and _emit_draft is not None:
-            response = _stream_structured(
+            return _stream_structured(
                 provider,
-                synth_messages,
+                messages,
                 max_tokens=s.synthesizer_max_tokens,
                 telemetry=synth_telemetry,
                 on_delta=_emit_draft,
@@ -2161,14 +2208,16 @@ def _synthesize_and_admit(
                 # failing sink as cosmetic.
                 on_reset=_emit_draft_reset or (lambda: None),
             )
-        else:
-            response = _complete_structured(
-                provider,
-                synth_messages,
-                max_tokens=s.synthesizer_max_tokens,
-                response_format=None if prose_mode else "json",
-                telemetry=synth_telemetry,
-            )
+        return _complete_structured(
+            provider,
+            messages,
+            max_tokens=s.synthesizer_max_tokens,
+            response_format=None if prose_mode else "json",
+            telemetry=synth_telemetry,
+        )
+
+    try:
+        response = _run_synthesis(synth_messages)
     except Exception as exc:  # provider transport error (timeout / 429 / 5xx)
         # B2: a synthesizer failure must NOT return a naked 500 with no audit
         # row, which would break INV-6 exactly when the system misbehaves. We
@@ -2202,6 +2251,62 @@ def _synthesize_and_admit(
             usage=response.usage,
             guide=False,
         )
+
+    # Pathological-output bounds (issue #183). The prose arms apply no length
+    # bound at admission by design, so a degenerate completion -- a repetition
+    # loop, a sentence that never terminates -- would otherwise render
+    # unbounded text. ONE repair attempt, then a conversational exit.
+    #
+    # One, not a loop: a model producing a runaway sentence is in a state a
+    # second identical nudge does not fix, and each attempt costs a full
+    # synthesis call on the user's latency budget.
+    if prose_mode:
+        breach = prose_turn.bounds_exceeded(answer)
+        if breach is not None:
+            log.warning("qa_prose_bounds_breach", breach=breach, chars=len(answer))
+            synth_telemetry["bounds_breach"] = breach
+            synth_telemetry["bounds_repair_attempted"] = True
+            # Whatever the client already rendered came from the breaching
+            # completion, so retract it before the second attempt streams over
+            # it. Same contract the truncation retry uses.
+            if _emit_draft_reset is not None:
+                try:
+                    _emit_draft_reset()
+                except Exception:  # cosmetic sink; never fail the turn on it
+                    log.debug("on_draft_reset_failed", exc_info=True)
+            try:
+                response = _run_synthesis([*synth_messages, *_BOUNDS_REPAIR_TURN[breach]])
+            except Exception as exc:
+                log.warning("qa_provider_error", error=str(exc), error_type=type(exc).__name__)
+                capture_exception(exc)
+                return _decline(
+                    _refuse,
+                    reason="provider_error",
+                    response_mode="refused",
+                    passages=passages,
+                    status="error",
+                    answer_text=_SERVICE_UNAVAILABLE_TEXT,
+                    route_extra=synth_route,
+                    guide=False,
+                )
+            answer = response.text.strip()
+            still = prose_turn.bounds_exceeded(answer) if answer else breach
+            synth_telemetry["bounds_repair_succeeded"] = still is None
+            if still is not None:
+                # The reason is machine-readable and stays out of the reply:
+                # nothing about the QUESTION was wrong, only our answer to it.
+                log.warning("qa_prose_bounds_repair_failed", breach=still)
+                return _decline(
+                    _refuse,
+                    reason=_BOUNDS_REASON[still],
+                    response_mode="refused",
+                    passages=passages,
+                    model_name=response.model,
+                    answer_text=tg.OVERSIZE_RECOVERY_TEXT,
+                    usage=response.usage,
+                    route_extra=synth_route,
+                    guide=False,
+                )
 
     _emit("Checking each claim against its source…")
     admitted: AdmittedTurn | GateFailure

@@ -304,6 +304,15 @@ PARTIAL_DROP_DISCLOSURE = (
 )
 MATERIAL_DROP_TEXT = "I could not produce a fully supported answer from the available evidence."
 
+# Said to the user when a completion breached the pathological-output bounds
+# and the one repair attempt did not recover it (issue #183). Deliberately
+# ordinary speech: the 2,000-char rule is plumbing, and a reason code, a
+# character count or the word "validation" would leak mechanism into a
+# regulatory conversation. It invites the next turn rather than closing the
+# thread, because nothing about the QUESTION was wrong -- only our answer to
+# it. The machine-readable reason travels separately, on the audit row.
+OVERSIZE_RECOVERY_TEXT = "I got too wordy there. Ask me again and I will keep it tighter."
+
 # Retrieval-sufficiency disclosure. Unchanged wording: the eval set, the prompt
 # eval and tests/test_grounded_qa_citations.py all pin this exact prefix.
 PARTIAL_EVIDENCE_PREFIX = "Evidence not found in the supplied passages for:"

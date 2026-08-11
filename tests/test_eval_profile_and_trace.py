@@ -461,7 +461,10 @@ def test_broken_retrieval_still_fails_the_build(
     [
         # Just under each blocking floor: the smallest regression that must trip.
         ("recall_at_k", 0.79),
-        ("citation_precision", 0.73),
+        # Tracks the floor: 0.73 sat under the old 0.74 but clears the 0.70
+        # prose-era floor, so it would no longer trip the gate it exists to
+        # prove trips.
+        ("citation_precision", 0.69),
     ],
 )
 def test_a_regression_below_any_blocking_floor_trips(
