@@ -99,11 +99,20 @@ class Settings(BaseSettings):
     # base URL at Databricks would also misroute generation requests.
     qwen_embedding_base_url: str | None = None
     qwen_embedding_token: str | None = None
-    qwen_embedding_model: str = "Qwen/Qwen3-Embedding-4B"
-    # Qwen3-Embedding-4B is natively 2560-dimensional. The 1536 default is a
-    # Matryoshka profile chosen so local dev matches the legacy pgvector shape;
-    # it is not the model's default and it is not what prod runs. The live prod
-    # profile is 1024-dim on the Databricks Qwen3 serving endpoint.
+    # The SERVED endpoint, not a HuggingFace repo id: the deployed Model Service
+    # is `workspace.default.regwatch-embed` (served entity
+    # `qwen3-embedding-0-6b-112025`). The previous default named
+    # Qwen/Qwen3-Embedding-4B, which was never deployed and which no endpoint
+    # answers -- the same trap `databricks_llm_model` already documents below.
+    # Prod sets this via env; the default exists so a misconfigured deployment
+    # fails against a real name instead of an imaginary one.
+    qwen_embedding_model: str = "qwen3-embedding-0-6b"
+    # The 1536 default is a Matryoshka profile chosen so local dev matches the
+    # legacy pgvector shape; it is not the model's default and it is not what
+    # prod runs. The live prod profile is 1024-dim on the Databricks Qwen3
+    # serving endpoint. Left at 1536 deliberately: this value is folded into the
+    # embedding profile fingerprint, so changing it here would silently
+    # invalidate a staged profile.
     qwen_embedding_dimension: int = 1536
     qwen_embedding_batch_size: int = 128
     qwen_embedding_query_instruction: str = (

@@ -28,7 +28,10 @@ from config.settings import get_settings
 # (mirrors retrieve/reranker.py's _RERANKER_LOCK).
 _LOCAL_CACHE_LOCK = Lock()
 
-QWEN3_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-4B"
+# The served Databricks endpoint (`workspace.default.regwatch-embed`, served
+# entity `qwen3-embedding-0-6b-112025`), not a HuggingFace repo id: the old
+# Qwen/Qwen3-Embedding-4B value was never deployed anywhere.
+QWEN3_EMBEDDING_MODEL = "qwen3-embedding-0-6b"
 QWEN3_QUERY_INSTRUCTION_VERSION = "regwatch-regulatory-retrieval-v1"
 QWEN3_DOCUMENT_PREPROCESSING_VERSION = "raw-text-v1"
 QWEN3_QUERY_INSTRUCTION = (
@@ -297,7 +300,12 @@ def _shared_qwen_http_client(base_url: str, token: str, timeout_s: float) -> htt
 
 
 class Qwen3EmbeddingProvider:
-    """Qwen3-Embedding-4B through an OpenAI-compatible serving endpoint.
+    """A Qwen3 embedding model through an OpenAI-compatible serving endpoint.
+
+    The deployed target is the 0.6B (``workspace.default.regwatch-embed``); the
+    provider itself is model-agnostic, so the dimension bound below is the
+    widest any Qwen3 embedding model accepts, not a claim about which one is
+    served.
 
     The production target is a Databricks-served endpoint, while the same
     request shape works with vLLM's ``/v1/embeddings`` API. The configured
@@ -346,7 +354,7 @@ class Qwen3EmbeddingProvider:
         if not self.model:
             raise ValueError("Qwen embedding model must not be empty")
         if not 32 <= self.dim <= 2560:
-            raise ValueError("Qwen3-Embedding-4B dimension must be in [32, 2560]")
+            raise ValueError("Qwen3 embedding dimension must be in [32, 2560]")
         if not self.query_instruction:
             raise ValueError("Qwen query instruction must not be empty")
         if not self.query_instruction_version:
