@@ -29,6 +29,24 @@ on:
         type: boolean
         default: false
         required: false
+      require_databricks_arm:
+        description: >-
+          fail unless the run resolves the Databricks/Qwen arm. Default TRUE for
+          the blocking call: the OpenAI-1536 fallback measures the ROLLBACK
+          geometry, and letting it stand in silently is the same silent-green
+          defect as skipping the eval outright.
+        type: boolean
+        default: true
+        required: false
+      assert_prod_mode:
+        description: >-
+          pass --assert-prod-mode, which refuses to score a run whose answer-path
+          settings disagree with config/prod_mode.json. Default FALSE on the
+          blocking call ONLY until ci.yml flips to prose+selective; turning it on
+          before that flip would fail every merge by design.
+        type: boolean
+        default: false
+        required: false
   workflow_dispatch:
     inputs:
       prose:
@@ -40,6 +58,24 @@ on:
         description: >-
           run the eval with REGWATCH_SELECTIVE_CITATION=1 (the v7 selective-citation
           arm; requires prose)
+        type: boolean
+        default: false
+        required: false
+      require_databricks_arm:
+        description: >-
+          fail unless the run resolves the Databricks/Qwen arm. Default FALSE on
+          dispatch so the OpenAI-1536 arm stays hand-runnable for a rollback
+          comparison, which is the one job it is still honest for.
+        type: boolean
+        default: false
+        required: false
+      assert_prod_mode:
+        description: >-
+          pass --assert-prod-mode. Default FALSE on dispatch: the v6 arm and the
+          OpenAI rollback arm are legitimate DIAGNOSTICS that deliberately do
+          not match production, and defaulting this on would make them
+          unrunnable. Turn it on for a run whose scorecard is meant to speak for
+          production -- the v7 measurement before the ci.yml flip.
         type: boolean
         default: false
         required: false
@@ -130,6 +166,23 @@ jobs:
             echo "arm=none" >> "$GITHUB_OUTPUT"
           fi
 
+      # The blocking call must measure the arm production serves. Without this,
+      # a lapsed Databricks credential silently demotes the gate to the
+      # OpenAI-1536 ROLLBACK space and it still reports green -- a scorecard
+      # about geometry nobody ships. Checked before any seed/index/embed work so
+      # a misconfigured run costs nothing and frees the serialized eval slot.
+      - name: require the arm production serves
+        if: >-
+          ${{ inputs.require_databricks_arm
+              && steps.eval_arm.outputs.arm != 'databricks' }}
+        env:
+          RESOLVED_ARM: ${{ steps.eval_arm.outputs.arm }}
+        run: |
+          echo "::error::This eval must measure the Databricks/Qwen arm, but"
+          echo "::error::resolved arm='${RESOLVED_ARM}'. The OpenAI-1536 arm is the"
+          echo "::error::rollback space, not what production serves."
+          exit 1
+
       # Register FIRST, then seed with the arm active: ingest writes the profile
       # vectors inline (_profile_document_embeddings) and leaves the legacy
       # 1536-dim column NULL, so this arm needs no backfill pass and no OpenAI
@@ -191,7 +244,8 @@ jobs:
           DATABRICKS_LLM_MODEL: ${{ vars.DATABRICKS_LLM_MODEL }}
         run: |
           uv run python -m regwatch.eval.run_eval \
-            --profile "$EVAL_PROFILE_ID" --check-thresholds --out eval-scorecard.json
+            --profile "$EVAL_PROFILE_ID" --check-thresholds --out eval-scorecard.json \
+            ${{ inputs.assert_prod_mode && '--assert-prod-mode' || '' }}
 
       - name: seed vector store (legacy arm)
         if: steps.eval_arm.outputs.arm == 'legacy'
@@ -205,7 +259,10 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
           EMBEDDING_PROVIDER: openai
-        run: uv run python -m regwatch.eval.run_eval --check-thresholds --out eval-scorecard.json
+        run: |
+          uv run python -m regwatch.eval.run_eval \
+            --check-thresholds --out eval-scorecard.json \
+            ${{ inputs.assert_prod_mode && '--assert-prod-mode' || '' }}
 
       # The scorecard is also written to the eval_run ledger, but that lands in
       # the CI Postgres service container, which is destroyed with the job. The
@@ -220,12 +277,17 @@ jobs:
           path: eval-scorecard.json
           if-no-files-found: ignore
 
-      - name: eval skipped
+      # Was a ::warning:: and a green job. That made "the eval could not run at
+      # all" indistinguishable from "the eval ran and passed" on the PR page --
+      # the gate reported success for a measurement that never happened. An
+      # absent credential is an operator error, so it fails like one.
+      - name: eval could not run
         if: steps.eval_arm.outputs.arm == 'none'
         run: |
-          echo "::warning::Live eval SKIPPED - no provider credentials configured."
+          echo "::error::Live eval could not run - no provider credentials configured."
           echo "Configure QWEN_EMBEDDING_BASE_URL + QWEN_EMBEDDING_TOKEN +"
-          echo "DATABRICKS_SERVING_RUNTIME_VERSION for the Databricks arm (preferred:"
-          echo "it measures the geometry production serves), or OPENAI_API_KEY for the"
-          echo "legacy arm. pytest still runs the deterministic offline eval gate, which"
-          echo "does NOT exercise real embedding geometry or the 0.30 refusal threshold."
+          echo "DATABRICKS_SERVING_RUNTIME_VERSION for the Databricks arm (the"
+          echo "geometry production serves), or OPENAI_API_KEY for the rollback arm."
+          echo "pytest's offline eval gate does NOT exercise real embedding geometry"
+          echo "or the refusal threshold, so it cannot stand in for this."
+          exit 1

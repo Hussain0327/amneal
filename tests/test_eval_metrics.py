@@ -874,3 +874,82 @@ def test_refused_answerable_row_still_scores_zero_faithfulness_despite_tags() ->
     sc = evaluate(gold, ask_callable=_ask)
     assert sc.faithfulness == 0.0
     assert sc.uncited_source_facts == 0
+
+
+# --- Answer-length sizing (issue #183) -------------------------------------
+#
+# The prose arms admit a sentence of ANY length -- turn_gate.admit_claims
+# applies no length check -- so choosing a per-sentence cap and a total-response
+# ceiling needs the real distribution, not a guess. These fields exist to be
+# READ off a live v7 scorecard before those numbers are picked. Nothing gates on
+# them, by the same rule as the other answer-shape metrics.
+
+
+def _sized_gold() -> list[GoldItem]:
+    return [
+        GoldItem(
+            question="short",
+            expected_sources=[{"short_name": "PSG_001", "page": 3}],
+            must_refuse=False,
+        ),
+        GoldItem(
+            question="long",
+            expected_sources=[{"short_name": "PSG_001", "page": 3}],
+            must_refuse=False,
+        ),
+    ]
+
+
+_SHORT_ANSWER = "Alpha [PSG_001, p.3]. Beta [PSG_001, p.3]."
+# One sentence, deliberately far longer than either sentence above.
+_LONG_ANSWER = "Gamma " * 40 + "[PSG_001, p.3]."
+
+
+def _sized_ask(question: str) -> _FakeResult:
+    answer = _SHORT_ANSWER if question == "short" else _LONG_ANSWER
+    return _FakeResult(
+        answer=answer,
+        citations=[_FakeCit("PSG_001", 3)],
+        refused=False,
+        retrieved=[{"short_name": "PSG_001", "page": 3, "doc_id": 1}],
+    )
+
+
+def test_scorecard_reports_the_longest_answer_in_characters() -> None:
+    sc = evaluate(_sized_gold(), ask_callable=_sized_ask)
+    assert sc.max_answer_chars == len(_LONG_ANSWER)
+
+
+def test_scorecard_reports_the_longest_single_sentence() -> None:
+    """The number a per-sentence cap has to be chosen against."""
+    sc = evaluate(_sized_gold(), ask_callable=_sized_ask)
+    # _LONG_ANSWER is one sentence, so the longest sentence IS the answer.
+    assert sc.max_sentence_chars == len(_LONG_ANSWER)
+
+
+def test_scorecard_reports_mean_answer_length() -> None:
+    sc = evaluate(_sized_gold(), ask_callable=_sized_ask)
+    expected = (len(_SHORT_ANSWER) + len(_LONG_ANSWER)) / 2
+    assert sc.mean_answer_chars == pytest.approx(expected)
+
+
+def test_per_row_answer_sizes_land_in_the_trace() -> None:
+    """Summary fields pick the number; the trace is how it is defended."""
+    sc = evaluate(_sized_gold(), ask_callable=_sized_ask)
+    sizes = {d["q"]: d.get("answer_chars") for d in sc.details}
+    assert sizes["short"] == len(_SHORT_ANSWER)
+    assert sizes["long"] == len(_LONG_ANSWER)
+
+
+def test_a_refused_row_contributes_no_answer_size() -> None:
+    """A refusal has no answer to size; it must not drag the mean down."""
+    gold = [GoldItem(question="oos", expected_sources=[], must_refuse=True)]
+    sc = evaluate(
+        gold,
+        ask_callable=lambda _q: _FakeResult(
+            answer="", citations=[], refused=True, status="refused"
+        ),
+    )
+    assert sc.max_answer_chars == 0
+    assert sc.max_sentence_chars == 0
+    assert sc.mean_answer_chars == 0.0

@@ -126,6 +126,20 @@ def claim_count(answer: str) -> int:
     return sum(1 for s in split_sentences(strip_sources_trailer(answer)) if has_citation(s))
 
 
+def _longest_sentence_chars(answer: str) -> int:
+    """Longest single sentence in the answer, in characters.
+
+    Split with the SAME splitter the prose parser uses
+    (``common.sentences.split_sentences``), so a number read off a scorecard is
+    the number a per-sentence cap in ``prose_turn`` would actually compare
+    against. The Sources trailer is stripped first, like ``claim_count``: it is
+    appended at render time, not authored by the model, and left in place it
+    would register as one enormous sentence.
+    """
+    body = strip_sources_trailer(answer or "")
+    return max((len(s) for s in split_sentences(body)), default=0)
+
+
 def _content_tokens(sentence: str) -> set[str]:
     return {t for t in re.split(r"[^a-z0-9]+", sentence.lower()) if len(t) > 2}
 
@@ -202,6 +216,15 @@ class Scorecard:
     # baseline that a later depth change is judged against.
     mean_claims: float = 0.0
     max_claims: int = 0
+    # Answer SIZE, alongside answer shape. The prose arms (v6/v7) admit a
+    # sentence of any length -- turn_gate.admit_claims applies no length check
+    # since issue #183 -- so a per-sentence cap and a total-response ceiling
+    # have to be chosen against the observed distribution rather than guessed.
+    # Measured on the rendered answer, which is what a reader actually receives.
+    # Reported, never thresholded, same rule as the shape metrics above.
+    mean_answer_chars: float = 0.0
+    max_answer_chars: int = 0
+    max_sentence_chars: int = 0
     redundant_claim_rate: float = 0.0
     forbidden_violations: int = 0
     rejection_reasons: dict[str, int] = field(default_factory=dict)
@@ -628,6 +651,10 @@ def evaluate(
                 "claim_count": claim_count(result.answer),
                 "redundancy": redundancy(result.answer),
                 "forbidden_ok": contains_none(result.answer, it.forbidden),
+                # Per-row sizes: the summary fields pick a number, these are
+                # how that number is defended against the actual rows.
+                "answer_chars": len(result.answer or ""),
+                "max_sentence_chars": _longest_sentence_chars(result.answer),
                 "trace": trace,
             }
         )
@@ -670,6 +697,11 @@ def evaluate(
     # regressions that must stay distinguishable.
     shaped = [d for d in details if "claim_count" in d]
     counts = [int(d["claim_count"]) for d in shaped]
+    # Same denominator as the shape aggregates: a refused row has no answer to
+    # size, and averaging its 0 in would report "answers got shorter" when what
+    # happened was "more turns refused".
+    answer_chars = [int(d["answer_chars"]) for d in shaped]
+    sentence_chars = [int(d["max_sentence_chars"]) for d in shaped]
     return Scorecard(
         n=n,
         recall_at_k=sums["recall"] / answerable,
@@ -692,6 +724,9 @@ def evaluate(
         skipped=skipped,
         mean_claims=(sum(counts) / len(counts)) if counts else 0.0,
         max_claims=max(counts, default=0),
+        mean_answer_chars=((sum(answer_chars) / len(answer_chars)) if answer_chars else 0.0),
+        max_answer_chars=max(answer_chars, default=0),
+        max_sentence_chars=max(sentence_chars, default=0),
         redundant_claim_rate=(
             (sum(1 for d in shaped if float(d["redundancy"]) >= 0.6) / len(shaped))
             if shaped
