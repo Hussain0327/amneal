@@ -122,7 +122,7 @@ from regwatch.generate.route_shadow import (
     finalize_route_observation,
     observe_route,
 )
-from regwatch.generate.turn_gate import AdmittedTurn, GateFailure, admit_turn
+from regwatch.generate.turn_gate import AdmittedTurn, GateFailure, admit_claims, admit_turn
 from regwatch.generate.turn_schema import TURN_SCHEMA_MESSAGE
 from regwatch.retrieve.mode import RetrievalPlan, RetrievalScope, default_mode_for_scope
 from regwatch.retrieve.reranker import rerank_passages
@@ -2256,8 +2256,9 @@ def _synthesize_and_admit(
                 "malformed_structure", "no sentences parsed from prose completion"
             )
         elif selective_mode:
-            admitted = admit_turn(
-                prose_turn.gate_payload(parsed_prose, evidence_passages),
+            admitted = admit_claims(
+                parsed_prose.turn_type,
+                prose_turn.to_claims(parsed_prose, evidence_passages),
                 passages=evidence_passages,
                 question=question,
                 correct=True,
@@ -2266,8 +2267,9 @@ def _synthesize_and_admit(
                 selective=True,
             )
         else:
-            admitted = admit_turn(
-                prose_turn.gate_payload(parsed_prose, evidence_passages),
+            admitted = admit_claims(
+                parsed_prose.turn_type,
+                prose_turn.to_claims(parsed_prose, evidence_passages),
                 passages=evidence_passages,
                 question=question,
                 # v6 branch. Re-stamp correction is live (v6 is still cite or

@@ -130,12 +130,12 @@ jobs:
           enable-cache: true
 
       # Audit the SHIPPED production closure: the slim image installs llm only
-      # (Dockerfile defaults INSTALL_LOCAL_EMBEDDINGS=false; Fly runs
-      # EMBEDDING_PROVIDER=openai), so torch/transformers from
-      # `local-embeddings` never reach prod and are intentionally out of scope
-      # here: gating prod CI on their noisy, slow-to-fix CVE cadence would add
-      # churn with no prod exposure. --frozen also asserts uv.lock matches
-      # pyproject.
+      # (Dockerfile defaults INSTALL_LOCAL_EMBEDDINGS=false; Fly embeds through
+      # the in-tenant Databricks Qwen3 endpoint, EMBEDDING_PROVIDER=qwen3, since
+      # the D1 residency closure), so torch/transformers from `local-embeddings`
+      # never reach prod and are intentionally out of scope here: gating prod CI
+      # on their noisy, slow-to-fix CVE cadence would add churn with no prod
+      # exposure. --frozen also asserts uv.lock matches pyproject.
       - name: export runtime dependency set
         run: >-
           uv export --frozen --no-emit-project --no-dev

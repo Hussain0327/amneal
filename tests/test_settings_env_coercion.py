@@ -33,8 +33,17 @@ def test_blank_dimension_falls_back_to_default(blank: str) -> None:
 
 @pytest.mark.parametrize("blank", ["", "   "])
 def test_blank_model_falls_back_to_default(blank: str) -> None:
-    """An empty string would otherwise silently replace a good default with ''."""
-    assert _settings(qwen_embedding_model=blank).qwen_embedding_model.startswith("Qwen/")
+    """An empty string would otherwise silently replace a good default with ''.
+
+    Compared against the unset default rather than a literal: the previous
+    ``startswith("Qwen/")`` assertion pinned a HuggingFace repo id that no
+    endpoint ever served, so retargeting the default at the deployed endpoint
+    broke a test that was only ever meant to prove the fallback fires.
+    """
+    assert (
+        _settings(qwen_embedding_model=blank).qwen_embedding_model
+        == _settings().qwen_embedding_model
+    )
 
 
 def test_real_values_still_parse() -> None:
