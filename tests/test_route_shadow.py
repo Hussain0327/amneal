@@ -67,7 +67,10 @@ class _PipelineProvider:
         self.call_kinds: list[str] = []
 
     def complete(self, messages: list[Any], **_kwargs: Any) -> LLMResponse:
-        is_route = any("[REGWATCH_ROUTE_V1]" in message.content for message in messages)
+        is_route = any(
+            "[REGWATCH_ROUTE_V2]" in message.content or "[REGWATCH_ROUTE_V1]" in message.content
+            for message in messages
+        )
         self.call_kinds.append("route" if is_route else "guidance")
         return LLMResponse(
             text=self.route_payload if is_route else "{}",

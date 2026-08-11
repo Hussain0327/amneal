@@ -521,7 +521,7 @@ response is not 200 / `"status":"ok"`. It is driven entirely by the
 skips cleanly. It is currently unset. This complements the external monitor, it
 does not replace it: GitHub cron schedules can lag or pause on inactive repos.
 
-### 6.3 Route/scope shadow rollout
+### 6.3 Route/scope shadow rollout (PR11b/PR11c)
 
 This measures the conversational router before it is allowed to change anything.
 The code default is `REGWATCH_ROUTE_CALL=off`, and it is unset in prod today.
@@ -531,6 +531,19 @@ recorded under `query_log.route_json.route_call`. The existing product resolver,
 retrieval query, mode, filters, response, citations and session update all stay
 authoritative. The reserved value `live` is intentionally shadow-equivalent right
 now and must not be treated as a promotion.
+
+The first controlled PR11b production window (2026-08-10) recorded 24 tagged
+turns: 21 route successes and 3 invalid responses (12.5%), with zero provider
+errors and zero unsafe corpus authorizations. All 15 explicit-corpus controls
+compiled to bounded `EXACT_CORPUS`, and all 3 named beclomethasone controls
+compiled to `EXACT_SCOPED`; the malformed cases and inconsistent greeting /
+inheritance classifications still blocked promotion. PR11c changes only the
+route prompt and its synthetic controls. Its v2 prompt remains observation-only
+and must pass the same production procedure below before PR12 is considered.
+The pre-merge route-only v2 battery passed 32/32 committed controls with zero
+invalid responses, provider errors, or unsafe corpus proposals; production
+shadow is still required because that battery did not exercise Ask integration,
+audit persistence, or real traffic mix.
 
 Before enabling it, probe the reasoning floor of the endpoint you actually run.
 The committed default of 1200 max tokens was sized from an older observation of
