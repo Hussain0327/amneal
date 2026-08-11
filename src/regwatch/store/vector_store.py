@@ -125,6 +125,17 @@ def chunk_texts_at(short_name: str, page: int) -> list[str]:
     return pgvector_store.chunk_texts_at(short_name, page)
 
 
+def document_chunks(doc_id: int, version_id: int) -> list[tuple[int, int, str]]:
+    """Every chunk of one document version as (ordinal, page, text).
+
+    The read side of the same rows `similarity_search` ranks: used to render a
+    stored document back as prose instead of retrieving passages from it.
+    """
+    from regwatch.store import pgvector_store
+
+    return pgvector_store.document_chunks(doc_id, version_id)
+
+
 def distinct_metadata_values(key: str) -> set[str]:
     """All distinct non-empty string values of one metadata `key` across chunks.
 

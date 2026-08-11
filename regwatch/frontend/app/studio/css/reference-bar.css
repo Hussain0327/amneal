@@ -1,0 +1,64 @@
+/* ===========================================================================
+   REFERENCE BAR - the strip above an open reference PSG, and the two states
+   the text pane can be in before it renders. It sits where the format bar
+   sits for a working document, so the two surfaces line up when the analyst
+   switches between them.
+   ======================================================================== */
+
+.st-refbar {
+  flex: none;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: var(--st-s3);
+  padding: 0 var(--st-s4);
+  background: var(--st-chrome-1);
+  border-bottom: 1px solid var(--st-line);
+  flex-wrap: wrap;
+}
+
+.st-refbar__chips {
+  display: flex;
+  align-items: center;
+  gap: var(--st-s1);
+  flex-wrap: wrap;
+}
+
+/* Pushed to the end rather than the chips being pushed to the start, so a
+   wrapped bar keeps the actions together on their own line. */
+.st-refbar__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--st-s2);
+}
+
+.st-refbar__warn {
+  font-size: var(--st-t-small);
+  color: var(--st-gold);
+}
+
+/* Same treatment as the PDF pane's own states: whichever of the two the
+   analyst is looking at, a pane that cannot render says so the same way. */
+.st-ref__note {
+  margin: auto;
+  padding: var(--st-s4);
+  font-size: var(--st-t-small);
+  color: var(--st-on-chrome-faint);
+}
+
+.st-ref__fallback {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--st-s2);
+  padding: var(--st-s5);
+  font-size: var(--st-t-small);
+  color: var(--st-on-chrome-faint);
+  text-align: center;
+}
+
+.st-ref__fallback .st-tree__retry {
+  margin-top: 0;
+}

@@ -257,6 +257,68 @@ def count_psg_documents() -> int:
 
 
 @dataclass(frozen=True)
+class PsgDocumentDetail:
+    """One ``psg_document`` row plus the id of its current version.
+
+    "Current" is computed the same way every other reader computes it
+    (captured_at DESC, id DESC) rather than stored, because there is no
+    is_current column and inventing a second rule here would let the studio
+    render a version retrieval does not quote. ``current_version_id`` is None
+    for a document whose version row is missing, which the caller must treat
+    as "nothing to render".
+    """
+
+    id: int
+    active_ingredient: str
+    dosage_form: str | None
+    route: str | None
+    appl_no: str | None
+    rld_or_rs_number: str | None
+    psg_type: str
+    recommended_date: str | None
+    source_url: str
+    current_version_id: int | None
+
+
+def fetch_psg_document_detail(doc_id: int) -> PsgDocumentDetail | None:
+    """One PSG's descriptive fields and current version id, or None."""
+    with session_scope() as s:
+        row = s.execute(
+            sa_select(
+                col(PsgDocument.id),
+                col(PsgDocument.active_ingredient),
+                col(PsgDocument.dosage_form),
+                col(PsgDocument.route),
+                col(PsgDocument.appl_no),
+                col(PsgDocument.rld_or_rs_number),
+                col(PsgDocument.psg_type),
+                col(PsgDocument.recommended_date),
+                col(PsgDocument.source_url),
+            ).where(col(PsgDocument.id) == doc_id)
+        ).first()
+        if row is None:
+            return None
+        version_id = s.execute(
+            sa_select(col(PsgVersion.id))
+            .where(col(PsgVersion.psg_document_id) == doc_id)
+            .order_by(col(PsgVersion.captured_at).desc(), col(PsgVersion.id).desc())
+            .limit(1)
+        ).scalar()
+    return PsgDocumentDetail(
+        id=int(row[0]),
+        active_ingredient=row[1],
+        dosage_form=row[2],
+        route=row[3],
+        appl_no=row[4],
+        rld_or_rs_number=row[5],
+        psg_type=row[6],
+        recommended_date=row[7],
+        source_url=row[8],
+        current_version_id=int(version_id) if version_id is not None else None,
+    )
+
+
+@dataclass(frozen=True)
 class PsgPdfSource:
     """The fields the PDF-serving route needs from one ``psg_document`` row."""
 

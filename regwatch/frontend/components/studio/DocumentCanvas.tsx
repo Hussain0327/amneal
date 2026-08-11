@@ -92,6 +92,8 @@ interface DocBlockProps {
   /** 1-based position and total, for a name that does not change as you type. */
   position: number;
   total: number;
+  /** Render the text without an editing surface (a reference document). */
+  readOnly: boolean;
   onEditBlock: (blockId: string, text: string) => void;
   onSelectFinding: (id: string | null) => void;
 }
@@ -109,6 +111,10 @@ const BLOCK_ROLE: Record<Block["type"], string> = {
 type EditableProps = HTMLAttributes<HTMLElement> & {
   ref: (node: HTMLElement | null) => void;
   "data-block-id": string;
+  /** Marks a block whose text is one flat offset space (see the selection
+   * reader). Tables carry a block id too, and cell-level offsets are a
+   * different model this surface does not have. */
+  "data-text-offsets": string;
 };
 
 function EditableBlock({
@@ -118,6 +124,7 @@ function EditableBlock({
   tracked,
   position,
   total,
+  readOnly,
   onEditBlock,
   onSelectFinding,
 }: DocBlockProps) {
@@ -174,17 +181,28 @@ function EditableBlock({
     if (id) onSelectFinding(id);
   };
 
+  // A reference document is FDA's published text, not ours to edit, so it
+  // renders as prose rather than as a disabled textbox: no caret, and nothing
+  // announced as an editable region that refuses every keystroke. Marks still
+  // render, which is what keeps highlighting available on it.
+  const editing: Partial<EditableProps> = readOnly
+    ? {}
+    : {
+        contentEditable: true,
+        role: "textbox",
+        "aria-multiline": true,
+        // Positional, not derived from the text. A name built from the content
+        // renames the focused textbox on every keystroke, and a screen reader
+        // announces the rename over what the analyst is trying to hear.
+        "aria-label": `${BLOCK_ROLE[block.type]} ${position} of ${total}`,
+      };
+
   const props: EditableProps = {
     ref: attach,
     className: `st-blk st-blk--${block.type}`,
     "data-block-id": block.id,
-    contentEditable: true,
-    role: "textbox",
-    "aria-multiline": true,
-    // Positional, not derived from the text. A name built from the content
-    // renames the focused textbox on every keystroke, and a screen reader
-    // announces the rename over what the analyst is trying to hear.
-    "aria-label": `${BLOCK_ROLE[block.type]} ${position} of ${total}`,
+    "data-text-offsets": "",
+    ...editing,
     onInput: (event) => {
       const text = event.currentTarget.textContent ?? "";
       emitted.current = text;
@@ -285,6 +303,8 @@ interface Props {
   tracked?: boolean;
   /** Honour prefers-reduced-motion when scrolling a finding into view. */
   reduceMotion?: boolean;
+  /** Render the whole document read-only (a reference PSG). */
+  readOnly?: boolean;
   onEditBlock: (blockId: string, text: string) => void;
   onSelectFinding: (id: string | null) => void;
   onSelectionChange: (s: StudioSelection | null) => void;
@@ -296,6 +316,7 @@ export function DocumentCanvas({
   activeFindingId,
   tracked = true,
   reduceMotion = false,
+  readOnly = false,
   onEditBlock,
   onSelectFinding,
   onSelectionChange,
@@ -327,8 +348,11 @@ export function DocumentCanvas({
         emit(null);
         return;
       }
-      // Read-only blocks carry no offset model to map a span into.
-      if (!block.matches('[contenteditable="true"]')) {
+      // A block has to carry a flat text offset space for a span to mean
+      // anything. That is a property of the block's MODEL, not of whether it
+      // happens to be editable: a reference PSG is read-only and still maps
+      // offsets fine, while a table carries a block id and does not.
+      if (!block.hasAttribute("data-text-offsets")) {
         emit(null);
         return;
       }
@@ -402,6 +426,7 @@ export function DocumentCanvas({
             tracked={tracked}
             position={i + 1}
             total={doc.blocks.length}
+            readOnly={readOnly}
             onEditBlock={onEditBlock}
             onSelectFinding={onSelectFinding}
           />
@@ -412,7 +437,10 @@ export function DocumentCanvas({
             names itself. */}
         <footer className="st-foot">
           <span>{doc.name}</span>
-          <span className="st-foot__v">v{doc.version}</span>
+          {/* "v5.0" is OUR version of a working document. A reference PSG has
+              no version of ours -- it carries FDA's recommended date, which
+              must not be dressed up as an internal revision number. */}
+          <span className="st-foot__v">{readOnly ? doc.version : `v${doc.version}`}</span>
         </footer>
       </article>
     </div>

@@ -41,6 +41,9 @@ NO_JSON_BODY_ROUTES = {
     # Raw PDF bytes; the iframe consumes them, not the typed client. (The
     # sibling HEAD probe needs no entry: HEAD is excluded from the sweep.)
     ("GET", "/psg/documents/{doc_id}/pdf"),
+    # Generated .docx bytes; the browser downloads them. The typed contract for
+    # the same document is the sibling /content route, which does have a model.
+    ("GET", "/psg/documents/{doc_id}/docx"),
 }
 
 # Internal-only routes: NOT part of the public wire contract (include_in_schema

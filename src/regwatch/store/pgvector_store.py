@@ -676,6 +676,28 @@ def chunk_texts_at(short_name: str, page: int) -> list[str]:
         return [r for r in rows if r]
 
 
+def document_chunks(doc_id: int, version_id: int) -> list[tuple[int, int, str]]:
+    """Every chunk of one document version as (ordinal, page, text).
+
+    The whole document, in stored order, for callers that need to read it
+    rather than search it -- the studio's reference renderer. Rows with no
+    text are dropped; a NULL ordinal (written before 0017 added the column)
+    sorts last on its page rather than taking the document down.
+    """
+    _ensure_ready()
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            sa_text(
+                "SELECT COALESCE(ordinal, 2147483647) AS ordinal, "
+                "COALESCE(page, 1) AS page, text FROM chunk "
+                "WHERE doc_id = :doc_id AND version_id = :version_id "
+                "ORDER BY page, ordinal"
+            ),
+            {"doc_id": doc_id, "version_id": version_id},
+        ).all()
+    return [(int(r[0]), int(r[1]), r[2]) for r in rows if r[2]]
+
+
 def distinct_metadata_values(key: str) -> set[str]:
     """Distinct non-empty values of one text metadata column.
 

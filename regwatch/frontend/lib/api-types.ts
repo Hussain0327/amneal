@@ -154,6 +154,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/psg/documents/{doc_id}/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Psg Document Content
+         * @description One PSG as ordered blocks, rebuilt from the text ingest already stored.
+         *
+         *     No PDF fetch and no parsing happen here: the chunks of the document's
+         *     current version are read and reassembled, which is why this is cheap
+         *     enough to serve on every open (a PSG averages three chunks).
+         */
+        get: operations["psg_document_content_psg_documents__doc_id__content_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/psg/documents/{doc_id}/docx": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Psg Document Docx
+         * @description The same PSG as a Word download, generated per request and never stored.
+         *
+         *     Same source and same blocks as the content route, so what an analyst reads
+         *     in the studio and what lands in their working folder cannot drift apart.
+         */
+        get: operations["psg_document_docx_psg_documents__doc_id__docx_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/psg/documents/{doc_id}/pdf": {
         parameters: {
             query?: never;
@@ -716,6 +763,58 @@ export interface components {
             error?: string | null;
             /** Ok */
             ok: boolean;
+        };
+        /**
+         * PsgContentBlock
+         * @description One block of a reference PSG, in the studio's own block vocabulary.
+         */
+        PsgContentBlock: {
+            /** Id */
+            id: string;
+            /** Page */
+            page: number;
+            /** Text */
+            text: string;
+            /**
+             * Type
+             * @enum {string}
+             */
+            type: "title" | "meta" | "h2" | "p";
+        };
+        /**
+         * PsgDocumentContentResponse
+         * @description One PSG rendered as a document the studio can open like a working file.
+         *
+         *     ``file_name`` carries the .docx name the rail shows and the download
+         *     produces, so the client never builds a second one that could disagree.
+         *     ``truncated`` is surfaced rather than swallowed: a short body with no
+         *     explanation would read as a short guidance.
+         */
+        PsgDocumentContentResponse: {
+            /** Active Ingredient */
+            active_ingredient: string;
+            /** Appl No */
+            appl_no: string | null;
+            /** Blocks */
+            blocks: components["schemas"]["PsgContentBlock"][];
+            /** Dosage Form */
+            dosage_form: string | null;
+            /** File Name */
+            file_name: string;
+            /** Id */
+            id: number;
+            /** Page Count */
+            page_count: number;
+            /** Psg Type */
+            psg_type: string;
+            /** Recommended Date */
+            recommended_date: string | null;
+            /** Route */
+            route: string | null;
+            /** Source Url */
+            source_url: string;
+            /** Truncated */
+            truncated: boolean;
         };
         /** PsgDocumentListResponse */
         PsgDocumentListResponse: {
@@ -1430,6 +1529,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PsgDocumentListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    psg_document_content_psg_documents__doc_id__content_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                doc_id: number;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PsgDocumentContentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    psg_document_docx_psg_documents__doc_id__docx_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                doc_id: number;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

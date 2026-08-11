@@ -925,6 +925,19 @@ export function psgPdfPath(psgId: number): string {
   return `/api/psg/documents/${psgId}/pdf`;
 }
 
+export type PsgDocumentContent = Schemas["PsgDocumentContentResponse"];
+
+/** One PSG's text as studio blocks. Cheap on the server: no PDF is fetched. */
+export function fetchPsgContent(psgId: number): Promise<PsgDocumentContent> {
+  return getJSON<PsgDocumentContent>(`/psg/documents/${psgId}/content`);
+}
+
+// Same same-origin reasoning as psgPdfPath: a download is a navigation the
+// fetch wrapper never sees, so it has to carry the session cookie by itself.
+export function psgDocxPath(psgId: number): string {
+  return `/api/psg/documents/${psgId}/docx`;
+}
+
 export function listProducts(): Promise<ProductsResponse> {
   return getJSON<ProductsResponse>("/products");
 }
