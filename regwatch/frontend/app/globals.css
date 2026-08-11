@@ -1688,10 +1688,11 @@ button.chip:disabled {
 }
 
 /* ---------- The spine rail ----------
-   The shell reduced to a bound edge: seal, the five chapter numerals, Studio's
-   gold mark, the title lettered down the spine, then the analyst's own things
-   (new chat / history / account). A class, not inline styles, so the media
-   query below can restack it. */
+   The shell reduced to a bound edge: seal, the two studio marks, the title
+   lettered down the spine, then the analyst's own things (new chat / history /
+   account). A class, not inline styles, so the media query below can restack it.
+   Two peers need no rule drawn between them, so the hairline that used to fence
+   the numbered chapters off from Studio went with the numerals. */
 .rail {
   flex-shrink: 0;
   position: sticky;
@@ -1723,10 +1724,6 @@ button.chip:disabled {
   gap: 0.26rem;
   margin-top: 0.65rem;
 }
-.rail__hair {
-  width: 1.3rem;
-  margin: 0.4rem 0;
-}
 .rail__stop {
   position: relative;
   display: grid;
@@ -1752,13 +1749,10 @@ button.chip:disabled {
   color: var(--gold-ink);
   box-shadow: inset 3px 0 0 var(--gold);
 }
-.rail__no {
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-}
-/* Studio wears its own gold mark — a place, not a chapter numeral. */
-.rail__studio-mark {
+/* Each studio wears a lettered gold mark: a place, not a step in a sequence.
+   The letter is decorative (aria-hidden); the flyout and the aria-label carry
+   the name. */
+.rail__mark {
   display: grid;
   place-items: center;
   width: 1.35rem;
@@ -1770,6 +1764,16 @@ button.chip:disabled {
   color: #3a2600;
   background: linear-gradient(150deg, var(--gold), var(--gold-deep));
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+  /* Two gold chips of equal weight would leave the inset bar doing all the
+     work of saying which room you are in; the room you are not in sits back a
+     step and comes forward on hover, focus or arrival. */
+  opacity: 0.82;
+  transition: opacity 0.15s ease;
+}
+.rail__stop:hover .rail__mark,
+.rail__stop:focus-visible .rail__mark,
+.rail__stop--active .rail__mark {
+  opacity: 1;
 }
 /* The volume's title, lettered down the free run of the spine. */
 .rail__wordmark {
@@ -2085,13 +2089,6 @@ button.chip:disabled {
     align-items: center;
     gap: 0.1rem;
     margin-top: 0;
-  }
-  .rail__hair {
-    width: 0;
-    height: 1.4rem;
-    margin: 0 0.35rem;
-    border-top: 0;
-    border-left: 1px solid var(--edge);
   }
   .rail__wordmark {
     display: none;

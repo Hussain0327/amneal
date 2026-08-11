@@ -1,0 +1,82 @@
+/* ---------------------------------------------------------------------------
+   Record rail: three ways into the record
+   ----------------------------------------------------------------------------
+   The mirror of the Compliance Studio's activity rail, and deliberately the
+   same object: same 56px column, same icon-over-label stack, same chrome and
+   the same single hairline against the desk. Landing here from the spine should
+   feel like turning to face the other wall of one room, not entering a second
+   building, and a rail that looked different would be the first thing to say
+   otherwise.
+
+   Closed by default. The artifact is the work; the record is the lookup, and a
+   lookup that is always open is a column of nothing most of the day.
+
+   Three buttons instead of two, and the label under each icon is a visible echo
+   of the accessible name rather than a paraphrase of it -- see RecordRail.tsx
+   for why. Nothing about the geometry changed: 46px buttons inside a 56px rail,
+   so the badge-free icon box still clears the border on both sides.
+   ------------------------------------------------------------------------ */
+
+.rw-studio .rw-rail {
+  flex: none;
+  width: var(--rw-act-w);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--rw-s1);
+  padding: var(--rw-s2) 0;
+  background: var(--rw-chrome);
+  border-left: 1px solid var(--rw-line);
+}
+
+.rw-studio .rw-rail__btn {
+  position: relative;
+  width: 46px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--rw-s1);
+  padding: var(--rw-s2) 0;
+  border: 0;
+  border-radius: var(--rw-r-md);
+  background: transparent;
+  color: var(--rw-ink-faint);
+  cursor: pointer;
+  transition:
+    background var(--rw-dur) var(--rw-ease),
+    color var(--rw-dur) var(--rw-ease);
+}
+
+.rw-studio .rw-rail__btn:hover {
+  background: var(--rw-chrome-hover);
+  color: var(--rw-ink);
+}
+
+/* On parchment, raised means brighter, so the pressed toggle takes the same
+   lift as a hover rather than a darker well. The gold icon below is what
+   separates "pressed" from "pointer is here". */
+.rw-studio .rw-rail__btn.is-on {
+  background: var(--rw-chrome-hover);
+  color: var(--rw-ink);
+}
+
+.rw-studio .rw-rail__icon {
+  display: grid;
+  place-items: center;
+  width: var(--rw-s5);
+  height: var(--rw-s5);
+  color: inherit;
+}
+
+.rw-studio .rw-rail__btn.is-on .rw-rail__icon {
+  color: var(--rw-gold);
+}
+
+.rw-studio .rw-rail__label {
+  font-family: var(--rw-face-ui);
+  font-size: var(--rw-t-micro);
+  font-weight: 500;
+  line-height: 1;
+  color: inherit;
+}

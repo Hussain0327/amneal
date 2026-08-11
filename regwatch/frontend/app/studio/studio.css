@@ -1,10 +1,16 @@
 /* ===========================================================================
    COMPLIANCE STUDIO stylesheet.
-   foundation.css owns the token contract and the shared primitives; every
-   other file owns exactly one region's selectors and may only compose the
-   primitives, never redefine them. Import order is cascade order.
+   app/design owns the numbers and the shared controls; foundation.css binds
+   this studio's --st-* names onto them and owns the shell; every other file
+   owns exactly one region's selectors and may only compose the primitives,
+   never redefine them.
+
+   Import order is cascade order, and it is also dependency order now: the two
+   design files come FIRST because foundation.css resolves against them.
    ======================================================================== */
 
+@import "../design/tokens.css";
+@import "../design/primitives.css";
 @import "./css/foundation.css";
 @import "./css/top-bar.css";
 @import "./css/repository-tree.css";

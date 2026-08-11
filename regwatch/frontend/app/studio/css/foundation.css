@@ -1,8 +1,23 @@
 /* ============================================================================
    COMPLIANCE STUDIO -- one surface with the rest of the app
    ----------------------------------------------------------------------------
-   FOUNDATION: tokens, base, shell layout, shared primitives.
+   FOUNDATION: the studio's token names, base, shell layout, shared primitives.
    Region stylesheets are imported after this one; import order is cascade order.
+
+   WHERE THE NUMBERS LIVE
+   ----------------------
+   Not here, as of the Research Studio split. Every --st-* value in the .studio
+   block below is now an alias onto app/design/tokens.css, which both studios
+   read from, and app/design/primitives.css carries the .rw- copies of the
+   controls at the foot of this file. The reasoning that justifies the values --
+   the measured WCAG table, the 1.2:1 parchment-on-parchment problem, the
+   two-gold split, why focus is navy, why --st-on-chrome-faint is not the app's
+   own faint ink -- travelled with them and lives in tokens.css. Read it there,
+   not here: duplicated rationale is rationale that drifts.
+
+   Every --st-* NAME and every .st-* selector is unchanged, so this studio
+   renders exactly as it did. What changed is that there is now one set of
+   numbers instead of two, and the two studios cannot drift apart.
 
    THE THESIS
    ----------
@@ -15,68 +30,11 @@
 
    WHAT WAS ACTUALLY WRONG BEFORE
    ------------------------------
-   Not the palette. The previous build carried 26 distinct font-size values
-   across 73 declarations -- 22 of them jammed between 0.55rem and 1.06rem --
-   and 11 border radii. That is not a system, it is 73 local decisions, and it
-   is why the surface read as mush no matter what colours were in it. This file
-   has 7 type steps, 4 radii, 7 spacing steps, and no region may introduce a
-   value outside them.
-
+   Not the palette; the absence of a scale, which is tokens.css's story now.
    The structural defects went with it: filenames that truncated in the tree,
    the repository-wide run set rotated 90 degrees in a 48px rail, a footer
    paragraph that ran off the bottom of the viewport, and eighteen equally
    weighted buttons in a 376px findings column.
-
-   MEASURED CONTRAST (WCAG 2.1)
-   ----------------------------
-   Computed by scratch/contrast.mjs, not eyeballed. Each colour is reported
-   against the worst ground it actually lands on.
-
-     on-chrome        #16213a on #faf6ec   14.7:1   body text, headings
-     on-chrome-soft   #283450 on #faf6ec   11.5:1   secondary text
-     on-chrome-faint  #5f6478 on #efe7d3    4.8:1   metadata           (AA)
-     on-chrome-dim    #8f7b57 on #efe7d3    3.3:1   NON-TEXT ONLY
-     line-strong      #8f7b57 on #efe7d3    3.3:1   control boundaries (1.4.11)
-     gold             #8a5b00 on #faf6ec    5.5:1   accent as text or mark
-     ink on gold-fill #16213a on #f5b400    8.7:1   the primary button
-     flag             #7a2e2e on #faf6ec    8.7:1   defect
-     clear            #35704a on #faf6ec    5.5:1   settled
-     paper vs canvas  #fffdf8 on #efe7d3    1.2:1   -- SEE BELOW
-     ink on paper     #16213a on #fffdf8   15.0:1   document body text
-
-   THE 1.2:1 PROBLEM, AND WHAT CARRIES THE PAGE INSTEAD
-   ---------------------------------------------------
-   Parchment on parchment is 1.21:1. That single number is why the old build's
-   "five-step surface ramp" could never make the page an object: there is no
-   fill contrast available inside this family, so fill cannot be the mechanism.
-   Three things carry it instead, and all three have to be present:
-     1. the contact shadow -- a tight, dark 3px band directly under the sheet
-     2. the --st-paper-edge hairline, drawn as the shadow's first layer
-     3. the blotter edge -- .st-main darkens at its OUTER edges only, well
-        clear of the sheet, so the desk never rises to meet the page
-   Remove any one of them and the page goes flat again.
-
-   GOLD IS TWO TOKENS
-   ------------------
-   #f5b400 is 1.5:1 on parchment and fails as text AND as an indicator, which
-   globals.css and the previous build both said. So the split:
-     --st-gold       #8a5b00   marking something: text, icons, indicators
-     --st-gold-fill  #f5b400   painting something: large fills, dark text on top
-   Reaching for the wrong one is a contrast bug, so the names say which is which.
-
-   FOCUS
-   -----
-   Navy, everywhere. Chrome and page are the same material here, so there is no
-   second ground to answer, and gold would fail on both. globals.css made this
-   call for this reason.
-
-   COLOUR VOCABULARY (held strictly, unchanged since the first build)
-   -----------------------------------------------------------------
-     gold, bounded    grounded / sourced -- a citation chip, mono, hairline edge
-     gold, unbounded  the analyst's own hand -- a marker wash, a tracked change
-     flag / oxblood   a defect; weight encodes severity (solid > dashed)
-     soft ink         a note, nothing to fix
-   Severity is never a rainbow. One problem hue, varied by fill and weight.
 
    Everything is scoped under .studio so the shell outside cannot be touched.
    ========================================================================== */
@@ -84,140 +42,135 @@
 .studio {
   /* --- chrome: Ask's parchment, verbatim ----------------------------------- */
   /* Sampled from the running 01 Ask surface, not transcribed from memory:
-     Ask's ground computes to #faf6ec with #e4d9bf hairlines. The studio's
-     chrome sits on exactly that, so landing here from the rail is continuous. */
-  --st-chrome-1: #faf6ec; /* --paper:   tree and panel -- Ask's own ground */
-  --st-chrome-0: #faf6ec; /* the frame: top bar and rail. Ask sets its rail
-     TRANSPARENT over the body, so on Ask the frame and the ground are literally
-     the same surface and only hairlines divide them. Matched exactly. */
-  --st-chrome-2: #fffdf8; /* row hover: on parchment, raised means brighter */
-  --st-chrome-3: #fcefca; /* --gold-wash: the selected row */
-  --st-raise: #fffdf8; /* cards, chips, fields, the floating toolbar */
+     Ask's ground computes to #faf6ec with #e4d9bf hairlines, which is what
+     --rw-chrome holds. The studio's chrome sits on exactly that, so landing
+     here from the rail is continuous. */
+  --st-chrome-1: var(--rw-chrome); /* tree and panel -- Ask's own ground */
+  --st-chrome-0: var(--rw-chrome); /* the frame: top bar and rail. Ask sets its
+     rail TRANSPARENT over the body, so on Ask the frame and the ground are
+     literally the same surface and only hairlines divide them. Matched. */
+  --st-chrome-2: var(--rw-chrome-hover);
+  --st-chrome-3: var(--rw-chrome-sel);
+  --st-raise: var(--rw-raise); /* cards, chips, fields, the floating toolbar */
   /* The one region that does NOT match Ask, and deliberately. Ask has no
      artefact to lift; this surface does. The desk goes to the deepest parchment
      so the page has something to sit on. */
-  --st-canvas: #efe7d3; /* --paper-3 */
+  --st-canvas: var(--rw-desk);
 
-  --st-line: #e4d9bf; /* --edge: DIVIDER hairline, decorative */
-  --st-line-soft: #efe7d3;
-  /* One of the two derived values in this file; --st-on-chrome-faint is the
-     other, and both exist for the same reason. A divider may be faint, but the
-     edge of a text field or an outlined button IS what identifies the control,
-     and WCAG 1.4.11 owes that 3:1. The parchment family has no member between
-     --edge (1.35:1, decorative) and --ink-soft (4.8:1, text), so there is
-     nothing to use verbatim. 3.3:1 against every ground it lands on, and it
-     stays inside the family's hue. */
-  --st-line-strong: #8f7b57;
+  --st-line: var(--rw-line);
+  --st-line-soft: var(--rw-line-soft);
+  --st-line-strong: var(--rw-line-strong);
 
-  --st-on-chrome: #16213a; /* --ink        14.7:1 */
-  --st-on-chrome-soft: #283450; /* --ink-2      11.5:1 */
-  --st-on-chrome-faint: #5f6478; /* 4.8:1 on the DESK, the worst ground it lands
-     on (the format bar sits there). --ink-soft #686d80 is the app value and was
-     the obvious pick, but it is 4.17:1 there and 4.49:1 on a selected row. */
-  --st-on-chrome-dim: #8f7b57; /* 3.3:1 -- NON-TEXT ONLY */
+  --st-on-chrome: var(--rw-ink);
+  --st-on-chrome-soft: var(--rw-ink-2);
+  --st-on-chrome-faint: var(--rw-ink-faint);
+  --st-on-chrome-dim: var(--rw-ink-dim); /* 3.3:1 -- NON-TEXT ONLY */
 
   /* --- accents ------------------------------------------------------------- */
-  /* On cream, gold is the trap: #f5b400 is 1.5:1 against parchment and fails as
-     both text and indicator -- globals.css and the previous studio build both
-     said so. So --st-gold IS the ink-weight gold (5.5:1) and is safe anywhere,
-     and the saturated gold is a separate token licensed for LARGE FILLS ONLY,
-     with dark text on top. Reach for --st-gold-fill and you are painting a
-     surface; reach for --st-gold and you are marking something. */
-  --st-gold: #8a5b00; /* --gold-ink:  text, icons, indicators   5.5:1 */
-  --st-gold-fill: #f5b400; /* --gold:      fills only, dark text on top */
-  --st-gold-deep: #c98a0c;
-  --st-gold-wash: #fcefca; /* --gold-wash */
-  --st-flag: #7a2e2e; /* --oxblood:   8.7:1, safe as text AND as fill */
-  --st-flag-wash: #f3e3df; /* --oxblood-wash */
-  --st-clear: #35704a; /* 5.5:1, safe as text and as fill */
-  --st-clear-wash: rgba(53, 112, 74, 0.1);
+  /* Reach for --st-gold-fill and you are painting a surface; reach for
+     --st-gold and you are marking something. tokens.css says why. */
+  --st-gold: var(--rw-gold);
+  --st-gold-fill: var(--rw-gold-fill);
+  --st-gold-deep: var(--rw-gold-deep);
+  --st-gold-wash: var(--rw-gold-wash);
+  --st-flag: var(--rw-flag);
+  --st-flag-wash: var(--rw-flag-wash);
+  --st-clear: var(--rw-clear);
+  --st-clear-wash: var(--rw-clear-wash);
 
   /* --- the page: warm, and the only bright object on screen ---------------- */
-  --st-paper: #fffdf8;
-  --st-paper-2: #f4eede;
-  --st-paper-3: #efe7d3;
-  --st-paper-edge: #e5dbc3;
-  --st-ink: #16213a;
-  --st-ink-2: #283450;
-  --st-ink-soft: #686d80; /* 4.8:1 on paper */
+  --st-paper: var(--rw-paper);
+  --st-paper-2: var(--rw-paper-2);
+  --st-paper-3: var(--rw-paper-3);
+  --st-paper-edge: var(--rw-paper-edge);
+  --st-ink: var(--rw-ink);
+  --st-ink-2: var(--rw-ink-2);
+  --st-ink-soft: var(--rw-ink-soft); /* 4.8:1 on paper */
+  /* STUDIO-LOCAL, no shared counterpart. A warm grey rather than a cool one:
+     it sets the document footer, which is printed matter and wants the paper's
+     hue, not the chrome ramp's. --rw-ink-faint is the cool #5f6478 derived for
+     metadata on the DESK, and swapping it in here would tint the footer against
+     the sheet it is printed on. If the Research Studio ever needs a warm faint
+     ink on paper, that is the moment to promote this one, not before. */
   --st-ink-faint: #6b6859;
-  /* Accents ON PAPER keep their original values: they were chosen against cream
-     and still have to pass against cream. Only the on-chrome siblings are new. */
-  --st-gold-ink: #8a5b00;
-  --st-gold-paper-wash: #fcefca;
-  --st-oxblood: #7a2e2e;
-  --st-oxblood-wash: #f3e3df;
-  --st-green-ink: #35704a;
+  /* Accents ON PAPER are the same colours as on chrome: they were chosen
+     against cream and still have to pass against cream. The names differ
+     because the vocabulary on the page is the printer's, not the shell's. */
+  --st-gold-ink: var(--rw-gold);
+  --st-gold-paper-wash: var(--rw-gold-wash);
+  --st-oxblood: var(--rw-flag);
+  --st-oxblood-wash: var(--rw-flag-wash);
+  --st-green-ink: var(--rw-clear);
 
   /* --- focus --------------------------------------------------------------- */
-  /* Navy, both grounds. Chrome and page are the same material now, so there is
-     no second ground to answer -- and gold would fail here anyway (1.5:1).
-     globals.css made this exact call for this exact reason. */
-  --st-focus-chrome: #16213a;
-  --st-focus-paper: #16213a;
+  /* Two names, one colour, and that is the finding: chrome and page are the
+     same material here, so there is no second ground to answer. */
+  --st-focus-chrome: var(--rw-focus);
+  --st-focus-paper: var(--rw-focus);
 
   /* --- type: 7 steps, replacing 26 ---------------------------------------- */
-  --st-t-micro: 0.625rem; /* 10px -- mono identifiers, badges, eyebrows */
-  --st-t-small: 0.75rem; /* 12px -- meta lines, secondary labels */
-  --st-t-base: 0.8125rem; /* 13px -- ALL chrome UI: rows, buttons, body */
-  --st-t-mid: 0.9375rem; /* 15px -- panel titles, finding titles */
-  --st-t-doc: 1.0625rem; /* 17px -- document body serif */
-  --st-t-doch: 1.1875rem; /* 19px -- document headings */
-  --st-t-title: 1.6875rem; /* 27px -- document title */
+  --st-t-micro: var(--rw-t-micro); /* mono identifiers, badges, eyebrows */
+  --st-t-small: var(--rw-t-small); /* meta lines, secondary labels */
+  --st-t-base: var(--rw-t-base); /* ALL chrome UI: rows, buttons, body */
+  --st-t-mid: var(--rw-t-mid); /* panel titles, finding titles */
+  --st-t-doc: var(--rw-t-doc); /* document body serif */
+  --st-t-doch: var(--rw-t-doch); /* document headings */
+  --st-t-title: var(--rw-t-title); /* document title */
 
-  --st-lh-tight: 1.25;
-  --st-lh: 1.45;
-  --st-lh-doc: 1.68;
+  --st-lh-tight: var(--rw-lh-tight);
+  --st-lh: var(--rw-lh);
+  --st-lh-doc: var(--rw-lh-doc);
 
   /* Mono is for IDENTIFIERS ONLY -- document ids, ICH codes, versions, CTD
      paths, severity labels. Not buttons, not status, not prose. When every
-     small thing is set in tracked uppercase mono, nothing is emphasised. */
-  --st-face-ui: var(--font-body), ui-sans-serif, system-ui, sans-serif;
-  --st-face-doc: var(--font-serif), Georgia, "Times New Roman", serif;
-  --st-face-id: var(--font-mono), ui-monospace, SFMono-Regular, monospace;
+     small thing is set in tracked uppercase mono, nothing is emphasised.
+     There is deliberately no alias for the shared display face: it is licensed
+     for an artefact title, and this studio's artefact wears the reviewed
+     document's own title, set in the document face. */
+  --st-face-ui: var(--rw-face-ui);
+  --st-face-doc: var(--rw-face-doc);
+  --st-face-id: var(--rw-face-id);
 
   /* --- space: 7 steps ------------------------------------------------------ */
-  --st-s1: 0.25rem;
-  --st-s2: 0.5rem;
-  --st-s3: 0.75rem;
-  --st-s4: 1rem;
-  --st-s5: 1.5rem;
-  --st-s6: 2rem;
-  --st-s7: 3rem;
+  --st-s1: var(--rw-s1);
+  --st-s2: var(--rw-s2);
+  --st-s3: var(--rw-s3);
+  --st-s4: var(--rw-s4);
+  --st-s5: var(--rw-s5);
+  --st-s6: var(--rw-s6);
+  --st-s7: var(--rw-s7);
 
   /* --- radius: 4 steps, replacing 11 -------------------------------------- */
-  --st-r-xs: 3px; /* the page itself -- paper barely rounds */
-  --st-r-sm: 5px; /* chips, fields, small controls */
-  --st-r-md: 9px; /* cards, buttons, panels */
-  --st-r-pill: 999px;
+  --st-r-xs: var(--rw-r-xs); /* the page itself -- paper barely rounds */
+  --st-r-sm: var(--rw-r-sm); /* chips, fields, small controls */
+  --st-r-md: var(--rw-r-md); /* cards, buttons, panels */
+  --st-r-pill: var(--rw-r-pill);
 
   /* --- geometry ------------------------------------------------------------ */
-  --st-top-h: 52px;
-  --st-tree-w: 17.5rem;
+  --st-top-h: var(--rw-top-h);
+  --st-tree-w: var(--rw-work-w);
+  /* STUDIO-LOCAL, and it only looks like --rw-spine-w. That token is the 56px
+     NAVIGATION rail both studios stand on. This is the compliance spine: a
+     ruler drawn on the desk beside the page, carrying tick marks rather than
+     icons, and 30px is what a ruler needs. Same word, different instrument. */
   --st-spine-w: 30px;
+  /* STUDIO-LOCAL, no shared counterpart. A finding is a paragraph with controls
+     under it, so this panel is the widest thing in the building. The shared
+     contract's narrow column, --rw-margin-w, is for identifiers beside prose
+     and would not hold one of these. */
   --st-panel-w: 24rem;
-  --st-rail-w: 56px;
-  --st-page-w: 46rem;
+  --st-rail-w: var(--rw-act-w);
+  --st-page-w: var(--rw-page-w);
 
-  /* --- elevation: cast light, not grey ------------------------------------- */
-  /* Navy-tinted, never neutral black: a shadow on parchment is ink pooling, not
-     an absence of light. --shadow-soft / --shadow-lift from globals.css, plus
-     one the app does not have.
+  /* --- elevation ----------------------------------------------------------- */
+  /* The contact layer in --st-shadow-page is what makes the sheet an object at
+     1.21:1; tokens.css carries that argument in full. */
+  --st-shadow-panel: var(--rw-shadow-panel);
+  --st-shadow-pop: var(--rw-shadow-pop);
+  --st-shadow-page: var(--rw-shadow-page);
 
-     On navy the page separated from its ground by 17.8:1 and the shadow was
-     decoration. On parchment #fffdf8 against #efe7d3 is 1.21:1, so fill cannot
-     carry the separation and the shadow has to do the structural work instead.
-     Hence the CONTACT layer: a tight, comparatively dark 3px band directly
-     under the sheet. That is the line that says "lying on" rather than
-     "printed on", and it is the whole reason the page reads as an object. */
-  --st-shadow-panel: 0 2px 4px rgba(22, 33, 58, 0.06), 0 22px 48px -24px rgba(22, 33, 58, 0.34);
-  --st-shadow-pop: 0 1px 2px rgba(22, 33, 58, 0.08), 0 12px 28px -12px rgba(22, 33, 58, 0.3);
-  --st-shadow-page:
-    0 0 0 1px var(--st-paper-edge), 0 2px 3px -1px rgba(22, 33, 58, 0.16),
-    0 10px 20px -8px rgba(22, 33, 58, 0.18), 0 34px 60px -30px rgba(22, 33, 58, 0.38);
-
-  --st-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
-  --st-dur: 0.18s;
+  --st-ease: var(--rw-ease);
+  --st-dur: var(--rw-dur);
 
   /* The studio owns the viewport: it is a workbench, not a page. */
   position: fixed;

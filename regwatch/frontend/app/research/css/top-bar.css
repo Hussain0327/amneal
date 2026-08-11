@@ -1,0 +1,105 @@
+/* ---------------------------------------------------------------------------
+   Top bar: identity and breadcrumb
+   ----------------------------------------------------------------------------
+   Chrome, one hairline below the desk, so it reads as the frame rather than
+   another working surface. Everything in it is sans and sentence case except
+   the mark: mono is reserved for identifiers, and "RW" is a badge, not a label.
+
+   Two things the Compliance Studio's bar has and this one does not.
+
+   No exit link. The spine rail is on screen at every width above the mobile
+   breakpoint, so there is nowhere to exit TO -- leaving the Research Studio
+   means picking another room in the spine. A trailing "Exit" would be a button
+   whose only honest destination is the room you are already standing next to.
+
+   No save state. A thread, a bulletin and a paper do not share one, and a bar
+   that says "All changes saved" over a bulletin nobody can edit is a lie in the
+   most trusted line on the surface. Artifact state belongs on the sheet.
+
+   Everything is scoped under .rw-studio so the shell outside, the old surfaces
+   and the Compliance Studio cannot be touched by anything in this file.
+   ------------------------------------------------------------------------ */
+
+.rw-studio .rw-top {
+  flex: none;
+  height: var(--rw-top-h);
+  display: flex;
+  align-items: center;
+  gap: var(--rw-s3);
+  padding: 0 var(--rw-s3);
+  background: var(--rw-chrome);
+  border-bottom: 1px solid var(--rw-line);
+}
+
+.rw-studio .rw-top__mark {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: var(--rw-r-sm);
+  background: var(--rw-gold-fill);
+  color: var(--rw-ink);
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  font-weight: 700;
+}
+
+/* The hairline lives on the name itself (a ::after) rather than as a sibling
+   element, so the divider tracks the title's baseline without a DOM node that
+   carries no meaning of its own. */
+.rw-studio .rw-top__name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rw-s3);
+  flex: none;
+  font-size: var(--rw-t-base);
+  font-weight: 600;
+  line-height: 1;
+  color: var(--rw-ink);
+  white-space: nowrap;
+}
+
+.rw-studio .rw-top__name::after {
+  content: "";
+  width: 1px;
+  height: var(--rw-s4);
+  background: var(--rw-line);
+}
+
+.rw-studio .rw-top__crumb {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--rw-t-small);
+  color: var(--rw-ink-faint);
+}
+
+/* The artifact title is prose, not a code -- it is the one thing in the bar
+   that has to be findable at a glance, so it gets weight instead of mono. */
+.rw-studio .rw-top__crumb b {
+  font-weight: 600;
+  color: var(--rw-ink);
+}
+
+/* Holds the right end open for the product scope that will land there. Until
+   then it is what stops a long title from filling the bar edge to edge, which
+   would leave the crumb with no visible end. */
+.rw-studio .rw-top__spacer {
+  flex: 1;
+  min-width: var(--rw-s5);
+}
+
+/* The work rail is in flow on desktop, so its toggle only exists once the rail
+   becomes a slide-over. Three classes deep so the rule out-specifies
+   .rw-icon-btn's own display:grid whatever order the stylesheets land in. */
+.rw-studio .rw-top .rw-top__menu {
+  display: none;
+}
+
+@media (max-width: 960px) {
+  .rw-studio .rw-top .rw-top__menu {
+    display: grid;
+  }
+}
