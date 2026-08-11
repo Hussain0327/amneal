@@ -1,0 +1,432 @@
+/* ============================================================================
+   RESEARCH STUDIO stylesheet.
+
+   app/design owns the numbers and the shared controls. This file owns the
+   SHELL -- the frame the four artifact kinds are shown inside -- and every
+   other file owns exactly one region's selectors and may only compose the
+   primitives, never redefine them. Import order is cascade order, and it is
+   dependency order too: the two design files come first because everything
+   below resolves against them.
+
+   WHERE THIS STUDIO DIFFERS FROM THE COMPLIANCE ONE, AND WHY
+   ----------------------------------------------------------
+   Anatomically it does not: spine rail, work rail, desk and sheet, activity
+   rail, left is what you own and right is what you consult. That sameness is
+   the point -- two rooms in one building.
+
+   Two things are new. First, this studio does not cover the viewport: it fills
+   the space BESIDE the spine rail rather than painting over it, because the
+   rail now carries both studios and a room you can only leave with the back
+   button is not a room. Second, the sheet is ruled into a prose column and an
+   authorities margin (see css/sheet.css). In the Compliance Studio marks go ON
+   the text, because they are the analyst's own hand; here they go BESIDE it,
+   because they are the record's.
+
+   THE DESK, and why fill cannot carry it
+   --------------------------------------
+   Inherited verbatim from .st-main. Paper on parchment is 1.21:1, so there is
+   no fill contrast available inside this family and the sheet cannot be made an
+   object by colouring it. Three things do that instead and all three have to be
+   present: the contact shadow, the --rw-paper-edge hairline drawn as the
+   shadow's first layer (both in --rw-shadow-page), and the blotter edge below.
+   Remove any one and the page goes flat.
+   ========================================================================== */
+
+@import "../design/tokens.css";
+@import "../design/primitives.css";
+@import "./css/top-bar.css";
+@import "./css/work-rail.css";
+@import "./css/sheet.css";
+@import "./css/record-rail.css";
+
+/* ---------------------------------------------------------------------------
+   Shell
+   ------------------------------------------------------------------------ */
+
+/* The app shell, pinned to the viewport for this route only. globals.css gives
+   .shell min-height:100vh so a page can grow past the fold; a workbench must
+   not, or the rails scroll away from the work. Pinning here rather than on
+   .shell keeps every other surface unchanged. */
+.rw-shell {
+  height: 100dvh;
+  overflow: hidden;
+}
+
+/* Everything except the spine rail. Owns its own scrolling -- nothing inside
+   ever scrolls the document -- and stacks the top bar over a three-column
+   body. */
+.rw-studio {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--rw-desk);
+  color: var(--rw-ink);
+  font-family: var(--rw-face-ui);
+  font-size: var(--rw-t-base);
+  line-height: var(--rw-lh);
+  -webkit-font-smoothing: antialiased;
+}
+
+.rw-studio *,
+.rw-studio *::before,
+.rw-studio *::after {
+  box-sizing: border-box;
+}
+
+/* Paper grain, matching body::before in globals.css and .studio::before exactly
+   -- same noise, same multiply, same opacity. This surface paints its own
+   ground over the app's, so without this it would be the one flat thing in an
+   app made of paper. ONE grain for the whole studio: the sheet does not lay a
+   second, or the two would stack and the page would read dirtier than the desk
+   it is lying on. */
+.rw-studio::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  opacity: 0.035;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.rw-body {
+  position: relative;
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* WorkRail's contract is four props and none of them is "open", so the shell
+   carries the narrow-viewport drawer state as .is-work-open on this root and
+   css/work-rail.css answers it. Nothing to declare here; the class exists only
+   as a hook, and this note is so nobody deletes it as unused. */
+
+/* ---------------------------------------------------------------------------
+   The desk
+   ------------------------------------------------------------------------ */
+
+.rw-desk {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--rw-desk);
+}
+
+/* THE BLOTTER EDGE, and it has to point this way round.
+   The first attempt lightened the desk toward the middle, which is exactly
+   where the sheet sits: it raised the ground to meet the page and cancelled the
+   separation it existed to create. So the gradient darkens the OUTER edges
+   only, well clear of the sheet, and leaves the desk immediately around it at
+   full --rw-desk. That is also what the furniture does -- a blotter is darkest
+   at its border and the record sits in the clear middle of it.
+
+   On the desk rather than on the scroller, so it stays put while the artifact
+   moves under it. A desk does not scroll. */
+.rw-desk::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    125% 95% at 50% 42%,
+    rgba(22, 33, 58, 0) 52%,
+    rgba(22, 33, 58, 0.055) 100%
+  );
+}
+
+/* Above the blotter. Without this the gradient paints over the sheet's own
+   background and the contact shadow loses its darkest band. */
+.rw-desk > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* ---------------------------------------------------------------------------
+   The staged centre
+   ---------------------------------------------------------------------------
+   Three of the four kinds still render through their old surfaces (see
+   components/research/LegacyCenter.tsx). Those surfaces were written to sit in
+   the (shell) canvas, so two pieces of the old chrome have to be neutralised
+   here rather than by editing four pages that are all being replaced.
+   ------------------------------------------------------------------------ */
+
+.rw-legacy {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--rw-s6) var(--rw-s5) var(--rw-s7);
+}
+
+/* The old reading column, re-measured. Its 56rem came from globals.css --maxw,
+   which was measured against the full canvas these surfaces no longer sit in;
+   inside the desk the studio's own page width is the honest measure, and it is
+   the width the real sheet beside it uses. */
+.rw-legacy .measure {
+  max-width: var(--rw-page-w);
+  margin-inline: auto;
+}
+
+/* PageHeader: the masthead each legacy surface prints above its own content.
+   The top bar's crumb already names the kind and the artifact, so a second
+   title on the same screen -- carrying a chapter numeral the rail no longer
+   uses -- states an order that no longer exists. It is the first child of
+   .measure on both surfaces that still carry one. */
+.rw-legacy .measure > header:first-child {
+  display: none;
+}
+
+/* ---------------------------------------------------------------------------
+   The composer
+   ---------------------------------------------------------------------------
+   Docked below the sheet, in the sheet's footer slot. It belongs to the page
+   rather than to the sheet -- a dossier's footer will hold something else --
+   so it is defined here with the shell and not in css/sheet.css.
+   ------------------------------------------------------------------------ */
+
+.rw-composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rw-s2);
+}
+
+.rw-composer__bar {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--rw-s2);
+  padding: var(--rw-s2);
+  border: 1px solid var(--rw-line-strong);
+  border-radius: var(--rw-r-md);
+  background: var(--rw-raise);
+  transition: border-color var(--rw-dur) var(--rw-ease);
+}
+
+/* --rw-ink-dim is byte-identical to --rw-line-strong, the resting border, so
+   the obvious "darken on focus" is a no-op that paints the same hex. The
+   composer is this studio's primary control and owes a visible focus state
+   (2.4.7), so the border goes to a colour that actually differs and the ring
+   below carries the rest. */
+.rw-composer__bar:focus-within {
+  border-color: var(--rw-ink-2);
+}
+
+.rw-composer__input {
+  flex: 1;
+  min-width: 0;
+  max-height: calc(var(--rw-s7) * 3);
+  padding: var(--rw-s1);
+  border: 0;
+  background: transparent;
+  color: var(--rw-ink);
+  font-family: var(--rw-face-ui);
+  font-size: var(--rw-t-base);
+  line-height: var(--rw-lh);
+  resize: none;
+  overflow-y: auto;
+}
+
+/* The ring is drawn on the BAR, not the textarea, so it frames the whole
+   control including the send button rather than a borderless inner box. The
+   textarea therefore suppresses its own, and the bar answers for it -- which
+   the rule above does not do on its own, because a keyboard user needs
+   something more definite than a one-step border change. */
+.rw-composer__input:focus-visible {
+  outline: none;
+}
+
+.rw-composer__bar:focus-within {
+  outline: 2px solid var(--rw-focus);
+  outline-offset: 2px;
+}
+
+/* A placeholder is text, so 1.4.3 applies and --rw-ink-dim (3.3:1, non-text
+   only) cannot carry it. */
+.rw-composer__input::placeholder {
+  color: var(--rw-ink-faint);
+  opacity: 1;
+}
+
+.rw-composer__send {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border: 1px solid var(--rw-gold-fill);
+  border-radius: var(--rw-r-sm);
+  background: var(--rw-gold-fill);
+  color: var(--rw-ink);
+  cursor: pointer;
+  transition:
+    background var(--rw-dur) var(--rw-ease),
+    border-color var(--rw-dur) var(--rw-ease);
+}
+
+.rw-composer__send:hover:not(:disabled) {
+  background: var(--rw-gold-deep);
+  border-color: var(--rw-gold-deep);
+}
+
+.rw-composer__send:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+/* Transport failures and load notices. Mono because they are machine-register
+   lines about the plumbing, not the studio's own voice. */
+.rw-composer__note {
+  margin: 0;
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-small);
+  line-height: var(--rw-lh);
+  color: var(--rw-ink-faint);
+}
+
+.rw-composer__note--fail {
+  color: var(--rw-flag);
+}
+
+/* ---------------------------------------------------------------------------
+   The transcript
+   ---------------------------------------------------------------------------
+   A thread's turns are the app's own .chat-row / .msg markup, reused verbatim
+   rather than reimplemented -- see the note in page.tsx. Only the column
+   rhythm is set here; everything inside a turn keeps globals.css's typography,
+   which is the same parchment system this studio is cut from.
+   ------------------------------------------------------------------------ */
+
+.rw-thread {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rw-s5);
+}
+
+.rw-thread__empty {
+  margin: 0;
+  color: var(--rw-ink-soft);
+  font-size: var(--rw-t-mid);
+  line-height: var(--rw-lh);
+}
+
+/* ---------------------------------------------------------------------------
+   The record panel
+   ---------------------------------------------------------------------------
+   SEAM. The rail beside it is real; the three panels are not built. This is the
+   shell they will open into, and it currently holds one honest sentence saying
+   so -- three toggles that visibly do nothing would be worse. Whoever builds
+   the panels owns this block from then on.
+   ------------------------------------------------------------------------ */
+
+/* 24rem is the Compliance Studio's --st-panel-w, so the panel that opens on the
+   right is literally the same object in both rooms. It is not a token yet
+   because there is nothing behind it yet; promote it when there is. */
+.rw-panel {
+  flex: none;
+  width: 24rem;
+  max-width: 100%;
+  padding: var(--rw-s4);
+  border-left: 1px solid var(--rw-line);
+  background: var(--rw-chrome);
+  overflow-y: auto;
+}
+
+.rw-panel__staged {
+  margin: var(--rw-s3) 0 0;
+  color: var(--rw-ink-soft);
+  line-height: var(--rw-lh);
+}
+
+/* ---------------------------------------------------------------------------
+   Scrim: the narrow-viewport work rail, and nothing else
+   ------------------------------------------------------------------------ */
+
+.rw-scrim {
+  display: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Scrollbars: present but recessive
+   ------------------------------------------------------------------------ */
+
+.rw-studio ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.rw-studio ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.rw-studio ::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: var(--rw-r-pill);
+  background-clip: content-box;
+  background-color: var(--rw-line);
+}
+
+.rw-studio ::-webkit-scrollbar-thumb:hover {
+  background-color: var(--rw-ink-dim);
+}
+
+.rw-studio * {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rw-line) transparent;
+}
+
+/* ---------------------------------------------------------------------------
+   Responsive. A workbench is a desktop instrument; below the breakpoints it
+   degrades to the same regions reached one at a time rather than pretending a
+   four-column bench fits on a phone.
+
+   Only the shell's own pieces are re-laid out here. The rail's slide-over and
+   the sheet's margin fold live in their own region files, where the reasoning
+   for each breakpoint sits next to the thing it moves.
+   ------------------------------------------------------------------------ */
+
+@media (max-width: 960px) {
+  .rw-panel {
+    position: absolute;
+    right: var(--rw-act-w);
+    top: 0;
+    bottom: 0;
+    z-index: 30;
+    box-shadow: var(--rw-shadow-panel);
+  }
+
+  .rw-scrim {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    border: 0;
+    background: rgba(22, 33, 58, 0.32);
+  }
+}
+
+/* Nothing is owed to globals.css's own 860px breakpoint, where the spine rail
+   restacks into a top strip and .shell turns into a column. The shell is still
+   exactly one viewport tall and the studio is still flex:1 with min-height:0,
+   so it takes the height the strip leaves in a column exactly as it takes the
+   width the rail leaves in a row. Noted because the absence of a rule here
+   looks like an oversight and is not. */
+
+@media (prefers-reduced-motion: reduce) {
+  .rw-studio *,
+  .rw-studio *::before,
+  .rw-studio *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

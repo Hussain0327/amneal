@@ -1,0 +1,332 @@
+/* ============================================================================
+   RW PRIMITIVES -- the controls both studios share
+   ----------------------------------------------------------------------------
+   A button is a button everywhere. These are the pieces that appeared
+   identically in every region of the first studio, lifted out so the second one
+   inherits them rather than re-deciding them. Every value here comes from
+   tokens.css; there is not a single literal colour, step or radius below except
+   the control heights, which are their own small scale (26 / 28 / 30 / 32 / 36).
+
+   Regions own their own namespace and may COMPOSE these, never redefine them.
+   If a region needs a variant, it adds a modifier class in its own file rather
+   than reaching in here -- that is how the two studios stay one system while
+   still being two rooms.
+   ========================================================================== */
+
+/* ---------------------------------------------------------------------------
+   Focus and selection: the two rules that hold the contrast contract
+   ------------------------------------------------------------------------ */
+
+/* Navy on both grounds -- see the focus note in tokens.css. :where() keeps
+   specificity at zero so a component can position its own ring. */
+.rw-studio
+  :where(a, button, summary, input, textarea, [tabindex], [contenteditable]):focus-visible {
+  outline: 2px solid var(--rw-focus);
+  outline-offset: 2px;
+  border-radius: var(--rw-r-sm);
+}
+
+/* --rw-ink-faint clears 4.5:1 on every surface except --rw-chrome-sel, the
+   gold-wash selected row, where it lands at 4.49. Rather than ask every
+   component to remember that, rebind the token inside anything selected:
+   "faint" resolves to "ink-2" there, and the contrast is correct by
+   construction. Selection is emphasis anyway, so the promotion costs nothing. */
+.rw-studio :where(.is-active, [aria-current="true"], [aria-selected="true"]) {
+  --rw-ink-faint: var(--rw-ink-2);
+}
+
+/* ---------------------------------------------------------------------------
+   Buttons
+   ------------------------------------------------------------------------ */
+
+.rw-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--rw-s2);
+  height: 30px;
+  padding: 0 var(--rw-s3);
+  border: 1px solid transparent;
+  border-radius: var(--rw-r-sm);
+  background: transparent;
+  color: var(--rw-ink-2);
+  font-family: var(--rw-face-ui);
+  font-size: var(--rw-t-base);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--rw-dur) var(--rw-ease),
+    color var(--rw-dur) var(--rw-ease),
+    border-color var(--rw-dur) var(--rw-ease);
+}
+
+.rw-btn svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.rw-btn:hover:not(:disabled) {
+  background: var(--rw-chrome-hover);
+  color: var(--rw-ink);
+}
+
+.rw-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+/* The one saturated control in any given view. Ink on gold-fill is 8.7:1, so it
+   can carry the primary action honestly -- but only ONE of these per view, or
+   the emphasis it is spending stops meaning anything. */
+.rw-btn--primary {
+  background: var(--rw-gold-fill);
+  border-color: var(--rw-gold-fill);
+  color: var(--rw-ink);
+  font-weight: 600;
+}
+
+.rw-btn--primary:hover:not(:disabled) {
+  background: var(--rw-gold-deep);
+  border-color: var(--rw-gold-deep);
+  color: var(--rw-ink);
+}
+
+/* --rw-line-strong, not --rw-line: the edge IS what identifies an outlined
+   control, so it owes 3:1 under WCAG 1.4.11 and the decorative hairline
+   does not clear it. */
+.rw-btn--outline {
+  border-color: var(--rw-line-strong);
+  color: var(--rw-ink-2);
+}
+
+.rw-btn--outline:hover:not(:disabled) {
+  border-color: var(--rw-ink-dim);
+  background: var(--rw-chrome-hover);
+  color: var(--rw-ink);
+}
+
+/* A text button. For the actions that are not the expected one, so the expected
+   one can be the only filled control in its card. */
+.rw-btn--quiet {
+  height: 26px;
+  padding: 0 var(--rw-s2);
+  color: var(--rw-ink-faint);
+}
+
+.rw-btn--quiet:hover:not(:disabled) {
+  background: var(--rw-chrome-hover);
+  color: var(--rw-ink);
+}
+
+.rw-btn--lg {
+  height: 36px;
+  padding: 0 var(--rw-s4);
+  font-size: var(--rw-t-base);
+}
+
+.rw-btn--block {
+  width: 100%;
+}
+
+.rw-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: var(--rw-r-sm);
+  background: transparent;
+  color: var(--rw-ink-faint);
+  cursor: pointer;
+  transition:
+    background var(--rw-dur) var(--rw-ease),
+    color var(--rw-dur) var(--rw-ease);
+}
+
+.rw-icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.rw-icon-btn:hover:not(:disabled) {
+  background: var(--rw-chrome-hover);
+  color: var(--rw-ink);
+}
+
+.rw-icon-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+/* ---------------------------------------------------------------------------
+   Identifiers and labels
+   ------------------------------------------------------------------------ */
+
+/* Mono, tracked -- the ONE place that treatment is licensed, because these
+   really are codes: PSG-0214, 21 CFR 314.94, v5.0, 2026-08-11. */
+.rw-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--rw-line);
+  border-radius: var(--rw-r-xs);
+  background: var(--rw-raise);
+  color: var(--rw-ink-faint);
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.rw-chip svg {
+  width: 10px;
+  height: 10px;
+  opacity: 0.8;
+}
+
+/* Severity: one problem hue varied by fill and weight, never a rainbow.
+   major = solid flag, minor = hairline flag, info = quiet ink. */
+.rw-sev {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--rw-r-xs);
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  line-height: 1.5;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.rw-sev--major {
+  background: var(--rw-flag);
+  border-color: var(--rw-flag);
+  color: var(--rw-paper);
+}
+
+/* The one literal left in this file: a flag tint at hairline weight. It is the
+   wash lifted just far enough to read as an edge against itself, which no
+   member of the token palette does -- the same gap --rw-line-strong exists to
+   fill on the parchment side. */
+.rw-sev--minor {
+  background: var(--rw-flag-wash);
+  border-color: rgba(226, 133, 124, 0.55);
+  color: var(--rw-flag);
+}
+
+.rw-sev--info {
+  background: transparent;
+  border-color: var(--rw-line);
+  color: var(--rw-ink-faint);
+}
+
+/* Section eyebrow. Micro, tracked, faint -- it names a region and then gets out
+   of the way. */
+.rw-eyebrow {
+  margin: 0;
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--rw-ink-faint);
+}
+
+/* ---------------------------------------------------------------------------
+   Fields
+   ------------------------------------------------------------------------ */
+
+/* Fields are the brightest fill on a mid surface, so they read as a well cut
+   into the chrome rather than a card sitting on it. */
+.rw-field {
+  display: flex;
+  align-items: center;
+  gap: var(--rw-s2);
+  height: 32px;
+  padding: 0 var(--rw-s2);
+  border: 1px solid var(--rw-line-strong);
+  border-radius: var(--rw-r-sm);
+  background: var(--rw-raise);
+  color: var(--rw-ink);
+  transition: border-color var(--rw-dur) var(--rw-ease);
+}
+
+.rw-field:focus-within {
+  border-color: var(--rw-ink-dim);
+}
+
+.rw-field svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--rw-ink-dim);
+}
+
+.rw-field input,
+.rw-field textarea {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: var(--rw-face-ui);
+  font-size: var(--rw-t-base);
+  line-height: var(--rw-lh);
+}
+
+.rw-field input:focus,
+.rw-field textarea:focus {
+  outline: none;
+}
+
+/* A placeholder is TEXT, so 1.4.3 applies and --rw-ink-dim (3.3:1, non-text
+   only) cannot carry it. This is the visible label of an empty search box, so
+   it is not decorative either. */
+.rw-field ::placeholder {
+  color: var(--rw-ink-faint);
+  opacity: 1;
+}
+
+/* ---------------------------------------------------------------------------
+   Status glyph
+   ------------------------------------------------------------------------ */
+
+/* A shape and a colour, never a colour alone: whatever renders one of these
+   owes screen readers the same state in words. Solid = something to act on,
+   ring = settled or not yet begun. Regions add their own state modifiers,
+   because the states belong to the region, not to the shape. */
+.rw-glyph {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--rw-r-pill);
+  box-shadow: inset 0 0 0 1.5px currentcolor;
+  color: var(--rw-ink-dim);
+}
+
+/* ---------------------------------------------------------------------------
+   Screen-reader-only text
+   ------------------------------------------------------------------------ */
+
+.rw-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

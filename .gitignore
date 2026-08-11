@@ -47,3 +47,6 @@ docs/*.txt
 
 # office docs / local working files (not source — kept locally, not pushed)
 *.docx
+
+# visual brainstorm scratch (superpowers companion)
+.superpowers/

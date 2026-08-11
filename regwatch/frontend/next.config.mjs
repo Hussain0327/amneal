@@ -31,6 +31,27 @@ const nextConfig = {
   async rewrites() {
     return [{ source: "/api/:path*", destination: `${API_PROXY_TARGET}/:path*` }];
   },
+  // Assemble, Watch and White Paper are now artifact kinds inside the Research
+  // Studio, so their old paths are gone from the app and must not 404: bookmarks
+  // and pasted links outlive a rebuild. 308 (permanent: true) because the move is
+  // permanent and the method must be preserved.
+  //
+  // Next passes the original query through to the destination automatically, so
+  // an old /watch?rp=albuterol%20sulfate&appl=020503 keeps its product scope and
+  // only picks up kind=bulletin on top. "/" is deliberately absent: Ask still
+  // lives at the root and moves on its own schedule.
+  //
+  // Deficiency is a UI removal only. The FastAPI routes behind /api/deficiency/*
+  // are untouched and still reachable through the rewrite above; this entry only
+  // stops the deleted page from 404ing.
+  async redirects() {
+    return [
+      { source: "/assemble", destination: "/research?kind=dossier", permanent: true },
+      { source: "/watch", destination: "/research?kind=bulletin", permanent: true },
+      { source: "/whitepaper", destination: "/research?kind=paper", permanent: true },
+      { source: "/deficiency", destination: "/research", permanent: true },
+    ];
+  },
   // Security response headers. The app is a cookie-authed origin reachable over
   // a public tunnel, so the simple anti-clickjacking / sniffing / referrer
   // headers are enforced immediately. The CSP ships Report-Only first: Next's

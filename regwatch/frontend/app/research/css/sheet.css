@@ -1,0 +1,515 @@
+/* ---------------------------------------------------------------------------
+   THE SHEET AND ITS MARGIN -- the signature of the Research Studio
+   ---------------------------------------------------------------------------
+   Everything else in this building is deliberately quiet so that this one
+   object can be the thing you remember. It is the only region that carries the
+   paper tokens, the only place the display face appears, and the only thing on
+   screen with a real shadow under it.
+
+   THE MARGIN, AND WHY IT IS NOT A PANEL
+   In the Compliance Studio a mark goes ON the text: a highlight, a tracked
+   change, a finding anchored to a span, all of them the analyst's own hand.
+   Here the marks are the record's, not the reader's, so they go BESIDE the
+   text the way a source note does on a printed page. That thesis is only
+   legible if the margin is part of the sheet, so it takes no background, no
+   radius, no shadow and no fill of its own -- one hairline divides it, and the
+   same paper runs underneath both columns.
+
+   WHAT MAKES THE PAGE AN OBJECT
+   Paper on parchment is 1.21:1. Fill cannot carry the separation, so all three
+   of the mechanisms named in tokens.css have to be present at once:
+     1. the contact shadow, tight and dark, directly under the sheet
+     2. the --rw-paper-edge hairline, drawn as that shadow's FIRST layer
+     3. the blotter edge -- .rs-desk darkens at its OUTER edges only, well clear
+        of the page, so the desk never rises to meet it
+   The first two ride in --rw-shadow-page. The third is .rs-desk::before.
+
+   Every type step, space, radius and colour below is a token. The literals that
+   remain are the ones that are not design decisions: hairline and border
+   weights, the two hit-target minimums on the stamp (WCAG 2.5.8), the blotter
+   gradient copied verbatim from the Compliance Studio's desk, the clamp count,
+   optical letter-spacing, and the two breakpoints.
+   ------------------------------------------------------------------------ */
+
+/* ---------------------------------------------------------------------------
+   The desk
+   ------------------------------------------------------------------------ */
+
+.rs-desk {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--rw-desk);
+}
+
+/* The blotter edge, and it has to be pointed this way round. Lightening the
+   desk toward the middle would raise the ground exactly where the page sits and
+   cancel the separation it exists to create, so the gradient darkens the OUTER
+   edges only and leaves the desk immediately around the sheet at full --rw-desk.
+   That is also what the furniture does: a blotter is darkest at its border and
+   the record lies in the clear middle of it.
+
+   It sits on the desk rather than on the scroller so it stays put while the
+   sheet moves under it. A desk does not scroll. */
+.rs-desk::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    125% 95% at 50% 42%,
+    rgba(22, 33, 58, 0) 52%,
+    rgba(22, 33, 58, 0.055) 100%
+  );
+}
+
+/* The shell owns a desk of its own (.rw-desk in research.css), and inside the
+   studio the sheet is dropped into it. Nested, this one stops painting: two
+   blotter gradients stacked would darken the outer edges twice, and an opaque
+   ground here would cover the shell's gradient rather than add to it. The sheet
+   keeps its own desk so it still stands up outside the studio -- in a fixture,
+   or in a test -- rather than depending on a parent it cannot see. */
+.rw-desk .rs-desk {
+  background: none;
+}
+
+.rw-desk .rs-desk::before {
+  display: none;
+}
+
+.rs-desk__scroll {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* The composer is on the desk, not on the paper: it is the reader's instrument,
+   and the sheet is the record. It does not scroll with the sheet either, so the
+   hairline is honest about where the moving part stops. */
+.rs-desk__dock {
+  position: relative;
+  z-index: 1;
+  flex: none;
+  padding: var(--rw-s3) var(--rw-s5) var(--rw-s4);
+  border-top: 1px solid var(--rw-line);
+}
+
+.rs-desk__dock-inner {
+  max-width: calc(var(--rw-page-w) + var(--rw-margin-w));
+  margin: 0 auto;
+}
+
+/* ---------------------------------------------------------------------------
+   The sheet
+   ------------------------------------------------------------------------ */
+
+.rs-sheet {
+  position: relative;
+  /* The page plus its margin: the prose keeps its measure and the margin is
+     added to the sheet rather than taken out of the text. */
+  max-width: calc(var(--rw-page-w) + var(--rw-margin-w));
+  /* A sheet ends where the desk does, not two thirds of the way down it. The
+     subtrahend is the furniture above and below it: the top bar, the docked
+     composer and the sheet's own gutters. dvh rather than vh because the shell
+     is sized in dvh, and two different viewport units would disagree by the
+     height of a mobile toolbar. */
+  min-height: calc(100dvh - var(--rw-top-h) - 12rem);
+  margin: var(--rw-s6) auto var(--rw-s7);
+  padding: var(--rw-s7);
+  border-radius: var(--rw-r-xs);
+  background: var(--rw-paper);
+  color: var(--rw-ink);
+  box-shadow: var(--rw-shadow-page);
+}
+
+/* THE RULE. One hairline, running the full height of the sheet because the
+   margin cell spans every row -- so the division is a property of the page and
+   not a decoration that stops where the citations run out. */
+.rs-sheet__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--rw-margin-w);
+  column-gap: var(--rw-s5);
+}
+
+/* No authorities, no column and no rule. See the empty case in Sheet.tsx: a
+   ruled column with nothing in it would promise sources that do not exist. */
+.rs-sheet__grid--unruled {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.rs-sheet__head {
+  grid-column: 1;
+  grid-row: 1;
+  margin-bottom: var(--rw-s5);
+}
+
+/* Mono because a kind is a label on the record, and gold because gold is what
+   the record's own material is marked in here. */
+.rs-sheet__kicker {
+  margin: 0 0 var(--rw-s2);
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  line-height: var(--rw-lh-tight);
+  text-transform: uppercase;
+  color: var(--rw-gold);
+}
+
+/* The only display-face line on screen. An artefact has a title, and this is
+   the one line allowed to behave like one. */
+.rs-sheet__title {
+  margin: 0;
+  font-family: var(--rw-face-display);
+  font-size: var(--rw-t-title);
+  font-weight: 600;
+  line-height: var(--rw-lh-tight);
+  text-wrap: balance;
+  color: var(--rw-ink);
+}
+
+.rs-sheet__prose {
+  grid-column: 1;
+  grid-row: 2;
+  min-width: 0;
+  font-family: var(--rw-face-doc);
+  font-size: var(--rw-t-doc);
+  line-height: var(--rw-lh-doc);
+  color: var(--rw-ink);
+}
+
+/* ---------------------------------------------------------------------------
+   Prose. The caller supplies the content, so the sheet sets the type for
+   whatever arrives rather than trusting each artefact kind to remember it.
+   ------------------------------------------------------------------------ */
+
+.rs-sheet__prose p {
+  margin: 0 0 var(--rw-s4);
+}
+
+.rs-sheet__prose h2 {
+  margin: var(--rw-s6) 0 var(--rw-s3);
+  font-size: var(--rw-t-doch);
+  font-weight: 600;
+  line-height: var(--rw-lh-tight);
+}
+
+.rs-sheet__prose h3 {
+  margin: var(--rw-s5) 0 var(--rw-s2);
+  font-size: var(--rw-t-doc);
+  font-weight: 600;
+  line-height: var(--rw-lh-tight);
+}
+
+/* Lists carry their markers. The app-wide .prose rule lost them once and every
+   enumerated answer read as one long paragraph in stripes. */
+.rs-sheet__prose ul,
+.rs-sheet__prose ol {
+  margin: 0 0 var(--rw-s4);
+  padding-left: var(--rw-s5);
+}
+
+.rs-sheet__prose ul {
+  list-style: disc outside;
+}
+
+.rs-sheet__prose ol {
+  list-style: decimal outside;
+}
+
+.rs-sheet__prose li {
+  margin-bottom: var(--rw-s2);
+}
+
+.rs-sheet__prose blockquote {
+  margin: var(--rw-s4) 0;
+  padding-left: var(--rw-s4);
+  border-left: 2px solid var(--rw-line-strong);
+  color: var(--rw-ink-2);
+}
+
+/* A link out of the record is the record's material, so it takes the record's
+   accent -- 5.5:1 on paper, and underlined so colour is not the only cue. */
+.rs-sheet__prose a {
+  color: var(--rw-gold);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.rs-sheet__prose code {
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-small);
+}
+
+.rs-sheet__prose table {
+  width: 100%;
+  margin: var(--rw-s4) 0 var(--rw-s5);
+  border-collapse: collapse;
+  font-size: var(--rw-t-small);
+}
+
+.rs-sheet__prose th,
+.rs-sheet__prose td {
+  padding: var(--rw-s2) var(--rw-s3);
+  border: 1px solid var(--rw-paper-edge);
+  line-height: var(--rw-lh);
+  text-align: left;
+  vertical-align: top;
+}
+
+.rs-sheet__prose th {
+  background: var(--rw-paper-2);
+  font-weight: 600;
+}
+
+.rs-sheet__prose > :last-child {
+  margin-bottom: 0;
+}
+
+/* ---------------------------------------------------------------------------
+   The stamp
+   ---------------------------------------------------------------------------
+   Bounded gold, square corners, mono: the vocabulary the app already uses for
+   "this clause is sourced", so a stamp here and a stamp on Ask are the same
+   mark. The prose is the caller's, so this is a class the caller composes; the
+   fact the sheet actually reads is the data-authority-n attribute, and lighting
+   is a rule Sheet.tsx generates for whichever [n] is lit.
+   ------------------------------------------------------------------------ */
+
+.rs-stamp {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: baseline;
+  /* WCAG 2.5.8: >= 24px wide, with the height tracking the inline line so the
+     stamp qualifies under the inline-target exception. */
+  min-width: 24px;
+  min-height: 18px;
+  margin-left: var(--rw-s1);
+  padding: 0 var(--rw-s1);
+  border: 1px solid var(--rw-gold-deep);
+  border-radius: var(--rw-r-xs);
+  background: var(--rw-gold-wash);
+  color: var(--rw-gold);
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-small);
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  /* Colour only. A stamp that moved when it lit would shift the line of prose
+     it sits in, and the reader would lose their place to a hover. */
+  transition:
+    background var(--rw-dur) var(--rw-ease),
+    border-color var(--rw-dur) var(--rw-ease),
+    color var(--rw-dur) var(--rw-ease);
+}
+
+/* ---------------------------------------------------------------------------
+   The margin
+   ------------------------------------------------------------------------ */
+
+.rs-margin {
+  grid-column: 2;
+  /* Every row: the hairline is the page's division, not the list's box. */
+  grid-row: 1 / -1;
+  min-width: 0;
+  padding-left: var(--rw-s4);
+  border-left: 1px solid var(--rw-line);
+}
+
+.rs-margin__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rs-margin__row + .rs-margin__row {
+  margin-top: var(--rw-s4);
+}
+
+/* A real button, because the reader points at it and the keyboard has to reach
+   it. It is bare: on the paper, an authority is a note in the margin, and the
+   moment it takes a fill or an edge it becomes a control sitting on top of the
+   page instead of part of it. */
+.rs-margin__item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: var(--rw-s2);
+  width: 100%;
+  padding: 0 0 0 var(--rw-s2);
+  /* Reserved, not added on lighting: a border that appears would shove the
+     whole entry sideways, and nothing may move. */
+  border: 0;
+  border-left: 2px solid transparent;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--rw-dur) var(--rw-ease);
+}
+
+/* Lit. --rw-gold-fill is 1.5:1 on paper and could not carry a state on its own,
+   which is why it is not asked to: the entry is already identified by its
+   number, the keyboard state is the navy focus ring from the primitives, and
+   this bar is emphasis on a relationship the reader can also simply read. */
+.rs-margin__item.is-lit {
+  border-left-color: var(--rw-gold-fill);
+}
+
+.rs-margin__n {
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-small);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: var(--rw-lh);
+  color: var(--rw-gold);
+}
+
+.rs-margin__body {
+  display: block;
+  min-width: 0;
+}
+
+/* The UI face: a short name is a name, not an identifier and not prose. */
+.rs-margin__name {
+  display: block;
+  font-family: var(--rw-face-ui);
+  font-size: var(--rw-t-small);
+  font-weight: 600;
+  line-height: var(--rw-lh);
+  color: var(--rw-ink-2);
+}
+
+/* A page and a revision date ARE identifiers, which is the whole licence mono
+   has in this system. */
+.rs-margin__meta {
+  display: block;
+  margin-top: var(--rw-s1);
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  letter-spacing: 0.04em;
+  line-height: var(--rw-lh);
+  color: var(--rw-ink-soft);
+}
+
+/* The record's own words, so the record's face, italic because it is quoted.
+   Clamped: an unbounded quotation in an 11rem column would push the next
+   authority off the bottom of the page, and the full text is one click away in
+   the record. */
+.rs-margin__snip {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+  overflow: hidden;
+  margin-top: var(--rw-s2);
+  font-family: var(--rw-face-doc);
+  font-size: var(--rw-t-micro);
+  font-style: italic;
+  line-height: var(--rw-lh);
+  color: var(--rw-ink-soft);
+}
+
+/* ---------------------------------------------------------------------------
+   The unsourced turn
+   ---------------------------------------------------------------------------
+   The visual half of the invariant. The margin is gone, the rule with it, and
+   this says why in the app's own face -- the app is speaking here, not the
+   record, and the two must never be confused on the same sheet.
+   ------------------------------------------------------------------------ */
+
+.rs-sheet__unsourced {
+  margin-top: var(--rw-s6);
+  padding-top: var(--rw-s3);
+  border-top: 1px solid var(--rw-paper-edge);
+  font-family: var(--rw-face-ui);
+}
+
+.rs-sheet__unsourced-label {
+  display: block;
+  font-size: var(--rw-t-small);
+  font-weight: 600;
+  line-height: var(--rw-lh);
+  color: var(--rw-ink-2);
+}
+
+.rs-sheet__unsourced-line {
+  margin: var(--rw-s1) 0 0;
+  font-size: var(--rw-t-small);
+  line-height: var(--rw-lh);
+  color: var(--rw-ink-soft);
+}
+
+/* ---------------------------------------------------------------------------
+   Responsive
+   ---------------------------------------------------------------------------
+   Two moves, in the order the page can afford them.
+
+   At 1100px the margin can no longer hold a measure of its own: 11rem of
+   two-line names and a clamped quotation stops being a margin and becomes a
+   gutter of fragments. So it goes UNDER the prose, still ruled -- the hairline
+   turns from vertical to horizontal -- and still linked both ways, because the
+   link is a fact about the turn and not about the layout.
+
+   At 860px the sheet spends its side padding instead of its measure. Losing the
+   margins costs the page nothing; losing the measure costs it its readability.
+   ------------------------------------------------------------------------ */
+
+@media (max-width: 1100px) {
+  .rs-sheet__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rs-margin {
+    grid-column: 1;
+    grid-row: 3;
+    margin-top: var(--rw-s6);
+    padding-top: var(--rw-s4);
+    padding-left: 0;
+    border-left: 0;
+    border-top: 1px solid var(--rw-line);
+  }
+
+  /* Wide now, so the entries run across instead of stacking into a column of
+     four-line blocks nobody scans. The minimum is the margin's own width: an
+     authority that was legible in the margin is legible in the footing. */
+  .rs-margin__list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(var(--rw-margin-w), 1fr));
+    gap: var(--rw-s4);
+  }
+
+  .rs-margin__row + .rs-margin__row {
+    margin-top: 0;
+  }
+}
+
+@media (max-width: 860px) {
+  .rs-sheet {
+    /* The scroller carries no gutter of its own, so the sheet keeps one here
+       and still centres, which margin-inline would give up. */
+    width: calc(100% - var(--rw-s4));
+    margin: var(--rw-s4) auto var(--rw-s6);
+    padding: var(--rw-s5) var(--rw-s4);
+  }
+
+  .rs-desk__dock {
+    padding: var(--rw-s3) var(--rw-s4);
+  }
+}
+
+/* The only motion in this region is the colour crossfade on a light. Reduced
+   motion turns it into a state change, which is what it always was. */
+@media (prefers-reduced-motion: reduce) {
+  .rs-stamp,
+  .rs-margin__item {
+    transition-duration: 0.001ms;
+  }
+}

@@ -24,6 +24,13 @@ export function CitationStamp({
     <button
       type="button"
       className="cite-stamp"
+      // How the Research Studio's sheet finds this stamp. The sheet cannot pass
+      // a prop into streamed markdown, so it delegates off the prose column and
+      // reads this attribute: it is what lets hovering or focusing a stamp light
+      // its authority in the margin, and the margin light this stamp back. `n`
+      // comes from citationIndex, the same index authoritiesFrom numbers by, so
+      // the two sides cannot disagree. Inert on surfaces with no margin.
+      data-authority-n={n}
       onClick={() => onCite(citation)}
       title={`${citation.short_name} · p.${citation.page}`}
       aria-label={`Source ${n}: ${citation.short_name}, page ${citation.page}`}

@@ -1,0 +1,201 @@
+/* ============================================================================
+   RW DESIGN TOKENS -- the numbers both studios are built from
+   ----------------------------------------------------------------------------
+   One :root block, one set of values. The Compliance Studio and the Research
+   Studio each keep their own local token names, but every one of those names
+   now resolves to a token declared here. That is the point: there is exactly
+   one place to change a colour, a step or a hairline, so the two surfaces
+   cannot drift apart into two buildings.
+
+   WHY A SCALE AND NOT A PALETTE
+   -----------------------------
+   What was wrong with the build this system replaced was never the palette. It
+   carried 26 distinct font-size values across 73 declarations -- 22 of them
+   jammed between 0.55rem and 1.06rem -- and 11 border radii. That is not a
+   system, it is 73 local decisions, and it is why the surface read as mush no
+   matter what colours were in it. There are 7 type steps here, 4 radii and 7
+   spacing steps, and NO REGION MAY INTRODUCE A VALUE OUTSIDE THEM. The
+   constraint is the product.
+
+   MEASURED CONTRAST (WCAG 2.1)
+   ----------------------------
+   Computed by scratch/contrast.mjs, not eyeballed. Each colour is reported
+   against the worst ground it actually lands on.
+
+     ink               #16213a on #faf6ec   14.7:1   body text, headings
+     ink-2             #283450 on #faf6ec   11.5:1   secondary text
+     ink-faint         #5f6478 on #efe7d3    4.8:1   metadata            (AA)
+     ink-dim           #8f7b57 on #efe7d3    3.3:1   NON-TEXT ONLY
+     line-strong       #8f7b57 on #efe7d3    3.3:1   control boundaries (1.4.11)
+     gold              #8a5b00 on #faf6ec    5.5:1   accent as text or mark
+     ink on gold-fill  #16213a on #f5b400    8.7:1   the primary button
+     flag              #7a2e2e on #faf6ec    8.7:1   defect
+     clear             #35704a on #faf6ec    5.5:1   settled
+     paper vs desk     #fffdf8 on #efe7d3    1.2:1   -- SEE BELOW
+     ink on paper      #16213a on #fffdf8   15.0:1   document body text
+
+   THE 1.2:1 PROBLEM, AND WHAT CARRIES THE PAGE INSTEAD
+   ---------------------------------------------------
+   Parchment on parchment is 1.21:1. That single number is why a "surface ramp"
+   could never make the page an object here: there is no fill contrast available
+   inside this family, so fill cannot be the mechanism. Three things carry it
+   instead, and all three have to be present:
+     1. the contact shadow -- a tight, dark 3px band directly under the sheet
+     2. the --rw-paper-edge hairline, drawn as the shadow's first layer
+     3. the blotter edge -- the desk darkens at its OUTER edges only, well clear
+        of the sheet, so the ground never rises to meet the page
+   Remove any one of them and the page goes flat again.
+
+   COLOUR VOCABULARY (held strictly, unchanged since the first build)
+   ------------------------------------------------------------------
+     gold, bounded    grounded / sourced -- a citation chip, mono, hairline edge
+     gold, unbounded  a hand on the page -- a marker wash, a tracked change
+     flag / oxblood   a defect; weight encodes severity (solid > dashed)
+     soft ink         a note, nothing to fix
+   Severity is never a rainbow. One problem hue, varied by fill and weight.
+   ========================================================================== */
+
+:root {
+  /* --- surfaces: the chrome, sampled from the running app ------------------ */
+  /* Not transcribed from memory: the app's ground computes to #faf6ec with
+     #e4d9bf hairlines, and both studios sit on exactly that, so arriving from
+     the spine rail is continuous. The frame is the SAME value as the ground --
+     the app sets its rail transparent over the body, so only hairlines divide
+     frame from field, and the studios match that exactly. */
+  --rw-chrome: #faf6ec;
+  --rw-chrome-hover: #fffdf8; /* on parchment, raised means brighter */
+  --rw-chrome-sel: #fcefca; /* the selected row: the gold wash */
+  --rw-raise: #fffdf8; /* cards, chips, fields, floating toolbars */
+  /* The desk. The one surface that goes to the deepest parchment, and only
+     because it has an artefact to lift off it. */
+  --rw-desk: #efe7d3;
+
+  /* --- surfaces: the page -------------------------------------------------- */
+  --rw-paper: #fffdf8;
+  --rw-paper-2: #f4eede;
+  --rw-paper-3: #efe7d3;
+  --rw-paper-edge: #e5dbc3;
+
+  /* --- lines --------------------------------------------------------------- */
+  --rw-line: #e4d9bf; /* DIVIDER hairline, decorative */
+  --rw-line-soft: #efe7d3;
+  /* One of the two derived values in this file; --rw-ink-faint is the other,
+     and both exist for the same reason. A divider may be faint, but the edge of
+     a text field or an outlined button IS what identifies the control, and WCAG
+     1.4.11 owes that 3:1. The parchment family has no member between --rw-line
+     (1.35:1, decorative) and --rw-ink-soft (4.8:1, text), so there is nothing
+     to use verbatim. 3.3:1 against every ground it lands on, and it stays
+     inside the family's hue. */
+  --rw-line-strong: #8f7b57;
+
+  /* --- ink ----------------------------------------------------------------- */
+  --rw-ink: #16213a; /* 14.7:1 */
+  --rw-ink-2: #283450; /* 11.5:1 */
+  --rw-ink-soft: #686d80; /* 4.8:1 on PAPER, the brightest ground it lands on */
+  /* The other derived value. #686d80 is the app's own faint ink and was the
+     obvious pick, but it is 4.17:1 on the desk -- the worst ground metadata
+     actually lands on -- and 4.49:1 on a selected row. #5f6478 clears 4.5:1 on
+     both. The two are not interchangeable; do not "simplify" them back
+     together. */
+  --rw-ink-faint: #5f6478;
+  /* 3.3:1. NON-TEXT ONLY: glyphs, rules, disabled affordances. It fails 1.4.3
+     as text on every ground in this system, so a placeholder, a caption or a
+     label never gets it. */
+  --rw-ink-dim: #8f7b57;
+
+  /* --- accents ------------------------------------------------------------- */
+  /* On cream, gold is the trap: #f5b400 is 1.5:1 against parchment and fails as
+     both text and indicator. Hence the split. --rw-gold IS the ink-weight gold
+     and is safe anywhere; the saturated gold is a separate token licensed for
+     LARGE FILLS ONLY, with dark text on top. Reach for --rw-gold-fill and you
+     are painting a surface; reach for --rw-gold and you are marking something.
+     Reaching for the wrong one is a contrast bug, so the names say which. */
+  --rw-gold: #8a5b00; /* marking: text, icons, indicators       5.5:1 */
+  --rw-gold-fill: #f5b400; /* painting: large fills, dark text on top */
+  --rw-gold-deep: #c98a0c;
+  --rw-gold-wash: #fcefca;
+  --rw-flag: #7a2e2e; /* oxblood: 8.7:1, safe as text AND as fill */
+  --rw-flag-wash: #f3e3df;
+  --rw-clear: #35704a; /* 5.5:1, safe as text and as fill */
+  --rw-clear-wash: rgba(53, 112, 74, 0.1);
+
+  /* --- focus --------------------------------------------------------------- */
+  /* Navy, on both grounds. Chrome and page are the same material in this
+     system, so there is no second ground to answer -- and gold would fail on
+     both anyway at 1.5:1. One focus colour, no per-region exception. */
+  --rw-focus: #16213a;
+
+  /* --- type: 7 steps, replacing 26 ----------------------------------------- */
+  --rw-t-micro: 0.625rem; /* 10px -- mono identifiers, badges, eyebrows */
+  --rw-t-small: 0.75rem; /* 12px -- meta lines, secondary labels */
+  --rw-t-base: 0.8125rem; /* 13px -- ALL chrome UI: rows, buttons, body */
+  --rw-t-mid: 0.9375rem; /* 15px -- panel titles, card titles */
+  --rw-t-doc: 1.0625rem; /* 17px -- document body serif */
+  --rw-t-doch: 1.1875rem; /* 19px -- document headings */
+  --rw-t-title: 1.6875rem; /* 27px -- the artefact title, and nothing else */
+
+  --rw-lh-tight: 1.25;
+  --rw-lh: 1.45;
+  --rw-lh-doc: 1.68;
+
+  /* --- faces --------------------------------------------------------------- */
+  /* Mono is for IDENTIFIERS ONLY -- PSG ids, CFR cites, page numbers, dates,
+     versions. Not buttons, not status, not prose. When every small thing is set
+     in tracked uppercase mono, nothing is emphasised.
+     The display face is the ARTEFACT TITLE ONLY, one line, nowhere else: it is
+     the single place a surface is allowed to announce itself. */
+  --rw-face-ui: var(--font-body), ui-sans-serif, system-ui, sans-serif;
+  --rw-face-doc: var(--font-serif), Georgia, "Times New Roman", serif;
+  --rw-face-id: var(--font-mono), ui-monospace, SFMono-Regular, monospace;
+  --rw-face-display: var(--font-display), Georgia, serif;
+
+  /* --- space: 7 steps ------------------------------------------------------ */
+  --rw-s1: 0.25rem;
+  --rw-s2: 0.5rem;
+  --rw-s3: 0.75rem;
+  --rw-s4: 1rem;
+  --rw-s5: 1.5rem;
+  --rw-s6: 2rem;
+  --rw-s7: 3rem;
+
+  /* --- radius: 4 steps, replacing 11 --------------------------------------- */
+  --rw-r-xs: 3px; /* the page itself -- paper barely rounds */
+  --rw-r-sm: 5px; /* chips, fields, small controls */
+  --rw-r-md: 9px; /* cards, buttons, panels */
+  --rw-r-pill: 999px;
+
+  /* --- elevation: cast light, not grey ------------------------------------- */
+  /* Navy-tinted, never neutral black: a shadow on parchment is ink pooling, not
+     an absence of light.
+
+     On a dark ground the page separates from its desk by 17.8:1 and a shadow is
+     decoration. Here #fffdf8 against #efe7d3 is 1.21:1, so fill cannot carry
+     the separation and the shadow has to do the structural work instead. Hence
+     the CONTACT layer in --rw-shadow-page: a tight, comparatively dark 3px band
+     directly under the sheet. That is the line that says "lying on" rather than
+     "printed on", and it is the whole reason the page reads as an object. Its
+     first layer is the --rw-paper-edge hairline, for the same reason. */
+  --rw-shadow-panel: 0 2px 4px rgba(22, 33, 58, 0.06), 0 22px 48px -24px rgba(22, 33, 58, 0.34);
+  --rw-shadow-pop: 0 1px 2px rgba(22, 33, 58, 0.08), 0 12px 28px -12px rgba(22, 33, 58, 0.3);
+  --rw-shadow-page:
+    0 0 0 1px var(--rw-paper-edge), 0 2px 3px -1px rgba(22, 33, 58, 0.16),
+    0 10px 20px -8px rgba(22, 33, 58, 0.18), 0 34px 60px -30px rgba(22, 33, 58, 0.38);
+
+  /* --- motion -------------------------------------------------------------- */
+  --rw-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --rw-dur: 0.18s;
+
+  /* --- geometry ------------------------------------------------------------ */
+  /* The shared anatomy: spine rail, work rail, desk, activity rail. The two
+     outer rails are square (56px) so an icon sits on the same grid on both
+     edges of the building. */
+  --rw-top-h: 52px;
+  --rw-spine-w: 56px;
+  --rw-work-w: 17.5rem;
+  --rw-act-w: 56px;
+  --rw-page-w: 46rem;
+  /* The authorities margin: a strip of PAPER, not chrome, carrying the cited
+     record beside the prose it supports. Narrow on purpose -- it holds
+     identifiers and one line of source, never an argument. */
+  --rw-margin-w: 11rem;
+}

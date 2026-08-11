@@ -1,0 +1,353 @@
+/* ---------------------------------------------------------------------------
+   Work rail: the four kinds of artifact you own
+   ----------------------------------------------------------------------------
+   The rail stopped naming commands and started naming things. "Ask / Assemble /
+   Watch / White paper" were four verbs and read as four chapters of one
+   sequence; "Threads / Dossiers / Bulletins / Papers" are four kinds of thing
+   on a bench, which is what they actually are. The verbs went to the Make group
+   at the foot, and the 01-04 numerals went nowhere -- they only encoded truth
+   while the surfaces were a sequence.
+
+   THE STATE ROW IS THE POINT
+   --------------------------
+   Each kind header carries a dot, and only a reachable kind carries a count.
+   Zero and "we could not ask" are different facts: an analyst who reads a
+   failed request as an empty shelf stops looking for the dossier that exists.
+   So "unreachable" renders the word Unavailable, a solid flag dot and a retry,
+   never a numeral; "loading" renders the pulsing dot alone. The button's
+   aria-label says the same thing in a sentence, because a dot has no voice.
+
+   Everything is scoped under .rw-studio. The one rule that cannot be is the
+   keyframe below, which is why it carries this block's name.
+   ------------------------------------------------------------------------ */
+
+.rw-studio .rw-work {
+  flex: none;
+  width: var(--rw-work-w);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--rw-chrome);
+  border-right: 1px solid var(--rw-line);
+}
+
+.rw-studio .rw-work__head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: 44px;
+  padding: 0 var(--rw-s3);
+}
+
+.rw-studio .rw-work__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--rw-s2) var(--rw-s4);
+}
+
+/* --- kind header ---------------------------------------------------------- */
+
+.rw-studio .rw-work__kind {
+  display: flex;
+  align-items: center;
+  gap: var(--rw-s2);
+  width: 100%;
+  min-height: 30px;
+  padding: var(--rw-s1) var(--rw-s2);
+  border: 0;
+  border-radius: var(--rw-r-sm);
+  background: transparent;
+  color: var(--rw-ink);
+  font-family: var(--rw-face-ui);
+  font-size: var(--rw-t-base);
+  font-weight: 500;
+  line-height: var(--rw-lh);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--rw-dur) var(--rw-ease),
+    color var(--rw-dur) var(--rw-ease);
+}
+
+.rw-studio .rw-work__kind:hover {
+  background: var(--rw-chrome-hover);
+}
+
+.rw-studio .rw-work__caret {
+  flex: none;
+  color: var(--rw-ink-dim);
+  transition: transform var(--rw-dur) var(--rw-ease);
+}
+
+.rw-studio .rw-work__caret--open {
+  transform: rotate(90deg);
+}
+
+/* Takes the slack so the state marks sit at the right edge, where the eye can
+   read four kinds as a column instead of four ragged rows. */
+.rw-studio .rw-work__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- state: dot, count, word ---------------------------------------------- */
+
+/* Composed onto .rw-glyph, the shared ring primitive, so only colour lives
+   here. Solid means there is something to act on and a ring means settled or
+   not yet begun -- the same rule the Compliance Studio's glyph holds, which is
+   what keeps the pair legible in greyscale.
+
+   Rendered last in the row so it is flush right on every kind, including the
+   loading one that has no count beside it. */
+.rw-studio .rw-work__dot {
+  flex: none;
+  color: var(--rw-ink-dim);
+}
+
+.rw-studio .rw-work__dot--ready {
+  color: var(--rw-clear);
+}
+
+.rw-studio .rw-work__dot--loading {
+  color: var(--rw-gold);
+  animation: rw-work-pulse 1.1s ease-in-out infinite;
+}
+
+.rw-studio .rw-work__dot--unreachable {
+  background: var(--rw-flag);
+  color: var(--rw-flag);
+}
+
+.rw-studio .rw-work__count {
+  flex: none;
+  min-width: var(--rw-s4);
+  text-align: right;
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.06em;
+  color: var(--rw-ink-faint);
+}
+
+/* A word, not a numeral, and not mono: mono here is for identifiers, and this
+   is the absence of one. Oxblood is the surface's single problem hue. */
+.rw-studio .rw-work__flag {
+  flex: none;
+  font-size: var(--rw-t-small);
+  font-weight: 600;
+  color: var(--rw-flag);
+}
+
+/* Sits outside the header button rather than inside it, because a button
+   inside a button is not markup a browser will render. Indented to the label,
+   past the caret. */
+.rw-studio .rw-work__lost {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--rw-s2);
+  margin: 0;
+  padding: var(--rw-s1) var(--rw-s2) var(--rw-s2) var(--rw-s5);
+  font-size: var(--rw-t-small);
+  line-height: var(--rw-lh);
+  color: var(--rw-ink-2);
+}
+
+.rw-studio .rw-work__retry {
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--rw-gold);
+  font-weight: 600;
+}
+
+.rw-studio .rw-work__retry:hover:not(:disabled) {
+  background: transparent;
+  color: var(--rw-gold);
+  text-decoration: underline;
+}
+
+/* --- items ---------------------------------------------------------------- */
+
+.rw-studio .rw-work__items {
+  padding-bottom: var(--rw-s1);
+}
+
+/* A title is the content, so it wraps and the row grows. Nothing here is
+   truncated: an analyst recognises the right dossier by its whole name. */
+.rw-studio .rw-work__item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--rw-s2);
+  width: 100%;
+  min-height: 34px;
+  padding: var(--rw-s1) var(--rw-s2) var(--rw-s1) var(--rw-s5);
+  border: 0;
+  border-radius: var(--rw-r-sm);
+  background: transparent;
+  color: var(--rw-ink-2);
+  font-family: var(--rw-face-ui);
+  font-size: var(--rw-t-base);
+  line-height: var(--rw-lh);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--rw-dur) var(--rw-ease),
+    color var(--rw-dur) var(--rw-ease);
+}
+
+.rw-studio .rw-work__item:hover {
+  background: var(--rw-chrome-hover);
+  color: var(--rw-ink);
+}
+
+/* The gold-fill bar is the marker this surface uses for "lit", and it is the
+   same 2px bar the authorities margin lights an entry with -- one gesture, two
+   places. It is NOT carrying the selected state on its own: #f5b400 on the
+   gold wash is a low-contrast pair, so the fill change, the weight and
+   aria-current carry it and the bar is the accent on top.
+
+   Square off the left edge: an inset shadow follows the border radius, which
+   turns the marker into a curved sliver instead of a bar. */
+.rw-studio .rw-work__item.is-active {
+  background: var(--rw-chrome-sel);
+  color: var(--rw-ink);
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--rw-gold-fill);
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.rw-studio .rw-work__item-title {
+  flex: 1;
+  min-width: 0;
+}
+
+/* A date is an identifier, so it is mono. */
+.rw-studio .rw-work__when {
+  flex: none;
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  color: var(--rw-ink-faint);
+}
+
+/* --rw-ink-faint lands at 4.49:1 on the gold wash, just under AA, and this is
+   the one place in the rail that puts faint text on a selected row. Promote it
+   there rather than dropping the token everywhere: selection is emphasis, so
+   the promotion costs nothing. */
+.rw-studio .rw-work__item.is-active .rw-work__when {
+  color: var(--rw-ink-2);
+}
+
+.rw-studio .rw-work__empty {
+  margin: 0;
+  padding: var(--rw-s2) var(--rw-s2) var(--rw-s2) var(--rw-s5);
+  font-size: var(--rw-t-small);
+  line-height: var(--rw-lh);
+  color: var(--rw-ink-faint);
+}
+
+/* --- make ----------------------------------------------------------------- */
+
+.rw-studio .rw-work__make {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--rw-s1);
+  padding: var(--rw-s3) var(--rw-s2);
+  border-top: 1px solid var(--rw-line);
+}
+
+.rw-studio .rw-work__make .rw-eyebrow {
+  padding: 0 var(--rw-s2) var(--rw-s1);
+}
+
+.rw-studio .rw-work__make-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--rw-s2);
+  width: 100%;
+  min-height: 30px;
+  padding: var(--rw-s1) var(--rw-s2);
+  border: 0;
+  border-radius: var(--rw-r-sm);
+  background: transparent;
+  color: var(--rw-ink-2);
+  font-family: var(--rw-face-ui);
+  font-size: var(--rw-t-base);
+  font-weight: 500;
+  line-height: var(--rw-lh);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--rw-dur) var(--rw-ease),
+    color var(--rw-dur) var(--rw-ease);
+}
+
+.rw-studio .rw-work__make-btn:hover {
+  background: var(--rw-chrome-hover);
+  color: var(--rw-ink);
+}
+
+/* Ink-weight gold, the marking token: these three are the only controls in the
+   rail that create something, and the glyph is what says so. */
+.rw-studio .rw-work__make-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--rw-gold);
+}
+
+/* Answers the question the group raises by omission before it is asked. */
+.rw-studio .rw-work__make-note {
+  margin: 0;
+  padding: var(--rw-s1) var(--rw-s2) 0;
+  font-size: var(--rw-t-small);
+  line-height: var(--rw-lh);
+  color: var(--rw-ink-faint);
+}
+
+/* --- responsive ------------------------------------------------------------ */
+
+/* Below the breakpoint the rail leaves the flow and becomes a slide-over that
+   the top bar's hamburger opens. The open state is the shell's, not the
+   component's: WorkRail takes no `open` prop, so the shell puts .is-work-open
+   on the .rw-studio root and this rule answers it. */
+@media (max-width: 960px) {
+  .rw-studio .rw-work {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 30;
+    width: var(--rw-work-w);
+    transform: translateX(-100%);
+    transition: transform var(--rw-dur) var(--rw-ease);
+    box-shadow: var(--rw-shadow-panel);
+  }
+
+  .rw-studio.is-work-open .rw-work {
+    transform: translateX(0);
+  }
+}
+
+/* Cannot be scoped -- a keyframe is global by definition -- so it carries the
+   block name instead, and no other region may reuse it. */
+@keyframes rw-work-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}

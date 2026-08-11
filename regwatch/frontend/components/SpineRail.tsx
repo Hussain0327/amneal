@@ -12,19 +12,64 @@ import { HistoryPanel } from "./HistoryPanel";
 import { useSessions } from "./SessionsProvider";
 import { useSettings } from "./SettingsProvider";
 
-// The register's spine: the shell reduced to a slim bound edge. Top to bottom —
-// the wax seal (home), the five numbered chapters, Studio below a hairline, the
-// title lettered down the spine, then the analyst's own things (new chat,
-// history, account). Every stop shows its name in a flyout on hover/focus and
-// carries a full aria-label, so the numerals stay glyphs, not guesses.
+// The register's spine: the shell reduced to a slim bound edge. Top to bottom --
+// the wax seal (home), the two studios, the title lettered down the spine, then
+// the analyst's own things (new chat, history, account). Every stop shows its
+// name in a flyout on hover/focus and carries a full aria-label, so the letters
+// stay glyphs, not guesses.
+//
+// WHY THE 01-05 NUMERALS ARE GONE
+// A numeral is a claim about order, and that claim was only ever true while Ask,
+// Assemble, Watch and White Paper read as chapters of one sequence. They are now
+// four artifact kinds inside the Research Studio, and a studio is not chapter two
+// of the other studio: two rooms in one building have no first and second. What
+// is left on the rail is the choice actually being made -- whose material am I
+// working on. R is the public record, C is our own drafts.
 
-const NAV = [
-  { href: "/", no: "01", label: "Ask", note: "Cited Q&A" },
-  { href: "/assemble", no: "02", label: "Assemble", note: "Build a dossier" },
-  { href: "/watch", no: "03", label: "Watch", note: "Change feed" },
-  { href: "/whitepaper", no: "04", label: "White Paper", note: "Populate & cite" },
-  { href: "/deficiency", no: "05", label: "Deficiency", note: "Scan a draft" },
+interface Stop {
+  /** Where the stop navigates. */
+  readonly href: string;
+  /** The letter struck on the stop's mark. */
+  readonly mark: string;
+  readonly label: string;
+  readonly note: string;
+  /** Paths this studio owns; any of them marks the stop active. */
+  readonly paths: readonly string[];
+  /** Whether the href carries the scoped product (Compliance reads none). */
+  readonly scoped: boolean;
+}
+
+const STOPS: readonly Stop[] = [
+  {
+    href: "/research",
+    mark: "R",
+    label: "Research Studio",
+    note: "Ask, assemble, watch, publish",
+    // Ask has not moved off the root yet, so the root is still Research's;
+    // drop "/" here the day it does.
+    paths: ["/research", "/"],
+    scoped: true,
+  },
+  {
+    href: "/studio",
+    mark: "C",
+    label: "Compliance Studio",
+    note: "Review and check our drafts",
+    paths: ["/studio"],
+    scoped: false,
+  },
 ];
+
+// Prefix match, not equality: /research?kind=dossier reaches usePathname as
+// "/research", but a single artifact reaches it as "/research/<id>" and is still
+// the Research Studio. The root is the one path that can never be treated as a
+// prefix -- every path starts with "/" -- so it matches only itself, which is
+// also what keeps the two stops disjoint and at most one of them active.
+function owns(pathname: string, paths: readonly string[]): boolean {
+  return paths.some((p) =>
+    p === "/" ? pathname === "/" : pathname === p || pathname.startsWith(`${p}/`),
+  );
+}
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -79,35 +124,25 @@ export function SpineRail() {
         </Link>
 
         <nav className="rail__nav" aria-label="Surfaces">
-          {NAV.map((n) => {
-            const active = pathname === n.href;
+          {STOPS.map((s) => {
+            const active = owns(pathname, s.paths);
             return (
               <Link
-                key={n.href}
-                href={withScope(n.href, productParams)}
+                key={s.href}
+                href={s.scoped ? withScope(s.href, productParams) : s.href}
                 className={`rail__stop${active ? " rail__stop--active" : ""}`}
-                aria-label={`${n.no} ${n.label} — ${n.note}`}
+                aria-label={`${s.label} - ${s.note}`}
                 aria-current={active ? "page" : undefined}
               >
-                <span className="code rail__no">{n.no}</span>
-                <Tip label={n.label} note={n.note} />
+                {/* Both studios are places, so both wear a lettered mark. The
+                    mark is the glyph; the flyout and the aria-label say which. */}
+                <span className="rail__mark" aria-hidden>
+                  {s.mark}
+                </span>
+                <Tip label={s.label} note={s.note} />
               </Link>
             );
           })}
-          <hr className="hair rail__hair" aria-hidden />
-          {/* Studio is its own surface (full-viewport, outside this shell);
-              its stop wears Studio's own gold mark rather than a chapter
-              numeral -- it is a place, not a chapter. */}
-          <Link
-            href="/studio"
-            className={`rail__stop rail__stop--studio${pathname === "/studio" ? " rail__stop--active" : ""}`}
-            aria-label="Studio — review and annotate documents"
-          >
-            <span className="rail__studio-mark" aria-hidden>
-              S
-            </span>
-            <Tip label="Studio" note="Review & annotate" />
-          </Link>
         </nav>
 
         {/* The volume's title, lettered down the spine. Decorative — the seal
