@@ -757,9 +757,42 @@
             "title": "Doc Id",
             "type": "integer"
           },
+          "dosage_form": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dosage Form"
+          },
           "page": {
             "title": "Page",
             "type": "integer"
+          },
+          "product_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Name"
+          },
+          "psg_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Psg Type"
           },
           "recommended_date": {
             "anyOf": [
@@ -772,6 +805,17 @@
               }
             ],
             "title": "Recommended Date"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
           },
           "score": {
             "anyOf": [

@@ -770,10 +770,18 @@ export interface components {
             diff_summary?: string | null;
             /** Doc Id */
             doc_id: number;
+            /** Dosage Form */
+            dosage_form?: string | null;
             /** Page */
             page: number;
+            /** Product Name */
+            product_name?: string | null;
+            /** Psg Type */
+            psg_type?: string | null;
             /** Recommended Date */
             recommended_date?: string | null;
+            /** Route */
+            route?: string | null;
             /** Score */
             score?: number | null;
             /** Short Name */

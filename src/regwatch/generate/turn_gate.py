@@ -450,7 +450,28 @@ def _citation_for(passage: RetrievedPassage) -> Citation:
         # citation it grounds. INV-1 unaffected -- this is the same passage that
         # validated the citation.
         score=passage.score,
+        # Human-identifying provenance, all already in hand: "PSG_020911" names
+        # an FDA application number and nothing a reader can act on. No new
+        # query -- normalized_name is a named field and the rest ride the chunk
+        # row's denormalized metadata (pgvector_store._TEXT_METADATA_COLUMNS).
+        product_name=passage.normalized_name or None,
+        dosage_form=_meta_text(passage, "dosage_form"),
+        route=_meta_text(passage, "route"),
+        psg_type=_meta_text(passage, "psg_type"),
     )
+
+
+def _meta_text(passage: RetrievedPassage, key: str) -> str | None:
+    """One passage metadata string, or None when absent or blank.
+
+    Ingest writes "" rather than NULL for an unknown dosage_form/route, so an
+    empty string has to collapse to None here: the UI distinguishes "not
+    recorded" from "not loaded", and "" would render as a stray separator.
+    """
+    value = passage.metadata.get(key)
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
 
 
 def _sanitize_claim_text(raw: str) -> str:

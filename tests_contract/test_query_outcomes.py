@@ -26,8 +26,8 @@ from tests_contract.conftest import (
     GUIDED_ROUTE_JSON_KEYS,
     LOW_SCORE_GUIDANCE_TEXT,
     MULTIFORM_QUESTION,
-    NO_PRODUCT_GUIDANCE_TEXT,
     QUERY_RESPONSE_KEYS,
+    REFUSAL_TEXT,
     RETRIEVED_ITEM_KEYS,
     ROUTE_JSON_KEYS,
     EdgeClient,
@@ -47,11 +47,14 @@ _GUIDED_REASONS = frozenset(
         "ambiguous_product",
         "brand_lookup",
         "did_you_mean",
+        "empty_corpus",
         "low_top_score",
         "meta",
         "mixed_products",
         "multi_form",
+        "need_product",
         "no_product",
+        "product_not_covered",
         "scope_warning",
         "vague_input",
     }
@@ -198,9 +201,13 @@ def test_s7_summary_variant(base_stack: Stack, edge_login: Callable[..., EdgeCli
     assert row["retrieved_json"]
 
 
-def test_s8_no_product_refusal_on_empty_corpus(
-    base_stack: Stack, edge_login: Callable[..., EdgeClient]
-) -> None:
+def test_s8_empty_corpus_refusal(base_stack: Stack, edge_login: Callable[..., EdgeClient]) -> None:
+    """An EMPTY corpus is a real evidence gap and keeps the refused register.
+
+    Distinct from an unresolved product against a POPULATED corpus, which
+    converses (S8b). Asking "which product?" with nothing indexed would be a
+    lie: no answer would name one that works.
+    """
     client = edge_login(base_stack)
 
     response = client.http.post("/query", json={"question": ABSENT_DRUG_QUESTION})
@@ -208,20 +215,23 @@ def test_s8_no_product_refusal_on_empty_corpus(
     payload = response.json()
     assert set(payload.keys()) == QUERY_RESPONSE_KEYS
     assert payload["status"] == "refused"
-    assert payload["reason"] == "no_product"
+    assert payload["reason"] == "empty_corpus"
     assert payload["refused"] is True
-    assert payload["answer"] == NO_PRODUCT_GUIDANCE_TEXT
+    assert payload["answer"] == REFUSAL_TEXT
     assert payload["citations"] == []
     assert payload["related"] == []
 
     row = _one_new_row(payload, client)
     assert row["status"] == "refused"
     assert row["refused"] is True
-    assert row["answer_text"] == NO_PRODUCT_GUIDANCE_TEXT
+    assert row["answer_text"] == REFUSAL_TEXT
     assert row["retrieved_json"] == []
     assert row["citations_json"] == []
-    assert row["route_json"]["reason"] == "no_product"
-    _assert_echo_guidance(row, next_step="name_product", option_ids=[])
+    assert row["route_json"]["reason"] == "empty_corpus"
+    # empty_corpus has no bespoke step vocabulary, so it takes _allowed_steps'
+    # deliberate narrow fallback. The planner's choice is audit context only --
+    # render_guidance_message returns the canned refusal for this reason.
+    _assert_echo_guidance(row, next_step="narrow_source_topic", option_ids=[])
 
     _assert_two_chat_messages(payload, status="refused", cited=False)
 

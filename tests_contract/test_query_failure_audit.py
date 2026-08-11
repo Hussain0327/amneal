@@ -32,7 +32,7 @@ from tests_contract.conftest import (
     ABSENT_DRUG_QUESTION,
     ANSWERABLE_QUESTION,
     DEAD_PROVIDER_TIMEOUT,
-    NO_PRODUCT_GUIDANCE_TEXT,
+    REFUSAL_TEXT,
     SERVICE_UNAVAILABLE_TEXT,
     EdgeClient,
     Harness,
@@ -142,8 +142,8 @@ def test_s16_audit_fully_down_degrades_to_sentinel_not_500(
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "refused"
-    assert payload["reason"] == "no_product"
-    assert payload["answer"] == NO_PRODUCT_GUIDANCE_TEXT
+    assert payload["reason"] == "empty_corpus"
+    assert payload["answer"] == REFUSAL_TEXT
     assert payload["audit_id"] == -1, "the sentinel that never collides with a real id"
     assert query_log_count() == 0, "the defined failure: no row, not a half-row"
 
