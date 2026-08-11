@@ -1,12 +1,14 @@
 name: watch-daily
 
-# Scheduled production run of `regwatch watch` (the daily FDA PSG crawl →
-# watchlist match → ingest → alert → digest pipeline). There is NO Dagster
+# Last updated: 2026-08-11
+#
+# Scheduled production run of `regwatch watch`: the daily FDA PSG crawl ->
+# watchlist match -> ingest -> alert -> digest pipeline. There is NO Dagster
 # daemon deployed (compose.yaml's scheduler is local-only), so this GitHub
 # Actions cron is the sole driver of the daily pipeline in production.
 #
-# It connects to the SAME live Supabase Postgres the API uses, over the public
-# pooler endpoint, and writes durable alerts to the DB (stream 1).
+# It connects to the SAME live production Postgres the API uses (Databricks
+# Lakebase) and writes durable alerts to the DB (stream 1).
 #
 # It does NOT migrate the schema. The Fly deploy is the single migration authority
 # (fly.toml `[deploy] release_command = "alembic upgrade head"` runs migrations in
@@ -14,39 +16,48 @@ name: watch-daily
 # (src/regwatch/store/db.py::_init_postgres) REFUSES to start when the DB stamp !=
 # the code's head, so if a migration was merged but not yet deployed this cron
 # fails loudly here rather than advancing the live schema ahead of the running API
-# machines — which would crash-loop them (the 2026-06-18 failure class).
+# machines, which would crash-loop them (the 2026-06-18 failure class).
 #
-# Required repository secrets (Settings → Secrets and variables → Actions):
-#   WATCH_DATABASE_URL  postgresql://...pooler.supabase.com:5432/postgres?sslmode=require
-#                       (the prod Supabase URL WITH ?sslmode=require — see stream 2)
-#   WATCH_OPENAI_API_KEY  ingest embeds every chunk (EMBEDDING_PROVIDER=openai), so
-#                       this is REQUIRED. The key is only exercised when a PSG
-#                       actually CHANGES (embed/extract), so a lost key would stay
-#                       green through every no-change day; the preflight step below
-#                       fails the run fast when the secret is empty. Watch-scoped
-#                       (NOT the repo-wide OPENAI_API_KEY) so ci.yml's live-eval gate
-#                       stays skipped — see the env block below.
-#   OPENFDA_API_KEY     OPTIONAL — only raises the openFDA rate limit; the run
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   WATCH_DATABASE_URL  the prod Postgres URL WITH ?sslmode=require, e.g.
+#                       postgresql://<role>:<pw>@ep-<id>.database.<region>
+#                       .cloud.databricks.com:5432/databricks_postgres
+#                       ?sslmode=require (stream 2). Point it at the SAME
+#                       database the API serves, or the run writes alerts
+#                       nobody reads. A stale value here is what broke this
+#                       cron from 2026-08-07 to 2026-08-10.
+#   WATCH_OPENAI_API_KEY  this job pins EMBEDDING_PROVIDER=openai and leaves
+#                       ACTIVE_EMBEDDING_PROFILE unset, so ingest still embeds
+#                       through OpenAI here even though PROD does not. That
+#                       makes the key REQUIRED. It is only exercised when a PSG
+#                       actually CHANGES (embed/extract), so a lost key would
+#                       stay green through every no-change day; the preflight
+#                       step below fails the run fast when the secret is empty.
+#                       Watch-scoped (NOT the repo-wide OPENAI_API_KEY) so
+#                       ci.yml's live-eval gate stays skipped. See the env
+#                       block below, which is where the real hazard lives.
+#   OPENFDA_API_KEY     OPTIONAL: only raises the openFDA rate limit; the run
 #                       works without it. Leave unset to omit.
 # While WATCH_DATABASE_URL is unset, the job skips cleanly (no failures).
 #
 # Optional alerting secrets (this cron is the SOLE prod driver of the pipeline,
 # so a silent failure leaves analysts on stale FDA guidance with nobody paged):
-#   SLACK_WEBHOOK_URL     OPTIONAL — Slack incoming-webhook URL. When set, a
+#   SLACK_WEBHOOK_URL     OPTIONAL: Slack incoming-webhook URL. When set, a
 #                         failed OR timed-out (cancelled) run posts
 #                         repo/workflow/run-URL to Slack, AND a successful run
 #                         delivers the day's alert digest (new/revised PSGs; a
 #                         quiet day posts nothing). Unset => both Slack steps
 #                         are graceful no-ops (forks are fine).
-#   WATCH_HEALTHCHECK_URL OPTIONAL — healthchecks.io-style ping URL (see
-#                         docs/DEPLOY.md §6.2). On success we ping it; on failure
-#                         we ping `$URL/fail`. This is the dead-man's-switch that
-#                         catches a cron that NEVER STARTS (which the in-job
-#                         failure step cannot). Unset => both pings no-op.
+#   WATCH_HEALTHCHECK_URL OPTIONAL: healthchecks.io-style ping URL (see
+#                         docs/DEPLOY.md section 6.2). On success we ping it; on
+#                         failure we ping `$URL/fail`. This is the dead-man's
+#                         switch that catches a cron that NEVER STARTS (which
+#                         the in-job failure step cannot). Unset => both pings
+#                         no-op.
 
 on:
   schedule:
-    # 07:17 UTC daily — off the top of the hour to avoid the cron stampede, and
+    # 07:17 UTC daily, off the top of the hour to avoid the cron stampede, and
     # early enough that a US-East analyst sees fresh alerts at the start of day.
     - cron: "17 7 * * *"
   workflow_dispatch:
@@ -65,22 +76,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      # Mirror prod (fly.toml): OpenAI embeddings + Postgres-mode boot guard.
+      # The Postgres-mode boot guard. EMBEDDING_PROVIDER below is this job's
+      # OWN setting, NOT a mirror of prod: prod no longer embeds through
+      # OpenAI (see the ARMED HAZARD note under it).
       DATABASE_URL: ${{ secrets.WATCH_DATABASE_URL }}
       REQUIRE_DATABASE_URL: "true"
       EMBEDDING_PROVIDER: "openai"
-      # Embedding-profile parity with prod. Ingest builds its profile shadow/
-      # backfill targets from ITS OWN process env, so a promoted prod profile
-      # that is absent HERE means a change-day run commits chunk rows carrying
-      # no profile embedding. Coverage goes incomplete, and the next app boot
-      # refuses inside assert_profile_ready_for_activation (docker/
-      # entrypoint.sh runs init-db), crash-looping every Python machine while
-      # the Go proxy -- which skips init-db by design -- keeps holding the
-      # public port and relaying into a dead upstream. It presents as edge
-      # 502s, not as machines that fail to start, and it only fires on the
-      # first FDA revision after promotion, i.e. weeks later at a random
-      # deploy. All five are unset today (prod is still ACTIVE_EMBEDDING_
-      # PROFILE=legacy), which makes this block inert until the secrets exist.
+      # ARMED HAZARD, open as of 2026-08-11. Read this before touching the job.
+      #
+      # These five secrets are what give this job embedding-profile parity with
+      # prod, and NONE of them is set. Prod, meanwhile, promoted a real profile
+      # on 2026-07-30 and now serves a Databricks Qwen3 profile at 1024
+      # dimensions. So the two sides disagree today, and the failure below is
+      # live, not hypothetical.
+      #
+      # Ingest builds its profile shadow/backfill targets from ITS OWN process
+      # env. With the prod profile absent here, the first run on a day a real
+      # FDA revision lands commits chunk rows carrying no profile embedding.
+      # Coverage goes incomplete, and the next app boot refuses inside
+      # assert_profile_ready_for_activation (docker/entrypoint.sh runs
+      # init-db), crash-looping every Python machine while the Go proxy --
+      # which skips init-db by design -- keeps holding the public port and
+      # relaying into a dead upstream. It presents as edge 502s, not as
+      # machines that fail to start, and it fires weeks after the promotion, at
+      # whatever deploy happens to come next.
+      #
+      # The fix is the owner's: set the five WATCH_* secrets to the live prod
+      # values. Until then this job is one FDA revision away from breaking a
+      # future deploy.
       #
       # Any drift from the prod values is ALSO fatal, and deliberately so: the
       # profile fingerprint is immutable and covers model, dimension, revision,
@@ -109,8 +132,8 @@ jobs:
       - name: skipped (secret not configured)
         if: env.DATABASE_URL == ''
         run: |
-          echo "WATCH_DATABASE_URL secret not set — skipping the daily watch run."
-          echo "Set it to the prod Supabase URL with ?sslmode=require (stream 2)."
+          echo "WATCH_DATABASE_URL secret not set - skipping the daily watch run."
+          echo "Set it to the prod Databricks Lakebase DIRECT endpoint URL with ?sslmode=require (never a -pooler host)."
 
       # Fail fast on a missing/empty OpenAI key. The key is only exercised at
       # embed/extract time, i.e. on the day a PSG actually changes: without this
@@ -161,18 +184,20 @@ jobs:
       # Match the SHIPPED prod closure (ci.yml python-audit): llm only. No
       # `orchestration`: this job runs `regwatch watch` + the threshold sweep
       # directly, never dagster (compose-only dev tooling; see the header).
-      # local-embeddings is intentionally omitted — prod runs EMBEDDING_PROVIDER=openai.
+      # local-embeddings is intentionally omitted: nothing in this job embeds
+      # locally.
       - name: sync deps
         if: env.DATABASE_URL != ''
         run: uv sync --extra llm
 
-      # NOTE: no `alembic upgrade head` here — the Fly deploy migrates (see the
+      # NOTE: no `alembic upgrade head` here. The Fly deploy migrates (see the
       # header). `regwatch watch` boots through the _init_postgres stamp guard,
       # which refuses (loudly) if the DB schema is behind this checkout's head;
       # the fix is to deploy the pending migration, not to migrate from the cron.
 
-      # The pipeline: crawl → match watchlist → ingest matches → write durable
-      # alerts → digest. --extract is the default (paid per-PSG BE extraction);
+      # The pipeline: crawl -> match watchlist -> ingest matches -> write
+      # durable alerts -> digest. --extract is the default (paid per-PSG BE
+      # extraction);
       # pass --no-extract here if you want change-detection + alerts without the
       # LLM extraction cost (chunks are still embedded either way).
       - name: regwatch watch
@@ -247,21 +272,27 @@ jobs:
             "$SLACK_WEBHOOK_URL" || true
 
       # ---- Refusal-threshold revalidation (ADVISORY observability) -----------
-      # NON-GATING. This re-runs the gold set through the REAL prod retrieval path
-      # in THIS job's PROD embedding space (EMBEDDING_PROVIDER=openai + the live
-      # Supabase DATABASE_URL => OpenAI-1536 + pgvector) against the PROD corpus,
-      # which CI's disposable empty database cannot. It reports the two score
-      # distributions (must-answer vs must-refuse) and RECOMMENDS a refusal cutoff
-      # so a human can revalidate the provisional 0.30 default in the OpenAI
-      # vector space. See docs/DEPLOY.md §"Refusal-threshold revalidation".
+      # NON-GATING. This re-runs the gold set through the retrieval path against
+      # the PROD corpus, which CI's disposable empty database cannot. It reports
+      # the two score distributions (must-answer vs must-refuse) and RECOMMENDS
+      # a refusal cutoff. See docs/DEPLOY.md section "Refusal-threshold
+      # revalidation".
       #
-      # It is calibration OBSERVABILITY, NOT a gate: the sweep is read-only w.r.t.
-      # the safety path — it never changes REFUSAL_SCORE_THRESHOLD or the 0.30
-      # default, and exits 0 even when its recommendation differs from 0.30. The
-      # explicit `continue-on-error: true` guarantees that a sweep hiccup (or a
-      # recommendation != 0.30) can NEVER fail the daily crawl or block ingestion,
-      # and that it never trips the failure-alerting / dead-man's-switch steps
-      # below (a non-gating step's failure does not set job `failure()`).
+      # KNOWN LIMIT, same root cause as the ARMED HAZARD above: this job leaves
+      # ACTIVE_EMBEDDING_PROFILE unset, so retrieval here runs on the LEGACY
+      # OpenAI-1536 arm, not on the Qwen3 1024-dim profile prod actually serves.
+      # Its recommendation therefore does not transfer to prod, and the 0.30
+      # default remains unvalidated against the live vector space. Fixing the
+      # five WATCH_* secrets fixes this too.
+      #
+      # It is calibration OBSERVABILITY, NOT a gate. The sweep is read-only with
+      # respect to the safety path: it never changes REFUSAL_SCORE_THRESHOLD or
+      # the 0.30 default, and exits 0 even when its recommendation differs from
+      # 0.30. The explicit `continue-on-error: true` guarantees that a sweep
+      # hiccup (or a recommendation != 0.30) can NEVER fail the daily crawl or
+      # block ingestion, and that it never trips the failure-alerting or
+      # dead-man's-switch steps below (a non-gating step's failure does not set
+      # job `failure()`).
       - name: threshold sweep (advisory)
         if: env.DATABASE_URL != ''
         continue-on-error: true
@@ -297,11 +328,11 @@ jobs:
           set -euo pipefail
           curl -fsS --max-time 20 --retry 2 --retry-delay 10 \
             -X POST -H 'Content-Type: application/json' \
-            --data "$(printf '{"text":":rotating_light: *%s* / *%s* FAILED — analysts may be on stale FDA guidance. <%s|View run>"}' "$REPO" "$WORKFLOW" "$RUN_URL")" \
+            --data "$(printf '{"text":":rotating_light: *%s* / *%s* FAILED - analysts may be on stale FDA guidance. <%s|View run>"}' "$REPO" "$WORKFLOW" "$RUN_URL")" \
             "$SLACK_WEBHOOK_URL"
 
       # Dead-man's-switch success ping. Fires even on a clean skip (DB secret
-      # unset) — the cron DID start and finish, which is what we monitor. A cron
+      # unset): the cron DID start and finish, which is what we monitor. A cron
       # that never starts pings nothing, so healthchecks.io pages on the miss.
       - name: healthcheck ping on success
         if: success() && env.WATCH_HEALTHCHECK_URL != ''

@@ -1,58 +1,60 @@
 # REGWATCH Simple Technical Guide
 
-This guide explains the REGWATCH codebase for technical readers who want the
-big picture before reading implementation details.
+Last updated: 2026-08-11
 
-It is intentionally simple. It focuses on how the project connects end to end.
+For a technical reader who wants the big picture before opening the code.
 
-## One-Line System Summary
+## What It Does
 
-REGWATCH ingests public FDA data, stores searchable/citable evidence, answers
-questions only from that evidence, and refuses when it cannot support an answer.
+REGWATCH pulls in public FDA material, stores it as searchable and citable
+evidence, and answers questions from that evidence. Facts it states about FDA
+guidance carry a citation. When the evidence does not cover the question, it
+says so in plain words instead of guessing.
 
-## Current Shape
+## What Is Running Right Now
 
-REGWATCH is a deployed production service: the backend runs on Fly.io (app
-"amneal", TLS via `force_https`), the Next.js UI is on Vercel
-(amneal.vercel.app), and Supabase hosts the Postgres + pgvector datastore.
-Remaining pre-external-exposure work (enterprise SSO/OIDC, least-privilege DB
-creds, a rehearsed restore drill, distributed rate limiting) is tracked in
-`docs/ROADMAP.md`. The code paths described below are all shipped on `main`.
+Verified against the live system on 2026-08-11.
+
+- Backend on Fly.io, app `amneal`, release v104. TLS via `force_https`.
+- Go edge service holds the public port. Python runs the RAG core behind it.
+- Frontend on Vercel: Next.js App Router.
+- Database: **Databricks Lakebase** Postgres in us-east-2, database
+  `databricks_postgres`, app role `regwatch_app`. pgvector lives in the same
+  database, so rows, vectors, and the audit log are all in one place.
+  (An older doc, `DATABRICKS_ADOPTION_2026-07-28.md`, argued for keeping
+  Supabase. That call was reversed and the move already happened.)
+- Alembic head in the live DB is `0020_eval_run`, which matches the repo. Nothing
+  pending.
+- 5,494 chunk rows in the corpus.
+- Generation model: **`gpt-oss-120b`** (served id `gpt-oss-120b-080525`),
+  open weight, served from the company Databricks tenant at
+  `workspace.default.regwatch`. One model does every role: router, synthesizer,
+  extractor. `DATABRICKS_REASONING_EFFORT=low`.
+- Embeddings: **Databricks Qwen3** at `workspace.default.regwatch-embed`, 1024
+  dimensions, active profile `ep_2e7368b354d911ea3a013c3125e276c2`. All 5,494
+  chunks are embedded on that profile, so coverage is 100 percent.
+- OpenAI is the rollback path only. The provider still ships and is still
+  tested, but it serves nothing in production.
+
+Data residency is closed. Generation, embeddings, and the database all sit
+inside the company's Databricks tenant, so a normal analyst question never
+leaves for a third-party model API.
 
 Main stack:
 
-- Python 3.11+ / 3.12
-- Go edge service (`go/`) on the public port: auth, sessions, feedback,
-  settings, products served natively, rate limiting, and since 2026-07-24 the
-  end-to-end orchestration of `POST /query`
-- FastAPI RAG core behind the Go edge (conversational query pipeline with
-  session/turn IDs)
+- Python 3.11+ / 3.12, FastAPI, SQLModel / SQLAlchemy
+- Go edge service in `go/`
 - Next.js (App Router, TypeScript) UI in `regwatch/frontend/`
-- Authenticated: cookie-session auth on every endpoint except `GET /health`
-  (DB-backed opaque tokens, bcrypt passwords, per-user chat history + rate
-  limiting)
-- Postgres + pgvector as the only datastore (structured store and vectors in
-  the same DB); `DATABASE_URL` is mandatory - the app refuses to boot without
-  it
-- SQLModel / SQLAlchemy over the structured store
-- `httpx` and `selectolax` for FDA crawling
-- `pdfplumber` and `pypdf` for PDF parsing
-- pluggable LLM providers; prod runs the `databricks` provider (open-weight
-  gpt-oss-20b for all roles, hosted in the company Databricks tenant), with
-  the `openai` role-model provider kept as the rollback path
-- pluggable embedding providers
-- Alembic migrations (baseline + incremental, currently through `0016`)
-- Docker / Compose for the local API + ingest baseline
+- Postgres + pgvector as the only datastore. `DATABASE_URL` is mandatory and the
+  app refuses to boot without it.
+- `httpx` and `selectolax` for FDA crawling, `pdfplumber` and `pypdf` for PDFs
+- Alembic migrations, currently through `0020`
+- Docker / Compose for the local API and ingest baseline
 - pytest, ruff, black, mypy
 
-## High-Level Flow
+## The Two Flows
 
-The system has two main flows:
-
-1. Ingest FDA source material.
-2. Answer user questions from stored evidence.
-
-Ingest flow:
+Ingest:
 
 ```text
 FDA PSG index
@@ -62,591 +64,431 @@ FDA PSG index
   -> chunk text with page metadata
   -> embed chunks
   -> store chunks in pgvector
-  -> store document/version/BE fields in the structured store (Postgres)
+  -> store document/version/BE fields in Postgres
 ```
 
-Q&A flow:
+Q&A:
 
 ```text
 user question
   -> create or load chat session
   -> resolve follow-up context when safe
-  -> resolve product/entity
+  -> resolve product scope
   -> retrieve scoped chunks
-  -> refuse if retrieval is weak
-  -> call LLM with only retrieved evidence
-  -> validate citations
-  -> audit the query with session_id and turn_id
-  -> return answer, summary, clarification, scope warning, or refusal
+  -> withhold passages below the score threshold
+  -> call the LLM with only the surviving passages
+  -> gate the reply sentence by sentence, validate citations
+  -> write one audit row with session_id and turn_id
+  -> return the answer, a clarify prompt, or a plain-words decline
 ```
 
 ## Folder Map
 
 ```text
-config/
-  settings.py              runtime config from env
+config/settings.py         runtime config from env
 
-scripts/
-  export_openapi.py        dump the OpenAPI schema
-  fly-deploy.sh            Fly.io deploy helper
-  gen-store-schema.sh      regenerate the Go sqlc store schema
-  share-demo.sh            start API + UI behind one public link
+go/                        Go edge: auth, sessions, feedback, settings,
+                           products, rate limits, POST /query orchestration
 
-docker/
-  entrypoint.sh            container startup: create data dirs and init DB
-
-go/
-  (Go edge service)        public port: auth, sessions, feedback, settings,
-                           products, rate limits, and POST /query orchestration
-
-migrations/
-  versions/                Alembic migrations (through 0016)
+migrations/versions/       Alembic migrations (through 0020)
 
 src/regwatch/
-  ingest/                  crawl FDA PSGs and parse PDFs
+  ingest/                  crawl FDA PSGs, parse PDFs
   process/                 chunk, embed, extract BE fields, detect changes
   store/                   Postgres models/session + pgvector vector store
-  common/conversation.py    chat session/message persistence and safe context
-  retrieve/                product resolution and vector retrieval
-  generate/                prompts, LLM providers, grounded Q&A
+  retrieve/                product resolution, scoping, vector retrieval
+  generate/                prompts, LLM providers, the answer gate, grounded Q&A
   watch/                   watchlist, alias discovery, matching, alerts
   assemble/                product dossier builder
-  whitepaper/              cited White Paper populator + .docx export + entity-resolution spine
-  sources/                 rules-first source router + FDA source handlers (OB, Drugs@FDA, NDC, DailyMed, Shortages, REMS, PSG)
-  auth/                    cookie-session auth: opaque tokens, request deps
+  whitepaper/              cited White Paper populator + .docx export
+  deficiency/              deficiency analysis runs
+  sources/                 rules-first source router + FDA source handlers
+  auth/                    cookie-session verification
   api/                     FastAPI endpoints
   eval/                    gold set, metrics, deterministic eval gate
-  common/                  citations, audit, logging, text normalization, conversation, rate limiting, observability
+  common/                  citations, audit, logging, conversation, rate limits
 
-regwatch/
-  backend/                 backend workspace docs; source stays in src/regwatch
-  frontend/                Next.js (App Router, TypeScript) UI — five scoped surfaces in one (shell) route group, plus /studio outside it
+regwatch/frontend/         Next.js UI: five surfaces in one (shell) route group,
+                           plus /studio outside it
 tests/                     unit, integration, invariant, eval-gate tests
-tests_contract/            cross-service contract suite over real Go + uvicorn + Postgres
-docs/                      specs, decisions, plans, onboarding docs
+tests_contract/            cross-service suite over real Go + uvicorn + Postgres
+docs/                      specs, decisions, plans, onboarding
 ```
 
-Top-level Docker files:
+Docker files at the top level: `Dockerfile` builds the shared Python image,
+`compose.yaml` runs API + ingest, `.dockerignore` keeps data and secrets out of
+the image.
 
-- `Dockerfile`: builds the shared Python app image.
-- `compose.yaml`: runs the API and ingest services (the UI runs separately).
-- `.dockerignore`: keeps local data, secrets, docs, and caches out of the image.
-
-## The Core Data Model
-
-Read `src/regwatch/store/models.py` early. It explains the system.
-
-Important tables:
-
-- `Product`: verified watchlist product.
-- `PsgDocument`: current FDA PSG document record.
-- `PsgVersion`: captured PSG version.
-- `BeRequirement`: extracted BE fields with citations.
-- `QueryLog`: durable audit log for Q&A and related paths.
-- `User` / session tables: auth identities, opaque session tokens, and
-  per-user chat ownership (see migration `0004`).
-
-The vector store (pgvector, in the same Postgres database as the structured
-store) holds PSG text chunks and metadata.
-
-Each vector chunk carries metadata like:
-
-- `doc_id`
-- `version_id`
-- `normalized_name`
-- `dosage_form`
-- `route`
-- `page`
-- `source_url`
-- `appl_no`
-
-That metadata is what makes citations and scoped retrieval possible.
-
-## Important Files To Read First
-
-Best first pass:
+## Read These First
 
 1. `README.md`
 2. `docs/ARCHITECTURE.md`
-3. `docs/PROJECT_SPEC.md`
-4. `docs/DECISIONS.md`
-5. `docs/DOCKER.md`
-6. `config/settings.py`
-7. `src/regwatch/store/models.py`
-8. `src/regwatch/ingest/pipeline.py`
-9. `src/regwatch/generate/grounded_qa.py`
-10. `src/regwatch/retrieve/resolver.py`
-11. `src/regwatch/common/citations.py`
-12. `tests/test_invariants.py`
+3. `config/settings.py`
+4. `src/regwatch/store/models.py`
+5. `src/regwatch/ingest/pipeline.py`
+6. `src/regwatch/generate/grounded_qa.py`
+7. `src/regwatch/generate/prompts.py`
+8. `src/regwatch/generate/turn_gate.py`
+9. `src/regwatch/retrieve/resolver.py`
+10. `src/regwatch/common/citations.py`
+11. `tests/test_invariants.py`
 
-If those make sense, the rest of the repo will be much easier.
+`store/models.py` explains most of the system on its own.
 
-## Ingest Components
+## The Data Model
 
-### `ingest/psg_crawler.py`
+Important tables:
 
-Scrapes the FDA PSG index page.
+- `Product`: verified watchlist product
+- `PsgDocument`: current FDA PSG document record
+- `PsgVersion`: a captured PSG version
+- `BeRequirement`: extracted BE fields with citations
+- `QueryLog`: durable audit row for every Q&A turn
+- `User` and session tables: auth identities, opaque session tokens, per-user
+  chat ownership (migration `0004`)
+- `embedding_profile`: which vector space is live. There is exactly one row.
 
-It creates `PsgListing` objects that include:
+Each vector chunk carries `doc_id`, `version_id`, `normalized_name`,
+`dosage_form`, `route`, `page`, `source_url`, and `appl_no`. That metadata is
+what makes citations and scoped retrieval possible.
 
-- application number
-- active ingredient
-- normalized name
-- PSG type
-- route
-- dosage form
-- recommended date
-- PDF URL
+## Ingest
 
-It also filters listings for seed products.
+**`ingest/psg_crawler.py`** scrapes the FDA PSG index into `PsgListing` objects:
+application number, active ingredient, normalized name, PSG type, route, dosage
+form, recommended date, PDF URL. It can also filter listings to seed products.
 
-### `ingest/pdf_parser.py`
+**`ingest/pdf_parser.py`** turns PDF bytes into full text, a per-page text list,
+and the parser engine name. Page boundaries matter because every citation needs
+a page.
 
-Parses PDF bytes into:
+**`process/chunker.py`** splits page text into chunks and keeps the page number,
+section path, and document metadata.
 
-- full text
-- per-page text list
-- parser engine name
+**`process/embedder.py`** defines the embedding interface. Providers:
 
-Page boundaries are important because every answer citation needs a page.
+- `qwen3`: Qwen3 over an OpenAI-compatible private endpoint. This is production,
+  served by Databricks at 1024 dimensions.
+- `openai`: `text-embedding-3-small`, 1536-dim. Rollback path only.
+- `local-bge-small`: local sentence-transformers model, 384-dim, offline tooling
+  only. The dimension check rejects it against the app datastore.
+- `echo`: deterministic test provider, 1536-dim.
 
-### `process/chunker.py`
+How the switch actually works, because it trips people up: retrieval picks its
+provider from `ACTIVE_EMBEDDING_PROFILE`. Only the `legacy` value reads
+`EMBEDDING_PROVIDER`. Production runs a real profile, so the
+`EMBEDDING_PROVIDER=openai` line still sitting in `fly.toml` does nothing on the
+query path. Do not read it as the live setting.
 
-Splits page text into chunks while keeping:
+**`process/extractor.py`** uses the LLM to pull structured BE requirement fields
+out of a PSG. Every populated field needs a citation with a page and a verbatim
+quote, the quote has to actually appear on that page, and fields that fail are
+dropped.
 
-- page number
-- section path
-- document metadata
+**`ingest/pipeline.py`** is the orchestrator: download PDF, upsert
+`PsgDocument`, create a `PsgVersion` if content changed, parse, chunk, embed,
+store in pgvector, run BE extraction, save `BeRequirement`.
 
-This is the text that goes into pgvector.
+## Retrieval
 
-### `process/embedder.py`
+**`retrieve/resolver.py`** is the correctness file. FDA PSGs share boilerplate
+across products, so unfiltered search will happily answer a beclomethasone
+question with albuterol text. The fix is to resolve the product first and then
+search only that product's chunks. Outcomes are `resolved`, `ambiguous`, or
+`none`.
 
-Defines the embedding interface.
+**`retrieve/retriever.py`** embeds the query and searches pgvector, with
+metadata filters on `normalized_name`, `dosage_form`, `route`, and `psg_type`.
+For product-specific PSG questions `normalized_name` is the one that matters.
 
-Providers:
+**`retrieve/reranker.py`** is an optional cross-encoder hook, off by default
+(`RERANKER_ENABLED`).
 
-- `openai`: `text-embedding-3-small`, 1536-dim - the production provider
-- `qwen3`: Qwen3 embeddings over an OpenAI-compatible private endpoint
-  (Databricks-served target)
-- `local-bge-small`: local sentence-transformers model (384-dim; offline
-  tooling only - the dimension assert rejects it against the app datastore)
-- `echo`: deterministic test provider (1536-dim, matching the pgvector column)
+`REFUSAL_SCORE_THRESHOLD` defaults to 0.30. Passages scoring below it are
+withheld before the synthesizer ever sees them.
 
-Business logic calls the provider interface, not a hard-coded model.
+## Generation: The v7 Answer Policy
 
-### `process/extractor.py`
+This is the part that changed most recently, and it is live in production.
 
-Uses an LLM to extract structured BE requirement fields from a PSG.
+The old headline rule was "cite or refuse". It is gone. The rule now is **cite
+the facts, talk like a person.** The prompt is `GROUNDED_QA_SYSTEM_V7` in
+`generate/prompts.py`; the enforcement is `generate/turn_gate.py`.
 
-Important behavior:
+Every sentence the model writes is one of three kinds.
 
-- every populated field must have a citation
-- the citation must include page and verbatim quote
-- the quote must actually appear in the source page
-- invalid fields are dropped
+1. **Source fact.** States what FDA guidance requires, recommends, permits, or
+   prohibits. It must end with the passage numbers it came from, like `[1]` or
+   `[1, 3]`, placed right before the final period. An uncited source fact is
+   dropped by the gate. This is INV-1 and it lives in code, not in the prompt.
+2. **Reasoning.** Our own reading, going past what the passages say. It carries
+   no numbers and must open with one of four exact phrases:
+   "The guidance does not state this directly; my reading is ...",
+   "Reading the guidance together, ...", "My reading is ...", or
+   "Beyond the guidance, ...". Those openers are pinned byte for byte to
+   `turn_gate.REASONING_FRAME_PREFIXES` and a test enforces the match. An
+   obligation or a prohibition cannot hide inside a reasoning sentence: a
+   source-assertion lexicon reclassifies it back to a source fact.
+3. **Conversation.** Greetings, offers, transitions, a question back to the
+   user. Plain text, no numbers, no FDA facts.
 
-### `ingest/pipeline.py`
+**There is no sentinel and no code word for "not found".** v6 had one and it
+broke every refusal in the battery. In v7, when the passages do not answer the
+question the model says so in ordinary words, names what it does have nearby,
+and offers a next step. That whole reply is plain prose with zero passage
+numbers.
 
-This is the ingest orchestrator.
+Gate verdicts in `turn_gate.py`:
 
-It does:
+| Verdict | Meaning |
+|---|---|
+| `answer` | every emitted claim was admitted |
+| `partial` | something was dropped, immaterial, so render and disclose |
+| `material_drop` | the drop would change the meaning, so reject the whole answer |
+| `no_valid_citations` | nothing was admitted |
+| `no_evidence` | the model declined |
+| `conversational_decline` | admitted, but zero source facts (new in v7) |
 
-1. download PDF
-2. upsert `PsgDocument`
-3. create `PsgVersion` if content changed
-4. parse PDF
-5. chunk text
-6. embed chunks
-7. store chunks in pgvector
-8. run BE extraction
-9. save `BeRequirement`
+Three feature flags are set on Fly and all three are on:
+`REGWATCH_PROSE_SYNTHESIS` (v6 prose format, replaced the v5 claims JSON),
+`REGWATCH_LIVE_DRAFT` (live token streaming of the provisional draft over SSE),
+and `REGWATCH_SELECTIVE_CITATION` (the v7 policy above).
 
-## Retrieval Components
+`generate/llm.py` defines the provider interface:
 
-### `retrieve/resolver.py`
+- **Databricks** (`DatabricksProvider`), production since 2026-07-28. Serving
+  alias `workspace.default.regwatch`, one model for all roles. The alias pointed
+  at `system.ai.gpt-oss-20b` until 2026-08-05, when it was repointed to
+  `system.ai.gpt-oss-120b`. The served id is pinned in
+  `tests/test_d1_guards.py`.
+- **OpenAI**, rollback path. Uses the Responses API by default
+  (`OPENAI_API_MODE=responses`; `chat` falls back to Chat Completions) with
+  role-specific models: router `gpt-5-nano`, synthesizer and extractor
+  `gpt-5.4-nano`, each falling back to `LLM_MODEL`. Reasoning models that reject
+  `temperature` are retried without it.
+- **Anthropic**, and `echo` for tests.
 
-This is a key correctness file.
-
-Problem it solves:
-
-FDA PSGs share boilerplate language across products. If retrieval is unfiltered,
-a beclomethasone question can retrieve albuterol chunks because both documents
-contain similar phrases.
-
-Solution:
-
-Resolve the product first, then retrieve only within that product's chunks.
-
-Resolver outcomes:
-
-- `resolved`: one product matched
-- `ambiguous`: multiple products matched
-- `none`: no product matched
-
-### `retrieve/retriever.py`
-
-Embeds the query and searches pgvector.
-
-It supports metadata filters like:
-
-- `normalized_name`
-- `dosage_form`
-- `route`
-- `psg_type`
-
-For product-specific PSG questions, `normalized_name` is the important filter.
-
-### `retrieve/reranker.py`
-
-Optional cross-encoder reranking hook.
-
-It is off by default.
-
-## Generation Components
-
-### `generate/prompts.py`
-
-Stores prompts in one place.
-
-Main prompt types:
-
-- grounded Q&A
-- BE extraction
-- change summary
-
-The prompts tell the model to answer only from provided evidence and to refuse
-when the answer is not in the source context.
-
-### `generate/llm.py`
-
-Defines the LLM provider interface.
-
-Current providers:
-
-- Databricks (`DatabricksProvider`) - the production provider since
-  2026-07-28: open-weight gpt-oss-20b served from the company Databricks
-  tenant (endpoint `workspace.default.regwatch`), one model for all roles.
-- OpenAI - the rollback path; uses the **Responses API** by default
-  (`OPENAI_API_MODE=responses`; `chat` falls back to Chat Completions), with
-  role-specific models: router `gpt-5-nano`, synthesizer + extractor
-  `gpt-5.4-nano`, each falling back to `LLM_MODEL`.
-- Anthropic
-- echo for tests
-
-Business logic always calls `get_llm_provider(role=...)`; no model name is
+Business logic always calls `get_llm_provider(role=...)`. No model name is
 hard-coded.
 
-### `generate/grounded_qa.py`
+Residency guardrails that are still worth knowing: `D1_ALLOWED_LLM_MODELS` plus
+a runtime served-model check in `llm.py`. It rejects a response served by a
+model outside the allowlist, and it rejects partner-hosted families
+(`databricks-gpt*`, `databricks-claude*`, `databricks-gemini*`) even if somebody
+allowlists them by hand.
 
-This is the main Q&A path.
+## Citations
 
-It does:
+`common/citations.py` is the one citation grammar for the whole codebase.
 
-1. resolve product scope when needed
-2. retrieve passages
-3. rerank and trim passages
-4. refuse before LLM if retrieval is weak
-5. call LLM with source passages
-6. validate citations
-7. strip fake citations
-8. refuse if answer has no valid citations
-9. write audit log
-10. return `QAResult`
-
-## Citation System
-
-`common/citations.py` is the centralized citation grammar.
-
-PSG citation format:
+The model writes passage numbers like `[1]`. The gate maps each admitted claim
+back to a real source and renders the final answer with locators:
 
 ```text
 [PSG_020503, p.3]
 ```
 
-It also supports compound citations:
+Compound form for a claim backed by two sources:
 
 ```text
 [PSG_020503, p.4; PSG_021730, p.4]
 ```
 
-Why this matters:
+A `Sources:` trailer lists them at the end. One shared parser means generator
+validation and eval scoring agree, fake citations can be stripped before the
+answer goes out, and citation behavior does not drift between modules.
 
-- generator validation and eval scoring use the same parser
-- fake citations can be removed before returning an answer
-- citation behavior does not drift across the codebase
+## Watch, Dossier, White Paper
 
-## Watch System
+**Watch** (`watch/`) tracks products and alerts on relevant PSG changes.
+Products must come from verified sources, applicant aliases are discovered from
+Drugs@FDA rather than guessed, PSG listings are matched against the watchlist,
+and an alert is only emitted when the PSG version actually exists in the store.
+The daily run is a GitHub Actions schedule, `.github/workflows/watch-daily.yml`.
 
-The watch system tracks products and alerts on relevant PSG changes.
+**Dossier** (`assemble/dossier.py`) builds a Markdown research brief for a
+product: matched PSGs, BE fields, citations and source links, RLD label info
+from openFDA when available, a PSG Q&A summary, and a checklist scaffold. It is
+a research scaffold, not submission content.
 
-Files:
+**White Paper** (`whitepaper/`) is the shipped instance of multi-source
+synthesis. It fuses Orange Book, Drugs@FDA, NDC, DailyMed, Shortages, REMS, and
+PSG into a cited cell graph with tri-state cells (`populated`,
+`verified_absent` rendered as "No", `analyst_input_required`), records OB/SPL
+provenance with `last_fetched_at` freshness (migration `0005`), and exports a
+`.docx` rendered from the exact reviewed result.
 
-- `watch/watchlist.py`
-- `watch/aliases.py`
-- `watch/matcher.py`
-- `watch/alerts.py`
+## Multi-Source Routing
 
-Concepts:
+Handlers live in `src/regwatch/sources/` behind a rules-first router
+(`sources/router.py`) and are reachable via `POST /sources/search`: PSG (scoped
+RAG over PDF chunks), Orange Book, Drugs@FDA, Drug Shortages, NDC, DailyMed
+(SPL), REMS. The idea is that only PSG needs RAG. The rest are structured
+lookups.
 
-- Products must come from verified sources.
-- Applicant aliases are discovered from Drugs@FDA instead of guessed.
-- PSG listings are matched to watchlist products.
-- Alerts are emitted only when the PSG version exists in the structured store.
-
-## Dossier System
-
-`assemble/dossier.py` builds a Markdown research brief for a product.
-
-It can include:
-
-- matched PSGs
-- BE extraction fields
-- citations and source links
-- RLD label info from openFDA when available
-- a PSG Q&A summary
-- a checklist scaffold
-
-It is a research scaffold, not submission content.
+Still open: the main `POST /query` path runs PSG-scoped RAG only. It does not
+yet synthesize the structured handlers, and the persist-and-cite plus freshness
+pattern proven in the White Paper has not been applied to the Ask and Assemble
+read paths. See `docs/ROADMAP.md`.
 
 ## API And UI
 
-### `api/main.py` and the Go edge
+The Go edge owns the public port. It serves `/auth/*`, `/sessions*`,
+`/feedback`, `/settings`, and `/products` natively, orchestrates `POST /query`
+end to end (it writes the `query_log` audit row and calls Python only through
+the token-gated internal `POST /internal/query/compute`), and relays everything
+else to FastAPI.
 
-The Go edge service (`go/`) owns the public port. It serves `/auth/*`,
-`/sessions*`, `/feedback`, `/settings`, and `/products` natively, orchestrates
-`POST /query` end-to-end (it persists the `query_log` audit row and calls the
-Python RAG core only through the token-gated internal
-`POST /internal/query/compute`), and relays everything else to FastAPI.
+Endpoints:
 
-Public endpoints:
-
-- `GET /health` — open liveness + component diagnostics
-- `GET /ready` — open readiness probe for DB/vector/LLM constructability
-- `GET /metrics` — Prometheus counters; open by default, bearer-gated when
+- `GET /health`, `GET /ready`: open liveness and readiness
+- `GET /metrics`: Prometheus counters, open by default, bearer-gated when
   `METRICS_TOKEN` is set
-- `POST /auth/login`, `POST /auth/logout`, `GET /auth/me` - cookie-session
-  auth (Go-served)
-- `POST /query` - conversational; Go-orchestrated at the edge; accepts
-  `session_id`/`user_id`, returns `session_id`/`turn_id`/`status`
-  (`answer`/`summary`/`clarify`/`scope_warning`/`refused`)
-- `POST /query/stream` - SSE `status` progress frames, provisional `token`
+- `POST /auth/login`, `POST /auth/logout`, `GET /auth/me` (Go)
+- `POST /query`: conversational, Go-orchestrated. Takes `session_id`/`user_id`,
+  returns `session_id`/`turn_id`/`status`. Status is one of `answer`, `summary`,
+  `clarify`, `scope_warning`, `meta`, `refused`, `error`.
+- `POST /query/stream`: SSE. Sends `status` progress frames, provisional `token`
   delta frames (a cosmetic live draft), then one validated terminal
-  `QueryResponse` `result` frame; falls back client-side to `POST /query` if
-  the stream fails before the result
-- `POST /feedback` - per-turn answer feedback against an audit row (Go-served)
-- `POST /resolve` — deterministic entity resolution to a canonical spine
-  (`{normalized_name, six-digit application number}`). It is NOT an LLM turn:
-  it writes NO audit row and returns no answer text; a mismatch 422s with no
-  scope set (refuse over guess).
-- `POST /sources/search`
-- `POST /assemble`
-- `POST /whitepaper` (populate), `POST /whitepaper/runs/{id}/docx` (export a saved run)
-- `GET /watch/latest`
-- `GET /products`, `POST /products` (Go-served)
-- `GET /sessions`, `GET /sessions/{id}`, `DELETE /sessions/{id}` — per-user
-  chat history (foreign `session_id` 404s) (Go-served)
-- `GET /settings` (Go-served)
+  `QueryResponse` `result` frame. The client falls back to `POST /query` if the
+  stream dies before the result.
+- `POST /feedback`: per-turn feedback against an audit row (Go)
+- `POST /resolve`: deterministic entity resolution to
+  `{normalized_name, six-digit application number}`. Not an LLM turn: no audit
+  row, no answer text. A mismatch returns 422 with no scope set.
+- `POST /sources/search`, `POST /assemble`
+- `POST /whitepaper` plus the `/whitepaper/runs/*` read, edit, finalize, reopen,
+  delete, and `.docx` export routes
+- `POST /deficiency/analyze`, `GET /deficiency/runs`, `GET /deficiency/runs/{id}`
+- `GET /watch/latest`, `GET /psg/documents`, `GET /psg/documents/{id}/pdf`
+- `GET /products`, `POST /products` (Go)
+- `GET /sessions`, `GET /sessions/{id}`, `DELETE /sessions/{id}` (Go). A
+  `session_id` belonging to another user 404s.
+- `GET /settings` (Go)
 
-All other endpoints are behind a `require_user` dependency.
-Auth is a DB-backed cookie session (opaque token hashed at rest, bcrypt
-passwords, CLI-provisioned users) with per-user rate limiting
-(`RATE_LIMIT_PER_MINUTE`, default 30), plus login brute-force caps per email and
-per source IP. CORS is allow-listed with credentials via
-`CORS_ALLOW_ORIGINS_CSV` (defaults to the Next.js dev origins).
+Everything else sits behind `require_user`. Auth is a DB-backed cookie session:
+opaque token hashed at rest, bcrypt passwords, CLI-provisioned users, per-user
+rate limiting (`RATE_LIMIT_PER_MINUTE`, default 30), and login brute-force caps
+per email and per source IP. CORS is allow-listed with credentials via
+`CORS_ALLOW_ORIGINS_CSV`.
 
-### `regwatch/frontend/` (Next.js, TypeScript)
+### Frontend
 
-The production UI is the Next.js App Router app in `regwatch/frontend/`. All
-**five scoped surfaces** (Ask / Assemble / Watch / White Paper / Deficiency)
-render inside one `(shell)` route-group layout — one sidebar, one set of design
-tokens, and a shared **"Under review" product-scope bar** across all of them.
-The **Compliance Studio** (`/studio`) sits outside that shell: it reads our own
-CMC drafts rather than public FDA material, and is fixture-backed.
+Five surfaces (Ask, Assemble, Watch, White Paper, Deficiency) render inside one
+`(shell)` route-group layout: one sidebar, one set of design tokens, one shared
+"Under review" product-scope bar. The Compliance Studio (`/studio`) sits outside
+that shell because it reads our own CMC drafts instead of public FDA material,
+and it is fixture-backed.
 
-- The current product is **URL-scoped** (`?rp=&appl=`) so it is shareable and
-  survives reload; all five shell surfaces read it.
-- Product scope is settable from three places — the bar's resolve-backed
-  picker, a successful White Paper populate, and a Watch row — each writing the
-  canonical `{normalized_name, six-digit application number}`.
-- **Ask** is a cited conversational chat (right-aligned user bubbles, gold RW
-  avatar, citation chips that link to FDA sources with full snippets in a
-  Sources disclosure, clarify-option pills, bottom-pinned composer,
-  Enter-to-send), not an editorial document/ledger view.
+- The current product is URL-scoped (`?rp=&appl=`), so it survives reload and is
+  shareable. All five shell surfaces read it.
+- Scope can be set from three places: the bar's resolve-backed picker, a
+  successful White Paper populate, and a Watch row. Each writes the canonical
+  `{normalized_name, six-digit application number}`.
+- Ask is a cited conversational chat: right-aligned user bubbles, citation chips
+  that link to FDA sources with full snippets in a Sources disclosure, clarify
+  pills, a bottom-pinned composer, Enter to send.
 
-It uses a typed client in `regwatch/frontend/lib/api.ts` mirroring the Pydantic
-models, and a same-origin `/api` proxy (`regwatch/frontend/next.config.mjs`) so
-one origin exposes the whole app. Run it with
-`cd regwatch/frontend && npm run dev`, or use `scripts/share-demo.sh` to start
-API + UI behind one public link. (The earlier Streamlit POC has been fully
-retired.)
+It uses a typed client in `regwatch/frontend/lib/api.ts` that mirrors the
+Pydantic models, and a same-origin `/api` proxy in `next.config.mjs`. Run it
+with `cd regwatch/frontend && npm run dev`, or use `scripts/share-demo.sh` to
+put the API and UI behind one public link.
 
 ## Eval
 
-Files:
+Files: `eval/gold_set.jsonl`, `eval/whitepaper_gold.jsonl`, `eval/metrics.py`,
+`eval/run_eval.py`, `eval/verify_gold.py`.
 
-- `eval/gold_set.jsonl`
-- `eval/metrics.py`
-- `eval/run_eval.py`
+Metrics: recall@k, MRR, citation precision, faithfulness (the share of admitted
+source-fact claims that carry a citation), `sentence_citation_rate` (the older
+text-only definition, kept for trend continuity), `fact_recall`, and refusal
+accuracy.
 
-Metrics:
+`run_eval.py --check-thresholds` is the CI gate. It blocks on recall@8 >= 0.90,
+citation_precision >= 0.95, and refusal_accuracy >= 0.95, and exits non-zero on
+an empty store. Its provider-backed CI lane is key-gated.
+`tests/test_eval_gate.py` is a deterministic offline twin: it seeds a fixed
+corpus and a faithful LLM stub, so the check also fires inside plain
+`uv run pytest`. The eval is mechanical and auditable on purpose; there is no
+LLM-as-judge yet. See [`EVAL_STATUS.md`](EVAL_STATUS.md).
 
-- retrieval recall
-- citation precision
-- faithfulness proxy
-- `fact_recall` — fraction of a gold item's `expected_facts` present in the
-  answer (scores answer content, not just which pages were cited)
-- refusal accuracy
-
-`run_eval.py` scores the gold set against the live corpus and exits nonzero on
-an empty store. Its provider-backed CI lane is key-gated; the latest inspected
-run skipped it, so current live pass/fail is unverified.
-`tests/test_eval_gate.py` is a deterministic, offline gate: it seeds a fixed
-corpus and a faithful LLM stub and hard-gates every metric, so the fixture fires
-inside `uv run pytest` (and therefore in CI). The eval is intentionally
-mechanical and auditable; it does not yet use an LLM-as-judge. See
-[`EVAL_STATUS.md`](EVAL_STATUS.md) for the current evidence.
-
-Open eval work (see `docs/ROADMAP.md`): expand the gold set (12 Q&A + 16
-white-paper rows -> 30-50), add an LLM-as-judge alongside the mechanical
-`(short_name, page)` + `expected_facts` scoring, and hold thresholds
-recall@k >= 0.90, citation_precision >= 0.95, refusal_accuracy >= 0.95.
+The gold set is verified before it is scored. `verify_gold` asserts that every
+expected source quote really appears on that page, and `run_eval` refuses to
+score a gold set that fails, before spending a single LLM call.
 
 ## Tests
 
-The tests explain expected behavior better than comments.
-
-Key tests:
+The tests explain expected behavior better than comments do.
 
 - `test_invariants.py`: compliance invariants
+- `test_turn_gate.py`: the v7 sentence gate
 - `test_cross_drug_leak.py`: product scoping before retrieval
 - `test_citations.py`: citation grammar
 - `test_resolver.py`: entity/product resolution
 - `test_pipeline_idempotent.py`: ingest idempotency
 - `test_grounded_qa_citations.py`: fake citation stripping
+- `test_d1_guards.py`: residency allowlist and the served-model check
 - `test_api.py`: endpoint behavior
 
 ## Safety Model
 
-The safety model is simple:
+1. Use only trusted FDA and public source evidence.
+2. Resolve product scope before searching chunks (INV-9: citations cannot cross
+   drugs).
+3. Retrieve with metadata filters, and withhold anything under the score
+   threshold.
+4. Give the LLM only the surviving passages.
+5. Gate the reply sentence by sentence and validate every citation.
+6. Drop uncited source facts. Reject the whole answer when the drop was
+   material.
+7. Write exactly one `query_log` row per query, answered or not.
 
-1. Use only trusted FDA/public source evidence.
-2. Resolve product scope before searching PSG chunks.
-3. Retrieve evidence with metadata filters.
-4. Give the LLM only retrieved evidence.
-5. Validate citations after the LLM responds.
-6. Refuse if evidence or citations are weak.
-7. Audit every query.
-
-The LLM is not trusted by itself. The code checks its output.
-
-## Current Model Provider State
-
-Current state (this is implemented and deployed, not planned):
-
-- Production runs the Databricks provider since 2026-07-28
-  (`LLM_PROVIDER=databricks`): open-weight gpt-oss-20b served inside the
-  company Databricks tenant (endpoint `workspace.default.regwatch`), one
-  model for all roles. This is the data-residency decision recorded in
-  `docs/DATABRICKS_ADOPTION_2026-07-28.md`.
-- Two tuning knobs shipped 2026-07-29: `DATABRICKS_REASONING_EFFORT`
-  (default `low`) and `SYNTHESIZER_MAX_TOKENS` (default 3000).
-- Embeddings still use OpenAI `text-embedding-3-small` (1536-dim) - the
-  remaining data-residency gap. A Databricks Qwen3-Embedding-0.6B endpoint
-  (1024-dim, `workspace.default.regwatch-embed`) exists; app wiring is
-  pending.
-- OpenAI is the LLM rollback path. Its provider uses the **Responses API**
-  by default (`OPENAI_API_MODE=responses`; `chat` falls back to Chat
-  Completions) with role-specific models, each falling back to `LLM_MODEL`:
-  - `gpt-5-nano` (reasoning) for the router/classification role
-  - `gpt-5.4-nano` for answer synthesis and BE extraction
-- Reasoning models that reject `temperature` are retried without it.
-
-## Multi-Source Architecture
-
-Full Router -> Handlers -> Synthesizer flow:
-
-```text
-Question
-  -> classify intent
-  -> resolve entity/product
-  -> route to FDA source handlers
-  -> run source handlers
-  -> validate evidence
-  -> synthesize cited answer
-  -> validate output
-  -> audit
-```
-
-Source handlers exist today in `src/regwatch/sources/` behind a rules-first
-router (`sources/router.py`) and are reachable via `POST /sources/search`:
-
-- PSG: scoped RAG over PDF chunks
-- Orange Book: structured lookup
-- Drugs@FDA: structured lookup
-- Drug Shortages: structured lookup
-- NDC: structured lookup
-- DailyMed (SPL): structured lookup
-- REMS: structured lookup
-
-The core idea is that only PSG needs RAG. Most other FDA sources are queried as
-structured records.
-
-The **White Paper populator** (`src/regwatch/whitepaper/`) is the shipped
-instance of multi-source synthesis: it fuses Orange Book + Drugs@FDA + NDC +
-DailyMed + Shortages + REMS + PSG into a cited cell graph with tri-state cells
-(`populated` / `verified_absent -> 'No'` / `analyst_input_required`), persists
-OB/SPL provenance with `last_fetched_at` freshness (migration `0005`), and
-exports a `.docx` rendered from the exact reviewed result.
-
-Still open (see `docs/ROADMAP.md`): the main `POST /query` answer path still
-runs PSG-scoped RAG only (it does not yet synthesize the structured source
-handlers), and the persist-and-cite + freshness pattern proven in the White
-Paper has not yet been applied to the Ask/Assemble read paths.
+The LLM is not trusted on its own. The code checks what it produced.
 
 ## Local Commands
-
-Common commands:
 
 ```bash
 uv sync --extra dev --extra llm
 uv run pytest -q
 uv run regwatch init-db
-uv run regwatch create-user                              # provision a login (auth gates every endpoint but /health)
+uv run regwatch create-user                    # auth gates every endpoint but /health
 uv run regwatch aliases --refresh
 uv run regwatch seed
-uv run regwatch ingest-all                               # full ~1,795-PSG A-Z catalog crawl
+uv run regwatch ingest-all                     # full A-Z PSG catalog crawl
+uv run regwatch embedding-profile-list         # which vector space is live
+uv run regwatch embedding-profile-coverage <profile_id>
 uv run python -m regwatch.eval.run_eval
 uv run python -m regwatch.eval.run_eval --check-thresholds   # CI eval gate
 uv run uvicorn regwatch.api.main:app --reload
-cd regwatch/frontend && npm install && npm run dev      # Next.js UI on http://localhost:3000
+cd regwatch/frontend && npm install && npm run dev
 ```
 
-## What To Ignore At First
+## Known Open Items
 
-Do not start with:
-
-- `.venv/`
-- `.git/`
-- `.pytest_cache/`
-- `.mypy_cache/`
-- `.ruff_cache/`
-- `__pycache__/`
-- raw PDFs unless you want source examples
-
-Start with the code under `src/regwatch/` and the tests.
+- Not externally exposed yet. It needs an SSO plus TLS gateway.
+- Least-privilege database credentials.
+- A rehearsed restore drill.
+- The daily Watch cron does not have the embedding-profile secrets set
+  (`WATCH_ACTIVE_EMBEDDING_PROFILE`, `WATCH_QWEN_EMBEDDING_*`). If a real FDA
+  revision lands, that run would write chunk rows with no embedding on the live
+  profile, coverage would go incomplete, and the next Python boot would refuse
+  inside `assert_profile_ready_for_activation`. Setting those secrets is the
+  fix.
+- The 0.30 refusal threshold was validated against the old OpenAI vector space.
+  The space is now Qwen3 at 1024 dimensions, so that validation no longer
+  carries over.
+- Compliance Studio is UI and domain model only. Its document service,
+  compliance pipeline, and assistant are fixtures, and nothing survives a
+  refresh.
 
 ## Mental Model
 
-Think of REGWATCH as three systems connected together:
+Three systems bolted together:
 
-1. Evidence builder
-   - fetches and stores FDA evidence
+1. **Evidence builder**: fetches and stores FDA evidence.
+2. **Evidence answerer**: retrieves the right evidence and writes a cited
+   answer.
+3. **Evidence guardrail**: checks every sentence, drops what is not supported,
+   and audits everything.
 
-2. Evidence answerer
-   - retrieves the right evidence and answers with citations
-
-3. Evidence guardrail
-   - validates citations, refuses weak answers, and audits everything
-
-If you keep that model in mind, the codebase is much easier to read.
+Keep that in your head and the codebase reads much more easily.

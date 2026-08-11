@@ -65,7 +65,7 @@ def synth_turn_json(
 
 _TEST_DB_URL = (os.environ.get("TEST_DATABASE_URL") or "").strip()
 # Hosts we accept as "definitely a disposable database". The host .env carries
-# the LIVE production Supabase URL in DATABASE_URL; this guard makes it
+# the LIVE production Lakebase URL in DATABASE_URL; this guard makes it
 # structurally impossible for the suite (which drops schemas and truncates
 # every table) to reach anything remote even if an operator exports the wrong
 # variable.
@@ -257,7 +257,7 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     # Setting DATABASE_URL explicitly (rather than clearing it) means a host
     # .env pointing at production Postgres can never leak into the suite.
     monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
-    # Prod (Supabase) sessions run in UTC; a scratch Postgres initdb'd on a
+    # Prod (Lakebase) sessions run in UTC; a scratch Postgres initdb'd on a
     # laptop defaults to the LOCAL timezone, which would shift every
     # aware-datetime written into the naive timestamp columns. PGTZ pins the
     # libpq session timezone so both environments store identical values.

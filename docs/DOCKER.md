@@ -1,75 +1,59 @@
 # REGWATCH Docker Guide
 
-This document records the Docker work added to REGWATCH and how to use it.
+Last updated: 2026-08-11
 
-The goal is a reliable local/container baseline that can run the Python API,
-Next.js UI, and ingest jobs without changing the core application code.
-Production (the Fly app `amneal`) ships this same API image; `docs/DEPLOY.md`
-is the production runbook. (Dagster orchestration was removed in R5; GitHub
-Actions cron is the sole scheduler.)
+This is the local and container baseline: run the Python API, the Next.js UI and
+ingest jobs without changing application code. Production (the Fly app `amneal`)
+ships this same API image. `docs/DEPLOY.md` is the production runbook.
 
-## What Was Added
+## What is in the box
 
 | File | Purpose |
 |---|---|
-| `Dockerfile` | Multi-stage build: a digest-pinned `golang` stage compiles the static Go proxy binary (`regwatch-proxy`), then the `python:3.12-slim` stage builds the Python application; both ship in the one API image. |
+| `Dockerfile` | Multi-stage build. A digest-pinned `golang` stage compiles the static Go proxy binary (`regwatch-proxy`), then the `python:3.12-slim` stage builds the Python app. Both ship in the one API image. |
 | `regwatch/frontend/Dockerfile` | Builds the local Next.js UI image. |
-| `.dockerignore` | Keeps secrets, local data, docs, caches, and local tooling out of the image context. |
-| `compose.yaml` | Defines the API, UI, one-shot ingest, and pgvector `db` services. |
-| `docker/entrypoint.sh` | Creates container data directories and runs `regwatch init-db` before app start (skipped for `alembic` and `regwatch-proxy` argvs -- see Startup Behavior). |
-| `.github/workflows/ci.yml` | Builds both images in CI and gates them with a pinned Trivy scan (fixable CRITICAL/HIGH vulns + embedded secrets); `deploy.yml` re-scans the API image before every Fly release. |
-| `pyproject.toml` / `uv.lock` | Moves heavy local embedding dependencies behind the `local-embeddings` extra. |
-| `src/regwatch/api/main.py` | Avoids running DB initialization twice when the entrypoint already ran it. |
-| `src/regwatch/process/embedder.py` | Gives a clear error if local embeddings are requested without installing the extra. |
+| `.dockerignore` | Keeps secrets, local data, docs, caches and local tooling out of the image context. |
+| `compose.yaml` | API, UI, one-shot ingest and pgvector `db` services. |
+| `docker/entrypoint.sh` | Creates the data directories and runs `regwatch init-db` before app start. Skipped for `alembic` and `regwatch-proxy` argvs, see Startup Behavior. |
+| `.github/workflows/ci.yml` | Builds both images and gates them with a pinned Trivy scan (fixable CRITICAL/HIGH vulns plus embedded secrets). `deploy.yml` re-scans the API image before every Fly release. |
+| `pyproject.toml` / `uv.lock` | Heavy local embedding dependencies sit behind the `local-embeddings` extra. |
+| `src/regwatch/api/main.py` | Skips DB init when the entrypoint already ran it. |
+| `src/regwatch/process/embedder.py` | Clear error if local embeddings are requested without the extra installed. |
 
-## Container Shape
+## Container shape
 
-One Python image is reused for app and ingest jobs:
-
-1. API service
-2. Ingest service
-
-The API is a long-running service. Ingest is intentionally a separate one-shot
-command so a large 30-minute data load does not block API startup. Production
-Watch is driven by `.github/workflows/watch-daily.yml`; there is no local
-orchestration daemon (Dagster was removed in R5).
+One Python image serves both the app and the ingest job:
 
 ```text
 docker image: regwatch:local
   -> api                -> regwatch serve   (dual-stack uvicorn; see docs/GO_PROXY_ROLLOUT.md)
   -> ingest             -> regwatch seed
-  (also ships /usr/local/bin/regwatch-proxy -- no Compose service runs it)
+  (also ships /usr/local/bin/regwatch-proxy; no Compose service runs it)
 
 docker image: regwatch-web:local
   -> web                -> npm run dev
 ```
 
-Production differs here: on Fly this same API image runs TWO process groups
-(`fly.toml [processes]`). The `proxy` group execs the static Go binary
-`regwatch-proxy`, which holds the public edge on :8080 behind `[http_service]`
-and relays over the private 6PN network to the `app` group, which runs
-`regwatch serve` on :8000. Compose does not run the proxy locally -- the
-Next.js dev server proxies `/api` straight to the `api` service instead. See
+The API is long-running. Ingest is deliberately a separate one-shot command so a
+30-minute data load never blocks API startup. Production Watch is driven by
+`.github/workflows/watch-daily.yml`. There is no orchestration daemon.
+
+Production differs in one important way. On Fly this same API image runs two
+process groups (`fly.toml [processes]`). The `proxy` group execs the static Go
+binary `regwatch-proxy`, which holds the public edge on :8080 behind
+`[http_service]` and relays over the private 6PN network to the `app` group,
+which runs `regwatch serve` on :8000. Compose does not run the proxy locally;
+the Next.js dev server proxies `/api` straight to the `api` service instead. See
 `docs/GO_PROXY_ROLLOUT.md` and `docs/DEPLOY.md`.
 
-## Quick Commands
-
-Build the baseline image:
+## Quick commands
 
 ```bash
-docker build -t regwatch:local .
-```
-
-Run the API:
-
-```bash
-docker compose up api
-```
-
-Run the full local stack:
-
-```bash
-docker compose up --build api web
+docker build -t regwatch:local .                       # build the image
+docker compose up api                                  # API only
+docker compose up --build api web                      # full local stack
+docker compose --profile ingest run --rm ingest        # one-shot seed ingest
+docker compose config --quiet                          # validate compose syntax
 ```
 
 Local endpoints:
@@ -79,34 +63,18 @@ UI:      http://localhost:3000
 API:     http://localhost:8000
 ```
 
-Run the current one-shot seed ingest:
+## Data persistence
 
-```bash
-docker compose --profile ingest run --rm ingest
-```
+Compose mounts the host `./data` directory into the container at `/app/data`, so
+raw PDFs and processed output survive container restarts.
 
-Validate Compose syntax:
-
-```bash
-docker compose config --quiet
-```
-
-## Data Persistence
-
-Compose mounts the host `./data` directory into the container at `/app/data`.
-
-That means these survive container restarts:
-
-- raw PDF files
-- processed output files
-
-The structured store and the vectors both live in Postgres, not under `./data`
-(the `db` Compose service, a pgvector-image Postgres, backed by the named
-`db-data` Docker volume). Postgres + pgvector is the only datastore since R5 —
-there is no SQLite/Chroma fallback. `DATABASE_URL` is mandatory; Compose
-defaults it to the `db` service (`postgresql://postgres:postgres@db:5432/postgres`)
-but you can point it at a Supabase session-pooler URL instead — see
-`docs/DEPLOY.md`.
+The structured store and the vectors both live in Postgres, not under `./data`.
+Locally that is the `db` Compose service, a pgvector Postgres backed by the named
+`db-data` Docker volume. Postgres with pgvector has been the only datastore since
+R5; there is no SQLite or Chroma fallback. `DATABASE_URL` is mandatory. Compose
+defaults it to the `db` service, and you can point it at a hosted Postgres
+instead. Production points at Databricks Lakebase, in the same Databricks tenant
+as the models. See `docs/DEPLOY.md`.
 
 Container defaults:
 
@@ -114,221 +82,182 @@ Container defaults:
 DATA_DIR=/app/data
 RAW_PDF_DIR=/app/data/raw
 PROCESSED_DIR=/app/data/processed
-DATABASE_URL=postgresql://postgres:postgres@db:5432/postgres   # Compose default; Postgres + pgvector, mandatory
+DATABASE_URL=postgresql://postgres:postgres@db:5432/postgres   # Compose default; mandatory
 ```
 
-## Embedding Modes
+## Embedding modes
 
-Compose defaults to `EMBEDDING_PROVIDER=openai` (`INSTALL_LOCAL_EMBEDDINGS=true`
-is still the build-arg default, so the image can also run local embeddings if
-you override the env var). Since R5 the Compose `db` service is a
-`vector(1536)` pgvector Postgres, and OpenAI's `text-embedding-3-small` is the
-only bundled provider whose dimension matches — `local-bge-small` (384-dim) is
-rejected at boot by the dimension assert (`assert_embedding_provider_dim` in
-`store/pgvector_store.py`). `local-bge-small` remains available for
-offline/eval tooling, not as the app datastore's embedding provider.
+Two settings pick the vector space, and it helps to keep them apart:
 
-```text
-INSTALL_LOCAL_EMBEDDINGS=true        # compose build-arg default
-EMBEDDING_PROVIDER=openai            # compose environment default; plus OPENAI_API_KEY
-```
+- `EMBEDDING_PROVIDER` names a provider for the legacy arm.
+- `ACTIVE_EMBEDDING_PROFILE` names a registered embedding profile. Anything
+  other than the default `legacy` sends vectors to the profile-keyed
+  `chunk_embedding` table instead.
 
-For a slim no-torch stack — the production pairing, see `docs/DEPLOY.md` —
-set:
+**Local Compose runs the legacy arm**: `EMBEDDING_PROVIDER=openai`, no profile.
+The legacy `chunk.embedding` column is `vector(1536)`, so the provider has to be
+1536-dim. `local-bge-small` is 384-dim and `assert_embedding_provider_dim` (in
+`store/pgvector_store.py`) refuses it at boot. It stays available for offline and
+eval tooling, just not as the app datastore's provider. Qwen3 is refused on this
+arm too: it may not write into the unversioned legacy space at all.
 
-```text
-INSTALL_LOCAL_EMBEDDINGS=false
-EMBEDDING_PROVIDER=openai            # plus OPENAI_API_KEY
-```
+**Production does not run the legacy arm.** It runs a registered profile:
+Databricks-hosted Qwen3 at 1024 dimensions, profile
+`ep_2e7368b354d911ea3a013c3125e276c2`, with all 5,494 chunks embedded on it
+(measured 2026-08-11). Profile vectors live in `chunk_embedding`, whose embedding
+column deliberately carries no dimension typmod. The profile row's dimension is
+enforced by a database trigger plus a per-profile expression index, which is what
+lets several vector spaces coexist. Because prod runs a real profile,
+`EMBEDDING_PROVIDER=openai` in `fly.toml` no longer affects the query path.
+OpenAI is the rollback path, not the live setting.
 
-Then rebuild:
+To run the production-shaped vector space locally you need the Databricks
+embedding endpoint credentials, then three commands in the order
+`.github/workflows/databricks-eval.yml` uses:
 
 ```bash
-docker compose build
+export QWEN_EMBEDDING_BASE_URL=... QWEN_EMBEDDING_TOKEN=...
+PROFILE_ID=$(uv run regwatch embedding-profile-register \
+  --serving-runtime-version "$DATABRICKS_SERVING_RUNTIME_VERSION" --id-only)
+uv run regwatch embedding-profile-index "$PROFILE_ID"
+EMBEDDING_PROVIDER=qwen3 ACTIVE_EMBEDDING_PROFILE="$PROFILE_ID" uv run regwatch seed
 ```
 
-After that, run ingest:
+Index before seed. Seeding activates the profile, and the activation assert wants
+a ready HNSW index.
 
-```bash
-docker compose --profile ingest run --rm ingest
-```
+Build flavor is a separate axis. `INSTALL_LOCAL_EMBEDDINGS` defaults to `true` in
+`compose.yaml` and `false` in the `Dockerfile`; Fly builds with `false`. Set it
+false locally for the slim no-torch image, then `docker compose build`.
 
-Do not load the full 2,000+ PSG corpus with `EMBEDDING_PROVIDER=echo`.
+Do not load the full PSG corpus with `EMBEDDING_PROVIDER=echo`. That is enforced
+at startup: when an `echo` embedding or LLM provider meets a non-empty pgvector
+corpus, the API refuses to boot with a `RuntimeError` explaining the fix (switch
+to a real provider, or set `REGWATCH_ALLOW_TEST_PROVIDERS=1` for tests and CI). A
+fresh stack with an empty corpus still boots on `echo` so the ingest service can
+seed it, but the next `api` start after that ingest fails fast unless the
+providers are real. If your mounted `./data` already holds a seeded corpus, set
+real providers before `docker compose up api`.
 
-This is now enforced at startup: when an `echo` embedding/LLM provider faces a
-**non-empty** pgvector corpus, the API refuses to boot with a `RuntimeError`
-explaining the fix (switch to a real provider, or set
-`REGWATCH_ALLOW_TEST_PROVIDERS=1` for tests/CI). A fresh stack with an empty
-corpus still boots on `echo`, so the ingest service can seed it — but the next
-`api` start after that ingest will fail fast unless the providers are real. If
-your mounted `./data` already contains a seeded corpus, set real providers (or
-the override) before `docker compose up api`.
+## Why local embeddings are optional
 
-## Why Local Embeddings Became Optional
+The first Docker build pulled large CUDA and NVIDIA packages through the
+`sentence-transformers` and `torch` dependency path, which made the baseline API
+image far too heavy for a service smoke test. So `sentence-transformers`, `torch`
+and `transformers` moved behind the `local-embeddings` extra, the slim build
+installs `--extra llm` only, and Linux uses the PyTorch CPU index when the local
+extra is installed. That gives a lightweight API image for development and a
+heavier one for local PSG ingest.
 
-The first Docker build pulled large CUDA/NVIDIA packages through the
-`sentence-transformers` / `torch` dependency path. That made the baseline API
-image too heavy for a simple service smoke test.
+## Startup behavior
 
-The fix was:
+The entrypoint creates the container data directories, runs `regwatch init-db`,
+and exports `REGWATCH_DB_INITIALIZED=1`. FastAPI checks that marker and skips its
+own `init_db()` call, so the same work does not happen twice.
 
-1. Keep the application embedding provider pluggable.
-2. Move `sentence-transformers`, `torch`, and `transformers` into the
-   `local-embeddings` optional extra.
-3. Keep the slim Docker baseline build on `--extra llm` only (no torch); add
-   `--extra local-embeddings` only for the heavier image.
-4. Use the PyTorch CPU index for Linux when the local embedding extra is
-   installed.
+Two argv shapes skip `init-db` entirely, plus an explicit `REGWATCH_INIT_DB=false`
+override:
 
-This gives two useful modes:
+- `alembic ...`: the Fly release_command (`alembic upgrade head`) exists to move
+  the schema stamp to head. The boot guard would otherwise refuse and abort the
+  deploy before the migration ever ran.
+- `regwatch-proxy`: the Go proxy must boot DB-independent, so a proxy machine
+  never crash-loops on the stamp guard while holding the public port.
 
-- lightweight API image for health checks and API development
-- heavier local-embedding image for actual local PSG ingest
+## Health check
 
-## Startup Behavior
+Compose checks `GET http://127.0.0.1:8000/health`.
 
-The entrypoint creates the container data directories, then runs:
-
-```bash
-regwatch init-db
-```
-
-and exports:
-
-```text
-REGWATCH_DB_INITIALIZED=1
-```
-
-FastAPI checks that marker and skips its own duplicate `init_db()` call. This
-prevents startup from doing the same migration/init work twice.
-
-Two argv shapes skip `init-db` entirely (plus an explicit
-`REGWATCH_INIT_DB=false` override):
-
-- `alembic ...` -- the Fly release_command (`alembic upgrade head`) exists to
-  MOVE the schema stamp to head; the boot guard would otherwise refuse and
-  abort the deploy before the migration ever ran.
-- `regwatch-proxy` -- the Go proxy must boot DB-independent, so a proxy
-  machine never crash-loops on the stamp guard while holding the public port.
-
-## Health Check
-
-Compose checks:
-
-```text
-GET http://127.0.0.1:8000/health
-```
-
-`/health` now returns component diagnostics -- a superset of the original
-`{"status":"ok"}`, so the Compose healthcheck is unchanged:
+`/health` returns component diagnostics, a superset of the original
+`{"status":"ok"}`, so the Compose healthcheck is unchanged. With the local
+Compose defaults it looks like this:
 
 ```json
 {"status":"ok","components":{"db":{"ok":true,"dialect":"postgresql"},
  "vector_store":{"ok":true,"corpus_count":123},
- "llm":{"provider":"openai","key_present":true},"embedding":{"provider":"openai"}},
+ "llm":{"provider":"openai","key_present":true},
+ "embedding":{"provider":"openai","profile":"legacy"}},
  "whitepaper_template":"absent","warnings":[]}
 ```
 
-The providers shown are the local Compose defaults. Production reports
-`"llm":{"provider":"databricks","key_present":true}` -- since the Databricks
-cutover every LLM role runs on the in-tenant `gpt-oss-20b` endpoint, while
-embeddings stay `openai` (see `docs/DATABRICKS_ADOPTION_2026-07-28.md`). Keys
-are conditional by design: `db` carries `dialect` on success XOR `error` on
-failure, and `allow_test_providers` appears only when set.
+Production reports `"llm":{"provider":"databricks","key_present":true}`. Every
+LLM role (router, synthesizer, extractor) runs on one in-tenant Databricks
+endpoint, the Unity Catalog alias `workspace.default.regwatch`, which serves
+`gpt-oss-120b-080525`. The embedding component reports the live profile, not the
+`EMBEDDING_PROVIDER` setting, because only the legacy arm reads that setting and
+reporting it made the probe answer "openai" while queries were in fact embedded
+by the Databricks profile model. In prod it reads
+`"embedding":{"provider":"qwen3","profile":"ep_2e7368b354d911ea3a013c3125e276c2"}`.
+The profile's model name is left out on purpose: `/health` is the one
+anonymous-reachable endpoint.
 
-It returns HTTP 503 with `"status":"unhealthy"` only when the DB or the vector
-store is actually unreachable. An empty corpus is healthy (with a warning) so a fresh
-stack can boot and the ingest service can seed it. Key presence is reported as
-a boolean only — never a value.
+Keys are reported as booleans only, never values, and appear conditionally: `db`
+carries `dialect` on success or `error` on failure, and `allow_test_providers`
+shows up only when set.
 
-## Current Verification
-
-This Docker pass verified:
-
-- `docker compose config --quiet`
-- `docker build -t regwatch:local .`
-- in-container `/health` smoke check
-- formatting and type checks
-- full pytest suite
-
-The deterministic offline eval fixture (`tests/test_eval_gate.py`) passes inside
-`uv run pytest`. The separate provider-backed eval lane in CI is key-gated; the
-latest inspected run skipped it because the repo-wide `OPENAI_API_KEY` was
-absent. Its current live-corpus pass/fail status is unverified. The previously
-cited `0.917` was a separate threshold-sweep decision metric, not
-`run_eval.refusal_accuracy`; see `docs/EVAL_STATUS.md`.
+`/health` returns 503 with `"status":"unhealthy"` only when the DB or the vector
+store is actually unreachable. An empty corpus is healthy, with a warning, so a
+fresh stack can boot and the ingest service can seed it.
 
 ## The Next.js UI
 
-The UI is the Next.js app in `regwatch/frontend/` and now runs as the Compose
-`web` service. It talks to the API through a same-origin `/api` proxy
-(`regwatch/frontend/next.config.mjs`). In Compose, `API_PROXY_TARGET` is set to
-`http://api:8000`, so browser traffic still only talks to the Next.js origin.
+The UI is the Next.js app in `regwatch/frontend/` and runs as the Compose `web`
+service. It talks to the API through a same-origin `/api` proxy
+(`regwatch/frontend/next.config.mjs`). In Compose, `API_PROXY_TARGET` is
+`http://api:8000`, so browser traffic only ever talks to the Next.js origin.
 
-The UI is login-gated and a fresh stack has zero users, so provision one
-before opening it (the password is prompted, never passed as an argument):
+The UI is login-gated and a fresh stack has zero users, so create one before
+opening it. The password is prompted, never passed as an argument:
 
 ```bash
 docker compose run --rm api regwatch create-user analyst@example.com --name "Analyst"
 ```
 
-The local container shape is:
+The local container shape:
 
 ```text
 api container      -> FastAPI / Python evidence service
-web container      -> Next.js / TypeScript UI (proxies /api -> api)
-ingest container   -> scheduled or one-shot FDA data loads
+web container      -> Next.js / TypeScript UI (proxies /api to api)
+ingest container   -> one-shot FDA data loads
 db container       -> Postgres + pgvector (structured store + vectors)
 ```
 
-## Large Ingest Notes
+## Large ingest notes
 
-For a 2,000 PSG / 1,200 drug load, the container shape is acceptable, but the
-ingest command needs more production hardening before it should be trusted as a
-routine job.
+The container shape holds up for a full PSG load, and the guard rails that
+matter are in place: the echo-provider boot refusal above, retry and backoff in
+the crawler, and a scheduled daily run in `watch-daily.yml` rather than a human
+launching `docker compose run`. The remaining ingest hardening is tracked in
+`docs/ROADMAP.md`.
 
-Needed next:
+## Not done yet for production
 
-- real embedding provider, not `echo`
-- resumable batches
-- progress logging
-- failure checkpoints
-- source freshness timestamps
-- retry/backoff per FDA source
-- explicit prevention of broad ingest with test embeddings
-- eventually a scheduled job or orchestrated worker instead of manual
-  `docker compose run` launches
+This is the local and container baseline. The production runbook is
+`docs/DEPLOY.md`. When an older Docker-only note conflicts with it, the runbook
+wins. The consolidated open-item list lives in `docs/ROADMAP.md`.
 
-## Not Done Yet For Production
+Done and pruned from the old list here: CI supply-chain checks (pip-audit, npm
+audit and Trivy on both images, re-scanned in `deploy.yml`), non-root container
+users in both Dockerfiles, managed Postgres with pgvector (Databricks Lakebase
+serves prod), TLS termination at Fly's edge (`force_https` plus
+`AUTH_COOKIE_SECURE=true` in `fly.toml`), the Kubernetes question (hosting landed
+on Fly, no manifests needed), and the daily watch cadence (`watch-daily.yml`,
+cron 07:17 UTC).
 
-This remains the local/container baseline. The active production runbook is
-`docs/DEPLOY.md`; do not use older Docker-only notes as the production source
-of truth when they conflict with that runbook. The consolidated list of open
-items lives in `docs/ROADMAP.md`.
+Still needed, cross-referenced in `docs/ROADMAP.md`:
 
-Several items from the original list are DONE and pruned: CI supply-chain
-checks (pip-audit + npm audit + Trivy on both images in `ci.yml`, re-scanned in
-`deploy.yml`), non-root container users (both Dockerfiles drop privileges),
-managed Postgres/pgvector provisioning (Supabase serves prod), TLS termination
-(Fly's edge, `force_https` + `AUTH_COOKIE_SECURE=true` in `fly.toml`), the
-Kubernetes question (the hosting decision landed on Fly; no manifests needed),
-and the daily watch cadence (`watch-daily.yml`, cron 07:17 UTC, is the live
-prod scheduler).
-
-Still needed (cross-referenced in `docs/ROADMAP.md`):
-
-- an approved secrets-manager policy + a tested key-rotation drill (the secret
-  inventory and provisioning runbook exist: `docs/SECRETS_RUNBOOK.md`)
-- SSO/OIDC against the corporate IdP in front of the app-layer login (see
-  `docs/PROD_READINESS.md` #1). The rate limiter is still per-process, so
-  multi-replica needs gateway-level limiting.
-- a rehearsed restore drill + least-privilege app DB credentials for the live
-  Supabase Postgres
-- load testing against the live deployment (the analyst smoke flows have run;
-  a load test has not)
-- observability depth: exported request/latency/cost metrics, confirmation
-  that `SENTRY_DSN` is set in prod (a Fly secret; the app logs a loud warning
-  when absent), an external uptime monitor beyond `uptime-eval.yml`, and
-  product-facing alert delivery beyond the watch cron's optional Slack digest
-  and the in-app `/watch/latest` feed
-- resource limits (`compose.yaml` and `fly.toml` set none)
+- an approved secrets-manager policy and a tested key-rotation drill. The secret
+  inventory and provisioning runbook already exist in `docs/SECRETS_RUNBOOK.md`.
+- SSO/OIDC against the corporate IdP in front of the app-layer login, see
+  `docs/PROD_READINESS.md` #1. The rate limiter is still per-process, so multiple
+  replicas need gateway-level limiting.
+- a rehearsed restore drill and least-privilege app DB credentials on the live
+  Lakebase Postgres.
+- load testing against the live deployment. The analyst smoke flows have run; a
+  load test has not.
+- observability depth: exported request, latency and cost metrics; confirmation
+  that `SENTRY_DSN` is set in prod (it is a Fly secret, and the app logs a loud
+  warning when absent); an external uptime monitor beyond `uptime-eval.yml`; and
+  product-facing alert delivery beyond the watch cron's optional Slack digest and
+  the in-app `/watch/latest` feed.
+- resource limits. Neither `compose.yaml` nor `fly.toml` sets any.

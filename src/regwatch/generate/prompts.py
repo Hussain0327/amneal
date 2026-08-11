@@ -1,8 +1,21 @@
 """Prompts used by the system.
 
-All prompts live in one place so a reviewer can audit the system's behavior
-in a single read. Prompts are *strict* about grounding — INV-1 and INV-2 are
-enforced at the prompt layer AND at the orchestration layer.
+All prompts live in one place so a reviewer can audit the system's behavior in
+a single read.
+
+Last updated: 2026-08-11. Three generations of the grounded-QA prompt live
+here and the flags decide which one runs (see ``active_grounded_qa_prompt``):
+
+  v5  claims-JSON envelope, one cited claim per object.
+  v6  the same policy in prose with [n] markers.
+  v7  selective citation, and what prod serves today. Cite the facts, talk
+      like a person: only SOURCE FACT sentences must carry passage numbers,
+      REASONING and CONVERSATION carry none, and "I found nothing" is written
+      as ordinary prose with no code word.
+
+The prompt text is never the safety boundary. INV-1 and INV-2 are enforced in
+code (generate/prose_turn.py parses, generate/turn_gate.py admits), so an
+uncited source fact is dropped no matter what the model was told.
 """
 
 from __future__ import annotations
@@ -11,11 +24,11 @@ from textwrap import dedent
 
 from regwatch.generate.prompt_identity import PromptIdentity, identify_prompt
 
-# ---------- Grounded Q&A ----------
-# UNFORMATTED on purpose. The template used to carry a {refusal} placeholder and
-# was .format()ed at two call sites; the refusal string is no longer a prompt
-# input (a decline is turn_type="NO_EVIDENCE"), so the placeholder is gone and
-# with it the brace trap that made every future literal '{' a KeyError.
+# ---------- Grounded Q&A v5: claims JSON ----------
+# HISTORY, still reachable with REGWATCH_PROSE_SYNTHESIS off. v5 declines by
+# returning turn_type="NO_EVIDENCE"; the refusal STRING is not a prompt input,
+# which is why this template carries no {refusal} placeholder and no brace trap
+# that would make a future literal '{' a KeyError.
 GROUNDED_QA_SYSTEM = dedent("""\
     You are RegWatch, a regulatory-research colleague for a generic-drug Clinical
     Regulatory Affairs team. Be direct, useful, and easy to understand while
@@ -97,11 +110,12 @@ GROUNDED_QA_USER = dedent("""\
 
 
 # ---------- Grounded Q&A v6: prose + [n] markers (slm-layer Phase A) ----------
-# Same refuse-or-cite POLICY as v5 -- every sentence cited or NO_EVIDENCE --
-# with only the FORMAT changed: natural prose with numeric markers instead of
-# the claims-JSON envelope. The server parses the prose back into claims
-# (generate/prose_turn.py) and the same gate admits them, so flipping
-# REGWATCH_PROSE_SYNTHESIS is a pure format A/B.
+# HISTORY, superseded in prod by v7 below but still reachable with
+# REGWATCH_SELECTIVE_CITATION off. v6 kept v5's POLICY exactly (every sentence
+# cited, or the whole turn declines) and changed only the FORMAT: natural prose
+# with numeric markers instead of the claims-JSON envelope. The server parses
+# the prose back into claims (generate/prose_turn.py) and the same gate admits
+# them, so flipping REGWATCH_PROSE_SYNTHESIS alone is a pure format A/B.
 #
 # The opening sentinel line is load-bearing: the echo provider keys its prose
 # branch on it (mirroring [REGWATCH_QUERY_GUIDANCE_V1]) rather than on
@@ -109,6 +123,8 @@ GROUNDED_QA_USER = dedent("""\
 # chat_completion seam. The "reply with exactly: NO_EVIDENCE." instruction must
 # stay byte-equal to prose_turn.PROSE_NO_EVIDENCE_SENTINEL; a test pins the
 # equality instead of an import, keeping this module's import graph flat.
+# That code word is v6-only. It broke 11 of 11 refusals in the battery, which
+# is why v7 abolished it rather than polishing it.
 GROUNDED_QA_SYSTEM_V6 = dedent("""\
     [REGWATCH_GROUNDED_QA_V6]
     You are RegWatch, a regulatory-research colleague for a generic-drug Clinical
@@ -249,16 +265,19 @@ GROUNDED_QA_EXEMPLARS_V6: tuple[tuple[str, str], ...] = (
 
 
 # ---------- Grounded Q&A v7: selective citation (slm-layer Phase B) ----------
-# v6 changed the FORMAT (prose + [n]); v7 changes the POLICY. Three epistemic
-# kinds, only one of which must be cited, and NO sentinel: found-nothing is
-# plain conversation, so the code word that broke 11 of 11 v6 refusals does not
-# exist here. The deterministic layer still decides what renders: prose_turn
-# classifies every sentence, the materiality + source-assertion lexicons
-# reclassify anything that reads like a corpus assertion back into SOURCE_FACT,
-# and the gate drops or corrects it (INV-1 stays in code, not in this text).
+# LIVE IN PRODUCTION. v6 changed the FORMAT (prose + [n]); v7 changes the
+# POLICY: cite the facts, talk like a person. Three epistemic kinds, only one
+# of which must be cited, and no sentinel at all. Found-nothing is plain
+# conversation, so the v6 code word does not exist here.
+#
+# The deterministic layer still decides what renders: prose_turn classifies
+# every sentence, the materiality + source-assertion lexicons reclassify
+# anything that reads like a corpus assertion back into SOURCE_FACT, and the
+# gate drops or corrects it. INV-1 lives in that code, not in this text.
+#
 # The REASONING frame openers below are pinned BYTE-FOR-BYTE to
-# turn_gate.REASONING_FRAME_PREFIXES -- a frame the parser does not recognize is
-# not a hedge, it is an uncited claim -- and a test pins the equality.
+# turn_gate.REASONING_FRAME_PREFIXES, and a test pins the equality: a frame the
+# parser does not recognize is not a hedge, it is an uncited claim.
 GROUNDED_QA_SYSTEM_V7 = dedent("""\
     [REGWATCH_GROUNDED_QA_V7]
     You are RegWatch, a research colleague for a generic-drug Clinical Regulatory

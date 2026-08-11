@@ -51,7 +51,7 @@ The corrected harness excludes `must_clarify` from the threshold curve and
 returns `recommended=null`, `provisional=true` when either scored distribution
 is empty. It also preserves the observed pre-retrieval `refused` flag instead
 of relabeling every no-score clarification as a refusal. See
-[`EVAL_STATUS.md`](EVAL_STATUS.md) for the broader eval status.
+[`EVAL_STATUS.md`](../EVAL_STATUS.md) for the broader eval status.
 
 ## What `0.30` gates
 
