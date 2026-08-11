@@ -374,3 +374,73 @@ def test_empty_completion_parses_to_an_empty_answer() -> None:
     assert turn.claims == []
     assert turn.truncated_material is False
     assert turn.leftover_brackets == []
+
+
+# --- Pathological-output bounds (issue #183) --------------------------------
+#
+# Since #183 the prose arms apply NO length bound of any kind: turn_gate's
+# admission ladder never inspects length, and the v5 schema's caps are
+# unreachable from this path by design. These bounds exist to stop a degenerate
+# completion (a repetition loop, a model that never terminates a sentence), not
+# to constrain how a real answer is written. The measured v7 gold run had a
+# longest sentence of 488 chars and a longest answer of 1,823, so both bounds
+# sit roughly 4x above anything real, and neither fired on any of the 62 rows.
+
+
+def test_a_normal_cited_answer_breaches_no_bound() -> None:
+    assert pt.bounds_exceeded("A fasting study is recommended [1]. It is single-dose [1].") is None
+
+
+def test_a_sentence_at_the_cap_is_allowed() -> None:
+    """The cap is a maximum, not a limit one short of it."""
+    assert pt.bounds_exceeded("x" * (pt.PROSE_MAX_SENTENCE_CHARS - 1) + ".") is None
+
+
+def test_a_sentence_over_the_cap_is_reported() -> None:
+    answer = "y" * (pt.PROSE_MAX_SENTENCE_CHARS + 1) + "."
+    assert pt.bounds_exceeded(answer) == "sentence_too_long"
+
+
+def test_a_real_length_enumeration_sentence_is_untouched() -> None:
+    """The audit-#1604 shape: long, valid, and the whole point of #183.
+
+    A sentence of this length is exactly what the old 400-char claims-JSON cap
+    killed. If this ever trips a bound again, the bound is wrong.
+    """
+    sentence = (
+        "The guidance lists three recommended study options for albuterol "
+        "sulfate inhalation aerosol: (I) three in-vitro bioequivalence studies "
+        "and one in-vivo bioequivalence study with pharmacokinetic endpoints; "
+        "(II) three in-vitro bioequivalence studies with a comparative "
+        "clinical endpoint study establishing local delivery equivalence; and "
+        "(III) three in-vitro bioequivalence studies alone, where the "
+        "applicant justifies equivalence by an alternative route acceptable "
+        "to the agency [1]."
+    )
+    # The band the 400-char claims-JSON cap actually killed in production.
+    assert 400 < len(sentence) < 600
+    assert pt.bounds_exceeded(sentence) is None
+
+
+def test_an_answer_over_the_total_ceiling_is_reported() -> None:
+    """Many individually-legal sentences still must not run away."""
+    one = "A recommended study is described here [1]. "
+    answer = one * (pt.PROSE_MAX_ANSWER_CHARS // len(one) + 2)
+    assert len(answer) > pt.PROSE_MAX_ANSWER_CHARS
+    assert pt.bounds_exceeded(answer) == "answer_too_long"
+
+
+def test_the_sentence_bound_is_reported_before_the_total_bound() -> None:
+    """One repair instruction has to name one fault; the sentence is specific."""
+    answer = "z" * (pt.PROSE_MAX_SENTENCE_CHARS + 1) + ". " + "w" * pt.PROSE_MAX_ANSWER_CHARS + "."
+    assert pt.bounds_exceeded(answer) == "sentence_too_long"
+
+
+def test_the_bounds_sit_far_above_measured_real_output() -> None:
+    """Pins the headroom the numbers were chosen for, not just the numbers.
+
+    Measured on the 62-row v7 gold run: longest sentence 488, longest answer
+    1,823. If someone tightens a bound toward real output, this fails.
+    """
+    assert pt.PROSE_MAX_SENTENCE_CHARS >= 4 * 488
+    assert pt.PROSE_MAX_ANSWER_CHARS >= 4 * 1823
