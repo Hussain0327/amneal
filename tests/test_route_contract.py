@@ -49,12 +49,24 @@ def test_route_schema_contains_only_advisory_fields() -> None:
 
 def test_route_prompt_fingerprint_includes_the_schema() -> None:
     with_schema = identify_prompt(
-        "regwatch.route", "1", ROUTE_SYSTEM, ROUTE_USER, ROUTE_SCHEMA_MESSAGE.content
+        "regwatch.route", "2", ROUTE_SYSTEM, ROUTE_USER, ROUTE_SCHEMA_MESSAGE.content
     )
-    without_schema = identify_prompt("regwatch.route", "1", ROUTE_SYSTEM, ROUTE_USER)
+    without_schema = identify_prompt("regwatch.route", "2", ROUTE_SYSTEM, ROUTE_USER)
 
     assert with_schema == ROUTE_PROMPT
+    assert ROUTE_PROMPT.version == "2"
     assert ROUTE_PROMPT.sha256 != without_schema.sha256
+
+
+def test_route_v2_prompt_pins_reliability_precedence_and_valid_shapes() -> None:
+    assert ROUTE_SYSTEM.startswith("[REGWATCH_ROUTE_V2]")
+    assert "Classify the\noriginal latest turn before rewriting it" in ROUTE_SYSTEM
+    assert "preserve every named study, metric, requested subpart" in ROUTE_SYSTEM
+    assert "single-product question corpus-wide" in ROUTE_SYSTEM
+    assert "Make standalone_question self-contained" in ROUTE_SYSTEM
+    assert "unknown referenced guidance is the answer to retrieve" in ROUTE_SYSTEM
+    assert "converse | unknown | product_hint=null | corpus_policy_hint=null" in ROUTE_SYSTEM
+    assert "lookup | inherit | product_hint=null | corpus_policy_hint=null" in ROUTE_SYSTEM
 
 
 @pytest.mark.parametrize(
@@ -174,7 +186,7 @@ def test_request_marks_user_and_history_as_untrusted_data() -> None:
     )
     context = json.loads(request.messages[1].content)
 
-    assert request.messages[0].content.startswith("[REGWATCH_ROUTE_V1]")
+    assert request.messages[0].content.startswith("[REGWATCH_ROUTE_V2]")
     assert context["untrusted_question"] == injection
     assert context["recent_turns"][0]["scope_audited"] is True
     assert context["recent_turns"][0]["corpus_policy"] == "inhalation_psg"

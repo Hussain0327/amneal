@@ -444,7 +444,7 @@ cleanly (no failures, no invented URLs). This complements — does not
 replace — the external monitor: GitHub cron schedules can lag or pause on
 inactive repos.
 
-### 6.3 Route/scope shadow rollout (PR11b)
+### 6.3 Route/scope shadow rollout (PR11b/PR11c)
 
 This rollout measures the conversational router before it is allowed to change
 anything. The code default is `REGWATCH_ROUTE_CALL=off`; with `shadow`, the
@@ -453,6 +453,19 @@ additional route decision and deterministic scope compile are recorded under
 retrieval query/mode/filters, response, citations, and session update remain
 authoritative. The reserved value `live` is intentionally shadow-equivalent in
 PR11b and must not be treated as a promotion.
+
+The first controlled PR11b production window (2026-08-10) recorded 24 tagged
+turns: 21 route successes and 3 invalid responses (12.5%), with zero provider
+errors and zero unsafe corpus authorizations. All 15 explicit-corpus controls
+compiled to bounded `EXACT_CORPUS`, and all 3 named beclomethasone controls
+compiled to `EXACT_SCOPED`; the malformed cases and inconsistent greeting /
+inheritance classifications still blocked promotion. PR11c changes only the
+route prompt and its synthetic controls. Its v2 prompt remains observation-only
+and must pass the same production procedure below before PR12 is considered.
+The pre-merge route-only v2 battery passed 32/32 committed controls with zero
+invalid responses, provider errors, or unsafe corpus proposals; production
+shadow is still required because that battery did not exercise Ask integration,
+audit persistence, or real traffic mix.
 
 Before enabling it, probe the actual Databricks endpoint's effective reasoning
 floor. The earlier qwen35-122b observation was about 761 reasoning tokens, so

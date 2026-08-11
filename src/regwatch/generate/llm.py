@@ -181,7 +181,11 @@ class EchoLLMProvider:
         is_guidance = any(
             m.role == "system" and "[REGWATCH_QUERY_GUIDANCE_V1]" in m.content for m in messages
         )
-        is_route = any(m.role == "system" and "[REGWATCH_ROUTE_V1]" in m.content for m in messages)
+        is_route = any(
+            m.role == "system"
+            and ("[REGWATCH_ROUTE_V2]" in m.content or "[REGWATCH_ROUTE_V1]" in m.content)
+            for m in messages
+        )
         # F19: the v6 prose synthesizer is keyed on its system sentinel, like
         # the guidance branch -- NOT on marker-shape + response_format, which
         # would misfire on the deficiency chat_completion seam. v7 gets its
@@ -221,9 +225,18 @@ class EchoLLMProvider:
                     standalone = question
                     product_hint: str | None = None
                     corpus_policy_hint: str | None = None
-                    if any(
-                        word in lowered for word in ("hello", "hi ", "help me")
-                    ) and "guidance" not in lowered.replace("guidance question", ""):
+                    social_opening = bool(
+                        re.search(r"\b(?:hello|hi|hey)\b", lowered)
+                        or "can you help" in lowered
+                        or "help me" in lowered
+                    )
+                    asks_for_evidence = bool(
+                        re.search(
+                            r"\b(?:what|which|when|where|how|define|requires?|recommends?)\b",
+                            lowered,
+                        )
+                    )
+                    if social_opening and not asks_for_evidence:
                         mode = "converse"
                         scope_hint = "unknown"
                     elif detect_explicit_corpus_policy(question) is not None:

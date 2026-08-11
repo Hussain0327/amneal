@@ -1,8 +1,8 @@
 # slm-layer execution plan -- prompt-layer redesign (research doc section 3)
 
-Date: 2026-08-07. Status: execution in progress; v6 prose synthesis landed
-dark on 2026-08-10, and the first M3 scope-contract PR is intentionally
-runtime-dark.
+Date: 2026-08-07. Status: execution in progress; v7 selective synthesis and
+PR11b route/scope observation landed on 2026-08-10. Route execution remains
+unauthorized while PR11c corrects the measured v1 classifier reliability gap.
 
 PACE AMENDMENT (owner decision, 2026-08-07, supersedes the pacing below but
 none of the ordering or safety content): FAST PATH. The 18 PRs are batched
@@ -410,6 +410,41 @@ PR11b -- route shadow logging, flag off.
   the broad materiality trigger/token on converse-shaped turns (finding F5),
   so PR15's guard is designed
   against measured data, not the deliberately-broad lexicon's economics.
+
+PR11c -- route reliability correction, still observation-only.
+- The first bounded production shadow battery exposed a classifier defect, not
+  an execution defect: 3/24 route calls were structurally invalid (12.5%, above
+  the <2% gate), and valid outputs inconsistently confused a named product with
+  the corpus, a greeting with lookup clarification, and audited inheritance
+  with freshly asserted scope. No unsafe corpus result executed because PR11b
+  remained shadow-only.
+- Bump the route prompt identity to v2 and its sentinel to
+  `[REGWATCH_ROUTE_V2]`. Keep the strict `RouteDecision` schema and parser
+  unchanged. Make the decision precedence explicit: genuine audited follow-up,
+  single named product, explicit guidance family, ambiguity, and social turns
+  are distinct; plural "guidances" does not make a named-product question
+  corpus-wide. Enumerate the five valid mode/scope/hint shapes so unused hints
+  remain null.
+- The standalone rewrite must retain every named study, metric, requested
+  subpart, and qualifier. Inherited rewrites carry the audited product or corpus
+  family into the standalone text while the advisory scope remains `inherit`;
+  identifying a cross-referenced guidance inside an explicit family is a corpus
+  lookup, not missing scope.
+- Expand the committed route set with plural-guidance product controls,
+  additional ambiguous/capability turns, and product/corpus inheritance under
+  conflicting trusted context. Echo accepts both sentinels only for backwards
+  compatible local tests; runtime emits v2.
+- Re-run a paced route-only Databricks repetition battery and then a short
+  production shadow window after merge/deploy. Acceptance is parse failure
+  <2%, every committed semantic control correct, zero unsafe corpus proposals,
+  and no retrieval/response/session delta. PR12 still receives no authority in
+  this PR.
+- Pre-merge v2 evidence (2026-08-11): two complete paced passes over the 16-row
+  route set produced 32/32 semantic matches, 0 invalid responses, 0 provider
+  errors, and 0 unsafe corpus proposals on the served `gpt-oss-120b-080525`
+  endpoint. Segment median latency ranged from 751-1217 ms; maximum observed
+  route latency was 2670 ms. This clears the direct model battery only; the
+  post-deploy production shadow window remains required.
 
 > OWNER CHECKPOINT 3 -- route promotion. Evidence: joint mode/scope confusion
 > matrix, added latency p95, QPS headroom, route failure rate, and zero unsafe

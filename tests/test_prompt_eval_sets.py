@@ -32,7 +32,7 @@ def test_prompt_eval_sets_are_nonempty_unique_and_schema_valid() -> None:
     assert set(manifest) == {"qa", "guidance", "route", "extraction", "changes"}
     assert all(item["count"] >= 3 for item in manifest.values())
     assert manifest["guidance"]["count"] >= 7
-    assert manifest["route"]["count"] >= 10
+    assert manifest["route"]["count"] >= 16
     assert all(len(item["sha256"]) == 64 for item in manifest.values())
 
 
@@ -59,8 +59,12 @@ def test_route_prompt_set_covers_issue_163_and_safety_controls() -> None:
     assert all(row["expected_scope_hints"] == ["corpus"] for row in corpus_rows)
     assert all(row["expected_corpus_policies"] == ["inhalation_psg"] for row in corpus_rows)
     assert by_id["route_product_beclomethasone"]["expected_scope_hints"] == ["product"]
+    assert by_id["route_product_plural_guidances"]["expected_scope_hints"] == ["product"]
     assert by_id["route_ambiguous_be_requirements"]["expected_scope_hints"] == ["unknown"]
+    assert by_id["route_ambiguous_studies"]["expected_modes"] == ["lookup_clarify"]
     assert by_id["route_inherit_audited_corpus"]["recent_turns"][0]["scope_audited"] is True
+    assert by_id["route_inherit_corpus_over_product_context"]["expected_scope_hints"] == ["inherit"]
+    assert by_id["route_converse_capability"]["expected_modes"] == ["converse"]
 
 
 def test_generation_prompt_manifest_is_versioned_and_hashed() -> None:
