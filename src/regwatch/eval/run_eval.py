@@ -17,13 +17,14 @@ import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from config.settings import get_settings
 from rich.console import Console
 from rich.table import Table
 
-from regwatch.eval import run_fingerprint
+from regwatch.eval import prod_mode, run_fingerprint
 from regwatch.eval.metrics import GoldItem, Scorecard, evaluate
 from regwatch.generate.grounded_qa import ask
 from regwatch.generate.prompts import generation_prompt_manifest
@@ -94,6 +95,41 @@ TARGETS = {
 # returns every metric to its recorded baseline. A worse outage must not be able
 # to pass the gate on a shrunken denominator.
 MAX_UNMEASURED_FRACTION = 0.10
+
+# --assert-prod-mode failed: this run is not measuring what production serves,
+# so its scorecard cannot speak for production. Distinct from 2 (a metric
+# missed) and 3 (the run could not measure) because the fix is different: 2 is a
+# regression, 3 is an outage, 4 is a misconfigured run.
+EXIT_WRONG_ARM = 4
+
+
+def _assert_prod_mode() -> None:
+    """Refuse to score an arm production does not serve.
+
+    Read BEFORE the corpus, the DB and the first provider call, so a
+    misconfigured run costs nothing and cannot occupy the serialized live-eval
+    slot. See regwatch.eval.prod_mode for why this exists.
+    """
+    try:
+        expected = prod_mode.load_manifest()
+        settings = get_settings()
+        effective = {key: getattr(settings, key) for key in expected if hasattr(settings, key)}
+        found = prod_mode.mismatches(effective, expected)
+    except prod_mode.ManifestError as exc:
+        Console().print(f"[red]production-mode contract unusable: {exc}[/red]")
+        sys.exit(EXIT_WRONG_ARM)
+    if found:
+        console = Console()
+        console.print(
+            "[red]This run does not measure what production serves, so its "
+            "scorecard cannot speak for production:[/red]"
+        )
+        for line in found:
+            console.print(f"  [red]{line}[/red]")
+        console.print(
+            "Fix the run's env (or config/prod_mode.json, if production moved) " "and re-run."
+        )
+        sys.exit(EXIT_WRONG_ARM)
 
 
 def _apply_profile(profile: str) -> str:
@@ -386,7 +422,26 @@ def run(
             "in its own invocation so the two are independent."
         ),
     ),
+    # Annotated form, unlike the options above it, because this one must default
+    # to False for a caller that invokes run() as a PLAIN FUNCTION -- which the
+    # tests do. In the older `x: bool = typer.Option(False, ...)` form the
+    # runtime default is an OptionInfo object, and OptionInfo is TRUTHY, so a
+    # direct caller that simply omitted this argument would silently switch the
+    # production-mode assertion ON. Here the declared default is a real False.
+    assert_prod_mode: Annotated[
+        bool,
+        typer.Option(
+            "--assert-prod-mode",
+            help=(
+                "Refuse to run unless this process's answer-path settings match "
+                "config/prod_mode.json. The blocking CI eval passes this so a "
+                "green check cannot mean 'some arm passed'."
+            ),
+        ),
+    ] = False,
 ) -> None:
+    if assert_prod_mode:
+        _assert_prod_mode()
     profile = _apply_profile(profile)
     try:
         init_db()

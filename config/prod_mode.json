@@ -1,0 +1,6 @@
+{
+  "_comment": "What production's answer path serves. Asserted by `run_eval --assert-prod-mode` and cited by docs/DEPLOY.md; change it in the same PR that changes the Fly secrets, never after. Underscore-prefixed keys are notes, not assertions.",
+  "_verified": "2026-08-11, against the Fly secrets and docs/DECISIONS.md",
+  "prose_synthesis_enabled": true,
+  "selective_citation_enabled": true
+}
