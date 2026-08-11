@@ -9,8 +9,10 @@
 > service, the compliance pipeline and the assistant are fixtures behind typed
 > seams, and nothing recorded here survives a page refresh. One seam is real:
 > the left rail's **reference library** lists the FDA PSG corpus from the
-> database (`GET /psg/documents`) and streams the PDFs inline
-> (`GET /psg/documents/{id}/pdf`). See section 10.
+> database (`GET /psg/documents`), opens each PSG as a document on the same
+> canvas the working files use (`GET /psg/documents/{id}/content`), offers it
+> as a Word download (`GET /psg/documents/{id}/docx`), and keeps the original
+> PDF one click away (`GET /psg/documents/{id}/pdf`). See section 10.
 >
 > Last updated: 2026-08-11 (re-checked against the frontend on that date).
 >
@@ -46,7 +48,8 @@ Sequencing lives in [`ROADMAP.md`](ROADMAP.md).
 | Piece | State |
 |---|---|
 | Repository tree, live filter, per-document check glyphs | Built, fixture-backed |
-| Reference library: DB PSGs grouped A-Z by drug, inline PDF viewer | Built, **API-backed** (section 10) |
+| Reference library: DB PSGs grouped A-Z by drug | Built, **API-backed** (section 10) |
+| Reference PSG as a read-only document on the canvas, .docx download, PDF toggle | Built, **API-backed** (section 10) |
 | Document canvas: contentEditable blocks, span-anchored marks, tracked changes | Built |
 | Compliance findings anchored to `(blockId, start, end)` | Built, fixture-backed |
 | Suggested fix, apply, restore | Built (3 of 12 fixture findings carry one) |
@@ -232,10 +235,14 @@ An endpoint replacing `CHECK_RESULTS` must return findings that:
 | `lib/studio-marks.ts` | **all** pure logic: splice, staleness, dispositions, verdict |
 | `lib/studio-fixtures.ts` | stand-in repository plus `CHECK_RESULTS` plus canned assistant |
 | `lib/studio-library.ts` | pure grouping: wire PSG rows to a letter/drug/doc tree |
-| `components/studio/*.tsx` | tree, library section, PDF pane, canvas, spine, panels, rails |
+| `lib/studio-reference.ts` | pure: one PSG's wire content to the same `StudioDoc` shape |
+| `components/studio/*.tsx` | tree, library section, reference bar, PDF pane, canvas, spine, panels, rails |
+| `src/regwatch/process/psg_document.py` | pure: stored chunks back to typed blocks |
+| `src/regwatch/process/psg_docx.py` | pure: those blocks to .docx bytes |
 | `test/studioMarks.test.ts` | 109 tests on the pure layer |
 | `test/studioLibrary.test.ts` | 13 tests on the library grouping and filter layer |
-| `test/StudioPage.test.tsx` | 37 page tests, including the whole loop and the library |
+| `test/studioReference.test.ts` | 6 tests on the reference-document mapping |
+| `test/StudioPage.test.tsx` | 42 page tests, including the whole loop and the library |
 
 Keyboard: `F8` and `Shift+F8` move between open findings, behind visible
 Previous/Next buttons. A letter or `Alt+Arrow` would collide with typing in the
@@ -254,23 +261,51 @@ sits beside the fixture working set rather than replacing it.
   "Albuterol"), then by PSG labelled `{dosage_form} ({route})` with a
   Draft/Final badge. Letter buckets start closed. The shared search box filters
   both sections and force-opens surviving branches.
-- Opening a PSG swaps the canvas for an inline PDF: an `<iframe>` over
+- **Opening a PSG opens a document, not a viewer.**
+  `GET /psg/documents/{id}/content` rebuilds the PSG from the chunk rows ingest
+  already stored for its current version and returns the studio's own block
+  vocabulary (`title` / `meta` / `h2` / `p`, each carrying its PDF page), so
+  `DocumentCanvas` renders a reference PSG exactly as it renders a working
+  document. Nothing is fetched, parsed or persisted to serve it: a PSG averages
+  three chunks, and the rebuild (`process/psg_document.py`) is a pure function
+  over rows already in Postgres. Because those are the same rows retrieval
+  quotes, a passage read here and a passage cited by an answer cannot disagree.
+  A document whose row exists but whose text never landed answers `409`, not
+  `404` - it is a real document, and the client offers the PDF instead.
+- **The reference bar** replaces the format bar while a PSG is open: chips
+  (form/route, date, Draft/Final), **Download .docx**, a **View original PDF**
+  toggle and the fda.gov link-out. The `.docx` is generated per request by
+  `process/psg_docx.py` (python-docx) from the same blocks and stored nowhere,
+  so a revised PSG has no stale file behind it. It carries a provenance
+  paragraph naming the FDA source and stating that the PDF is authoritative and
+  the file is not an FDA-issued document - the words are FDA's, the layout is
+  not. The drug name reaches `Content-Disposition`, so it is sanitised to
+  `[A-Za-z0-9._-]` first.
+- **The PDF is still one click away**, unchanged: an `<iframe>` over
   `GET /psg/documents/{id}/pdf`, which serves the local cache or fetches from
   fda.gov using the crawler's own hardened `download_pdf` (polite pause, byte
   cap, `%PDF` check, best-effort write-through cache). Local hits are
   hash-verified before serving, so the content ETag never vouches for a
   truncated file. A `HEAD` probe runs first (the DB row plus at most two stat()
   calls, never the network) because an iframe renders an error body as page text
-  instead of signalling; it refuses rows the GET is guaranteed to fail. An
-  "Open on fda.gov" link-out is always visible. `next.config.mjs` relaxes
-  `X-Frame-Options` to `SAMEORIGIN` for `/api/psg/*` only; every other route
-  keeps `DENY`. Opening focuses the pane heading so Escape-to-draft works
-  immediately; once the reader clicks into the PDF the iframe owns the keyboard
-  (frames swallow keystrokes) and the exit is the tree or the heading.
+  instead of signalling; it refuses rows the GET is guaranteed to fail.
+  `next.config.mjs` relaxes `X-Frame-Options` to `SAMEORIGIN` for `/api/psg/*`
+  only; every other route keeps `DENY`. Opening focuses the pane heading so
+  Escape-to-draft works immediately; once the reader clicks into the PDF the
+  iframe owns the keyboard (frames swallow keystrokes) and the exit is the tree
+  or the heading.
 - **Reference docs are read-only and carry no findings.** The evidence gate
   (section 4.1) anchors to editable block text, and a PSG is FDA's document, not
   ours, so checks, dispositions, the spine and the panels are hidden rather than
-  disabled while one is open. The tree-footer check button is the one disabled
-  control, with a note explaining why. `activeId` keeps pointing at the retained
-  draft the whole time, so a half-typed justification survives draft, library,
-  draft untouched.
+  disabled while one is open. Read-only means no editing surface at all rather
+  than a textbox that refuses every keystroke: no block is `contentEditable` and
+  none announces as a textbox. Highlighting still works - it marks text without
+  changing it. The selection toolbar's three assistant actions are withheld,
+  because that assistant answers about the working repository and pointing it at
+  FDA's own guidance would produce confident answers about a document it was
+  never given; the page refuses them at the model too, not only in the toolbar.
+  The tree-footer check button is the one disabled control, with a note
+  explaining why. `activeId` keeps pointing at the retained draft the whole
+  time, so a half-typed justification survives draft, library, draft untouched.
+  The document's footer shows FDA's recommended date, never a `v`-prefixed
+  internal revision number the agency never issued.

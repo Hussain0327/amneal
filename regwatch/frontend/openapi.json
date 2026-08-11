@@ -613,6 +613,141 @@
         "title": "HealthVectorComponent",
         "type": "object"
       },
+      "PsgContentBlock": {
+        "description": "One block of a reference PSG, in the studio's own block vocabulary.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "title",
+              "meta",
+              "h2",
+              "p"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "text",
+          "page"
+        ],
+        "title": "PsgContentBlock",
+        "type": "object"
+      },
+      "PsgDocumentContentResponse": {
+        "description": "One PSG rendered as a document the studio can open like a working file.\n\n``file_name`` carries the .docx name the rail shows and the download\nproduces, so the client never builds a second one that could disagree.\n``truncated`` is surfaced rather than swallowed: a short body with no\nexplanation would read as a short guidance.",
+        "properties": {
+          "active_ingredient": {
+            "title": "Active Ingredient",
+            "type": "string"
+          },
+          "appl_no": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Appl No"
+          },
+          "blocks": {
+            "items": {
+              "$ref": "#/components/schemas/PsgContentBlock"
+            },
+            "title": "Blocks",
+            "type": "array"
+          },
+          "dosage_form": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dosage Form"
+          },
+          "file_name": {
+            "title": "File Name",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "page_count": {
+            "title": "Page Count",
+            "type": "integer"
+          },
+          "psg_type": {
+            "title": "Psg Type",
+            "type": "string"
+          },
+          "recommended_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommended Date"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
+          },
+          "source_url": {
+            "title": "Source Url",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "appl_no",
+          "file_name",
+          "active_ingredient",
+          "dosage_form",
+          "route",
+          "psg_type",
+          "recommended_date",
+          "source_url",
+          "page_count",
+          "truncated",
+          "blocks"
+        ],
+        "title": "PsgDocumentContentResponse",
+        "type": "object"
+      },
       "PsgDocumentListResponse": {
         "properties": {
           "count": {
@@ -2315,6 +2450,116 @@
           }
         },
         "summary": "Psg Documents"
+      }
+    },
+    "/psg/documents/{doc_id}/content": {
+      "get": {
+        "description": "One PSG as ordered blocks, rebuilt from the text ingest already stored.\n\nNo PDF fetch and no parsing happen here: the chunks of the document's\ncurrent version are read and reassembled, which is why this is cheap\nenough to serve on every open (a PSG averages three chunks).",
+        "operationId": "psg_document_content_psg_documents__doc_id__content_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "doc_id",
+            "required": true,
+            "schema": {
+              "title": "Doc Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PsgDocumentContentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Psg Document Content"
+      }
+    },
+    "/psg/documents/{doc_id}/docx": {
+      "get": {
+        "description": "The same PSG as a Word download, generated per request and never stored.\n\nSame source and same blocks as the content route, so what an analyst reads\nin the studio and what lands in their working folder cannot drift apart.",
+        "operationId": "psg_document_docx_psg_documents__doc_id__docx_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "doc_id",
+            "required": true,
+            "schema": {
+              "title": "Doc Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Psg Document Docx"
       }
     },
     "/psg/documents/{doc_id}/pdf": {

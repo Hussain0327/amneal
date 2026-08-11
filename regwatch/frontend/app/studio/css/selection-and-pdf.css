@@ -94,27 +94,6 @@
   color: var(--st-on-chrome);
 }
 
-.st-pdf__meta {
-  display: flex;
-  align-items: center;
-  gap: var(--st-s1);
-  flex-wrap: wrap;
-}
-
-.st-pdf__link {
-  margin-left: auto;
-}
-
-/* An inert link (unsafe or missing URL) keeps its slot but drops the voice:
-   the .st-btn disabled look (opacity, not-allowed) without being a real
-   button, so it also has to opt out of the outline hover by hand. */
-.st-pdf__link--inert {
-  margin-left: auto;
-  opacity: 0.42;
-  cursor: not-allowed;
-  pointer-events: none;
-}
-
 .st-pdf__frame {
   display: block;
   flex: 1;

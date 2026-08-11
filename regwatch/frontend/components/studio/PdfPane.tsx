@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { psgPdfPath } from "@/lib/api";
 import type { LibraryDoc } from "@/lib/studio-library";
-import { safeHref } from "@/lib/url";
 
 /**
  * The probe's own timeout. An <iframe> gives no reliable signal for an HTTP
@@ -67,36 +66,17 @@ export function PdfPane({ doc }: PdfPaneProps) {
     setAttempt((n) => n + 1);
   }, []);
 
-  const href = safeHref(doc.sourceUrl);
-  const linkOut = href ? (
-    <a
-      className="st-pdf__link st-btn st-btn--outline"
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-    >
-      Open on fda.gov
-    </a>
-  ) : (
-    // Keep the slot so the header never reflows; an unsafe or missing URL
-    // renders inert rather than binding an unguarded href. Borrows the
-    // .st-btn disabled treatment (opacity, not-allowed cursor) without being
-    // a real button.
-    <span className="st-pdf__link--inert st-btn st-btn--outline">No source link</span>
-  );
-
   return (
     <section className="st-pdf" aria-label={`Reference PSG: ${doc.ingredient}`}>
+      {/* The chips, the download and the fda.gov link live on the reference
+          bar above this pane, which stays put whether the analyst is reading
+          the extracted text or the original PDF. The heading remains: it is
+          the focus anchor on open and the element Escape-to-draft works from
+          (COMPLIANCE_STUDIO.md section 10). */}
       <div className="st-pdf__head">
         <h2 className="st-pdf__title" tabIndex={-1} ref={headingRef}>
           PSG: {doc.ingredient}
         </h2>
-        <span className="st-pdf__meta">
-          <span className="st-chip">{doc.label}</span>
-          {doc.recommendedDate ? <span className="st-chip">{doc.recommendedDate}</span> : null}
-          <span className="st-chip">{doc.psgType === "final" ? "Final" : "Draft"}</span>
-        </span>
-        {linkOut}
       </div>
 
       {status === "loading" && <div className="st-pdf__note">Loading PDF...</div>}
@@ -113,16 +93,6 @@ export function PdfPane({ doc }: PdfPaneProps) {
           <button type="button" className="st-btn st-btn--quiet st-tree__retry" onClick={retry}>
             Retry
           </button>
-          {href ? (
-            <a
-              className="st-pdf__link st-btn st-btn--outline"
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Open on fda.gov
-            </a>
-          ) : null}
         </div>
       )}
     </section>

@@ -23,6 +23,8 @@ Endpoints (per spec §10.16):
     GET    /psg/documents  - PSG reference-library catalog for the Studio rail (auth)
     GET    /psg/documents/{id}/pdf - stream one PSG PDF inline (auth)
     HEAD   /psg/documents/{id}/pdf - availability probe, DB row only (auth)
+    GET    /psg/documents/{id}/content - one PSG as studio blocks (auth)
+    GET    /psg/documents/{id}/docx - the same PSG as a Word download (auth)
     GET    /health         — liveness + component diagnostics (open)
     GET    /ready          - readiness: db + vector store + LLM constructable (open)
     GET    /metrics        - Prometheus counters from the query_log audit
@@ -89,6 +91,18 @@ from regwatch.ingest.psg_crawler import (
     download_pdf,
 )
 from regwatch.process.embedder import assert_embedding_runtime_available
+from regwatch.process.psg_document import (
+    PsgChunkText,
+    PsgDocumentBody,
+    build_body,
+    document_file_name,
+)
+from regwatch.process.psg_docx import (
+    DOCX_MEDIA_TYPE,
+    PsgDocxMeta,
+    safe_file_stem,
+    write_psg_docx,
+)
 from regwatch.sources.router import search_sources
 from regwatch.sources.types import SourceKind, SourceQuery
 from regwatch.store import deficiency_runs as deficiency_run_store
@@ -101,12 +115,14 @@ from regwatch.store.models import (
     WhitepaperRun,
 )
 from regwatch.store.queries import (
+    PsgDocumentDetail,
     count_psg_documents,
     fetch_citation_recency,
+    fetch_psg_document_detail,
     fetch_psg_pdf_source,
     list_psg_documents,
 )
-from regwatch.store.vector_store import collection_size
+from regwatch.store.vector_store import collection_size, document_chunks
 from regwatch.watch.alerts import count_digest_records, latest_digest_records
 from regwatch.watch.runs import latest_watch_run
 from regwatch.whitepaper import template_fetch
@@ -2228,6 +2244,124 @@ def psg_document_pdf(
         content=data,
         media_type="application/pdf",
         headers=_psg_pdf_headers(appl_no=doc.appl_no, doc_id=doc.id, etag=etag),
+    )
+
+
+class PsgContentBlock(BaseModel):
+    """One block of a reference PSG, in the studio's own block vocabulary."""
+
+    id: str
+    type: Literal["title", "meta", "h2", "p"]
+    text: str
+    page: int
+
+
+class PsgDocumentContentResponse(BaseModel):
+    """One PSG rendered as a document the studio can open like a working file.
+
+    ``file_name`` carries the .docx name the rail shows and the download
+    produces, so the client never builds a second one that could disagree.
+    ``truncated`` is surfaced rather than swallowed: a short body with no
+    explanation would read as a short guidance.
+    """
+
+    id: int
+    appl_no: str | None
+    file_name: str
+    active_ingredient: str
+    dosage_form: str | None
+    route: str | None
+    psg_type: str
+    recommended_date: str | None
+    source_url: str
+    page_count: int
+    truncated: bool
+    blocks: list[PsgContentBlock]
+
+
+def _psg_body(doc_id: int) -> tuple[PsgDocumentDetail, PsgDocumentBody]:
+    """Loads one PSG's row and rebuilt body, or raises the mapped HTTP error.
+
+    Shared by the content and docx routes so the two can never disagree about
+    which version they render or when a document has no text.
+    """
+    detail = fetch_psg_document_detail(doc_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="psg document not found")
+    if detail.current_version_id is None:
+        raise HTTPException(status_code=404, detail="psg document has no stored version")
+    rows = document_chunks(detail.id, detail.current_version_id)
+    body = build_body(
+        detail.id,
+        [PsgChunkText(ordinal=r[0], page=r[1], text=r[2]) for r in rows],
+    )
+    if not body.blocks:
+        # The row exists but its text never landed (an ingest that stored the
+        # version and died before chunking). 409, not 404: the document is
+        # real and the client should offer the PDF, not report a bad id.
+        raise HTTPException(status_code=409, detail="psg text is not available for this document")
+    return detail, body
+
+
+@protected.get("/psg/documents/{doc_id}/content", response_model=PsgDocumentContentResponse)
+def psg_document_content(doc_id: int) -> dict[str, Any]:
+    """One PSG as ordered blocks, rebuilt from the text ingest already stored.
+
+    No PDF fetch and no parsing happen here: the chunks of the document's
+    current version are read and reassembled, which is why this is cheap
+    enough to serve on every open (a PSG averages three chunks).
+    """
+    detail, body = _psg_body(doc_id)
+    return {
+        "id": detail.id,
+        "appl_no": detail.appl_no,
+        "file_name": document_file_name(
+            appl_no=detail.appl_no, active_ingredient=detail.active_ingredient
+        ),
+        "active_ingredient": detail.active_ingredient,
+        "dosage_form": detail.dosage_form,
+        "route": detail.route,
+        "psg_type": detail.psg_type,
+        "recommended_date": detail.recommended_date,
+        "source_url": detail.source_url,
+        "page_count": max((b.page for b in body.blocks), default=0),
+        "truncated": body.truncated,
+        "blocks": [
+            {"id": b.id, "type": b.type, "text": b.text, "page": b.page} for b in body.blocks
+        ],
+    }
+
+
+@protected.get("/psg/documents/{doc_id}/docx")
+def psg_document_docx(doc_id: int) -> Response:
+    """The same PSG as a Word download, generated per request and never stored.
+
+    Same source and same blocks as the content route, so what an analyst reads
+    in the studio and what lands in their working folder cannot drift apart.
+    """
+    detail, body = _psg_body(doc_id)
+    data = write_psg_docx(
+        body.blocks,
+        PsgDocxMeta(
+            active_ingredient=detail.active_ingredient,
+            dosage_form=detail.dosage_form,
+            route=detail.route,
+            appl_no=detail.appl_no,
+            psg_type=detail.psg_type,
+            recommended_date=detail.recommended_date,
+            source_url=detail.source_url,
+        ),
+        truncated=body.truncated,
+    )
+    stem = safe_file_stem(
+        document_file_name(
+            appl_no=detail.appl_no, active_ingredient=detail.active_ingredient
+        ).removesuffix(".docx")
+    )
+    return Response(
+        content=data,
+        media_type=DOCX_MEDIA_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="{stem}.docx"'},
     )
 
 

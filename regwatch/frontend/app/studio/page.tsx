@@ -18,11 +18,13 @@ import { FindingsPanel, type PendingDisposition } from "@/components/studio/Find
 import { FormatBar } from "@/components/studio/FormatBar";
 import type { LibraryState } from "@/components/studio/LibrarySection";
 import { PdfPane } from "@/components/studio/PdfPane";
+import { ReferenceBar } from "@/components/studio/ReferenceBar";
 import { RepositoryTree } from "@/components/studio/RepositoryTree";
 import { SelectionToolbar, type StudioSelection } from "@/components/studio/SelectionToolbar";
 import { TopBar } from "@/components/studio/TopBar";
-import { fetchPsgLibrary } from "@/lib/api";
+import { fetchPsgContent, fetchPsgLibrary } from "@/lib/api";
 import { buildLibraryTree, type LibraryDoc } from "@/lib/studio-library";
+import { toReferenceDoc } from "@/lib/studio-reference";
 import {
   ASSISTANT_INTRO,
   CHECK_RESULTS,
@@ -134,6 +136,16 @@ function useReducedMotion(): boolean {
   );
 }
 
+/**
+ * Loading state for the open PSG's text. Deliberately separate from
+ * `LibraryState` (the catalog): the catalog can be listed while one
+ * document's text fails, and an error must never render as an empty document.
+ */
+type ReferenceState =
+  | { phase: "loading" }
+  | { phase: "ready"; truncated: boolean }
+  | { phase: "error"; message: string };
+
 export default function StudioPage() {
   const [docs, setDocs] = useState<Record<string, StudioDoc>>(initialDocs);
   const [activeId, setActiveId] = useState<string>(INITIAL_DOC_ID);
@@ -152,6 +164,23 @@ export default function StudioPage() {
   // and none of the disposition-loop code paths change shape.
   const [libraryDoc, setLibraryDoc] = useState<LibraryDoc | null>(null);
   const [libraryState, setLibraryState] = useState<LibraryState>({ phase: "loading" });
+  // The open PSG's own text, rebuilt server-side into the same StudioDoc shape
+  // a working document has. Held beside `docs` rather than inside it: the
+  // fixture repository is the analyst's working set, and a reference document
+  // must never be swept into a repository-wide check or a disposition record.
+  //
+  // ONE slot, not a map. The library is ~1,800 documents, and keeping every
+  // one an analyst opened would grow without bound for the sake of remembering
+  // highlights on a document they left. The cost is that highlighting a PSG
+  // lasts as long as it is open, which is the same lifetime the rest of this
+  // surface gives anything (nothing here survives a refresh).
+  const [referenceDoc, setReferenceDoc] = useState<StudioDoc | null>(null);
+  const [referenceState, setReferenceState] = useState<ReferenceState>({ phase: "loading" });
+  // The PDF is the artifact FDA published; the canvas shows its extracted
+  // text. This switches between them for the document that is already open.
+  const [showPdf, setShowPdf] = useState(false);
+  // The psgId of the most recent text request; see openLibraryDoc.
+  const referenceRequest = useRef<number | null>(null);
   const libraryLoading = useRef(false);
   // Mirrored for delayed callbacks: a check that completes while a PSG is on
   // the canvas must not resurrect the findings panel (its scrim would sit
@@ -205,7 +234,12 @@ export default function StudioPage() {
     [doc],
   );
 
+  // One writer for both stores: handlers name the document they are acting on
+  // and never learn which of the two it lives in. A reference document accepts
+  // exactly the same operations, which is what keeps highlighting working on
+  // it without a second code path.
   const patch = useCallback((id: string, fn: (d: StudioDoc) => StudioDoc) => {
+    setReferenceDoc((prev) => (prev && prev.id === id ? fn(prev) : prev));
     setDocs((prev) => (prev[id] ? { ...prev, [id]: fn(prev[id]) } : prev));
   }, []);
 
@@ -233,6 +267,13 @@ export default function StudioPage() {
 
   const openDoc = useCallback((id: string) => {
     setLibraryDoc(null);
+    setReferenceDoc(null);
+    setShowPdf(false);
+    // Abandon any in-flight PSG text. Without this its reply still matches the
+    // request token and re-populates referenceDoc under the draft now on the
+    // canvas -- which would silently reroute this document's highlights to a
+    // document that is not open and hide the assistant actions on it.
+    referenceRequest.current = null;
     setActiveId(id);
     setActiveFindingId(null);
     setSelection(null);
@@ -245,16 +286,46 @@ export default function StudioPage() {
 
   const openLibraryDoc = useCallback((d: LibraryDoc) => {
     setLibraryDoc(d);
+    setReferenceDoc(null);
+    setReferenceState({ phase: "loading" });
+    setShowPdf(false);
+    // Last-request-wins. Two quick clicks in the rail would otherwise land the
+    // first document's text under the second document's header, and the slower
+    // reply is the one that arrives last.
+    referenceRequest.current = d.psgId;
+    fetchPsgContent(d.psgId)
+      .then((content) => {
+        if (referenceRequest.current !== d.psgId) return;
+        setReferenceDoc(toReferenceDoc(content));
+        setReferenceState({ phase: "ready", truncated: content.truncated });
+      })
+      .catch((e: unknown) => {
+        if (referenceRequest.current !== d.psgId) return;
+        // Stays out of "ready" on failure: an error must never render as a
+        // loaded-but-empty document (house convention, same as the catalog).
+        setReferenceState({
+          phase: "error",
+          message: e instanceof Error ? e.message : String(e),
+        });
+      });
     setActiveFindingId(null);
     setSelection(null);
     setTreeOpen(false);
     setDispositionError(null);
+    // Same reset openDoc does: the canvas element is shared, so a switch from
+    // halfway down a long draft would otherwise open the PSG mid-document.
+    scrollRef.current?.scrollTo?.({ top: 0 });
     // The panel shows the DRAFT's findings; leaving it open beside a PDF would
     // mislabel them. `docs`, `drafts` and `pending` are deliberately untouched
     // so a half-typed justification survives draft -> library -> draft.
     setPanel(null);
     setLive(`Opened PSG for ${d.ingredient}. Read-only FDA reference.`);
   }, []);
+
+  // A read-only canvas raises neither of these. They exist because the props
+  // are required, and they are stable so the canvas is not remounted.
+  const noEdit = useCallback(() => {}, []);
+  const noSelectFinding = useCallback(() => {}, []);
 
   const editBlock = useCallback(
     (blockId: string, text: string) => {
@@ -496,14 +567,28 @@ export default function StudioPage() {
 
   const onSelectionAction = useCallback(
     (action: SelectionAction) => {
-      if (!doc || !selection) return;
-      const block = doc.blocks.find((b) => b.id === selection.blockId);
+      // Whichever document is under the selection -- the working draft, or the
+      // reference PSG that has taken its place on the canvas.
+      const open = referenceDoc ?? doc;
+      if (!open || !selection) return;
+      const block = open.blocks.find((b) => b.id === selection.blockId);
       const text = block ? quote(sliceBlock(block, selection.start, selection.end)) : "";
 
       if (action === "highlight") {
-        patch(activeId, (d) => addHighlight(d, selection.blockId, selection.start, selection.end));
+        patch(open.id, (d) => addHighlight(d, selection.blockId, selection.start, selection.end));
         setSelection(null);
         window.getSelection()?.removeAllRanges();
+        return;
+      }
+
+      // The toolbar hides the assistant actions over a reference document; this
+      // is the same refusal at the model, so a keyboard or test path cannot
+      // reach around the missing buttons and ask the working-repository
+      // assistant about FDA's guidance.
+      if (referenceDoc) {
+        setSelection(null);
+        window.getSelection()?.removeAllRanges();
+        setLive("The assistant answers about your working documents, not about a reference PSG.");
         return;
       }
 
@@ -526,7 +611,7 @@ export default function StudioPage() {
       }
       send(prompt);
     },
-    [activeId, doc, patch, selection, send],
+    [doc, patch, referenceDoc, selection, send],
   );
 
   // --- keyboard ------------------------------------------------------------
@@ -564,6 +649,9 @@ export default function StudioPage() {
         if (treeOpen) setTreeOpen(false);
         else {
           setLibraryDoc(null);
+          setReferenceDoc(null);
+          setShowPdf(false);
+          referenceRequest.current = null;
           setLive(`Returned to ${doc.name}.`);
         }
       }
@@ -619,9 +707,57 @@ export default function StudioPage() {
           // The compliance chrome is HIDDEN, not disabled, while a reference
           // PSG is open: the spine, format bar, panels and rail all read or
           // write the DRAFT's blocks and findings, and rendering them next to
-          // a PDF they do not describe would be a lie ("2 open findings"
-          // beside a document that has none).
-          <PdfPane key={libraryDoc.id} doc={libraryDoc} />
+          // a document they do not describe would be a lie ("2 open findings"
+          // beside a document that has none). The reference bar takes their
+          // place with the three things a PSG actually supports.
+          <div className="st-main">
+            <ReferenceBar
+              doc={libraryDoc}
+              showingPdf={showPdf}
+              truncated={referenceState.phase === "ready" && referenceState.truncated}
+              onTogglePdf={() => setShowPdf((v) => !v)}
+            />
+
+            {showPdf ? (
+              <PdfPane key={libraryDoc.id} doc={libraryDoc} />
+            ) : referenceState.phase === "error" ? (
+              <div className="st-ref__fallback" role="alert">
+                <span>Couldn&apos;t load the text of this PSG.</span>
+                <button
+                  type="button"
+                  className="st-btn st-btn--quiet st-tree__retry"
+                  onClick={() => openLibraryDoc(libraryDoc)}
+                >
+                  Retry
+                </button>
+                <button
+                  type="button"
+                  className="st-btn st-btn--outline"
+                  onClick={() => setShowPdf(true)}
+                >
+                  View original PDF
+                </button>
+              </div>
+            ) : referenceDoc ? (
+              // The same canvas the working documents use, reading the same
+              // block model -- which is the whole point of rebuilding a PSG
+              // into one. Read-only: FDA's published text is not ours to edit.
+              <DocumentCanvas
+                key={referenceDoc.id}
+                doc={referenceDoc}
+                scrollRef={scrollRef}
+                activeFindingId={null}
+                tracked={false}
+                reduceMotion={reduceMotion}
+                readOnly
+                onEditBlock={noEdit}
+                onSelectFinding={noSelectFinding}
+                onSelectionChange={setSelection}
+              />
+            ) : (
+              <div className="st-ref__note">Loading document...</div>
+            )}
+          </div>
         ) : (
           <>
             <ComplianceSpine
@@ -716,7 +852,11 @@ export default function StudioPage() {
         )}
       </div>
 
-      <SelectionToolbar selection={selection} onAction={onSelectionAction} />
+      <SelectionToolbar
+        selection={selection}
+        assistant={referenceDoc === null}
+        onAction={onSelectionAction}
+      />
     </div>
   );
 }
