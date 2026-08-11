@@ -114,6 +114,23 @@ _NON_DRUG_WORDS = frozenset(
         "internal",
         "benchmark",
         "benchmarks",
+        # Pleasantries. Without these a greeting is emitted as a drug-name
+        # candidate and fuzzy-scored against the whole catalog -- the same words
+        # grounded_qa._FILLER already treats as filler. Two modules disagreeing
+        # about whether "hello" could be a drug is how "Hello" reached a
+        # product-resolution refusal in the first place.
+        "hello",
+        "hiya",
+        "howdy",
+        "greetings",
+        "morning",
+        "afternoon",
+        "evening",
+        "thanks",
+        "thank",
+        "good",
+        "okay",
+        "there",
     }
 )
 
@@ -298,44 +315,72 @@ def suggest_products(
     return [name for name, _ in sorted(scored.items(), key=lambda kv: kv[1], reverse=True)][:limit]
 
 
-def resolve_brand(question: str, *, products: set[str] | None = None, limit: int = 5) -> list[str]:
-    """Map a brand name in the question to in-corpus generic ingredient(s).
+@dataclass(frozen=True)
+class ExternalDrugMatch:
+    """What openFDA knows about a name this corpus could not resolve.
 
-    Brand names (e.g. "Adderall") are not in the PSG corpus, which is keyed by
-    generic ingredient. We ask openFDA Drugs@FDA for the brand's ``generic_name``
-    and return the corpus products that share an ingredient — to OFFER as "did you
-    mean", never to auto-answer. Gated on an OpenFDA key (so tests stay offline)
-    and graceful: any error / no match returns ``[]`` and the caller refuses.
+    ``corpus_products`` are in-corpus ingredients to OFFER as "did you mean".
+    ``known_absent`` is the stricter signal: openFDA recognised the name as a
+    real drug and NONE of its ingredients are in this corpus -- the only
+    evidence we have that a turn names a credible product we simply do not
+    cover, as opposed to a typo or a non-drug word.
+    """
+
+    corpus_products: list[str]
+    known_absent: bool
+
+
+_NO_EXTERNAL_MATCH = ExternalDrugMatch(corpus_products=[], known_absent=False)
+
+
+def lookup_external_drug(
+    question: str, *, products: set[str] | None = None, limit: int = 5
+) -> ExternalDrugMatch:
+    """Ask openFDA whether an unresolved name is a real drug, and whose.
+
+    One Drugs@FDA request searching BOTH ``brand_name`` and ``generic_name``:
+    the brand half is the long-standing "Adderall -> amphetamine" lookup, the
+    generic half is what lets a real but uncovered drug (romidepsin) be told
+    apart from a nonsense token. Same endpoint, same request, same timeout --
+    widening the query costs no extra round trip.
+
+    Gated on an OpenFDA key (so tests stay offline) and graceful: any error, no
+    key or no match yields no corpus products AND ``known_absent=False``, so the
+    caller degrades to asking which product rather than asserting we lack one.
     """
     from config.settings import get_settings
 
     if not get_settings().openfda_api_key:
-        return []
+        return _NO_EXTERNAL_MATCH
     known = products if products is not None else distinct_metadata_values("normalized_name")
     if not known:
-        return []
+        return _NO_EXTERNAL_MATCH
     candidates = _drug_like_tokens(question)
     if not candidates:
-        return []
+        return _NO_EXTERNAL_MATCH
     try:
         from regwatch.sources._utils import fetch_openfda_results
         from regwatch.sources.drugsfda import DRUGSFDA_ENDPOINT
 
         rows = fetch_openfda_results(
             DRUGSFDA_ENDPOINT,
-            [f'openfda.brand_name:"{tok}"' for tok in candidates],
+            [
+                f'openfda.{field}:"{tok}"'
+                for tok in candidates
+                for field in ("brand_name", "generic_name")
+            ],
             limit=5,
         )
     except Exception:  # offline / rate-limited / malformed — degrade to no match
         log.debug("ingredient_resolution_failed", exc_info=True)
-        return []
+        return _NO_EXTERNAL_MATCH
     generics: set[str] = set()
     for row in rows:
         openfda = row.get("openfda") or {}
         for name in openfda.get("generic_name") or []:
             generics.add(str(name).lower())
     if not generics:
-        return []
+        return _NO_EXTERNAL_MATCH
     known_tokens = {name: _product_tokens(name) for name in known}
     matches: set[str] = set()
     for generic in generics:
@@ -347,4 +392,19 @@ def resolve_brand(question: str, *, products: set[str] | None = None, limit: int
         for name, ntokens in known_tokens.items():
             if gtokens & ntokens:
                 matches.add(name)
-    return sorted(matches)[:limit]
+    # openFDA recognised the name but nothing it maps to is in the corpus: a
+    # real drug we do not cover. When it DID map to a corpus product the turn is
+    # a brand lookup, which the caller handles first and which is not "absent".
+    return ExternalDrugMatch(
+        corpus_products=sorted(matches)[:limit],
+        known_absent=not matches,
+    )
+
+
+def resolve_brand(question: str, *, products: set[str] | None = None, limit: int = 5) -> list[str]:
+    """Map a brand name in the question to in-corpus generic ingredient(s).
+
+    Kept as the narrow, long-standing view over :func:`lookup_external_drug` so
+    existing callers and tests are unaffected.
+    """
+    return lookup_external_drug(question, products=products, limit=limit).corpus_products

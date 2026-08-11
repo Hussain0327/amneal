@@ -111,6 +111,7 @@ const REASON_COPY: Record<string, string> = {
     "No passage scored high enough to answer this confidently — try naming the product or adding a specific detail.",
   no_product: "The product could not be identified confidently from this query.",
   no_matching_psg: "No product-specific guidance matched this query.",
+  empty_corpus: "No FDA guidance is indexed yet, so there was nothing to search.",
   did_you_mean: "The product name is close to a known one — pick the intended match.",
   multi_form: "This ingredient has several dosage forms — pick one.",
   mixed_products: "The question spans multiple products — narrow it to one.",
@@ -132,8 +133,20 @@ const REASON_COPY: Record<string, string> = {
   no_valid_citations: "The draft could not be verified against the retrieved passages.",
 };
 
+// Conversational outcomes whose backend copy already says the why, in plain
+// language, as the reply itself. Restating it underneath in the monospace
+// diagnostic register is the duplication audit #1715 showed: the user read
+// "I couldn't identify the product..." and then, in mono, "The product could
+// not be identified confidently from this query."
+//
+// `no_product` is here as read-only legacy — the backend stopped emitting it
+// when need_product/product_not_covered landed, but turns persisted before
+// that still rehydrate with it, and they carry the same doubled copy.
+const SELF_EXPLANATORY_REASONS = new Set(["need_product", "product_not_covered", "no_product"]);
+
 export function reasonCopy(reason: string | null): string | null {
   if (!reason) return null;
+  if (SELF_EXPLANATORY_REASONS.has(reason)) return null;
   return REASON_COPY[reason] ?? "The request could not be completed as expected.";
 }
 

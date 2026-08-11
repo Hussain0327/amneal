@@ -160,14 +160,17 @@ def test_core_success_path_never_writes(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_core_refusal_path_never_writes(monkeypatch: pytest.MonkeyPatch) -> None:
-    init_db()  # empty corpus: romidepsin is a deliberate must-refuse
+    init_db()  # nothing indexed: an empty corpus is a real evidence gap
     _forbid_persistence(monkeypatch)
 
     outcome, audit, patch = _run_core("What does the FDA recommend for romidepsin?")
 
     assert outcome.refused is True
     assert outcome.status == "refused"
-    assert outcome.reason == "no_product"
+    # An EMPTY CORPUS refuses. "Which product did you mean?" would be a lie
+    # here: no product would work. Distinct from an unresolved product against
+    # a populated corpus, which converses (see test_clarify).
+    assert outcome.reason == "empty_corpus"
     assert outcome.citations == []
     assert audit.refused is True
     assert audit.allow_skip is True

@@ -23,7 +23,6 @@ from tests_contract.conftest import (
     ANSWERABLE_QUESTION,
     DEAD_PROVIDER_TIMEOUT,
     GUIDED_ROUTE_JSON_KEYS,
-    NO_PRODUCT_GUIDANCE_TEXT,
     QUERY_RESPONSE_KEYS,
     REFUSAL_TEXT,
     SERVICE_UNAVAILABLE_TEXT,
@@ -113,22 +112,24 @@ def test_s20_refusal_streams_zero_token_frames(
     assert result["status"] == "refused"
     assert result["refused"] is True
     assert result["citations"] == []
-    assert result["answer"] == NO_PRODUCT_GUIDANCE_TEXT
+    assert result["answer"] == REFUSAL_TEXT
     # Not in any status frame either -- only the result carries it.
     for data in sse.data_for("status"):
-        assert NO_PRODUCT_GUIDANCE_TEXT not in data
+        assert REFUSAL_TEXT not in data
 
     assert query_log_count() == 1
     row = latest_query_log_row()
     assert row["id"] == result["audit_id"]
-    assert row["answer_text"] == NO_PRODUCT_GUIDANCE_TEXT
+    assert row["answer_text"] == REFUSAL_TEXT
     assert set(row["route_json"]) == GUIDED_ROUTE_JSON_KEYS
     assert row["route_json"]["prompt"]["prompt_id"] == "regwatch.query_guidance"
     assert row["route_json"]["prompt"]["version"] == "1"
     assert row["route_json"]["guidance"] == {
         "attempted": True,
         "applied": True,
-        "next_step": "name_product",
+        # empty_corpus takes _allowed_steps' narrow fallback; "name a product"
+        # would be the wrong instruction when nothing is indexed at all.
+        "next_step": "narrow_source_topic",
         "option_ids": [],
         "selected_options": [],
     }

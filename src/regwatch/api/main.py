@@ -118,7 +118,6 @@ from regwatch.store.models import (
 from regwatch.store.queries import (
     PsgDocumentDetail,
     count_psg_documents,
-    fetch_citation_recency,
     fetch_psg_document_detail,
     fetch_psg_pdf_source,
     fetch_psg_requirements,
@@ -747,6 +746,15 @@ class QueryCitation(BaseModel):
     # missing row or a DB error yields null and never blocks the answer.
     recommended_date: date | None = None
     diff_summary: str | None = None
+    # Human-identifying provenance: short_name is "PSG_<appl_no>", an FDA
+    # application number, which names nothing a reader can act on. These four
+    # let the client render "Beclomethasone Dipropionate - Inhalation Aerosol
+    # PSG, revised Mar 2021" and fall back to short_name when absent (a
+    # citation persisted before this shipped).
+    product_name: str | None = None
+    dosage_form: str | None = None
+    route: str | None = None
+    psg_type: str | None = None
 
 
 class ClarifyOptionOut(BaseModel):
@@ -823,25 +831,24 @@ def _parse_iso_date(value: str | None) -> date | None:
 
 
 def _wire_citations(result: QAResult) -> list[QueryCitation]:
-    """Serialize domain citations to the wire, enriched with score + recency.
+    """Serialize domain citations to the wire, enriched with score.
 
     score is copied from the audited retrieval by chunk_id (never recomputed;
-    null when no passage matches). recommended_date + diff_summary come from one
-    batched recency lookup (no N+1) that returns nulls on any failure, so the
-    enrichment can never block or break an already-validated answer.
+    null when no passage matches).
+
+    Recency is NO LONGER joined here. grounded_qa._enrich_citation_recency runs
+    the same batched lookup before the turn is persisted, so the domain citation
+    already carries recommended_date/diff_summary and history keeps them. This
+    boundary only parses the stored string to a date.
     """
     scores: dict[str, float | None] = {
         str(p.get("chunk_id")): p.get("score") for p in result.retrieved
     }
-    version_ids = sorted({c.version_id for c in result.citations})
-    doc_ids = sorted({c.doc_id for c in result.citations})
-    recency = fetch_citation_recency(version_ids, doc_ids)
     out: list[QueryCitation] = []
     for c in result.citations:
         # Domain Citation may already carry a score; prefer an explicit retrieval
         # match by chunk_id, else fall back to the dataclass value.
         score = scores.get(c.chunk_id, c.score)
-        r = recency.resolve(c.version_id, c.doc_id)
         out.append(
             QueryCitation(
                 short_name=c.short_name,
@@ -852,8 +859,12 @@ def _wire_citations(result: QAResult) -> list[QueryCitation]:
                 source_url=c.source_url,
                 snippet=c.snippet,
                 score=score,
-                recommended_date=_parse_iso_date(r.recommended_date),
-                diff_summary=r.diff_summary,
+                recommended_date=_parse_iso_date(c.recommended_date),
+                diff_summary=c.diff_summary,
+                product_name=c.product_name,
+                dosage_form=c.dosage_form,
+                route=c.route,
+                psg_type=c.psg_type,
             )
         )
     return out

@@ -598,7 +598,11 @@ function AskView() {
             : nonAnswer
               ? `${nonAnswer} — see the reply`
               : next.status === "meta"
-                ? "Information ready"
+                ? // A social turn is a reply, not a report. "Information ready"
+                  // is right for a capability question and wrong for "Hello".
+                  next.reason === "greeting"
+                  ? "Reply ready"
+                  : "Information ready"
                 : "Answer ready";
         const lead = (next.answer || next.interpretation || "").replace(/\s+/g, " ").trim().slice(0, 140);
         setAnnouncement(lead ? `${label}: ${lead}` : `${label}.`);
