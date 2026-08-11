@@ -1,0 +1,1180 @@
+/* ============================================================================
+   SURFACE 04 - WHITE PAPER
+   The screen is the deliverable. Everything below draws the CRA "Clinical
+   Regulatory Affairs / Labeling White Paper" as the document it prints as:
+   landscape US Letter sheets at the template's own geometry, banded section
+   tables, a running head and a page-of-N foot. Values that a public FDA record
+   verified are set in ink and footnoted; cells that need a human are shaded
+   blanks with a flag in the margin, and the analyst types straight onto them.
+
+   Every colour is a globals.css token. The one addition is the band grey,
+   warmed off the template's E7E6E6 so it sits on parchment instead of fighting
+   it.
+   ========================================================================== */
+
+.wp {
+  --wp-band: #e8e1cd;
+  --wp-rule: #d5c7a6; /* table hairline: a shade firmer than --edge */
+  --wp-label-bg: #f7f2e4;
+  --wp-desk: #e9e0c9; /* the surface the sheets lie on */
+  --wp-label-w: 250px;
+
+  position: relative;
+  z-index: 1;
+  margin-inline: auto;
+  max-width: 1180px;
+}
+
+/* ---------- the bar above the paper ---------- */
+
+.wp-bar {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem 1rem;
+  padding: 0.6rem 0.2rem 0.7rem;
+  margin-bottom: 0.9rem;
+  background: linear-gradient(180deg, var(--paper) 72%, rgba(250, 246, 236, 0));
+  border-bottom: 1px solid var(--edge);
+}
+
+.wp-bar__id {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+}
+.wp-bar__no {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.16em;
+  color: var(--gold-ink);
+}
+.wp-bar__where {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.66rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.wp-bar__doc {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.wp-bar__name {
+  font-family: var(--font-display), Georgia, serif;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 22ch;
+}
+.wp-bar__appl {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.7rem;
+  color: var(--ink-soft);
+}
+.wp-bar__lede {
+  margin: 0;
+  flex: 1 1 18rem;
+  min-width: 0;
+  font-size: 0.86rem;
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
+
+.wp-bar__tools {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-left: auto;
+}
+.wp-bar__pages {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.66rem;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.wp-bar__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.wp-bar__ask {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.68rem;
+  color: var(--oxblood);
+}
+.wp-bar__error {
+  margin: 0 0 0.8rem;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.74rem;
+  color: var(--oxblood);
+}
+
+/* ---------- buttons ---------- */
+
+.wp-btn {
+  appearance: none;
+  cursor: pointer;
+  border: 1px solid var(--edge);
+  background: var(--paper-bright);
+  color: var(--ink);
+  border-radius: 3px;
+  padding: 0.32rem 0.66rem;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  line-height: 1.4;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+.wp-btn:hover:not(:disabled) {
+  background: var(--paper-2);
+  border-color: var(--gold-deep);
+}
+.wp-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.wp-btn--ink {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+.wp-btn--ink:hover:not(:disabled) {
+  background: var(--ink-2);
+  border-color: var(--ink-2);
+}
+.wp-btn--danger {
+  border-color: var(--oxblood);
+  color: var(--oxblood);
+  background: var(--oxblood-wash);
+}
+.wp-btn--quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink-soft);
+}
+.wp-btn--quiet:hover:not(:disabled) {
+  background: var(--paper-2);
+  border-color: var(--edge);
+}
+.wp-btn--icon {
+  padding: 0.22rem 0.5rem;
+  font-size: 0.8rem;
+  line-height: 1;
+}
+.wp-btn--zoomlabel {
+  min-width: 3.4rem;
+  text-align: center;
+}
+
+/* ---------- fill meter ---------- */
+
+.wp-meter {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+.wp-meter__bar {
+  display: flex;
+  width: 9rem;
+  height: 7px;
+  border: 1px solid var(--wp-rule);
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--paper-bright);
+}
+.wp-meter__seg {
+  display: block;
+  height: 100%;
+}
+.wp-meter__seg--pop {
+  background: var(--ink);
+}
+.wp-meter__seg--abs {
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--ink-soft) 0 1.5px,
+    transparent 1.5px 4px
+  );
+}
+.wp-meter__seg--fill {
+  background: var(--gold-deep);
+}
+.wp-meter__seg--gap {
+  background: var(--gold-wash);
+}
+.wp-meter__text {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.66rem;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.wp-meter__text i {
+  display: inline-block;
+  width: 1px;
+  height: 0.62em;
+  margin: 0 0.5em;
+  background: var(--edge);
+}
+
+.wp-status {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.6rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 0.14rem 0.4rem;
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  color: var(--ink-soft);
+  background: var(--paper-bright); /* 5.05:1; --paper-2 was 4.44:1 */
+}
+.wp-status--final {
+  color: var(--gold-ink);
+  background: var(--gold-wash);
+  border-color: var(--gold-deep);
+}
+.wp-status--unsaved {
+  color: var(--oxblood);
+  background: var(--oxblood-wash);
+  border-color: var(--oxblood);
+}
+
+/* ---------- the desk and the sheets ---------- */
+
+.wp-viewport {
+  position: relative;
+  padding: 1.4rem 0 2rem;
+  /* Zoomed past 100% the sheet is wider than the canvas. The document scrolls;
+     the page around it must not. */
+  overflow-x: auto;
+}
+
+.wp-stage {
+  position: relative;
+  margin-inline: auto;
+}
+.wp-stage--flow {
+  width: 100%;
+}
+
+.wp-doc {
+  position: relative;
+  transform-origin: top left;
+}
+.wp-doc--flow {
+  width: 100%;
+  background: var(--paper-bright);
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  box-shadow: var(--shadow-soft);
+  padding: 1.4rem 1.1rem 2rem;
+}
+
+.wp-doc__sheets {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.wp-sheet {
+  position: absolute;
+  left: 0;
+  background: var(--paper-bright);
+  border: 1px solid var(--edge);
+  box-shadow: var(--shadow-soft);
+}
+.wp-sheet__head,
+.wp-sheet__foot {
+  position: absolute;
+  left: 48px;
+  right: 48px;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.6rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.wp-sheet__head {
+  top: 20px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--edge);
+}
+.wp-sheet__cont {
+  float: right;
+  letter-spacing: 0.1em;
+  text-transform: none;
+  font-style: italic;
+  color: var(--ink-soft);
+}
+.wp-sheet__foot {
+  bottom: 22px;
+  padding-top: 5px;
+  border-top: 1px solid var(--edge);
+  text-align: right;
+  letter-spacing: 0.1em;
+  text-transform: none;
+}
+
+.wp-doc__flow {
+  position: relative;
+  z-index: 1;
+  margin-inline: auto;
+}
+/* Each item is its own block formatting context. Without this a child's top
+   margin collapses out through the wrapper, offsetHeight under-reports by that
+   margin, and every page break after it lands progressively too early. */
+.wp-doc__flow > * {
+  display: flow-root;
+}
+/* A table split across a sheet has to close its top edge on the new sheet --
+   drawn as an inset shadow so re-ruling a row can never change its height and
+   send the pagination round again. */
+.wp-doc__flow > [data-page-start] .wp-row:first-child,
+.wp-doc__flow > [data-page-start] .wp-ref:first-child {
+  box-shadow: inset 0 1px 0 var(--wp-rule);
+}
+.wp-doc:not(.wp-doc--flow) .wp-doc__flow {
+  position: absolute;
+  left: 48px;
+  top: 0;
+}
+
+/* The frozen / unsaved mark, struck across the first sheet's corner. */
+.wp-stamp {
+  position: absolute;
+  z-index: 2;
+  top: 74px;
+  right: 56px;
+  pointer-events: none;
+  transform: rotate(-7deg);
+  font-family: var(--font-mono), monospace;
+  font-size: 1.15rem;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  padding: 0.3rem 0.7rem 0.28rem 0.9rem;
+  border: 2px solid currentColor;
+  border-radius: 3px;
+  opacity: 0.5;
+}
+.wp-stamp--final {
+  color: var(--gold-deep);
+}
+.wp-stamp--unsaved {
+  color: var(--oxblood);
+}
+
+/* ---------- document body ---------- */
+
+.wp-mast {
+  /* The top-right corner stays clear on every document so the FINAL / NOT
+     SAVED stamp can never land on top of a field. */
+  padding: 0 8.5rem 0.7rem 0;
+  border-bottom: 2px solid var(--ink);
+  margin-bottom: 0.9rem;
+}
+.wp-mast__title {
+  margin: 0;
+  font-family: var(--font-body), sans-serif;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.wp-mast__product {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7rem;
+  margin: 0;
+  font-family: var(--font-display), Georgia, serif;
+  font-size: 1.7rem;
+  font-weight: 600;
+  line-height: 1.12;
+  letter-spacing: -0.015em;
+}
+.wp-mast__appl {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.78rem;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  color: var(--gold-ink);
+}
+.wp-mast__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 0.4rem 1.4rem;
+  margin: 0.6rem 0 0;
+}
+.wp-fact dt {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.58rem;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.wp-fact dd {
+  margin: 0.15rem 0 0;
+  font-family: var(--font-serif), Georgia, serif;
+  font-size: 0.84rem;
+  color: var(--ink);
+}
+.wp-fact__mono {
+  font-family: var(--font-mono), monospace !important;
+  font-size: 0.76rem !important;
+}
+.wp-fact__break {
+  word-break: break-all;
+}
+.wp-mast__docket,
+.wp-mast__asof {
+  margin: 0.45rem 0 0;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.64rem;
+  color: var(--ink-faint);
+  line-height: 1.5;
+}
+.wp-mast__docket {
+  margin-top: 0.6rem;
+  color: var(--ink-soft);
+}
+
+.wp-notice {
+  display: block;
+  margin: 0 0 0.9rem;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid var(--oxblood);
+  background: var(--oxblood-wash);
+}
+.wp-notice__tag {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.58rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--oxblood);
+}
+.wp-notice ul {
+  margin: 0.3rem 0 0;
+  padding-left: 1.1rem;
+  list-style: disc;
+}
+.wp-notice li {
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+/* The section band: the template's shaded full-width header row. */
+.wp-band {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 1.1rem 0 0;
+  padding: 0.36rem 0.75rem;
+  background: var(--wp-band);
+  border: 1px solid var(--wp-rule);
+  border-bottom: none;
+  font-family: var(--font-body), sans-serif;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.wp-band--appendix {
+  margin-top: 1.6rem;
+  background: var(--paper-2);
+}
+.wp-band__count {
+  font-family: var(--font-mono), monospace;
+  font-weight: 400;
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  /* --ink-faint is only 4.29:1 on the band grey; --ink-2 clears AA at 9.48:1
+     and the weight keeps it quiet next to the title. */
+  color: var(--ink-2);
+}
+
+/* One label/value row of the form. */
+.wp-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--wp-label-w) 1fr;
+  border: 1px solid var(--wp-rule);
+  border-top: none;
+  background: var(--paper-bright);
+}
+.wp-row__label {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem 0.4rem 0.75rem;
+  border-right: 1px solid var(--wp-rule);
+  background: var(--wp-label-bg);
+  font-family: var(--font-body), sans-serif;
+  font-size: 0.76rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ink);
+}
+.wp-row__value {
+  position: relative;
+  padding: 0.4rem 0.75rem;
+  min-width: 0;
+}
+
+.wp-mode {
+  flex: none;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.54rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding-top: 0.15rem;
+}
+.wp-mode--manual {
+  color: var(--gold-ink);
+}
+
+.wp-val {
+  font-family: var(--font-serif), Georgia, serif;
+  font-size: 0.86rem;
+  line-height: 1.5;
+  color: var(--ink);
+  white-space: pre-wrap;
+}
+.wp-absent {
+  margin-left: 0.5rem;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.wp-note {
+  margin: 0.25rem 0 0;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
+
+.wp-refs {
+  margin-left: 0.25rem;
+  font-size: 0.62rem;
+  line-height: 0;
+}
+.wp-refs__n {
+  font-family: var(--font-mono), monospace;
+  color: var(--gold-ink);
+  text-decoration: none;
+  margin-left: 0.1rem;
+}
+.wp-refs__n:hover {
+  text-decoration: underline;
+}
+
+/* An unfilled cell is a shaded blank, the way an unfilled Word form field is. */
+.wp-row--analyst_input_required .wp-row__value {
+  background: var(--gold-wash);
+}
+.wp-blank {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.wp-blank__rule {
+  display: block;
+  height: 0;
+  border-bottom: 1px dashed var(--gold-deep);
+  margin: 0.55rem 0 0.15rem;
+}
+.wp-row--ghost .wp-blank__rule {
+  border-bottom-color: var(--wp-rule);
+  margin: 0.4rem 0;
+}
+.wp-blank__why {
+  font-size: 0.7rem;
+  line-height: 1.4;
+  color: var(--gold-ink);
+}
+
+.wp-row__flag {
+  position: absolute;
+  top: 0.3rem;
+  right: -30px;
+  width: 22px;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--gold-deep);
+}
+.wp-doc--flow .wp-row__flag {
+  display: none;
+}
+
+/* The analyst's own layer: typed onto the form, attributed, never restyled
+   into the cited ink above it. */
+.wp-fill {
+  display: block;
+}
+.wp-fill__input {
+  display: block;
+  width: 100%;
+  resize: none;
+  border: none;
+  border-bottom: 1px dashed var(--gold-deep);
+  background: transparent;
+  padding: 0.1rem 0 0.2rem;
+  font-family: var(--font-serif), Georgia, serif;
+  font-size: 0.86rem;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.wp-fill__input::placeholder {
+  color: var(--gold-ink); /* 5.13:1 on --gold-wash */
+  opacity: 1;
+  font-style: italic;
+}
+.wp-fill__input:focus-visible {
+  outline: none;
+  border-bottom-color: var(--ink);
+  background: var(--paper-bright);
+}
+.wp-fill--note .wp-fill__input {
+  border: 1px solid var(--edge);
+  background: var(--paper-bright);
+  padding: 0.3rem 0.45rem;
+  font-size: 0.8rem;
+}
+.wp-fill__actions {
+  display: flex;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+}
+.wp-fill__error {
+  margin: 0.3rem 0 0;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.66rem;
+  color: var(--oxblood);
+}
+
+.wp-notebtn {
+  position: absolute;
+  right: 0.4rem;
+  bottom: 0.22rem;
+  appearance: none;
+  cursor: pointer;
+  padding: 0.08rem 0.3rem;
+  border: 1px dashed var(--edge);
+  border-radius: 2px;
+  background: var(--paper-bright);
+  font-family: var(--font-mono), monospace;
+  font-size: 0.56rem;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.wp-row:hover .wp-notebtn,
+.wp-notebtn:focus-visible {
+  opacity: 1;
+  color: var(--ink-soft);
+}
+
+.wp-analyst {
+  margin-top: 0.3rem;
+  padding: 0.3rem 0.5rem;
+  border-left: 2px solid var(--gold-deep);
+  background: var(--paper-2);
+}
+.wp-analyst--filled {
+  background: transparent;
+  border-left-color: var(--gold-deep);
+  padding-left: 0.5rem;
+}
+.wp-analyst__tag {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.54rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--gold-ink);
+}
+.wp-analyst p {
+  margin: 0.15rem 0 0;
+  font-family: var(--font-serif), Georgia, serif;
+  font-size: 0.84rem;
+  line-height: 1.5;
+  color: var(--ink);
+  white-space: pre-wrap;
+}
+.wp-analyst__meta {
+  display: block;
+  margin-top: 0.2rem;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.58rem;
+  color: var(--ink-faint);
+}
+
+/* ---------- provenance appendix ---------- */
+
+.wp-ref {
+  display: grid;
+  grid-template-columns: 2.4rem 1fr;
+  gap: 0.3rem;
+  padding: 0.45rem 0.75rem;
+  border: 1px solid var(--wp-rule);
+  border-top: none;
+  background: var(--paper-bright);
+}
+.wp-ref__n {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.68rem;
+  color: var(--gold-ink);
+}
+.wp-ref__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.6rem;
+  margin: 0;
+}
+.wp-ref__src {
+  font-family: var(--font-body), sans-serif;
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+.wp-ref__loc,
+.wp-ref__where,
+.wp-ref__when {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.66rem;
+  color: var(--ink-soft);
+  word-break: break-all;
+}
+.wp-ref__when {
+  color: var(--ink-faint);
+}
+.wp-ref__quote {
+  margin: 0.3rem 0 0;
+  padding-left: 0.6rem;
+  border-left: 2px solid var(--edge);
+  font-family: var(--font-serif), Georgia, serif;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.wp-ref__cited {
+  margin: 0.3rem 0 0;
+  font-size: 0.7rem;
+  color: var(--ink-soft);
+}
+.wp-ref__link {
+  display: inline-block;
+  margin-top: 0.2rem;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.66rem;
+  color: var(--ink);
+  word-break: break-all;
+}
+
+/* ---------- intake: the blank form ---------- */
+
+.wp-mast--intake .wp-mast__title {
+  margin-bottom: 0.9rem;
+}
+.wp-intake {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 1.1rem;
+}
+.wp-intake__field {
+  display: block;
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+.wp-intake__field > span {
+  display: block;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.58rem;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.wp-intake__input {
+  width: 100%;
+  border: none;
+  border-bottom: 1.5px solid var(--ink);
+  background: transparent;
+  padding: 0.3rem 0 0.25rem;
+  font-family: var(--font-display), Georgia, serif;
+  font-size: 1.35rem;
+  font-weight: 500;
+  color: var(--ink);
+}
+.wp-intake__input::placeholder {
+  color: var(--ink-faint); /* 5.51:1 on --paper-bright; no alpha, it is content */
+  opacity: 1;
+  font-weight: 400;
+}
+.wp-intake__input:focus-visible {
+  outline: none;
+  border-bottom-color: var(--gold-deep);
+  box-shadow: 0 2px 0 -1px var(--gold);
+}
+.wp-intake__go {
+  flex: none;
+  padding: 0.5rem 1rem;
+  font-size: 0.72rem;
+}
+
+/* No group opacity here: fading the row would fade its label text and its own
+   background together and drop the blank form's 46 labels to ~2.3:1. The rows
+   read as unfilled because they ARE empty. */
+.wp-row--ghost .wp-row__label {
+  font-weight: 500;
+  color: var(--ink-soft); /* 4.59:1 on --wp-label-bg */
+}
+.wp-row--ghost .wp-row__value {
+  background: var(--paper-2);
+}
+
+.wp-loading,
+.wp-working {
+  margin: 0.6rem 0 0;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.72rem;
+  color: var(--ink-faint);
+  text-align: center;
+}
+
+/* While a populate is in flight the blank form dims and a single band of light
+   crosses it -- ambient, not a progress claim: the request is one round trip
+   and the page cannot know which source is answering. */
+.wp-blankdoc--working {
+  position: relative;
+  opacity: 0.72;
+}
+.wp-blankdoc--working::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    100deg,
+    rgba(245, 180, 0, 0) 42%,
+    rgba(245, 180, 0, 0.22) 50%,
+    rgba(245, 180, 0, 0) 58%
+  );
+  background-size: 260% 100%;
+  animation: wp-sweep 2.4s linear infinite;
+}
+@keyframes wp-sweep {
+  from {
+    background-position: 130% 0;
+  }
+  to {
+    background-position: -130% 0;
+  }
+}
+
+/* The document inking itself in: what a source proved arrives written. */
+.wp-ink {
+  animation: wp-ink 0.5s ease both;
+}
+@keyframes wp-ink {
+  from {
+    opacity: 0;
+    filter: blur(1.5px);
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    filter: none;
+    transform: none;
+  }
+}
+
+/* ---------- alerts ---------- */
+
+.wp-alert {
+  margin: 0 0 1rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--oxblood);
+  border-left-width: 3px;
+  border-radius: 3px;
+  background: var(--oxblood-wash);
+}
+.wp-alert__tag {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.6rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--oxblood);
+}
+.wp-alert p {
+  margin: 0.35rem 0 0;
+  font-size: 0.88rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  color: var(--ink);
+}
+.wp-alert__foot {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.7rem !important;
+  color: var(--ink-soft) !important;
+}
+
+/* ---------- the shelf of saved runs ---------- */
+
+.wp-shelf {
+  margin-top: 2.4rem;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--edge);
+}
+.wp-shelf__head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.8rem;
+}
+.wp-shelf__head h2 {
+  margin: 0;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.wp-shelf__count {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.66rem;
+  color: var(--ink-faint);
+  margin-right: auto;
+}
+.wp-shelf__empty {
+  margin: 0.9rem 0 0;
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+  max-width: 42rem;
+}
+.wp-shelf__more {
+  margin: 0.9rem 0 0;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.66rem;
+  color: var(--ink-faint);
+}
+.wp-shelf__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(21rem, 1fr));
+  gap: 0.9rem;
+  margin-top: 1rem;
+}
+
+.wp-card {
+  display: grid;
+  grid-template-columns: 118px 1fr;
+  gap: 0.85rem;
+  padding: 0.75rem;
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  background: var(--paper-2);
+}
+.wp-card--open {
+  border-color: var(--gold-deep);
+  background: var(--gold-wash);
+}
+.wp-card__sheet {
+  line-height: 0;
+}
+.wp-thumb {
+  width: 100%;
+  height: auto;
+  filter: drop-shadow(0 1px 2px rgba(22, 33, 58, 0.18));
+}
+.wp-thumb__paper {
+  fill: var(--paper-bright);
+  stroke: var(--edge);
+  stroke-width: 1;
+}
+.wp-thumb__band {
+  fill: var(--wp-band);
+}
+.wp-thumb__line--pop {
+  fill: var(--ink);
+  opacity: 0.72;
+}
+.wp-thumb__line--abs {
+  fill: var(--ink-soft);
+  opacity: 0.34;
+}
+.wp-thumb__line--fill {
+  fill: var(--gold-deep);
+}
+.wp-thumb__line--gap {
+  fill: var(--gold);
+  opacity: 0.4;
+}
+
+.wp-card__body {
+  min-width: 0;
+}
+.wp-card__top {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem 0.5rem;
+  flex-wrap: wrap;
+}
+.wp-card__name {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font-display), Georgia, serif;
+  font-size: 0.98rem;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--ink);
+  min-width: 0;
+  /* The ingredient is how an analyst finds their run -- it wraps rather than
+     truncating to "ALBUTEROL SULF...". */
+  overflow-wrap: anywhere;
+}
+.wp-card__name:hover {
+  color: var(--gold-ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.wp-card__appl {
+  display: flex;
+  gap: 0.6rem;
+  margin: 0.15rem 0 0;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.66rem;
+  color: var(--ink-soft);
+}
+.wp-card__age {
+  color: var(--ink-faint);
+  margin-left: auto;
+}
+.wp-card__counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.7rem;
+  margin: 0.45rem 0 0;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.64rem;
+  color: var(--ink-soft);
+}
+.wp-card__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+}
+.wp-card__ask {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.64rem;
+  white-space: nowrap;
+  color: var(--oxblood);
+}
+.wp-card__error {
+  margin: 0.4rem 0 0;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.66rem;
+  color: var(--oxblood);
+}
+
+/* ---------- narrow viewports: the sheet gives way to one column ---------- */
+
+@media (max-width: 1016px) {
+  .wp-row {
+    grid-template-columns: 1fr;
+  }
+  .wp-row__label {
+    border-right: none;
+    border-bottom: 1px solid var(--wp-rule);
+  }
+  .wp-mast__product {
+    font-size: 1.3rem;
+  }
+  .wp-intake__input {
+    font-size: 1.1rem;
+  }
+  .wp-card {
+    grid-template-columns: 84px 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wp-ink,
+  .wp-blankdoc--working::after {
+    animation: none;
+  }
+  .wp-ink {
+    opacity: 1;
+    filter: none;
+    transform: none;
+  }
+}
+
+/* ---------- print: the sheets, without the app around them ---------- */
+
+@page {
+  size: letter landscape;
+  margin: 0.5in;
+}
+
+@media print {
+  .wp-bar,
+  .wp-shelf,
+  .wp-notebtn,
+  .wp-fill__actions,
+  .wp-row__flag {
+    display: none !important;
+  }
+  .wp-viewport {
+    padding: 0;
+  }
+  .wp-stage,
+  .wp-doc {
+    width: auto !important;
+    height: auto !important;
+    transform: none !important;
+  }
+  .wp-doc__sheets {
+    display: none;
+  }
+  .wp-doc__flow {
+    position: static !important;
+    width: auto !important;
+  }
+  .wp-doc__flow > * {
+    margin-top: 0 !important;
+  }
+  .wp-band,
+  .wp-row,
+  .wp-ref {
+    break-inside: avoid;
+  }
+  .wp-band {
+    break-after: avoid;
+  }
+  .wp-fill__input {
+    border-bottom: 1px solid var(--ink);
+  }
+}

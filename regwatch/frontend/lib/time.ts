@@ -57,6 +57,42 @@ export function formatFiled(iso: string): string {
  * the timestamp does not parse -- an unparseable date is still a session the
  * analyst must be able to reach.
  */
+/**
+ * Compact relative age ("now", "42m", "6h", "6d", then a date) for run rows and
+ * analyst attribution. Same naive-UTC convention as everything else here.
+ * Returns "" when the timestamp does not parse.
+ */
+export function relTime(iso: string): string {
+  const t = parseApiDate(iso);
+  if (t === null) return "";
+  const mins = Math.floor(Math.max(0, Date.now() - t) / 60000);
+  if (mins < 1) return "now";
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d`;
+  return new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+/**
+ * Absolute "Jul 1, 2026, 10:00 AM" stamp for the document's own furniture
+ * (data-as-of, finalized-at). en-US pinned so the rendering is deterministic
+ * under vitest. Returns the raw string when it does not parse -- an unreadable
+ * timestamp is still evidence of when something happened.
+ */
+export function formatWhen(iso: string): string {
+  const t = parseApiDate(iso);
+  if (t === null) return iso;
+  return new Date(t).toLocaleString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export function historyBucket(iso: string, nowMs: number): string {
   const t = parseApiDate(iso);
   if (t === null) return "Earlier";

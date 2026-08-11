@@ -361,6 +361,115 @@ describe("WhitepaperPage -- durable runs workflow (surface 04)", () => {
     );
   });
 
+  it("the blanks navigator counts the unfilled analyst cells and puts the caret in the next one", async () => {
+    urlRunParam = "7";
+    getWhitepaperRunMock.mockResolvedValue(makeDetail());
+
+    render(<WhitepaperPage />);
+
+    // One analyst cell, nothing saved against it yet.
+    const next = await screen.findByRole("button", { name: "Next blank (1)" });
+    await userEvent.click(next);
+
+    expect(screen.getByLabelText("Analyst input for storage_conditions")).toHaveFocus();
+  });
+
+  it("a filled blank leaves the navigator nothing to walk to", async () => {
+    urlRunParam = "7";
+    getWhitepaperRunMock.mockResolvedValue(
+      makeDetail({
+        inputs: {
+          storage_conditions: {
+            value: "Store below 25C",
+            author: "Hana Analyst",
+            updated_at: "2026-07-01T12:00:00Z",
+          },
+        },
+      }),
+    );
+
+    render(<WhitepaperPage />);
+
+    await screen.findByText(/run #7 \/ audit #41/);
+    expect(screen.queryByRole("button", { name: /Next blank/ })).toBeNull();
+  });
+
+  it("cited values carry a footnote into a provenance appendix that names every citing cell", async () => {
+    urlRunParam = "7";
+    const evidence = {
+      source: "Orange Book",
+      locator: "products.txt appl_no=020503",
+      source_url: "https://www.fda.gov/orange-book",
+      fetched_at: "2026-07-01T09:00:00Z",
+      page: null,
+      section: null,
+      snippet: "ALBUTEROL SULFATE; AEROSOL, METERED",
+    };
+    getWhitepaperRunMock.mockResolvedValue(
+      makeDetail({
+        sections: [
+          {
+            title: "Product overview",
+            cells: [makeCell({ evidence: [evidence] }), makeCell({ id: "route", label: "Route", value: "INHALATION", evidence: [evidence] })],
+          },
+        ],
+      }),
+    );
+
+    render(<WhitepaperPage />);
+
+    // The marker sits with the value and links to the appendix entry.
+    const markers = await screen.findAllByRole("link", { name: "[1]" });
+    expect(markers).toHaveLength(2);
+    expect(markers[0]).toHaveAttribute("href", "#wp-ref-1");
+    // One appendix entry for the one record, listing both cells that cite it.
+    expect(screen.getByText("Cited at: Dosage form; Route")).toBeInTheDocument();
+    expect(screen.getByText("ALBUTEROL SULFATE; AEROSOL, METERED")).toBeInTheDocument();
+  });
+
+  it("New paper closes the open run without touching the rest of the scope", async () => {
+    urlRunParam = "7";
+    getWhitepaperRunMock.mockResolvedValue(makeDetail());
+
+    render(<WhitepaperPage />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "New paper" }));
+
+    expect(routerReplace).toHaveBeenCalledWith("/whitepaper", { scroll: false });
+  });
+
+  it("the fill-in cascade plays on the document that was just populated", async () => {
+    buildWhitepaperMock.mockResolvedValue(makeBuilt({ run_id: null }));
+
+    const { container } = render(<WhitepaperPage />);
+    await userEvent.type(screen.getByPlaceholderText("albuterol sulfate"), "albuterol");
+    await userEvent.type(screen.getByPlaceholderText(/NDA 020503/), "020503");
+    await userEvent.click(screen.getByRole("button", { name: "Populate white paper" }));
+
+    await screen.findByText("not saved");
+    expect(container.querySelectorAll(".wp-ink").length).toBeGreaterThan(0);
+  });
+
+  it("and never on a different run opened while that cascade is still pending", async () => {
+    buildWhitepaperMock.mockResolvedValue(makeBuilt({ run_id: 7 }));
+    getWhitepaperRunMock.mockResolvedValue(makeDetail({ id: 9 }));
+
+    const { container, rerender } = render(<WhitepaperPage />);
+    await userEvent.type(screen.getByPlaceholderText("albuterol sulfate"), "albuterol");
+    await userEvent.type(screen.getByPlaceholderText(/NDA 020503/), "020503");
+    await userEvent.click(screen.getByRole("button", { name: "Populate white paper" }));
+    await waitFor(() => expect(routerReplace).toHaveBeenCalled());
+
+    // Within the cascade's window the analyst opens a DIFFERENT saved run.
+    urlRunParam = "9";
+    rerender(<WhitepaperPage />);
+    await screen.findByText(/run #9 \/ audit #41/);
+
+    // Run 9 is not the document that was populated, so nothing inks in: the
+    // animation is a fact about one document, not a mode the page is in.
+    expect(container.querySelectorAll(".wp-ink")).toHaveLength(0);
+  });
+
   it("delete refusals (403 foreign draft) surface inline -- the affordance never hides", async () => {
     listWhitepaperRunsMock.mockResolvedValue(makeList([makeSummary()]));
     deleteWhitepaperRunMock.mockRejectedValue(new ApiError(403, "only the run's creator may delete it"));

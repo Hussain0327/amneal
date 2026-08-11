@@ -1,10 +1,14 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useCurrentProduct } from "@/components/CurrentProductProvider";
-import { PageHeader } from "@/components/PageHeader";
+import { BlankPaper } from "@/components/whitepaper/BlankPaper";
+import { FillMeter, StatusChip, ZoomControl } from "@/components/whitepaper/DocChrome";
+import { useFitScale, useNarrow } from "@/components/whitepaper/PaperDoc";
+import { RunCard } from "@/components/whitepaper/RunShelf";
+import { type DocMeta, WhitePaperDocument } from "@/components/whitepaper/WhitePaperDocument";
 import {
   ApiError,
   buildWhitepaper,
@@ -16,104 +20,30 @@ import {
   listWhitepaperRuns,
   reopenWhitepaperRun,
   saveWhitepaperInput,
-  type WhitepaperCell,
-  type WhitepaperCellMode,
-  type WhitepaperCellStatus,
-  type WhitepaperEvidence,
   type WhitepaperInput,
   type WhitepaperResponse,
   type WhitepaperRunDetail,
   type WhitepaperRunList,
-  type WhitepaperRunSummary,
   type WhitepaperSectionData,
-  type WhitepaperSpine,
 } from "@/lib/api";
-import { safeHref } from "@/lib/url";
+import { groupCells, tallyGroups } from "@/lib/whitepaper-form";
 
-const MODE_LABEL: Record<WhitepaperCellMode, string> = {
-  auto: "auto",
-  evidence_only: "evidence",
-  manual: "manual",
-};
+import "./whitepaper.css";
 
-// Text equivalent for the status glyph so the populated/absent/pending state is
-// not conveyed by color alone (WCAG 1.1.1 / 1.4.1).
-const STATUS_LABEL: Record<WhitepaperCellStatus, string> = {
-  populated: "Populated",
-  verified_absent: "Verified absent",
-  analyst_input_required: "Analyst input required",
-};
-
-// Timestamps may arrive without an offset (naive UTC from SQLite) — treat a
-// missing offset as UTC, same convention as the sidebar history times.
-function fmtWhen(iso: string): string {
-  const norm = /(?:Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`;
-  const t = Date.parse(norm);
-  if (Number.isNaN(t)) return iso;
-  return new Date(t).toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-// Compact relative time for the runs list and input attribution -- the same
-// naive-UTC convention as the sidebar history list.
-function relTime(iso: string): string {
-  const norm = /(?:Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`;
-  const t = Date.parse(norm);
-  if (Number.isNaN(t)) return "";
-  const mins = Math.floor(Math.max(0, Date.now() - t) / 60000);
-  if (mins < 1) return "now";
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d`;
-  return new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
-function tally(sections: WhitepaperSectionData[]) {
-  let populated = 0;
-  let absent = 0;
-  let pending = 0;
-  for (const section of sections) {
-    for (const cell of section.cells) {
-      if (cell.status === "populated") populated += 1;
-      else if (cell.status === "verified_absent") absent += 1;
-      else pending += 1;
-    }
-  }
-  return { populated, absent, pending, total: populated + absent + pending };
-}
-
-// Analyst completion over the run's IMMUTABLE generated layer: how many
-// analyst-required cells carry an overlay value. Notes on populated cells
-// deliberately do not count -- they annotate, they do not complete anything.
-function analystProgress(sections: WhitepaperSectionData[], inputs: Record<string, WhitepaperInput>) {
-  let required = 0;
+// How many analyst cells still have nothing in them -- the number the whole
+// surface is organised around. Notes on already-cited cells deliberately do not
+// count: they annotate, they do not complete anything.
+function blanksLeft(sections: WhitepaperSectionData[], inputs: Record<string, WhitepaperInput>) {
+  let open = 0;
   let filled = 0;
   for (const section of sections) {
     for (const cell of section.cells) {
       if (cell.status !== "analyst_input_required") continue;
-      required += 1;
       if (inputs[cell.id]) filled += 1;
+      else open += 1;
     }
   }
-  return { required, filled };
-}
-
-// The workflow layer a cell renders against: the attributed overlay value (if
-// any) plus the save/clear handlers. null means the ephemeral inline view (a
-// populate whose persist degraded) -- no overlay layer exists there.
-interface CellWorkflow {
-  input: WhitepaperInput | null;
-  // final runs freeze the analyst layer; editors never render.
-  frozen: boolean;
-  onSave: (cellId: string, value: string) => Promise<void>;
-  onClear: (cellId: string) => Promise<void>;
+  return { open, filled };
 }
 
 export default function WhitepaperPage() {
@@ -135,7 +65,7 @@ function WhitepaperView() {
   // The reference product name + application number ARE the scoped product, so
   // this surface both reads it (prefill) and writes it (on a successful
   // resolve). Seed from the URL scope, then keep each field in sync with the
-  // scope as it changes in place (a query-only scope change does NOT remount) —
+  // scope as it changes in place (a query-only scope change does NOT remount) --
   // but only for fields the analyst hasn't edited, so in-progress typing is
   // never clobbered (the dirty-guard below).
   const { referenceProductName, applicationNumber } = useCurrentProduct();
@@ -154,10 +84,14 @@ function WhitepaperView() {
   // (run_id null) -- a persisted populate navigates to its ?run= instead.
   const [result, setResult] = useState<WhitepaperResponse | null>(null);
   // 422 (spine could not resolve) is an expected, explanatory outcome and is
-  // rendered inline as its own state — distinct from transport/server errors.
+  // rendered inline as its own state -- distinct from transport/server errors.
   const [resolveError, setResolveError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // The fill-in cascade runs once, on the document the populate produced --
+  // held as that document's identity, not a bare flag, so opening a different
+  // saved run mid-animation cannot inherit it.
+  const [revealFor, setRevealFor] = useState<string | null>(null);
 
   // --- saved run (the ?run= URL param is the state of record) ---
   const [run, setRun] = useState<WhitepaperRunDetail | null>(null);
@@ -184,6 +118,19 @@ function WhitepaperView() {
   const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null);
   const [deleteBusy, setDeleteBusy] = useState<number | null>(null);
   const [deleteError, setDeleteError] = useState<{ id: number; message: string } | null>(null);
+
+  // --- document viewport ---
+  const stageRef = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState<number | null>(null);
+  const narrow = useNarrow();
+  const scale = useFitScale(stageRef, narrow ? 1 : zoom);
+  const [pageCount, setPageCount] = useState(1);
+  // Row nodes, so "next blank" can walk the analyst to the cell it names.
+  const rowNodes = useRef(new Map<string, HTMLElement>());
+  const registerRow = useCallback((cellId: string, el: HTMLElement | null) => {
+    if (el) rowNodes.current.set(cellId, el);
+    else rowNodes.current.delete(cellId);
+  }, []);
 
   const loadRuns = useCallback(() => {
     // In-flight guard: collapse overlapping loads (mount, Refresh, the
@@ -321,6 +268,11 @@ function WhitepaperView() {
         setResult(built);
         params.delete("run");
       }
+      setRevealFor(
+        built.run_id !== null && built.run_id !== undefined
+          ? `run-${built.run_id}`
+          : `audit-${built.audit_id}`,
+      );
       const qs = params.toString();
       router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
     } catch (er) {
@@ -446,179 +398,272 @@ function WhitepaperView() {
   );
 
   const showRunView = urlRun !== null;
+  // The one document on the table: a saved run, or an unpersisted populate.
+  const doc = useMemo(() => {
+    if (run && showRunView) {
+      const meta: DocMeta = {
+        spine: run.spine,
+        warnings: run.warnings,
+        auditId: run.source_audit_id,
+        runId: run.id,
+        status: run.status === "final" ? "final" : "draft",
+        preparedBy: run.created_by,
+        preparedAt: run.created_at,
+        finalizedAt: run.finalized_at,
+        finalizedBy: run.finalized_by,
+      };
+      return { meta, sections: run.sections, inputs: run.inputs };
+    }
+    if (result && !showRunView) {
+      const meta: DocMeta = {
+        spine: result.spine,
+        warnings: result.warnings,
+        auditId: result.audit_id,
+        runId: null,
+        status: "unsaved",
+        preparedBy: null,
+        preparedAt: null,
+        finalizedAt: null,
+        finalizedBy: null,
+      };
+      return { meta, sections: result.sections, inputs: {} as Record<string, WhitepaperInput> };
+    }
+    return null;
+  }, [result, run, showRunView]);
+
+  // Identity of the document on the table, shared by the remount key and the
+  // cascade so the two can never disagree about which document this is.
+  const docKey = doc ? (doc.meta.runId !== null ? `run-${doc.meta.runId}` : `audit-${doc.meta.auditId}`) : null;
+  const reveal = revealFor !== null && revealFor === docKey;
+
+  // The cascade is a one-shot: it plays on the document that just arrived and
+  // never again on a re-render of the same one. The countdown starts when that
+  // document is actually on screen -- a persisted populate navigates to ?run=
+  // and waits on a fetch, so timing from the submit would burn the window
+  // before there was anything to ink in.
+  useEffect(() => {
+    if (!reveal) return;
+    const t = setTimeout(() => setRevealFor(null), 1600);
+    return () => clearTimeout(t);
+  }, [reveal]);
+
+  const tally = useMemo(
+    () => (doc ? tallyGroups(groupCells(doc.sections)) : null),
+    [doc],
+  );
+  const blanks = doc ? blanksLeft(doc.sections, doc.inputs) : { open: 0, filled: 0 };
+  const frozen = run?.status === "final";
+
+  // Walk to the next unfilled blank and put the caret in it. Wraps, so the
+  // control keeps working on the last one.
+  const nextBlank = useCallback(() => {
+    if (!doc) return;
+    const ids: string[] = [];
+    for (const section of doc.sections) {
+      for (const cell of section.cells) {
+        if (cell.status === "analyst_input_required" && !doc.inputs[cell.id]) ids.push(cell.id);
+      }
+    }
+    if (ids.length === 0) return;
+    const active = document.activeElement?.closest?.("[data-cell]") as HTMLElement | null;
+    const from = active?.dataset.cell ? ids.indexOf(active.dataset.cell) : -1;
+    const target = ids[(from + 1) % ids.length];
+    const node = rowNodes.current.get(target);
+    if (!node) return;
+    // Optional call: jsdom (and any host without smooth scrolling) has no
+    // scrollIntoView, and losing the scroll must not lose the focus move.
+    node.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    node.querySelector("textarea")?.focus({ preventScroll: true });
+  }, [doc]);
 
   return (
-    <div className="measure">
-      <PageHeader
-        index="04"
-        product="White Paper"
-        title="Populate the white paper."
-        tagline="Every cell of the CRA template, traced to a public FDA record — filled where a source verifies it, handed to the analyst where judgment is required. It cites what it found; it never decides."
-      />
+    <div className="wp">
+      <div className="wp-bar">
+        <div className="wp-bar__id">
+          <span className="wp-bar__no">04</span>
+          <span className="wp-bar__where">White Paper</span>
+        </div>
 
-      <form onSubmit={onSubmit} className="doc doc--pad rise d3">
-        <div className="kicker" style={{ color: "var(--gold-ink)" }}>
-          Intake
-        </div>
-        <div className="mt-4 grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(13rem, 1fr))" }}>
-          <Field
-            label="Reference product name"
-            value={rld}
-            onChange={setRld}
-            placeholder="albuterol sulfate"
-          />
-          <Field
-            label="Application number"
-            value={applNo}
-            onChange={setApplNo}
-            placeholder="NDA 020503 · 020503 · N020503"
-          />
-        </div>
-        <div className="mt-5">
-          <button className="btn" type="submit" disabled={loading || !rld.trim() || !applNo.trim()}>
-            {loading ? "Populating…" : "Populate white paper"}
-          </button>
-        </div>
-      </form>
+        {doc ? (
+          <>
+            <div className="wp-bar__doc">
+              <span className="wp-bar__name">{doc.meta.spine.ingredient || rld || "White paper"}</span>
+              <span className="wp-bar__appl">
+                {doc.meta.spine.application_type} {doc.meta.spine.application_number}
+              </span>
+              <StatusChip status={doc.meta.status === "unsaved" ? "unsaved" : doc.meta.status} />
+            </div>
+            {tally && <FillMeter tally={tally} filled={blanks.filled} />}
+            {!frozen && doc.meta.runId !== null && blanks.open > 0 && (
+              <button className="wp-btn wp-btn--ink" type="button" onClick={nextBlank}>
+                Next blank ({blanks.open})
+              </button>
+            )}
+          </>
+        ) : (
+          <p className="wp-bar__lede">
+            The CRA template, traced to public FDA records. It cites what it found; it never decides.
+          </p>
+        )}
 
-      {loading && (
-        <p className="code mt-7" style={{ fontSize: "0.74rem", color: "var(--ink-faint)" }}>
-          Resolving the application and querying sources…
-        </p>
+        <div className="wp-bar__tools">
+          {!narrow && (
+            <>
+              <ZoomControl zoom={zoom} scale={scale} onZoom={setZoom} />
+              <span className="wp-bar__pages">
+                {pageCount} {pageCount === 1 ? "page" : "pages"}
+              </span>
+            </>
+          )}
+        </div>
+
+        <div className="wp-bar__actions">
+          {run && showRunView && !runLoading && (
+            <>
+              <button className="wp-btn wp-btn--ink" type="button" onClick={() => void onDownload()} disabled={downloading}>
+                {downloading ? "Preparing..." : "Download .docx"}
+              </button>
+              {!frozen && !finalizeConfirm && (
+                <button className="wp-btn" type="button" onClick={() => setFinalizeConfirm(true)} disabled={statusBusy}>
+                  Finalize
+                </button>
+              )}
+              {!frozen && finalizeConfirm && (
+                <>
+                  <span className="wp-bar__ask">Freeze analyst edits?</span>
+                  <button className="wp-btn wp-btn--danger" type="button" onClick={() => void onFinalize()} disabled={statusBusy}>
+                    {statusBusy ? "Finalizing..." : "Confirm finalize"}
+                  </button>
+                  <button className="wp-btn" type="button" onClick={() => setFinalizeConfirm(false)} disabled={statusBusy}>
+                    Cancel
+                  </button>
+                </>
+              )}
+              {frozen && (
+                <button className="wp-btn" type="button" onClick={() => void onReopen()} disabled={statusBusy}>
+                  {statusBusy ? "Reopening..." : "Reopen"}
+                </button>
+              )}
+            </>
+          )}
+          {(doc || showRunView) && (
+            <button className="wp-btn" type="button" onClick={() => { setResult(null); openRun(null); }}>
+              New paper
+            </button>
+          )}
+        </div>
+      </div>
+
+      {(downloadError || statusError) && (
+        <p className="wp-bar__error">{downloadError ? `Download failed: ${downloadError}` : statusError}</p>
       )}
 
       {resolveError && !loading && (
-        <div className="stamp doc--seal mt-8 rise">
-          <div className="stamp__tag">Could not resolve</div>
-          <p style={{ margin: "0.5rem 0 0", fontSize: "0.98rem", lineHeight: 1.55, whiteSpace: "pre-wrap" }}>
-            {resolveError}
-          </p>
-          <p className="code mt-3" style={{ fontSize: "0.72rem", margin: "0.8rem 0 0" }}>
-            Nothing was guessed — check the name/number pair and resubmit.
-          </p>
+        <div className="wp-alert wp-alert--resolve">
+          <span className="wp-alert__tag">Could not resolve</span>
+          <p>{resolveError}</p>
+          <p className="wp-alert__foot">Nothing was guessed - check the name/number pair and resubmit.</p>
         </div>
       )}
 
       {error && !loading && (
-        <div className="stamp mt-8 rise">
-          <div className="stamp__tag">Request failed</div>
-          <p className="code mt-1" style={{ fontSize: "0.82rem" }}>
-            {error}
-          </p>
+        <div className="wp-alert">
+          <span className="wp-alert__tag">Request failed</span>
+          <p>{error}</p>
         </div>
       )}
 
-      {/* Ephemeral inline result: ONLY the degraded (run_id null) populate
-          path. It was never persisted, so there is no editor layer and no
-          .docx render -- the warning in the payload says why. */}
-      {result && !loading && !showRunView && (
-        <section className="mt-9 rise">
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
-            <h2 className="kicker" style={{ color: "var(--ink)" }}>
-              White paper
-            </h2>
-            <hr className="hair grow" />
-            <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
-              audit #{result.audit_id}
-            </span>
-            <span className="chip code">not saved</span>
-          </div>
-
-          <div className="mt-4">
-            <SpineCard spine={result.spine} extraWarnings={result.warnings} />
-          </div>
-
-          <Tally sections={result.sections} />
-
-          <Sections sections={result.sections} workflow={null} />
-        </section>
-      )}
-
-      {showRunView && (
-        <section className="mt-9 rise" aria-busy={runLoading}>
-          {runLoading && (
-            <p className="code" style={{ fontSize: "0.74rem", color: "var(--ink-faint)" }}>
-              Loading saved run...
-            </p>
-          )}
-
-          {runError && !runLoading && (
-            <div className="stamp rise">
-              <div className="stamp__tag">Run unavailable</div>
-              <p className="code mt-1" style={{ fontSize: "0.82rem" }}>
-                {runError}
-              </p>
-              <button className="btn btn--ghost mt-3" type="button" onClick={() => openRun(null)}>
-                Back to intake
-              </button>
-            </div>
-          )}
-
-          {run && !runLoading && !runError && (
-            <RunView
-              run={run}
-              downloading={downloading}
-              downloadError={downloadError}
-              statusBusy={statusBusy}
-              statusError={statusError}
-              finalizeConfirm={finalizeConfirm}
-              setFinalizeConfirm={setFinalizeConfirm}
-              onDownload={() => void onDownload()}
-              onFinalize={() => void onFinalize()}
-              onReopen={() => void onReopen()}
-              onClose={() => openRun(null)}
-              onSaveInput={onSaveInput}
-              onClearInput={onClearInput}
-            />
-          )}
-        </section>
-      )}
-
-      <section className="mt-10 rise d4">
-        <div className="flex items-baseline gap-3">
-          <h2 className="kicker" style={{ color: "var(--ink)" }}>
-            Saved runs
-          </h2>
-          <hr className="hair grow" />
-          <button
-            className="btn btn--ghost"
-            type="button"
-            onClick={loadRuns}
-            disabled={runsBusy}
-            style={{ padding: "0.32rem 0.7rem", fontSize: "0.62rem", opacity: runsBusy ? 0.6 : 1 }}
-          >
-            {runsBusy ? "Refreshing" : "Refresh"}
+      {runError && showRunView && !runLoading && (
+        <div className="wp-alert">
+          <span className="wp-alert__tag">Run unavailable</span>
+          <p>{runError}</p>
+          <button className="wp-btn mt-3" type="button" onClick={() => openRun(null)}>
+            Back to intake
           </button>
-          <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
+        </div>
+      )}
+
+      <div className="wp-viewport" ref={stageRef} aria-busy={runLoading || loading}>
+        {runLoading && showRunView && (
+          <p className="wp-loading">Loading saved run...</p>
+        )}
+
+        {doc && !runLoading && (
+          <WhitePaperDocument
+            // Cells share ids ACROSS runs (the template is fixed), so a run
+            // switch must remount the document or one run's unsaved editor text
+            // would leak into the next run's blanks.
+            key={docKey ?? "doc"}
+            meta={doc.meta}
+            sections={doc.sections}
+            workflow={
+              doc.meta.runId === null
+                ? null
+                : { frozen: !!frozen, inputs: doc.inputs, onSave: onSaveInput, onClear: onClearInput }
+            }
+            scale={scale}
+            paged={!narrow}
+            reveal={reveal}
+            onLayout={setPageCount}
+            onRegisterRow={registerRow}
+          />
+        )}
+
+        {!doc && !runLoading && (
+          <BlankPaper
+            rld={rld}
+            applNo={applNo}
+            onRld={setRld}
+            onApplNo={setApplNo}
+            onSubmit={onSubmit}
+            loading={loading}
+            scale={scale}
+            paged={!narrow}
+            onLayout={setPageCount}
+          />
+        )}
+
+        {loading && (
+          <p className="wp-working" role="status">
+            Resolving the application and querying sources...
+          </p>
+        )}
+      </div>
+
+      <section className="wp-shelf">
+        <div className="wp-shelf__head">
+          <h2>Saved runs</h2>
+          <span className="wp-shelf__count">
             {runsError ? "-" : runsFeed ? `${runsFeed.runs.length} runs` : "..."}
           </span>
+          <button className="wp-btn wp-btn--quiet" type="button" onClick={loadRuns} disabled={runsBusy}>
+            {runsBusy ? "Refreshing" : "Refresh"}
+          </button>
         </div>
 
         {runsError && (
-          <div className="stamp mt-3">
-            <div className="stamp__tag">Runs unavailable</div>
-            <p className="code mt-1" style={{ fontSize: "0.82rem" }}>
-              {runsError}
-            </p>
-            {/* disabled while a load is in flight: loadRuns() no-ops behind the
+          <div className="wp-alert">
+            <span className="wp-alert__tag">Runs unavailable</span>
+            <p>{runsError}</p>
+            {/* Disabled while a load is in flight: loadRuns() no-ops behind the
                 guard, so an enabled button would be a dead retry. */}
-            <button className="btn btn--ghost mt-3" type="button" onClick={loadRuns} disabled={runsBusy}>
+            <button className="wp-btn mt-3" type="button" onClick={loadRuns} disabled={runsBusy}>
               Try again
             </button>
           </div>
         )}
 
         {!runsError && runsFeed && runsFeed.runs.length === 0 && (
-          <p className="mt-3" style={{ color: "var(--ink-soft)", fontSize: "0.95rem" }}>
-            No saved runs yet. Populate a white paper above to create the first one; runs are shared
-            with every analyst.
+          <p className="wp-shelf__empty">
+            No saved runs yet. Fill in the two fields above and populate the first one; runs are
+            shared with every analyst.
           </p>
         )}
 
         {!runsError && runsFeed && runsFeed.runs.length > 0 && (
-          <div className="mt-3 flex flex-col gap-3">
+          <div className="wp-shelf__grid">
             {runsFeed.runs.map((r) => (
-              <RunRow
+              <RunCard
                 key={r.id}
                 run={r}
                 open={run !== null && run.id === r.id}
@@ -639,633 +684,11 @@ function WhitepaperView() {
 
         {/* The list is a newest-first window, not the whole ledger. */}
         {!runsError && runsFeed && runsFeed.total > runsFeed.runs.length && (
-          <p className="code mt-3" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
+          <p className="wp-shelf__more">
             Showing newest {runsFeed.runs.length} of {runsFeed.total} runs.
           </p>
         )}
       </section>
-    </div>
-  );
-}
-
-function RunRow({
-  run,
-  open,
-  onOpen,
-  deleteConfirm,
-  deleteBusy,
-  deleteError,
-  onDeleteAsk,
-  onDeleteCancel,
-  onDeleteConfirm,
-}: {
-  run: WhitepaperRunSummary;
-  open: boolean;
-  onOpen: () => void;
-  deleteConfirm: boolean;
-  deleteBusy: boolean;
-  deleteError: string | null;
-  onDeleteAsk: () => void;
-  onDeleteCancel: () => void;
-  onDeleteConfirm: () => void;
-}) {
-  return (
-    <article className={`doc doc--pad${open ? " doc--seal" : ""}`} aria-current={open ? "true" : undefined}>
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        {/* The name is the open affordance; delete stays its own button so
-            the two actions can never swallow each other. */}
-        <button
-          type="button"
-          className="link display"
-          onClick={onOpen}
-          style={{ fontSize: "1.1rem", fontWeight: 600, background: "none", border: 0, padding: 0, cursor: "pointer" }}
-        >
-          {run.ingredient || run.rld_name_input}
-        </button>
-        <span className="chip code">
-          {run.application_type} {run.application_number}
-        </span>
-        <StatusChip status={run.status} />
-        <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)", marginLeft: "auto" }}>
-          {relTime(run.updated_at)}
-        </span>
-      </div>
-      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
-        <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-soft)" }}>
-          {run.populated_count} populated / {run.verified_absent_count} absent / {run.analyst_input_count} analyst
-        </span>
-        <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-soft)" }}>
-          {run.inputs_count} {run.inputs_count === 1 ? "input" : "inputs"}
-        </span>
-        <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
-          by {run.created_by}
-        </span>
-        <span style={{ marginLeft: "auto", display: "inline-flex", gap: "0.5rem", alignItems: "center" }}>
-          {!deleteConfirm && (
-            <button className="chip" type="button" onClick={onDeleteAsk} disabled={deleteBusy}>
-              delete
-            </button>
-          )}
-          {deleteConfirm && (
-            <>
-              <span className="code" style={{ fontSize: "0.7rem", color: "var(--oxblood)" }}>
-                Delete this run?
-              </span>
-              <button className="chip" type="button" onClick={onDeleteConfirm} disabled={deleteBusy}>
-                {deleteBusy ? "deleting" : "confirm"}
-              </button>
-              <button className="chip" type="button" onClick={onDeleteCancel} disabled={deleteBusy}>
-                cancel
-              </button>
-            </>
-          )}
-        </span>
-      </div>
-      {deleteError && (
-        <p className="code mt-2" style={{ fontSize: "0.74rem", color: "var(--oxblood)" }}>
-          Delete failed: {deleteError}
-        </p>
-      )}
-    </article>
-  );
-}
-
-function StatusChip({ status }: { status: string }) {
-  // final borrows the gold treatment so the frozen state is visible at a
-  // glance; draft keeps the neutral chip.
-  return (
-    <span
-      className="chip code"
-      style={
-        status === "final"
-          ? { color: "var(--gold-ink)", background: "var(--gold-wash)", borderColor: "var(--gold-deep)" }
-          : undefined
-      }
-    >
-      {status}
-    </span>
-  );
-}
-
-function RunView({
-  run,
-  downloading,
-  downloadError,
-  statusBusy,
-  statusError,
-  finalizeConfirm,
-  setFinalizeConfirm,
-  onDownload,
-  onFinalize,
-  onReopen,
-  onClose,
-  onSaveInput,
-  onClearInput,
-}: {
-  run: WhitepaperRunDetail;
-  downloading: boolean;
-  downloadError: string | null;
-  statusBusy: boolean;
-  statusError: string | null;
-  finalizeConfirm: boolean;
-  setFinalizeConfirm: (v: boolean) => void;
-  onDownload: () => void;
-  onFinalize: () => void;
-  onReopen: () => void;
-  onClose: () => void;
-  onSaveInput: (cellId: string, value: string) => Promise<void>;
-  onClearInput: (cellId: string) => Promise<void>;
-}) {
-  const frozen = run.status === "final";
-  const progress = analystProgress(run.sections, run.inputs);
-  const workflow = { frozen, onSave: onSaveInput, onClear: onClearInput };
-  return (
-    <>
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
-        <h2 className="kicker" style={{ color: "var(--ink)" }}>
-          White paper
-        </h2>
-        <StatusChip status={run.status} />
-        <hr className="hair grow" />
-        <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
-          run #{run.id} / audit #{run.source_audit_id}
-        </span>
-        <button className="btn" type="button" onClick={onDownload} disabled={downloading}>
-          {downloading ? "Preparing..." : "Download .docx"}
-        </button>
-        {!frozen && !finalizeConfirm && (
-          <button className="btn btn--ghost" type="button" onClick={() => setFinalizeConfirm(true)} disabled={statusBusy}>
-            Finalize
-          </button>
-        )}
-        {!frozen && finalizeConfirm && (
-          <span className="flex items-center gap-2">
-            <span className="code" style={{ fontSize: "0.72rem", color: "var(--oxblood)" }}>
-              Freeze analyst edits?
-            </span>
-            <button className="btn" type="button" onClick={onFinalize} disabled={statusBusy}>
-              {statusBusy ? "Finalizing..." : "Confirm finalize"}
-            </button>
-            <button className="btn btn--ghost" type="button" onClick={() => setFinalizeConfirm(false)} disabled={statusBusy}>
-              Cancel
-            </button>
-          </span>
-        )}
-        {frozen && (
-          <button className="btn btn--ghost" type="button" onClick={onReopen} disabled={statusBusy}>
-            {statusBusy ? "Reopening..." : "Reopen"}
-          </button>
-        )}
-        <button className="btn btn--ghost" type="button" onClick={onClose}>
-          Close
-        </button>
-      </div>
-
-      {downloadError && (
-        <p className="code mt-2" style={{ fontSize: "0.78rem", color: "var(--oxblood)" }}>
-          Download failed: {downloadError}
-        </p>
-      )}
-      {statusError && (
-        <p className="code mt-2" style={{ fontSize: "0.78rem", color: "var(--oxblood)" }}>
-          {statusError}
-        </p>
-      )}
-
-      {/* Freshness is honest, not implied: the generated layer is immutable,
-          so refreshing data means a NEW run (this one stays). */}
-      <p className="code mt-2" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
-        Data as of {fmtWhen(run.created_at)} - re-populate to refresh. Created by {run.created_by}.
-        {frozen && run.finalized_at && (
-          <span>
-            {" "}
-            Finalized {fmtWhen(run.finalized_at)}
-            {run.finalized_by ? ` by ${run.finalized_by}` : ""}.
-          </span>
-        )}
-      </p>
-
-      <div className="mt-4">
-        <SpineCard spine={run.spine} extraWarnings={run.warnings} />
-      </div>
-
-      <Tally sections={run.sections} />
-      <p className="code mt-1" style={{ fontSize: "0.7rem", color: "var(--ink-soft)" }}>
-        Analyst progress: {progress.filled} of {progress.required} required cells filled.
-      </p>
-
-      {/* key: cells share ids ACROSS runs (the template is fixed), so without
-          a remount a run switch would leak one run's unsaved editor text into
-          the next run's editor. */}
-      <Sections key={run.id} sections={run.sections} workflow={workflow} inputs={run.inputs} />
-    </>
-  );
-}
-
-function Sections({
-  sections,
-  workflow,
-  inputs,
-}: {
-  sections: WhitepaperSectionData[];
-  workflow: Omit<CellWorkflow, "input"> | null;
-  inputs?: Record<string, WhitepaperInput>;
-}) {
-  return (
-    <>
-      {sections.map((section, i) => (
-        <section key={section.title} className="mt-8">
-          <div className="flex items-baseline gap-3">
-            <span className="kicker" style={{ color: "var(--ink-faint)" }}>
-              {String(i + 1).padStart(2, "0")}
-            </span>
-            <h3 className="kicker" style={{ color: "var(--ink)" }}>
-              {section.title}
-            </h3>
-            <hr className="hair grow" />
-            <span className="code" style={{ fontSize: "0.72rem", color: "var(--ink-faint)" }}>
-              {section.cells.length} cells
-            </span>
-          </div>
-          <div className="doc doc--pad mt-3">
-            {section.cells.map((cell) => (
-              <Cell
-                key={cell.id}
-                cell={cell}
-                workflow={workflow ? { ...workflow, input: inputs?.[cell.id] ?? null } : null}
-              />
-            ))}
-          </div>
-        </section>
-      ))}
-    </>
-  );
-}
-
-function Field({
-  label,
-  value,
-  onChange,
-  placeholder,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-}) {
-  return (
-    <div>
-      <label className="kicker" style={{ color: "var(--ink-faint)" }}>
-        {label}
-      </label>
-      <input className="field mt-1" value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
-    </div>
-  );
-}
-
-function SpineCard({ spine, extraWarnings }: { spine: WhitepaperSpine; extraWarnings: string[] }) {
-  const warnings = Array.from(new Set([...spine.warnings, ...extraWarnings]));
-  return (
-    <div className="doc doc--seal doc--pad">
-      <div className="kicker" style={{ color: "var(--gold-ink)" }}>
-        Resolution spine
-      </div>
-      <div className="mt-4 grid gap-x-6 gap-y-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(11rem, 1fr))" }}>
-        <SpineItem label="Application">
-          <span className="code">
-            {spine.application_type} {spine.application_number}
-          </span>
-        </SpineItem>
-        <SpineItem label="Ingredient">{spine.ingredient}</SpineItem>
-        <SpineItem label="Normalized name">
-          <span className="code">{spine.normalized_name}</span>
-        </SpineItem>
-        <SpineItem label="Products">
-          {spine.product_numbers.length === 0 ? (
-            "—"
-          ) : (
-            <span className="flex flex-wrap gap-1.5">
-              {spine.product_numbers.map((p) => (
-                <span key={p} className="chip code">
-                  {p}
-                </span>
-              ))}
-            </span>
-          )}
-        </SpineItem>
-        <SpineItem label="DailyMed SPL">
-          {spine.setid ? <span className="code" style={{ wordBreak: "break-all" }}>{spine.setid}</span> : "—"}
-        </SpineItem>
-      </div>
-      {warnings.length > 0 && (
-        <div className="wp-warn">
-          <span className="kicker" style={{ fontSize: "0.6rem" }}>
-            Warnings
-          </span>
-          <ul>
-            {warnings.map((w) => (
-              <li key={w}>{w}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SpineItem({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <div className="kicker" style={{ fontSize: "0.6rem", color: "var(--ink-faint)" }}>
-        {label}
-      </div>
-      <div style={{ marginTop: "0.3rem", fontSize: "0.92rem", color: "var(--ink)" }}>{children}</div>
-    </div>
-  );
-}
-
-// Counts double as the legend: each line carries the same status glyph the
-// cells use, so the three states read the same everywhere.
-function Tally({ sections }: { sections: WhitepaperSectionData[] }) {
-  const t = tally(sections);
-  return (
-    <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-1.5">
-      <TallyItem status="populated" text={`${t.populated} populated`} />
-      <TallyItem status="verified_absent" text={`${t.absent} verified absent — rendered “No”`} />
-      <TallyItem status="analyst_input_required" text={`${t.pending} analyst input required`} />
-      <span className="code" style={{ fontSize: "0.68rem", color: "var(--ink-faint)", marginLeft: "auto" }}>
-        {t.total} cells
-      </span>
-    </div>
-  );
-}
-
-function TallyItem({ status, text }: { status: WhitepaperCellStatus; text: string }) {
-  return (
-    <span className="flex items-center gap-2">
-      <span className={`wp-dot wp-dot--${status}`} aria-hidden />
-      <span className="code" style={{ fontSize: "0.7rem", color: "var(--ink-soft)" }}>
-        {text}
-      </span>
-    </span>
-  );
-}
-
-function Cell({ cell, workflow }: { cell: WhitepaperCell; workflow: CellWorkflow | null }) {
-  const input = workflow?.input ?? null;
-  return (
-    <div className="wp-cell">
-      <div className="wp-cell__head">
-        <span className={`wp-dot wp-dot--${cell.status}`} role="img" aria-label={STATUS_LABEL[cell.status]} />
-        <span className="wp-cell__label">{cell.label}</span>
-        <span className={`wp-badge wp-badge--${cell.mode}`}>{MODE_LABEL[cell.mode]}</span>
-      </div>
-
-      {cell.status === "analyst_input_required" ? (
-        <div className="wp-pending">
-          <span className="wp-pending__tag">Analyst input required</span>
-          {cell.note && <p>{cell.note}</p>}
-        </div>
-      ) : cell.status === "verified_absent" ? (
-        // The compliant "No": the source was queried and the record is
-        // genuinely absent; the query itself is recorded in evidence.
-        <p className="wp-cell__value">
-          <strong>No</strong>
-          <span className="wp-absent">verified absent</span>
-        </p>
-      ) : (
-        // An empty/whitespace value reads the same as null: an em-dash, never
-        // a blank line passing for a populated cell.
-        <p className="wp-cell__value">{cell.value?.trim() ? cell.value : "—"}</p>
-      )}
-
-      {cell.note && cell.status !== "analyst_input_required" && <p className="wp-cell__note">{cell.note}</p>}
-
-      {/* The analyst overlay: attributed human text in a separate layer. On an
-          analyst cell it IS the answer (the generated value stays None
-          forever, INV-3); on a populated/absent cell it is a NOTE that
-          annotates -- the cited value above renders untouched either way. */}
-      {workflow && (
-        <CellOverlay cell={cell} input={input} workflow={workflow} />
-      )}
-
-      {cell.evidence.length > 0 && (
-        <details className="wp-cell__evidence">
-          <summary className="kicker" style={{ cursor: "pointer", fontSize: "0.6rem", color: "var(--ink-faint)" }}>
-            Evidence · {cell.evidence.length}
-          </summary>
-          <div className="mt-1">
-            {cell.evidence.map((ev, i) => (
-              <EvidenceRow key={`${ev.source}-${ev.locator}-${i}`} n={i + 1} ev={ev} />
-            ))}
-          </div>
-        </details>
-      )}
-    </div>
-  );
-}
-
-function CellOverlay({
-  cell,
-  input,
-  workflow,
-}: {
-  cell: WhitepaperCell;
-  input: WhitepaperInput | null;
-  workflow: CellWorkflow;
-}) {
-  const isAnalystCell = cell.status === "analyst_input_required";
-  const label = isAnalystCell ? "Analyst input" : "Analyst note";
-  if (workflow.frozen) {
-    // Finalized: the overlay is read-only. Nothing saved renders nothing.
-    if (!input) return null;
-    return <AnalystValue label={label} input={input} />;
-  }
-  if (isAnalystCell) {
-    // The inline editor is always open on an analyst cell -- filling it is
-    // the whole job of the workflow surface.
-    return (
-      <AnalystEditor
-        cellId={cell.id}
-        label={label}
-        input={input}
-        alwaysOpen
-        onSave={workflow.onSave}
-        onClear={workflow.onClear}
-      />
-    );
-  }
-  // Populated / verified-absent: the saved note renders as an annotation and
-  // the editor hides behind an explicit affordance.
-  return (
-    <>
-      {input && <AnalystValue label={label} input={input} />}
-      <AnalystEditor
-        cellId={cell.id}
-        label={label}
-        input={input}
-        alwaysOpen={false}
-        onSave={workflow.onSave}
-        onClear={workflow.onClear}
-      />
-    </>
-  );
-}
-
-function AnalystValue({ label, input }: { label: string; input: WhitepaperInput }) {
-  return (
-    <div className="wp-analyst">
-      <span className="wp-analyst__tag">{label}</span>
-      <p>{input.value}</p>
-      <span className="wp-analyst__meta">
-        by {input.author ?? "unknown"}
-        {relTime(input.updated_at) ? ` - ${relTime(input.updated_at)}` : ""}
-      </span>
-    </div>
-  );
-}
-
-function AnalystEditor({
-  cellId,
-  label,
-  input,
-  alwaysOpen,
-  onSave,
-  onClear,
-}: {
-  cellId: string;
-  label: string;
-  input: WhitepaperInput | null;
-  alwaysOpen: boolean;
-  onSave: (cellId: string, value: string) => Promise<void>;
-  onClear: (cellId: string) => Promise<void>;
-}) {
-  const [open, setOpen] = useState(false);
-  const [text, setText] = useState(input?.value ?? "");
-  const [busy, setBusy] = useState(false);
-  const [editorError, setEditorError] = useState<string | null>(null);
-
-  async function save() {
-    if (busy) return;
-    setBusy(true);
-    setEditorError(null);
-    try {
-      await onSave(cellId, text);
-      setOpen(false);
-    } catch (er) {
-      setEditorError(er instanceof Error ? er.message : String(er));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function clear() {
-    if (busy) return;
-    // Nothing stored: clearing is a local reset, not a server call.
-    if (!input) {
-      setText("");
-      setOpen(false);
-      return;
-    }
-    setBusy(true);
-    setEditorError(null);
-    try {
-      await onClear(cellId);
-      setText("");
-      setOpen(false);
-    } catch (er) {
-      setEditorError(er instanceof Error ? er.message : String(er));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (!alwaysOpen && !open) {
-    return (
-      <div className="wp-editor">
-        <button
-          className="chip"
-          type="button"
-          onClick={() => {
-            // Re-seed from the saved value on open so an edit starts from what
-            // is stored, not from stale local text.
-            setText(input?.value ?? "");
-            setEditorError(null);
-            setOpen(true);
-          }}
-        >
-          {input ? "Edit note" : "Add note"}
-        </button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="wp-editor">
-      <textarea
-        className="field"
-        aria-label={`${label} for ${cellId}`}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        disabled={busy}
-        placeholder={label === "Analyst note" ? "Add an attributed note..." : "Enter the analyst answer..."}
-      />
-      <div className="mt-2 flex items-center gap-2">
-        <button className="btn" type="button" onClick={() => void save()} disabled={busy || !text.trim()}>
-          {busy ? "Saving..." : "Save"}
-        </button>
-        <button
-          className="btn btn--ghost"
-          type="button"
-          onClick={() => void clear()}
-          disabled={busy || (!input && !text)}
-        >
-          Clear
-        </button>
-        {!alwaysOpen && (
-          <button className="btn btn--ghost" type="button" onClick={() => setOpen(false)} disabled={busy}>
-            Cancel
-          </button>
-        )}
-      </div>
-      {editorError && (
-        <p className="code mt-2" style={{ fontSize: "0.74rem", color: "var(--oxblood)" }}>
-          Save failed: {editorError}
-        </p>
-      )}
-      {alwaysOpen && input && (
-        <p className="wp-analyst__meta">
-          Saved by {input.author ?? "unknown"}
-          {relTime(input.updated_at) ? ` - ${relTime(input.updated_at)}` : ""}
-        </p>
-      )}
-    </div>
-  );
-}
-
-function EvidenceRow({ n, ev }: { n: number; ev: WhitepaperEvidence }) {
-  const where = [ev.page !== null ? `p.${ev.page}` : null, ev.section].filter(Boolean).join(" · ");
-  return (
-    <div className="ref">
-      <span className="ref__no">[{n}]</span>
-      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-        <span className="ref__src">{ev.source}</span>
-        <span className="code" style={{ fontSize: "0.74rem", color: "var(--ink-soft)", wordBreak: "break-all" }}>
-          {ev.locator}
-        </span>
-        {where && <span className="ref__page">· {where}</span>}
-        {ev.fetched_at && (
-          <span className="code" style={{ fontSize: "0.68rem", color: "var(--ink-faint)" }}>
-            fetched {fmtWhen(ev.fetched_at)}
-          </span>
-        )}
-      </div>
-      {ev.snippet && <blockquote className="ref__quote">{ev.snippet}</blockquote>}
-      {ev.source_url && (
-        <a className="link code" style={{ fontSize: "0.76rem" }} href={safeHref(ev.source_url)} target="_blank" rel="noreferrer">
-          {ev.source_url}
-        </a>
-      )}
     </div>
   );
 }
