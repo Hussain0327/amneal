@@ -347,6 +347,22 @@ _LEDGER_TEXT_CHARS = 400
 
 
 @dataclass(frozen=True)
+class ParsedClaim:
+    """One already-parsed sentence on its way into the gate.
+
+    The admission core's input, deliberately NOT ``turn_schema.Claim``: that
+    model's caps (text 400 chars, cites 4, claims 20) exist to bound arbitrary
+    MODEL-authored JSON, and re-imposing them on prose that our own sentence
+    splitter produced is issue #183 -- a good answer failing as
+    ``malformed_structure``. Uncapped by construction, and free of pydantic so
+    the core does not depend on the v5 schema module at all.
+    """
+
+    text: str
+    cites: tuple[tuple[str, int], ...] = ()  # declared (short_name, page), declaration order
+
+
+@dataclass(frozen=True)
 class AdmittedClaim:
     index: int  # the model's claim index, so the ledger lines up with the draft
     text: str  # sanitized: one line, one sentence, no model-authored markers
@@ -620,10 +636,10 @@ def admit_turn(
     not through this flag.
 
     ``kinds``/``selective`` (v7, B.10.3.4): ``kinds`` is the parser's per-claim
-    epistemic reading, positional against ``turn.claims`` (the bridge emits
+    epistemic reading, positional against ``claims`` (the bridge emits
     claims in parse order, so the correspondence is exact). Reachable ONLY with
     ``selective=True`` -- a v5/v6 caller that happened to pass ``kinds`` would
-    still get today's behavior. A length mismatch against ``turn.claims``
+    still get today's behavior. A length mismatch against ``claims``
     ignores ``kinds`` entirely (logged, never silent) and treats every claim as
     ``source_fact``: the strict direction, more citation enforcement, never
     less. A claim carrying declared cites is ALWAYS ``source_fact`` regardless
@@ -655,15 +671,54 @@ def admit_turn(
     except ValidationError as exc:
         return GateFailure("malformed_structure", exc.json(indent=None)[:1000])
 
-    if turn.turn_type == "NO_EVIDENCE":
+    return admit_claims(
+        turn.turn_type,
+        tuple(
+            ParsedClaim(text=c.text, cites=tuple((cc.short_name, cc.page) for cc in c.cites))
+            for c in turn.claims
+        ),
+        tuple(turn.unsupported),
+        passages=passages,
+        question=question,
+        correct=correct,
+        downgrade_uncited=downgrade_uncited,
+        kinds=kinds,
+        selective=selective,
+    )
+
+
+def admit_claims(
+    turn_type: str,
+    claims: Sequence[ParsedClaim],
+    unsupported: Sequence[str] = (),
+    *,
+    passages: list[RetrievedPassage],
+    question: str,
+    correct: bool = False,
+    downgrade_uncited: bool | None = None,
+    kinds: Sequence[str] | None = None,
+    selective: bool = False,
+) -> AdmittedTurn:
+    """Admit already-parsed claims. The gate's whole judgment lives here.
+
+    Split out of ``admit_turn`` for issue #183. ``admit_turn`` is now only the
+    JSON front door -- extract, decode, schema-validate -- and every caller that
+    already HAS parsed claims (the prose path) reaches this directly, so the v5
+    schema's caps never see prose. The admission logic below is unchanged: same
+    order, same drops, same verdicts, same ledger.
+
+    Returns ``AdmittedTurn`` and never ``GateFailure``: a parse failure is by
+    definition a front-door outcome, and there is nothing left to fail to parse.
+    """
+    if turn_type == "NO_EVIDENCE":
         # Claims and unsupported labels are discarded WHOLESALE: a model that
         # declines has, by its own account, nothing to cite, so anything it put
         # in a claim slot is unvetted by definition.
-        if turn.claims or turn.unsupported:
+        if claims or unsupported:
             log.warning(
                 "qa_claims_on_no_evidence",
-                claims=len(turn.claims),
-                unsupported=len(turn.unsupported),
+                claims=len(claims),
+                unsupported=len(unsupported),
             )
         return AdmittedTurn(
             turn_type="NO_EVIDENCE",
@@ -672,7 +727,7 @@ def admit_turn(
             dropped=(),
             unsupported=(),
             dropped_unsupported=(),
-            emitted=len(turn.claims),
+            emitted=len(claims),
             material_word=None,
         )
 
@@ -685,18 +740,18 @@ def admit_turn(
     allow_downgrade = correct if downgrade_uncited is None else (correct and downgrade_uncited)
 
     # v7 (B.10.3.4): the parser's per-claim kinds, positional against
-    # turn.claims. An arity mismatch is the strict-direction fallback (every
+    # claims. An arity mismatch is the strict-direction fallback (every
     # claim reads as source_fact) rather than a guess at which index means
     # what.
     claim_kinds: list[str] | None = None
     if kinds is not None:
-        if len(kinds) == len(turn.claims):
+        if len(kinds) == len(claims):
             claim_kinds = list(kinds)
         else:
-            log.warning("gate_kind_arity_mismatch", declared=len(kinds), claims=len(turn.claims))
+            log.warning("gate_kind_arity_mismatch", declared=len(kinds), claims=len(claims))
 
-    for index, claim in enumerate(turn.claims):
-        declared = tuple((c.short_name, c.page) for c in claim.cites)
+    for index, claim in enumerate(claims):
+        declared = claim.cites
         text = _sanitize_claim_text(claim.text)
         if selective and not declared:
             # Sanitize-keep, narrowed from the parked draft: only the leading
@@ -848,7 +903,7 @@ def admit_turn(
             )
         )
 
-    kept_labels, rejected_labels = _keep_unsupported(list(turn.unsupported), question)
+    kept_labels, rejected_labels = _keep_unsupported(list(unsupported), question)
 
     if not admitted:
         # Zero admitted is NOT a no-evidence turn even when the model emitted
@@ -907,7 +962,7 @@ def admit_turn(
         dropped=tuple(dropped),
         unsupported=tuple(kept_labels),
         dropped_unsupported=tuple(rejected_labels),
-        emitted=len(turn.claims),
+        emitted=len(claims),
         material_word=material_word,
     )
 

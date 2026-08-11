@@ -11,6 +11,7 @@ v5; nothing here runs with the flag off except the identity pins.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -316,3 +317,163 @@ def test_material_parser_kill_rejects_the_whole_answer(
     assert route["synthesis"]["prose_parse"]["truncated_material"] is True
     # The turn died before the gate: no admitted-turn ledger on this row.
     assert "turn" not in route
+
+
+# ---------- issue #183: legacy claims-JSON caps must not police prose ----------
+#
+# The prose path used to parse sentences and then re-serialize them into the v5
+# claims-JSON contract before the gate saw them (prose_turn.gate_payload ->
+# admit_turn -> GroundedTurn.model_validate). That schema's caps were written to
+# defend against arbitrary MODEL-authored JSON; on the prose path they policed
+# our own sentence splitter, so a perfectly good answer died as
+# malformed_structure. Three caps, three cliffs -- issue #183 named only the
+# first:
+#   turn_schema.Claim.text          max_length=400  -> one long sentence
+#   turn_schema.GroundedTurn.claims max_length=20   -> a 21-sentence answer
+#   turn_schema.Claim.cites         max_length=4    -> 5 markers on one sentence
+# All three were reachable in prod (v6 and v7 are byte-identical here). The
+# prose path now reaches turn_gate.admit_claims directly, so none of the caps
+# apply to it; they still guard the v5 JSON arm, which still parses a string.
+
+# 460 chars, one sentence, one resolvable marker. Deliberately free of
+# obligation words: this must be admitted on its citation, not argued about on
+# the materiality path.
+_LONG_SENTENCE = (
+    "The bioequivalence study design described in this guidance is a single dose "
+    "fasting study conducted in healthy adult volunteers with a sample size large "
+    "enough to characterize the pharmacokinetic profile of the drug product, and "
+    "the discussion also covers the dissolution testing conditions, the analytical "
+    "method validation, the statistical analysis plan, the treatment of outlying "
+    "results, and the documentation of protocol deviations that accompanies the "
+    "submission [1]."
+)
+
+
+def test_sentence_longer_than_the_legacy_json_cap_still_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#183: a >400-char prose sentence renders instead of failing the turn.
+
+    The sentence is well-formed, cited, and resolvable. Only the v5 JSON
+    schema's per-claim text cap stands between it and the user.
+    """
+    assert len(_LONG_SENTENCE) > 400, "fixture must exceed the legacy 400-char cap"
+    _seed_corpus(_CORPUS)
+    _prose_mode(monkeypatch)
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_LONG_SENTENCE))
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert not result.refused, f"long sentence was rejected: {result.reason}"
+    assert "[PSG_020503, p.3]" in result.answer
+    claims = _only_route_json()["turn"]["claims"]
+    assert len(claims) == 1
+    assert claims[0]["admitted"] is True
+
+
+def test_answer_with_more_than_twenty_sentences_still_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#183 sibling: the 20-claim cap kills a long-but-valid prose answer."""
+    completion = " ".join(
+        f"Study design point number {n} is described in the guidance [1]." for n in range(1, 22)
+    )
+    _seed_corpus(_CORPUS)
+    _prose_mode(monkeypatch)
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(completion))
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert not result.refused, f"21-sentence answer was rejected: {result.reason}"
+    claims = _only_route_json()["turn"]["claims"]
+    assert len(claims) == 21
+    assert all(c["admitted"] for c in claims)
+
+
+def test_sentence_citing_five_passages_still_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#183 sibling: the 4-cite cap kills a sentence supported by 5 passages.
+
+    All five passages are the same product, form, and document -- only the page
+    differs -- so nothing but the cite-count cap can reject this turn.
+    """
+    _seed_corpus([(f"Fasting BE study detail number {p}.", _meta(1, p)) for p in range(1, 6)])
+    _prose_mode(monkeypatch)
+    monkeypatch.setattr(
+        qa_mod,
+        "get_llm_provider",
+        lambda *a, **k: _stub_llm(
+            "The study design is described across the guidance [1][2][3][4][5]."
+        ),
+    )
+
+    result = qa_mod.ask(_QUESTION)
+
+    assert not result.refused, f"five-cite sentence was rejected: {result.reason}"
+    claims = _only_route_json()["turn"]["claims"]
+    assert len(claims) == 1
+    assert len(claims[0]["cites"]) == 5
+
+
+# ---------- marker/passage correspondence guard (pre-refactor characterization) ----------
+
+
+def _capturing_stub_llm(text: str, sink: list[str]) -> Any:
+    """A stub that also records every prompt string it was handed."""
+
+    class _LLM:
+        name = "stub"
+
+        def complete(self, *a: object, **kw: object) -> LLMResponse:
+            for arg in list(a) + list(kw.values()):
+                items = arg if isinstance(arg, (list, tuple)) else [arg]
+                for m in items:
+                    content = getattr(m, "content", None)
+                    if isinstance(content, str):
+                        sink.append(content)
+            return LLMResponse(text=text, model="stub")
+
+    return _LLM()
+
+
+def test_marker_resolves_to_the_passage_shown_under_that_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Marker [n] must stamp the passage the model was SHOWN as [n].
+
+    This is the property the gate cannot check for itself: it verifies that a
+    cited (short_name, page) pair EXISTS among this turn's passages, never that
+    it is the pair the model meant. An off-by-one or a wrong passage list in
+    the prose->gate bridge therefore produces a real, clickable citation on the
+    wrong document, with no drop, no warning and no ledger anomaly. Read the
+    number the model actually saw out of the prompt rather than assuming a
+    retrieval order (the echo embedder ranks by sha256, so the order is
+    deterministic but arbitrary).
+    """
+    seen: list[str] = []
+    _seed_corpus(
+        [
+            ("Fasting BE study with 36 subjects.", _meta(1, 3, "PSG_020503")),
+            ("Dissolution testing uses Apparatus II at 50 rpm.", _meta(2, 9, "PSG_040101")),
+        ]
+    )
+    _prose_mode(monkeypatch)
+    monkeypatch.setattr(
+        qa_mod,
+        "get_llm_provider",
+        lambda *a, **k: _capturing_stub_llm("The design is described in the guidance [2].", seen),
+    )
+
+    result = qa_mod.ask(_QUESTION)
+
+    # seen[-1] is THIS turn's user message; earlier entries include the v6
+    # few-shot exemplars, whose own numbered blocks would otherwise match.
+    shown = re.search(r"\[2\] \[([A-Z0-9_]+), p\.(\d+)\]", seen[-1])
+    assert shown is not None, "passage [2] was never shown to the model"
+    short, page = shown.group(1), shown.group(2)
+
+    assert not result.refused, f"correspondence turn was rejected: {result.reason}"
+    assert f"[{short}, p.{page}]" in result.answer
+    cites = _only_route_json()["turn"]["claims"][0]["cites"]
+    assert cites == [f"{short},p.{page}"], "marker [2] stamped a passage other than the one shown"

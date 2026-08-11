@@ -437,23 +437,37 @@ def _run_qa(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 details.append({"id": row["id"], "passed": False, "model": response.model})
                 continue
             killed_sentences = list(parsed.leftover_brackets)
-            gate_input = prose_turn.gate_payload(parsed, passages)
+        # Forked for issue #183: prose reaches the admission core directly, so
+        # the v5 schema's caps (text 400 chars, cites 4, claims 20) never see
+        # sentences our own splitter produced. Only the v5 arm still has a raw
+        # string to parse.
+        admitted: tg.AdmittedTurn | tg.GateFailure
+        if prose_mode:
+            admitted = tg.admit_claims(
+                parsed.turn_type,
+                prose_turn.to_claims(parsed, passages),
+                passages=passages,
+                question=row["question"],
+                correct=True,
+                downgrade_uncited=False,
+                # Gated on selective, not prose_mode: the gate only ever
+                # consults kinds when selective=True, so passing it
+                # unconditionally under v6-prose was inert -- but it diverged
+                # from grounded_qa.py's own v6 call shape (no kinds argument at
+                # all), a latent gap the post-launch review flagged before it
+                # could become a real one.
+                kinds=[c.kind for c in parsed.claims] if selective else None,
+                selective=selective,
+            )
         else:
-            gate_input = raw_completion
-        admitted = tg.admit_turn(
-            gate_input,
-            passages=passages,
-            question=row["question"],
-            correct=prose_mode,
-            downgrade_uncited=False,
-            # Gated on selective, not prose_mode: admit_turn only ever
-            # consults kinds when selective=True, so passing it unconditionally
-            # under v6-prose was inert -- but it diverged from grounded_qa.py's
-            # own v6 call shape (no kinds argument at all), a latent gap the
-            # post-launch review flagged before it could become a real one.
-            kinds=[c.kind for c in parsed.claims] if selective else None,
-            selective=selective,
-        )
+            admitted = tg.admit_turn(
+                raw_completion,
+                passages=passages,
+                question=row["question"],
+                correct=False,
+                downgrade_uncited=False,
+                selective=selective,
+            )
         if isinstance(admitted, tg.GateFailure):
             details.append({"id": row["id"], "passed": False, "model": response.model})
             continue

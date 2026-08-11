@@ -25,7 +25,6 @@ of the ordered list the model was shown, so a later caller can build
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Literal
 
@@ -39,7 +38,12 @@ from regwatch.common.sentences import split_sentences
 # import -- every existing `prose_turn.REASONING_FRAME_PREFIXES` reference
 # must keep resolving after the B.10.3.2 move to turn_gate.
 from regwatch.generate.turn_gate import REASONING_FRAME_PREFIXES as REASONING_FRAME_PREFIXES
-from regwatch.generate.turn_gate import frame_split, materiality_trigger, source_assertion_trigger
+from regwatch.generate.turn_gate import (
+    ParsedClaim,
+    frame_split,
+    materiality_trigger,
+    source_assertion_trigger,
+)
 from regwatch.retrieve.retriever import RetrievedPassage
 
 # V6 ONLY. The exact single-sentence completion the v6 prose prompt tells the
@@ -115,8 +119,8 @@ class ParsedProseTurn(BaseModel):
     leftover_brackets: list[str] = Field(default_factory=list)
 
 
-def gate_payload(parsed: ParsedProseTurn, passages: list[RetrievedPassage]) -> str:
-    """Serialize a parsed prose turn into the gate's claims-JSON contract.
+def to_claims(parsed: ParsedProseTurn, passages: list[RetrievedPassage]) -> tuple[ParsedClaim, ...]:
+    """Bridge a parsed prose turn into the gate's admission input.
 
     One admission loop for both formats: the parser resolved [n] markers into
     passage positions; this bridge rewrites them as the (short_name, page)
@@ -127,14 +131,24 @@ def gate_payload(parsed: ParsedProseTurn, passages: list[RetrievedPassage]) -> s
     reasoning/conversation sentences bridge with zero cites, and what happens to
     them next is the gate's call, not this function's: under v6 they land on
     DROP_NO_CITES exactly as a v5 zero-cite claim would, while under v7
-    (``selective=True``) the gate admits them uncited. Still serialization, not
+    (``selective=True``) the gate admits them uncited. Still translation, not
     admission.
+
+    ``passages`` MUST be the same list handed to ``turn_gate.admit_claims`` --
+    marker n is resolved positionally against it, so a different list here
+    silently sources sentences to the wrong document (guarded by
+    tests/test_prose_synthesis.py::test_marker_resolves_to_the_passage_shown_under_that_number).
+
+    Replaced ``gate_payload``, which serialized this same result back into the
+    v5 claims-JSON contract only for ``admit_turn`` to re-parse it. That round
+    trip re-imposed the v5 schema's caps (text 400 chars, cites 4, claims 20)
+    on our own sentence splitter's output, failing good answers as
+    ``malformed_structure`` -- issue #183.
     """
-    claims: list[dict[str, object]] = []
+    claims: list[ParsedClaim] = []
     for claim in parsed.claims:
-        cites: list[dict[str, object]] = [
-            {"short_name": passages[i].short_name, "page": passages[i].page}
-            for i in claim.cite_indices
+        cites: list[tuple[str, int]] = [
+            (passages[i].short_name, passages[i].page) for i in claim.cite_indices
         ]
         unresolved_seen: set[str] = set()
         for token in claim.raw_markers:
@@ -143,9 +157,9 @@ def gate_payload(parsed: ParsedProseTurn, passages: list[RetrievedPassage]) -> s
             if 1 <= int(token) <= len(passages):
                 continue
             unresolved_seen.add(token)
-            cites.append({"short_name": f"UNRESOLVED_{token}", "page": 1})
-        claims.append({"text": claim.text, "cites": cites})
-    return json.dumps({"turn_type": parsed.turn_type, "claims": claims, "unsupported": []})
+            cites.append((f"UNRESOLVED_{token}", 1))
+        claims.append(ParsedClaim(text=claim.text, cites=tuple(cites)))
+    return tuple(claims)
 
 
 def _reattach_markers(text: str) -> str:

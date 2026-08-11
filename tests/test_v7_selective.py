@@ -524,8 +524,9 @@ def test_expanded_lexicon_leak_drops_on_the_natural_path(sentence: str) -> None:
     parsed = pt.parse(sentence, passages=[], selective=True)
     assert [c.kind for c in parsed.claims] == ["source_fact"]
 
-    turn = tg.admit_turn(
-        pt.gate_payload(parsed, []),
+    turn = tg.admit_claims(
+        parsed.turn_type,
+        pt.to_claims(parsed, []),
         passages=[],
         question=_QUESTION,
         correct=True,
