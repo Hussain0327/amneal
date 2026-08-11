@@ -3,15 +3,16 @@
  * documents use, so one canvas renders both. Pure: wire rows in, document
  * out. No I/O, no clock, no randomness.
  *
- * What this deliberately does NOT do is invent compliance state. The document
- * comes back with no findings and `checkState: "unchecked"`, because nothing
- * has checked it -- and nothing can: a PSG is FDA's published guidance, not a
- * controlled record of ours to hold findings against. An empty findings list
- * here is the truth, not a placeholder.
+ * The document arrives with no findings and `checkState: "unchecked"`,
+ * because nothing has read it yet. Running the check fills them in from
+ * `toReferenceFindings` below -- and those are REQUIREMENTS the guidance
+ * places on an applicant, not defects in the guidance. A PSG has no defects
+ * for us to find; saying otherwise about an FDA document would be the one
+ * unforgivable thing this surface could do.
  */
 
-import type { PsgDocumentContent } from "./api";
-import type { Block, BlockType, StudioDoc } from "./studio-types";
+import type { PsgDocumentContent, PsgRequirement } from "./api";
+import type { Block, BlockType, Finding, StudioDoc } from "./studio-types";
 
 /** The block types the API can send. Anything else degrades to a paragraph. */
 const BLOCK_TYPES: readonly BlockType[] = ["title", "meta", "h2", "p"];
@@ -63,4 +64,89 @@ export function toReferenceDoc(content: PsgDocumentContent): StudioDoc {
     // The guidance IS the standard here; it is not measured against one.
     standards: [],
   };
+}
+
+/**
+ * Turns the requirements ingest extracted from a PSG into anchored findings.
+ *
+ * A finding in this surface is a span of the document, so a requirement only
+ * becomes one when its extractor quote can still be located in the rendered
+ * text. One that cannot is dropped rather than anchored to a guess: a
+ * highlight over the wrong sentence of an FDA guidance is worse than no
+ * highlight. `unanchored` reports how many were dropped, so the panel can say
+ * so instead of quietly showing fewer.
+ *
+ * Severity is always "info". These are not defects; they are what the
+ * guidance asks of an applicant.
+ */
+export function toReferenceFindings(
+  requirements: readonly PsgRequirement[],
+  blocks: readonly Block[],
+): { findings: Finding[]; unanchored: number } {
+  const findings: Finding[] = [];
+  let unanchored = 0;
+
+  for (const requirement of requirements) {
+    const anchor = requirement.quote ? locate(requirement.quote, blocks) : null;
+    if (!anchor) {
+      unanchored += 1;
+      continue;
+    }
+    findings.push({
+      id: `psg-req-${requirement.key}`,
+      severity: "info",
+      title: requirement.label,
+      detail: requirement.value,
+      blockId: anchor.blockId,
+      start: anchor.start,
+      end: anchor.end,
+      excerpt: anchor.excerpt,
+      location: requirement.page === null ? "This guidance" : `Page ${requirement.page}`,
+      standard: "FDA product-specific guidance",
+    });
+  }
+
+  return { findings, unanchored };
+}
+
+/**
+ * Where a quote sits in the rebuilt text, or null.
+ *
+ * Exact match first. Failing that, whitespace is normalised on both sides,
+ * because the extractor read the PDF's own line wrapping while the rebuild
+ * rejoined those lines: the words agree, the spaces do not. Block text has no
+ * runs of whitespace left (the server collapses them), so an offset found in
+ * the normalised copy is the offset in the real text.
+ */
+function locate(
+  quote: string,
+  blocks: readonly Block[],
+): { blockId: string; start: number; end: number; excerpt: string } | null {
+  const needle = quote.trim();
+  if (!needle) return null;
+
+  for (const block of blocks) {
+    const exact = block.text.indexOf(needle);
+    if (exact >= 0) {
+      return {
+        blockId: block.id,
+        start: exact,
+        end: exact + needle.length,
+        excerpt: block.text.slice(exact, exact + needle.length),
+      };
+    }
+  }
+
+  const flat = needle.replace(/\s+/g, " ");
+  for (const block of blocks) {
+    const found = block.text.replace(/\s+/g, " ").indexOf(flat);
+    if (found < 0) continue;
+    return {
+      blockId: block.id,
+      start: found,
+      end: found + flat.length,
+      excerpt: block.text.slice(found, found + flat.length),
+    };
+  }
+  return null;
 }

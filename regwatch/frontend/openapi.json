@@ -871,6 +871,81 @@
         "title": "PsgLibraryDoc",
         "type": "object"
       },
+      "PsgRequirementOut": {
+        "description": "One extracted requirement, with the FDA words it was taken from.",
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page"
+          },
+          "quote": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quote"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "value",
+          "page",
+          "quote"
+        ],
+        "title": "PsgRequirementOut",
+        "type": "object"
+      },
+      "PsgRequirementsResponse": {
+        "description": "What one PSG requires of an ANDA, as ingest extracted it.\n\n``extracted`` is False when no extraction row exists for this version\n(the ``--no-extract`` ingest path). The client must say so rather than\nrender an empty list as \"this guidance requires nothing\" -- the two are\nopposite claims.",
+        "properties": {
+          "extracted": {
+            "title": "Extracted",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "requirements": {
+            "items": {
+              "$ref": "#/components/schemas/PsgRequirementOut"
+            },
+            "title": "Requirements",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "extracted",
+          "requirements"
+        ],
+        "title": "PsgRequirementsResponse",
+        "type": "object"
+      },
       "QueryCitation": {
         "properties": {
           "chunk_id": {
@@ -2666,6 +2741,62 @@
           }
         },
         "summary": "Psg Document Pdf Head"
+      }
+    },
+    "/psg/documents/{doc_id}/requirements": {
+      "get": {
+        "description": "The BE requirements ingest extracted from this PSG's current version.\n\nThese are not compliance findings about the document: a PSG has no\ndefects to report. They are what the guidance asks an applicant to do,\neach carrying the page and the verbatim quote it came from, so the studio\ncan anchor them in the rendered text instead of restating them loose.",
+        "operationId": "psg_document_requirements_psg_documents__doc_id__requirements_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "doc_id",
+            "required": true,
+            "schema": {
+              "title": "Doc Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PsgRequirementsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Psg Document Requirements"
       }
     },
     "/query": {

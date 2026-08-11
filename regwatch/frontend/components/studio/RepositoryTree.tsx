@@ -232,13 +232,16 @@ export function RepositoryTree({
           </div>
         )}
 
-        <h3 className="st-eyebrow st-tree__section">
-          Reference library
-          {library.phase === "ready"
-            ? ` - ${countLibraryDocs(library.buckets)} ${
-                countLibraryDocs(library.buckets) === 1 ? "PSG" : "PSGs"
-              }`
-            : ""}
+        {/* Same shape as the repository header above: a label and a count
+            chip, rather than a dash and a number welded into the heading. */}
+        <h3 className="st-tree__section st-tree__section--count">
+          <span className="st-eyebrow">Reference library</span>
+          {library.phase === "ready" ? (
+            <span className="st-chip">
+              {countLibraryDocs(library.buckets)}{" "}
+              {countLibraryDocs(library.buckets) === 1 ? "PSG" : "PSGs"}
+            </span>
+          ) : null}
         </h3>
         <LibrarySection
           state={library}
@@ -254,9 +257,7 @@ export function RepositoryTree({
           type="button"
           className="st-btn st-btn--primary st-btn--lg st-btn--block"
           onClick={onCheck}
-          // Disabled, not hidden, while a reference PSG is open: the footer is
-          // a stable landmark, and the swapped note explains the refusal.
-          disabled={checking || activeLibraryId !== null}
+          disabled={checking}
         >
           <ShieldIcon />
           {checking ? "Checking..." : "Check this document"}
@@ -265,13 +266,16 @@ export function RepositoryTree({
           type="button"
           className="st-btn st-btn--outline st-btn--block"
           onClick={onRunFullCheck}
+          // The repository-wide run sweeps the WORKING documents. A reference
+          // PSG is not one of them, so this stays out of reach while one is
+          // open rather than quietly checking seven other documents.
           disabled={checking || activeLibraryId !== null}
         >
           Check all {docCount} {docCount === 1 ? "document" : "documents"}
         </button>
         <p className="st-check__note">
           {activeLibraryId !== null
-            ? "Reference PSGs are FDA source documents. Compliance checks run on working documents."
+            ? "Reads what this guidance requires of an application, with the page each requirement comes from."
             : "Against ICH, USP, 21 CFR and your internal SOPs."}
         </p>
       </div>

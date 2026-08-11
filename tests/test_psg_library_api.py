@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 
 from regwatch.api.main import app
 from regwatch.store.db import session_scope
-from regwatch.store.models import PsgDocument, PsgVersion
+from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
 from regwatch.store.vector_store import add_chunks
 
 _PDF = b"%PDF-1.4 tiny reference-library test body"
@@ -433,6 +433,112 @@ def _seeded_doc() -> int:
     version_id = _mk_version(doc_id)
     _mk_text(doc_id, version_id, _PAGE_1, _PAGE_2)
     return doc_id
+
+
+def _mk_requirements(doc_id: int, version_id: int, **over: Any) -> None:
+    """Insert one be_requirement row, the way the extractor would."""
+    fields: dict[str, Any] = {
+        "study_type": "Bioequivalence",
+        "study_design": "Fasting, single-dose, two-way crossover",
+    }
+    citations: dict[str, Any] = {
+        "study_type": {"page": 2, "quote": "Class of study: Bioequivalence"},
+        "study_design": {"page": 4, "quote": "Design: Fasting, single-dose"},
+    }
+    fields.update(over.get("fields", {}))
+    citations.update(over.get("citations", {}))
+    with session_scope() as s:
+        s.add(
+            BeRequirement(
+                psg_document_id=doc_id,
+                version_id=version_id,
+                fields_json=fields,
+                citations_json=citations,
+            )
+        )
+
+
+def test_requirements_requires_auth_401() -> None:
+    with TestClient(app) as client:
+        assert client.get("/psg/documents/1/requirements").status_code == 401
+
+
+def test_requirements_unknown_id_404(auth_client: TestClient) -> None:
+    assert auth_client.get("/psg/documents/9999/requirements").status_code == 404
+
+
+def test_requirements_returns_values_with_their_citations(auth_client: TestClient) -> None:
+    doc_id = _mk_doc(appl_no="020503")
+    version_id = _mk_version(doc_id)
+    _mk_requirements(doc_id, version_id)
+
+    body = auth_client.get(f"/psg/documents/{doc_id}/requirements").json()
+    assert body["id"] == doc_id
+    assert body["extracted"] is True
+    assert body["requirements"] == [
+        {
+            "key": "study_type",
+            "label": "Recommended study",
+            "value": "Bioequivalence",
+            "page": 2,
+            "quote": "Class of study: Bioequivalence",
+        },
+        {
+            "key": "study_design",
+            "label": "Study design",
+            "value": "Fasting, single-dose, two-way crossover",
+            "page": 4,
+            "quote": "Design: Fasting, single-dose",
+        },
+    ]
+
+
+def test_requirements_says_when_nothing_was_extracted(auth_client: TestClient) -> None:
+    # The --no-extract ingest path leaves no row. "Nothing was extracted" and
+    # "this guidance requires nothing" are opposite claims; the flag is what
+    # lets the client tell them apart.
+    doc_id = _mk_doc(appl_no="020503")
+    _mk_version(doc_id)
+
+    body = auth_client.get(f"/psg/documents/{doc_id}/requirements").json()
+    assert body["extracted"] is False
+    assert body["requirements"] == []
+
+
+def test_requirements_skips_empty_fields_and_missing_citations(
+    auth_client: TestClient,
+) -> None:
+    doc_id = _mk_doc(appl_no="020503")
+    version_id = _mk_version(doc_id)
+    _mk_requirements(
+        doc_id,
+        version_id,
+        fields={"study_type": "Bioequivalence", "dissolution": "   ", "strengths": None},
+        citations={"study_type": {}},
+    )
+
+    body = auth_client.get(f"/psg/documents/{doc_id}/requirements").json()
+    keys = [r["key"] for r in body["requirements"]]
+    # A blank value is not a requirement; a value with no citation still is,
+    # and travels with page/quote null so the client can decline to anchor it.
+    assert "dissolution" not in keys
+    assert "strengths" not in keys
+    study = next(r for r in body["requirements"] if r["key"] == "study_type")
+    assert study["page"] is None
+    assert study["quote"] is None
+
+
+def test_requirements_reads_only_the_current_version(auth_client: TestClient) -> None:
+    doc_id = _mk_doc(appl_no="020503")
+    old = _mk_version(doc_id, content_hash="a" * 64)
+    _mk_requirements(doc_id, old, fields={"study_type": "Superseded study"})
+    current = _mk_version(doc_id, content_hash="b" * 64)
+    _mk_requirements(doc_id, current, fields={"study_type": "Current study"})
+
+    body = auth_client.get(f"/psg/documents/{doc_id}/requirements").json()
+    values = [r["value"] for r in body["requirements"]]
+    assert "Current study" in values
+    assert "Superseded study" not in values
 
 
 def test_content_requires_auth_401() -> None:
