@@ -27,7 +27,9 @@ interface LibrarySectionProps {
   onRetry: () => void;
 }
 
-/** Same indent rule as the working tree: rows nest by padding, not containment. */
+/** Same indent rule as the working tree: rows nest by padding, not containment.
+ * Depth is measured from the open bucket body, which is where the drug rows
+ * now hang -- the letter itself is a tile above, not a row. */
 function indent(depth: number): CSSProperties {
   return { paddingLeft: `${0.4 + depth * 0.8}rem` };
 }
@@ -80,7 +82,7 @@ export function LibrarySection({
     return (
       <div className="st-tree__empty" role="alert">
         Couldn&apos;t load the reference library. {state.message}
-        <button type="button" className="st-tree__retry" onClick={onRetry}>
+        <button type="button" className="st-btn st-btn--quiet st-tree__retry" onClick={onRetry}>
           Retry
         </button>
       </div>
@@ -94,82 +96,91 @@ export function LibrarySection({
     );
   }
 
+  // A search result is useless behind a closed bucket, so a live query opens
+  // every surviving branch without disturbing what was toggled.
+  const isBucketOpen = (bucket: LibraryBucket) => searching || expandedBuckets.has(bucket.id);
+
   return (
     <>
-      {visible.map((bucket) => {
-        // A search result is useless behind a closed bucket, so a live query
-        // opens every surviving branch without disturbing what was toggled.
-        const bucketOpen = searching || expandedBuckets.has(bucket.id);
-        const bucketBodyId = `st-lib-${bucket.id}`;
-        const bucketDocs = countLibraryDocs([bucket]);
-        return (
-          <div key={bucket.id}>
+      {/* An alphabet is an index, not a list of folders: 24 full-width rows for
+          a catalogue nobody browses linearly buried the 7 documents under
+          review. The bodies follow the whole grid rather than each tile, which
+          keeps the index intact while a letter is open. */}
+      <div className="st-lib__grid">
+        {visible.map((bucket) => {
+          const bucketOpen = isBucketOpen(bucket);
+          const bucketDocs = countLibraryDocs([bucket]);
+          return (
             <button
+              key={bucket.id}
               type="button"
-              className="st-node st-node--folder"
-              style={indent(0)}
+              className={`st-lib__tile${bucketOpen ? " is-open" : ""}`}
               aria-expanded={bucketOpen}
-              aria-controls={bucketBodyId}
+              aria-controls={`st-lib-${bucket.id}`}
               // Adjacent spans concatenate to "A2" in the computed name; say
-              // what the row means instead.
+              // what the tile means instead.
               aria-label={`${bucket.letter} - ${bucketDocs} ${bucketDocs === 1 ? "PSG" : "PSGs"}`}
               onClick={() => toggleBucket(bucket.id)}
             >
-              <CaretIcon className={`st-node__caret${bucketOpen ? " st-node__caret--open" : ""}`} />
-              <span className="st-node__label">{bucket.letter}</span>
-              <span className="st-node__badge">{bucketDocs}</span>
+              <span className="st-lib__letter">{bucket.letter}</span>
+              <span className="st-lib__count">{bucketDocs}</span>
             </button>
-            <div id={bucketBodyId} hidden={!bucketOpen}>
-              {bucket.drugs.map((drug) => {
-                const drugOpen = searching || !collapsedDrugs.has(drug.id);
-                const drugBodyId = `st-lib-${drug.id}`;
-                return (
-                  <div key={drug.id}>
-                    <button
-                      type="button"
-                      className="st-node st-node--folder"
-                      style={indent(1)}
-                      aria-expanded={drugOpen}
-                      aria-controls={drugBodyId}
-                      onClick={() => toggleDrug(drug.id)}
-                    >
-                      <CaretIcon
-                        className={`st-node__caret${drugOpen ? " st-node__caret--open" : ""}`}
-                      />
-                      <FolderIcon className="st-node__icon" />
-                      <span className="st-node__label">{drug.label}</span>
-                    </button>
-                    <div id={drugBodyId} hidden={!drugOpen}>
-                      {drug.docs.map((doc) => {
-                        const isActive = doc.id === activeLibraryId;
-                        return (
-                          <button
-                            key={doc.id}
-                            type="button"
-                            className={`st-node st-node--doc${isActive ? " is-active" : ""}`}
-                            style={indent(2)}
-                            aria-current={isActive ? "true" : undefined}
-                            onClick={() => onOpen(doc)}
-                          >
-                            <FileIcon className="st-node__icon" />
-                            <span className="st-node__label">{doc.label}</span>
-                            {doc.recommendedDate ? (
-                              <span className="st-node__date">{doc.recommendedDate}</span>
-                            ) : null}
-                            <span className={`st-node__badge st-node__badge--${doc.psgType}`}>
-                              {doc.psgType === "final" ? "Final" : "Draft"}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
+          );
+        })}
+      </div>
+
+      <div className="st-lib__bodies">
+        {visible.map((bucket) => (
+          <div key={bucket.id} id={`st-lib-${bucket.id}`} hidden={!isBucketOpen(bucket)}>
+            {bucket.drugs.map((drug) => {
+              const drugOpen = searching || !collapsedDrugs.has(drug.id);
+              const drugBodyId = `st-lib-${drug.id}`;
+              return (
+                <div key={drug.id}>
+                  <button
+                    type="button"
+                    className="st-node st-node--folder"
+                    style={indent(0)}
+                    aria-expanded={drugOpen}
+                    aria-controls={drugBodyId}
+                    onClick={() => toggleDrug(drug.id)}
+                  >
+                    <CaretIcon
+                      className={`st-node__caret${drugOpen ? " st-node__caret--open" : ""}`}
+                    />
+                    <FolderIcon className="st-node__icon" />
+                    <span className="st-node__label">{drug.label}</span>
+                  </button>
+                  <div id={drugBodyId} hidden={!drugOpen}>
+                    {drug.docs.map((doc) => {
+                      const isActive = doc.id === activeLibraryId;
+                      return (
+                        <button
+                          key={doc.id}
+                          type="button"
+                          className={`st-node st-node--doc${isActive ? " is-active" : ""}`}
+                          style={indent(1)}
+                          aria-current={isActive ? "true" : undefined}
+                          onClick={() => onOpen(doc)}
+                        >
+                          <FileIcon className="st-node__icon" />
+                          <span className="st-node__label">{doc.label}</span>
+                          {doc.recommendedDate ? (
+                            <span className="st-node__date">{doc.recommendedDate}</span>
+                          ) : null}
+                          <span className={`st-chip st-node__badge st-node__badge--${doc.psgType}`}>
+                            {doc.psgType === "final" ? "Final" : "Draft"}
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
-                );
-              })}
-            </div>
+                </div>
+              );
+            })}
           </div>
-        );
-      })}
+        ))}
+      </div>
     </>
   );
 }

@@ -57,24 +57,40 @@ export function SelectionToolbar({ selection, onAction }: Props) {
     >
       <button
         type="button"
-        className="st-sel__btn st-sel__btn--mark"
+        className="st-btn st-btn--quiet st-sel__btn st-sel__btn--mark"
         onClick={() => onAction("highlight")}
       >
         <HighlightIcon />
         Highlight
       </button>
       <span className="st-sel__sep" aria-hidden="true" />
-      <button type="button" className="st-sel__btn" onClick={() => onAction("summarize")}>
+      <button
+        type="button"
+        className="st-btn st-btn--quiet st-sel__btn"
+        onClick={() => onAction("summarize")}
+      >
         Summarize
       </button>
-      <button type="button" className="st-sel__btn" onClick={() => onAction("explain")}>
+      <button
+        type="button"
+        className="st-btn st-btn--quiet st-sel__btn"
+        onClick={() => onAction("explain")}
+      >
         Explain
       </button>
-      <button type="button" className="st-sel__btn" onClick={() => onAction("check")}>
+      <button
+        type="button"
+        className="st-btn st-btn--quiet st-sel__btn"
+        onClick={() => onAction("check")}
+      >
         Check
       </button>
       <span className="st-sel__sep" aria-hidden="true" />
-      <button type="button" className="st-sel__btn" onClick={() => onAction("ask")}>
+      <button
+        type="button"
+        className="st-btn st-btn--quiet st-sel__btn"
+        onClick={() => onAction("ask")}
+      >
         <ChatIcon />
         Ask
       </button>

@@ -1,0 +1,301 @@
+/* ---------------------------------------------------------------------------
+   Repository tree and reference library
+   ---------------------------------------------------------------------------
+   The rail carries two collections with opposite shapes: seven working
+   documents that are the job, and ~1,800 FDA guidances that are a lookup. It
+   used to render both as the same folder rows, so the lookup outweighed the
+   job and every filename ellipsized at 17rem. Here the working documents get
+   two lines and their whole name, and the library collapses to an alphabet
+   index whose bodies open below it.
+   ------------------------------------------------------------------------ */
+
+.st-tree {
+  flex: none;
+  width: var(--st-tree-w);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--st-chrome-1);
+  border-right: 1px solid var(--st-line);
+}
+
+.st-tree__head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--st-s2);
+  height: 44px;
+  padding: 0 var(--st-s3);
+}
+
+.st-tree__actions {
+  margin-left: auto;
+  display: flex;
+  gap: var(--st-s1);
+}
+
+/* .st-field carries the well; this only places it. */
+.st-search {
+  flex: none;
+  margin: 0 var(--st-s3) var(--st-s2);
+}
+
+.st-tree__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--st-s2) var(--st-s4);
+}
+
+/* Sticky because the library below it is 1,800 rows deep: without this the
+   analyst scrolls for a minute with no evidence of which collection they are
+   still inside. Opaque ground, or the rows read through it. */
+.st-tree__section {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: var(--st-s3) var(--st-s2) var(--st-s2);
+  background: var(--st-chrome-1);
+}
+
+.st-tree__empty {
+  padding: var(--st-s3) var(--st-s2);
+  color: var(--st-on-chrome-faint);
+}
+
+/* Also used by the PDF pane's fallback, so it has to stand up alone as well as
+   composed with .st-btn--quiet. */
+.st-tree__retry {
+  display: inline-flex;
+  align-items: center;
+  margin-top: var(--st-s1);
+  border: 0;
+  background: transparent;
+  color: var(--st-gold);
+  font-family: var(--st-face-ui);
+  font-size: var(--st-t-base);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.st-tree__retry:hover:not(:disabled) {
+  background: transparent;
+  color: var(--st-gold);
+  text-decoration: underline;
+}
+
+/* --- rows ----------------------------------------------------------------- */
+
+/* Inline padding-left carries depth, so everything else is set longhand-safe:
+   the shorthand below is overridden on the left by the style attribute. */
+.st-node {
+  display: flex;
+  align-items: center;
+  gap: var(--st-s2);
+  width: 100%;
+  min-height: 28px;
+  padding: var(--st-s1) var(--st-s2);
+  border: 0;
+  border-radius: var(--st-r-sm);
+  background: transparent;
+  color: var(--st-on-chrome-soft);
+  font-family: var(--st-face-ui);
+  font-size: var(--st-t-base);
+  line-height: var(--st-lh);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--st-dur) var(--st-ease),
+    color var(--st-dur) var(--st-ease);
+}
+
+.st-node:hover {
+  background: var(--st-chrome-2);
+  color: var(--st-on-chrome);
+}
+
+.st-node--folder {
+  font-weight: 500;
+  color: var(--st-on-chrome);
+}
+
+/* A filename is the content, so it wraps. The row grows; nothing is hidden. */
+.st-node--doc {
+  min-height: 40px;
+}
+
+.st-node--doc.is-active {
+  background: var(--st-chrome-3);
+  color: var(--st-on-chrome);
+  box-shadow: inset 2px 0 0 var(--st-gold);
+  /* Square off the left edge: an inset shadow follows the border radius, which
+     turns the marker into a curved sliver instead of a bar. */
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.st-node__caret {
+  flex: none;
+  color: var(--st-on-chrome-dim);
+  transition: transform var(--st-dur) var(--st-ease);
+}
+
+.st-node__caret--open {
+  transform: rotate(90deg);
+}
+
+.st-node__icon {
+  flex: none;
+  color: var(--st-on-chrome-dim);
+}
+
+.st-node--doc.is-active .st-node__icon {
+  color: var(--st-gold);
+}
+
+.st-node__label {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Two lines: the CTD coordinate is an identifier and reads as one, the name
+   below it is prose and reads as one. */
+.st-node__name {
+  flex: 1;
+  min-width: 0;
+}
+
+.st-node__code {
+  overflow-wrap: anywhere;
+  display: block;
+  font-family: var(--st-face-id);
+  font-size: var(--st-t-micro);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  line-height: var(--st-lh);
+  color: var(--st-on-chrome-faint);
+}
+
+.st-node__title {
+  display: block;
+  font-size: var(--st-t-base);
+  line-height: var(--st-lh-tight);
+  color: var(--st-on-chrome);
+  overflow-wrap: anywhere;
+}
+
+.st-node__badge {
+  flex: none;
+}
+
+.st-node__badge--final {
+  border-color: var(--st-gold-deep);
+  color: var(--st-gold);
+}
+
+.st-node__badge--draft {
+  background: var(--st-chrome-2);
+}
+
+/* A recommendation date is metadata, not an identifier, so it stays in the UI
+   face. */
+.st-node__date {
+  flex: none;
+  font-size: var(--st-t-small);
+  color: var(--st-on-chrome-faint);
+}
+
+/* --- reference library index ---------------------------------------------- */
+
+.st-lib__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(48px, 1fr));
+  gap: var(--st-s1);
+  padding: 0 var(--st-s1) var(--st-s2);
+}
+
+.st-lib__tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--st-s1);
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--st-line-soft);
+  border-radius: var(--st-r-sm);
+  background: transparent;
+  color: var(--st-on-chrome-soft);
+  font-family: var(--st-face-ui);
+  cursor: pointer;
+  transition:
+    background var(--st-dur) var(--st-ease),
+    border-color var(--st-dur) var(--st-ease),
+    color var(--st-dur) var(--st-ease);
+}
+
+.st-lib__tile:hover {
+  background: var(--st-chrome-2);
+  border-color: var(--st-line);
+  color: var(--st-on-chrome);
+}
+
+/* No caret in a 48px tile: aria-expanded carries the state to a screen reader
+   and the fill carries it to everyone else. */
+.st-lib__tile.is-open {
+  background: var(--st-chrome-3);
+  box-shadow: inset 0 0 0 1px var(--st-gold-deep);
+  border-color: var(--st-line);
+  color: var(--st-gold);
+}
+
+.st-lib__letter {
+  font-size: var(--st-t-base);
+  font-weight: 600;
+  line-height: 1;
+}
+
+.st-lib__count {
+  font-family: var(--st-face-id);
+  font-size: var(--st-t-micro);
+  line-height: 1;
+  color: var(--st-on-chrome-faint);
+}
+
+.st-lib__tile.is-open .st-lib__count {
+  color: var(--st-on-chrome-soft);
+}
+
+/* Open bodies hang off the index as a group, in bucket order. Their drug rows
+   indent from here, not from the grid. */
+.st-lib__bodies {
+  padding-bottom: var(--st-s2);
+}
+
+/* --- check footer --------------------------------------------------------- */
+
+/* flex: none and a clamped note, because this used to run off the bottom of
+   the viewport and take the only run-a-check control with it. */
+.st-check {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--st-s2);
+  min-height: 140px;
+  padding: var(--st-s3);
+  border-top: 1px solid var(--st-line);
+  background: var(--st-chrome-1);
+}
+
+.st-check__note {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  margin: 0;
+  font-size: var(--st-t-small);
+  line-height: var(--st-lh);
+  color: var(--st-on-chrome-faint);
+}

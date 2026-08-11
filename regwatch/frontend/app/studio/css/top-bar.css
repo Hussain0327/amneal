@@ -1,0 +1,116 @@
+/* ---------------------------------------------------------------------------
+   Top bar: identity, breadcrumb, save state
+   ----------------------------------------------------------------------------
+   The bar is chrome-0, one shade darker than the tree and panel it sits above,
+   so it reads as the frame rather than another working surface. Everything in
+   it is sans and sentence case except the mark: mono/uppercase is reserved for
+   identifiers, and "RW" is the one badge in this bar, not a label.
+   ------------------------------------------------------------------------ */
+
+.st-top {
+  flex: none;
+  height: var(--st-top-h);
+  display: flex;
+  align-items: center;
+  gap: var(--st-s3);
+  padding: 0 var(--st-s3);
+  background: var(--st-chrome-0);
+  border-bottom: 1px solid var(--st-line);
+}
+
+.st-top__mark {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: var(--st-r-sm);
+  background: var(--st-gold-fill);
+  color: var(--st-ink);
+  font-family: var(--st-face-id);
+  font-size: var(--st-t-micro);
+  font-weight: 700;
+}
+
+/* The hairline lives on the name itself (a ::after) rather than as a sibling
+   element, so the divider tracks the title's baseline without a DOM node that
+   carries no meaning of its own. */
+.st-top__name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--st-s3);
+  font-size: var(--st-t-base);
+  font-weight: 600;
+  line-height: 1;
+  color: var(--st-on-chrome);
+  white-space: nowrap;
+}
+
+.st-top__name::after {
+  content: "";
+  width: 1px;
+  height: var(--st-s4);
+  background: var(--st-line);
+}
+
+.st-top__crumb {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--st-t-small);
+  color: var(--st-on-chrome-faint);
+}
+
+/* The filename is prose, not a code -- it is the one thing in the bar that
+   has to be findable at a glance, so it gets weight instead of mono. */
+.st-top__crumb b {
+  font-weight: 600;
+  color: var(--st-on-chrome);
+}
+
+.st-top__state {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--st-s2);
+  font-size: var(--st-t-small);
+  color: var(--st-on-chrome-soft);
+}
+
+.st-top__dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: var(--st-r-pill);
+}
+
+.st-top__dot--saved {
+  background: var(--st-clear);
+}
+
+.st-top__dot--stale {
+  background: var(--st-gold);
+}
+
+.st-top__dot--readonly {
+  background: var(--st-on-chrome-dim);
+}
+
+/* The tree is in flow on desktop, so its toggle only exists once the tree
+   becomes a slide-over. The compound selector out-specifies .st-icon-btn's
+   own display:grid regardless of build-time ordering. */
+.st-top .st-top__menu {
+  display: none;
+}
+
+@media (max-width: 960px) {
+  .st-top .st-top__menu {
+    display: grid;
+  }
+}
+
+.st-top__exit {
+  flex: none;
+}

@@ -1,0 +1,201 @@
+/* ---------------------------------------------------------------------------
+   THE SIGNATURE -- compliance spine, as a closure gauge
+   ---------------------------------------------------------------------------
+   The structural change: the ticks were given something to be ON. Three 4px
+   marks floating in an empty 22px column read as rendering debris, not as a
+   minimap, so the column is now a continuous rail with beads on it and a window
+   marking where the reader is standing.
+
+   Severity is weight. Disposition is size AND hue, never hue alone: a mark that
+   changed only its colour dies in greyscale, and one that only faded lands under
+   the 3:1 a non-text indicator owes (WCAG 1.4.11).
+
+   The spine takes --st-canvas rather than a surface of its own. It is a ruler
+   drawn on the desk beside the page, not a fourth panel competing with the tree.
+   ------------------------------------------------------------------------ */
+
+.st-spine {
+  position: relative;
+  flex: none;
+  width: var(--st-spine-w);
+  background: var(--st-canvas);
+  overflow: hidden;
+}
+
+/* The rail. It runs the whole scrollable extent because that is the axis the
+   ticks are measured against; inset it and every mark would sit off its own
+   measure at the ends of the document. */
+.st-spine::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: var(--st-r-pill);
+  background: var(--st-line-strong);
+}
+
+/* The seal. Granted only by isSealed(): every actionable finding closed by an
+   actual fix. A document that was argued with rather than corrected never wears
+   it. Gold reads 9.1:1 here, so the thread that had to be dulled to --st-gold-ink
+   on parchment can finally be the payoff it was always meant to be. */
+.st-spine--clear::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  transform: translateX(-50%);
+  border-radius: var(--st-r-pill);
+  background: linear-gradient(180deg, transparent, var(--st-gold) 18%, var(--st-gold) 82%, transparent);
+}
+
+/* Where the reader is. A tenth of the room's own text colour: enough to locate
+   yourself against the rail, not enough to compete with a mark for attention.
+   The floor stops a 200-page document from rendering it as a 2px sliver. */
+.st-spine__window {
+  position: absolute;
+  left: var(--st-s1);
+  right: var(--st-s1);
+  z-index: 0;
+  min-height: var(--st-s4);
+  border-radius: var(--st-r-pill);
+  background: var(--st-chrome-2);
+  box-shadow: inset 0 0 0 1px var(--st-line);
+  pointer-events: none;
+}
+
+/* A 24px hit box (WCAG 2.5.8) around a mark that stays as fine as it looks:
+   the button is the target, the ::before is the drawing. */
+.st-spine__tick {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
+.st-spine__tick::before {
+  content: "";
+  display: block;
+  width: 7px;
+  height: 12px;
+  border-radius: var(--st-r-xs);
+  transition:
+    width var(--st-dur) var(--st-ease),
+    height var(--st-dur) var(--st-ease),
+    background var(--st-dur) var(--st-ease);
+}
+
+/* Weight is the whole severity scale: a blocking finding outsizes a major one,
+   and a note is a chip on the rail you have to go looking for. One problem hue,
+   varied by fill and size -- never a rainbow. */
+.st-spine__tick--critical::before {
+  height: 16px;
+  background: var(--st-flag);
+}
+
+.st-spine__tick--major::before {
+  height: 12px;
+  background: var(--st-flag);
+}
+
+.st-spine__tick--minor::before {
+  height: 12px;
+  background: var(--st-flag-wash);
+  box-shadow: inset 0 0 0 1px var(--st-flag);
+}
+
+.st-spine__tick--info::before {
+  height: 8px;
+  background: var(--st-on-chrome-dim);
+}
+
+/* Edited under, nothing recorded yet: the claim is suspended, so the mark keeps
+   its full height and loses its fill. Still owed a judgement. */
+.st-spine__tick.is-stale::before {
+  height: 12px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--st-on-chrome-faint);
+}
+
+/* Recorded. Half the height and the settled hue, two channels rather than one,
+   because either alone would be invisible to a reader who cannot use it. */
+.st-spine__tick.is-recorded::before {
+  height: 6px;
+  background: var(--st-clear);
+  box-shadow: none;
+}
+
+/* Closed by argument rather than by a change to the text. The difference between
+   "we fixed it" and "we explained it" is a shape, not a shade. */
+.st-spine__tick.is-argued::before {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--st-clear);
+}
+
+/* Recorded fixed, and the checker still reports it. It reads as open again,
+   because it is, and it keeps the settled ring it was wrongly given. */
+.st-spine__tick.is-contested::before {
+  height: 12px;
+  background: var(--st-flag);
+  box-shadow: 0 0 0 1px var(--st-clear);
+}
+
+/* Gold is the analyst's own hand everywhere else in the studio. Here it is where
+   their attention currently is, which is why it takes the width as well as the
+   colour: the active mark has to be findable in peripheral vision. */
+.st-spine__tick.is-active::before {
+  width: 11px;
+  background: var(--st-gold);
+  box-shadow: none;
+}
+
+/* Outline rather than box-shadow, so hovering a minor or a contested tick adds
+   to its ring instead of replacing the one that carries its state. */
+.st-spine__tick:hover::before {
+  outline: 1px solid var(--st-gold);
+  outline-offset: 1px;
+}
+
+/* The scan: light running the rail while a check is in flight. The one
+   orchestrated moment on the surface; everything else is a 180ms fade.
+
+   The resting frame is a lit rail rather than a blank one on purpose. The global
+   reduced-motion rule stops the sweep by collapsing its duration, and an element
+   that existed only inside its own keyframes would then be invisible in exactly
+   the state it is there to report. */
+.st-spine__scan {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  width: 3px;
+  transform: translateX(-50%);
+  border-radius: var(--st-r-pill);
+  background-color: var(--st-gold-wash);
+  background-image: linear-gradient(180deg, transparent, var(--st-gold), transparent);
+  background-repeat: no-repeat;
+  background-size: 100% 38%;
+  background-position: 0 50%;
+  animation: st-spine-scan 1.15s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@keyframes st-spine-scan {
+  from {
+    background-position: 0 -100%;
+  }
+  to {
+    background-position: 0 200%;
+  }
+}

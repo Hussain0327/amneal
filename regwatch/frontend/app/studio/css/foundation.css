@@ -1,0 +1,762 @@
+/* ============================================================================
+   COMPLIANCE STUDIO -- one surface with the rest of the app
+   ----------------------------------------------------------------------------
+   FOUNDATION: tokens, base, shell layout, shared primitives.
+   Region stylesheets are imported after this one; import order is cascade order.
+
+   THE THESIS
+   ----------
+   The studio is 01 Ask with a document in it. Same parchment, same hairlines,
+   same type, same voice -- so clicking S in the spine rail moves you to another
+   room in one building, not to another building. Only one thing here has no
+   counterpart on Ask, and it gets the only local deviation: the artefact under
+   review. The desk beneath it drops to the deepest parchment, and the sheet
+   lifts off it with a contact shadow. Everything else is Ask's surface.
+
+   WHAT WAS ACTUALLY WRONG BEFORE
+   ------------------------------
+   Not the palette. The previous build carried 26 distinct font-size values
+   across 73 declarations -- 22 of them jammed between 0.55rem and 1.06rem --
+   and 11 border radii. That is not a system, it is 73 local decisions, and it
+   is why the surface read as mush no matter what colours were in it. This file
+   has 7 type steps, 4 radii, 7 spacing steps, and no region may introduce a
+   value outside them.
+
+   The structural defects went with it: filenames that truncated in the tree,
+   the repository-wide run set rotated 90 degrees in a 48px rail, a footer
+   paragraph that ran off the bottom of the viewport, and eighteen equally
+   weighted buttons in a 376px findings column.
+
+   MEASURED CONTRAST (WCAG 2.1)
+   ----------------------------
+   Computed by scratch/contrast.mjs, not eyeballed. Each colour is reported
+   against the worst ground it actually lands on.
+
+     on-chrome        #16213a on #faf6ec   14.7:1   body text, headings
+     on-chrome-soft   #283450 on #faf6ec   11.5:1   secondary text
+     on-chrome-faint  #5f6478 on #efe7d3    4.8:1   metadata           (AA)
+     on-chrome-dim    #8f7b57 on #efe7d3    3.3:1   NON-TEXT ONLY
+     line-strong      #8f7b57 on #efe7d3    3.3:1   control boundaries (1.4.11)
+     gold             #8a5b00 on #faf6ec    5.5:1   accent as text or mark
+     ink on gold-fill #16213a on #f5b400    8.7:1   the primary button
+     flag             #7a2e2e on #faf6ec    8.7:1   defect
+     clear            #35704a on #faf6ec    5.5:1   settled
+     paper vs canvas  #fffdf8 on #efe7d3    1.2:1   -- SEE BELOW
+     ink on paper     #16213a on #fffdf8   15.0:1   document body text
+
+   THE 1.2:1 PROBLEM, AND WHAT CARRIES THE PAGE INSTEAD
+   ---------------------------------------------------
+   Parchment on parchment is 1.21:1. That single number is why the old build's
+   "five-step surface ramp" could never make the page an object: there is no
+   fill contrast available inside this family, so fill cannot be the mechanism.
+   Three things carry it instead, and all three have to be present:
+     1. the contact shadow -- a tight, dark 3px band directly under the sheet
+     2. the --st-paper-edge hairline, drawn as the shadow's first layer
+     3. the blotter edge -- .st-main darkens at its OUTER edges only, well
+        clear of the sheet, so the desk never rises to meet the page
+   Remove any one of them and the page goes flat again.
+
+   GOLD IS TWO TOKENS
+   ------------------
+   #f5b400 is 1.5:1 on parchment and fails as text AND as an indicator, which
+   globals.css and the previous build both said. So the split:
+     --st-gold       #8a5b00   marking something: text, icons, indicators
+     --st-gold-fill  #f5b400   painting something: large fills, dark text on top
+   Reaching for the wrong one is a contrast bug, so the names say which is which.
+
+   FOCUS
+   -----
+   Navy, everywhere. Chrome and page are the same material here, so there is no
+   second ground to answer, and gold would fail on both. globals.css made this
+   call for this reason.
+
+   COLOUR VOCABULARY (held strictly, unchanged since the first build)
+   -----------------------------------------------------------------
+     gold, bounded    grounded / sourced -- a citation chip, mono, hairline edge
+     gold, unbounded  the analyst's own hand -- a marker wash, a tracked change
+     flag / oxblood   a defect; weight encodes severity (solid > dashed)
+     soft ink         a note, nothing to fix
+   Severity is never a rainbow. One problem hue, varied by fill and weight.
+
+   Everything is scoped under .studio so the shell outside cannot be touched.
+   ========================================================================== */
+
+.studio {
+  /* --- chrome: Ask's parchment, verbatim ----------------------------------- */
+  /* Sampled from the running 01 Ask surface, not transcribed from memory:
+     Ask's ground computes to #faf6ec with #e4d9bf hairlines. The studio's
+     chrome sits on exactly that, so landing here from the rail is continuous. */
+  --st-chrome-1: #faf6ec; /* --paper:   tree and panel -- Ask's own ground */
+  --st-chrome-0: #faf6ec; /* the frame: top bar and rail. Ask sets its rail
+     TRANSPARENT over the body, so on Ask the frame and the ground are literally
+     the same surface and only hairlines divide them. Matched exactly. */
+  --st-chrome-2: #fffdf8; /* row hover: on parchment, raised means brighter */
+  --st-chrome-3: #fcefca; /* --gold-wash: the selected row */
+  --st-raise: #fffdf8; /* cards, chips, fields, the floating toolbar */
+  /* The one region that does NOT match Ask, and deliberately. Ask has no
+     artefact to lift; this surface does. The desk goes to the deepest parchment
+     so the page has something to sit on. */
+  --st-canvas: #efe7d3; /* --paper-3 */
+
+  --st-line: #e4d9bf; /* --edge: DIVIDER hairline, decorative */
+  --st-line-soft: #efe7d3;
+  /* One of the two derived values in this file; --st-on-chrome-faint is the
+     other, and both exist for the same reason. A divider may be faint, but the
+     edge of a text field or an outlined button IS what identifies the control,
+     and WCAG 1.4.11 owes that 3:1. The parchment family has no member between
+     --edge (1.35:1, decorative) and --ink-soft (4.8:1, text), so there is
+     nothing to use verbatim. 3.3:1 against every ground it lands on, and it
+     stays inside the family's hue. */
+  --st-line-strong: #8f7b57;
+
+  --st-on-chrome: #16213a; /* --ink        14.7:1 */
+  --st-on-chrome-soft: #283450; /* --ink-2      11.5:1 */
+  --st-on-chrome-faint: #5f6478; /* 4.8:1 on the DESK, the worst ground it lands
+     on (the format bar sits there). --ink-soft #686d80 is the app value and was
+     the obvious pick, but it is 4.17:1 there and 4.49:1 on a selected row. */
+  --st-on-chrome-dim: #8f7b57; /* 3.3:1 -- NON-TEXT ONLY */
+
+  /* --- accents ------------------------------------------------------------- */
+  /* On cream, gold is the trap: #f5b400 is 1.5:1 against parchment and fails as
+     both text and indicator -- globals.css and the previous studio build both
+     said so. So --st-gold IS the ink-weight gold (5.5:1) and is safe anywhere,
+     and the saturated gold is a separate token licensed for LARGE FILLS ONLY,
+     with dark text on top. Reach for --st-gold-fill and you are painting a
+     surface; reach for --st-gold and you are marking something. */
+  --st-gold: #8a5b00; /* --gold-ink:  text, icons, indicators   5.5:1 */
+  --st-gold-fill: #f5b400; /* --gold:      fills only, dark text on top */
+  --st-gold-deep: #c98a0c;
+  --st-gold-wash: #fcefca; /* --gold-wash */
+  --st-flag: #7a2e2e; /* --oxblood:   8.7:1, safe as text AND as fill */
+  --st-flag-wash: #f3e3df; /* --oxblood-wash */
+  --st-clear: #35704a; /* 5.5:1, safe as text and as fill */
+  --st-clear-wash: rgba(53, 112, 74, 0.1);
+
+  /* --- the page: warm, and the only bright object on screen ---------------- */
+  --st-paper: #fffdf8;
+  --st-paper-2: #f4eede;
+  --st-paper-3: #efe7d3;
+  --st-paper-edge: #e5dbc3;
+  --st-ink: #16213a;
+  --st-ink-2: #283450;
+  --st-ink-soft: #686d80; /* 4.8:1 on paper */
+  --st-ink-faint: #6b6859;
+  /* Accents ON PAPER keep their original values: they were chosen against cream
+     and still have to pass against cream. Only the on-chrome siblings are new. */
+  --st-gold-ink: #8a5b00;
+  --st-gold-paper-wash: #fcefca;
+  --st-oxblood: #7a2e2e;
+  --st-oxblood-wash: #f3e3df;
+  --st-green-ink: #35704a;
+
+  /* --- focus --------------------------------------------------------------- */
+  /* Navy, both grounds. Chrome and page are the same material now, so there is
+     no second ground to answer -- and gold would fail here anyway (1.5:1).
+     globals.css made this exact call for this exact reason. */
+  --st-focus-chrome: #16213a;
+  --st-focus-paper: #16213a;
+
+  /* --- type: 7 steps, replacing 26 ---------------------------------------- */
+  --st-t-micro: 0.625rem; /* 10px -- mono identifiers, badges, eyebrows */
+  --st-t-small: 0.75rem; /* 12px -- meta lines, secondary labels */
+  --st-t-base: 0.8125rem; /* 13px -- ALL chrome UI: rows, buttons, body */
+  --st-t-mid: 0.9375rem; /* 15px -- panel titles, finding titles */
+  --st-t-doc: 1.0625rem; /* 17px -- document body serif */
+  --st-t-doch: 1.1875rem; /* 19px -- document headings */
+  --st-t-title: 1.6875rem; /* 27px -- document title */
+
+  --st-lh-tight: 1.25;
+  --st-lh: 1.45;
+  --st-lh-doc: 1.68;
+
+  /* Mono is for IDENTIFIERS ONLY -- document ids, ICH codes, versions, CTD
+     paths, severity labels. Not buttons, not status, not prose. When every
+     small thing is set in tracked uppercase mono, nothing is emphasised. */
+  --st-face-ui: var(--font-body), ui-sans-serif, system-ui, sans-serif;
+  --st-face-doc: var(--font-serif), Georgia, "Times New Roman", serif;
+  --st-face-id: var(--font-mono), ui-monospace, SFMono-Regular, monospace;
+
+  /* --- space: 7 steps ------------------------------------------------------ */
+  --st-s1: 0.25rem;
+  --st-s2: 0.5rem;
+  --st-s3: 0.75rem;
+  --st-s4: 1rem;
+  --st-s5: 1.5rem;
+  --st-s6: 2rem;
+  --st-s7: 3rem;
+
+  /* --- radius: 4 steps, replacing 11 -------------------------------------- */
+  --st-r-xs: 3px; /* the page itself -- paper barely rounds */
+  --st-r-sm: 5px; /* chips, fields, small controls */
+  --st-r-md: 9px; /* cards, buttons, panels */
+  --st-r-pill: 999px;
+
+  /* --- geometry ------------------------------------------------------------ */
+  --st-top-h: 52px;
+  --st-tree-w: 17.5rem;
+  --st-spine-w: 30px;
+  --st-panel-w: 24rem;
+  --st-rail-w: 56px;
+  --st-page-w: 46rem;
+
+  /* --- elevation: cast light, not grey ------------------------------------- */
+  /* Navy-tinted, never neutral black: a shadow on parchment is ink pooling, not
+     an absence of light. --shadow-soft / --shadow-lift from globals.css, plus
+     one the app does not have.
+
+     On navy the page separated from its ground by 17.8:1 and the shadow was
+     decoration. On parchment #fffdf8 against #efe7d3 is 1.21:1, so fill cannot
+     carry the separation and the shadow has to do the structural work instead.
+     Hence the CONTACT layer: a tight, comparatively dark 3px band directly
+     under the sheet. That is the line that says "lying on" rather than
+     "printed on", and it is the whole reason the page reads as an object. */
+  --st-shadow-panel: 0 2px 4px rgba(22, 33, 58, 0.06), 0 22px 48px -24px rgba(22, 33, 58, 0.34);
+  --st-shadow-pop: 0 1px 2px rgba(22, 33, 58, 0.08), 0 12px 28px -12px rgba(22, 33, 58, 0.3);
+  --st-shadow-page:
+    0 0 0 1px var(--st-paper-edge), 0 2px 3px -1px rgba(22, 33, 58, 0.16),
+    0 10px 20px -8px rgba(22, 33, 58, 0.18), 0 34px 60px -30px rgba(22, 33, 58, 0.38);
+
+  --st-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --st-dur: 0.18s;
+
+  /* The studio owns the viewport: it is a workbench, not a page. */
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--st-canvas);
+  color: var(--st-on-chrome);
+  font-family: var(--st-face-ui);
+  font-size: var(--st-t-base);
+  line-height: var(--st-lh);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.studio *,
+.studio *::before,
+.studio *::after {
+  box-sizing: border-box;
+}
+
+/* Paper grain, matching body::before in globals.css exactly -- same noise, same
+   multiply, same opacity. The studio covers the viewport, so it has to lay its
+   own texture down or it would be the one flat surface in an app made of paper.
+   One grain for the whole surface: the page does not lay a second one, or the
+   two would stack and the sheet would read dirtier than the desk. */
+.studio::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  opacity: 0.035;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Focus: gold on chrome (9.1:1), navy on paper (15:1). :where() keeps
+   specificity at zero so a component can position its own ring. */
+.studio :where(a, button, summary, input, textarea, [tabindex], [contenteditable]):focus-visible {
+  outline: 2px solid var(--st-focus-chrome);
+  outline-offset: 2px;
+  border-radius: var(--st-r-sm);
+}
+
+.studio
+  :where(.st-page)
+  :where(a, button, summary, input, textarea, [tabindex], [contenteditable]):focus-visible {
+  outline-color: var(--st-focus-paper);
+}
+
+/* --st-on-chrome-faint clears 4.5:1 on every surface except --st-chrome-3, the
+   gold-wash selected row, where it lands at 4.49. Rather than ask every
+   component to remember that, rebind the token inside anything selected:
+   "faint" resolves to "soft" there, and the contrast is correct by
+   construction. Selection is emphasis anyway, so the promotion costs nothing. */
+.studio :where(.is-active, [aria-current="true"], [aria-selected="true"]) {
+  --st-on-chrome-faint: var(--st-on-chrome-soft);
+}
+
+.studio__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------------------------------------------------------------------------
+   Shell
+   ------------------------------------------------------------------------ */
+
+.st-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  position: relative;
+}
+
+.st-main {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--st-canvas);
+}
+
+/* THE SIGNATURE: the blotter edge.
+   The page and its ground are 1.21:1 apart, so nothing about the fills makes
+   the sheet an object; the contact shadow does most of the work. This is the
+   rest of it, and it has to be pointed the right way round. The first attempt
+   lightened the desk toward the middle, which is exactly where the page sits --
+   it raised the ground to meet the sheet and cancelled the separation it was
+   meant to create. So the gradient only darkens the OUTER edges, well clear of
+   the page, and leaves the desk immediately around the sheet at full --paper-3.
+
+   That is also what the furniture actually does: a blotter is darkest at its
+   border and the record sits in the clear middle of it.
+
+   It sits on .st-main rather than the scroller so it stays put while the
+   document moves under it -- a desk does not scroll. One gradient, no
+   animation. Spend the boldness here and nowhere else. */
+.st-main::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    125% 95% at 50% 42%,
+    rgba(22, 33, 58, 0) 52%,
+    rgba(22, 33, 58, 0.055) 100%
+  );
+}
+
+.st-scroll {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: transparent;
+}
+
+.st-scrim {
+  display: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Primitives
+   ---------------------------------------------------------------------------
+   Shared by every component so a button is a button everywhere. Components own
+   their own namespace and may compose these, never redefine them.
+   ------------------------------------------------------------------------ */
+
+/* --- buttons -------------------------------------------------------------- */
+
+.st-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--st-s2);
+  height: 30px;
+  padding: 0 var(--st-s3);
+  border: 1px solid transparent;
+  border-radius: var(--st-r-sm);
+  background: transparent;
+  color: var(--st-on-chrome-soft);
+  font-family: var(--st-face-ui);
+  font-size: var(--st-t-base);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--st-dur) var(--st-ease),
+    color var(--st-dur) var(--st-ease),
+    border-color var(--st-dur) var(--st-ease);
+}
+
+.st-btn svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.st-btn:hover:not(:disabled) {
+  background: var(--st-chrome-2);
+  color: var(--st-on-chrome);
+}
+
+.st-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+/* The one saturated control in any given view. Gold on navy is 9.1:1, and the
+   ink text on gold is 8.7:1 -- it can carry the primary action honestly. */
+.st-btn--primary {
+  background: var(--st-gold-fill);
+  border-color: var(--st-gold-fill);
+  color: var(--st-ink);
+  font-weight: 600;
+}
+
+.st-btn--primary:hover:not(:disabled) {
+  background: var(--st-gold-deep);
+  border-color: var(--st-gold-deep);
+  color: var(--st-ink);
+}
+
+.st-btn--outline {
+  border-color: var(--st-line-strong);
+  color: var(--st-on-chrome-soft);
+}
+
+.st-btn--outline:hover:not(:disabled) {
+  border-color: var(--st-on-chrome-dim);
+  background: var(--st-chrome-2);
+  color: var(--st-on-chrome);
+}
+
+/* A text button. Used for the three dispositions that are not the expected one,
+   so the expected one can be the only filled control in the card. */
+.st-btn--quiet {
+  height: 26px;
+  padding: 0 var(--st-s2);
+  color: var(--st-on-chrome-faint);
+}
+
+.st-btn--quiet:hover:not(:disabled) {
+  background: var(--st-chrome-2);
+  color: var(--st-on-chrome);
+}
+
+.st-btn--lg {
+  height: 36px;
+  padding: 0 var(--st-s4);
+  font-size: var(--st-t-base);
+}
+
+.st-btn--block {
+  width: 100%;
+}
+
+.st-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: var(--st-r-sm);
+  background: transparent;
+  color: var(--st-on-chrome-faint);
+  cursor: pointer;
+  transition:
+    background var(--st-dur) var(--st-ease),
+    color var(--st-dur) var(--st-ease);
+}
+
+.st-icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.st-icon-btn:hover:not(:disabled) {
+  background: var(--st-chrome-2);
+  color: var(--st-on-chrome);
+}
+
+.st-icon-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+/* --- identifiers and labels ---------------------------------------------- */
+
+/* Mono, uppercase and tracked -- the ONE place that treatment is licensed,
+   because these really are codes: ICH Q3D(R2), CMC-DS-SPEC-0007, v5.0, CTD. */
+.st-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--st-line);
+  border-radius: var(--st-r-xs);
+  background: var(--st-raise);
+  color: var(--st-on-chrome-faint);
+  font-family: var(--st-face-id);
+  font-size: var(--st-t-micro);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.st-chip svg {
+  width: 10px;
+  height: 10px;
+  opacity: 0.8;
+}
+
+/* Severity: one problem hue varied by fill and weight, never a rainbow.
+   major = solid flag, minor = hairline flag, info = quiet ink. */
+.st-sev {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--st-r-xs);
+  font-family: var(--st-face-id);
+  font-size: var(--st-t-micro);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  line-height: 1.5;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.st-sev--major {
+  background: var(--st-flag);
+  border-color: var(--st-flag);
+  color: var(--st-paper);
+}
+
+.st-sev--minor {
+  background: var(--st-flag-wash);
+  border-color: rgba(226, 133, 124, 0.55);
+  color: var(--st-flag);
+}
+
+.st-sev--info {
+  background: transparent;
+  border-color: var(--st-line);
+  color: var(--st-on-chrome-faint);
+}
+
+/* Section eyebrow. Micro, tracked, faint -- it names a region and then gets
+   out of the way. */
+.st-eyebrow {
+  margin: 0;
+  font-family: var(--st-face-id);
+  font-size: var(--st-t-micro);
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--st-on-chrome-faint);
+}
+
+/* --- fields --------------------------------------------------------------- */
+
+/* Inputs recess into the surface rather than sitting on it: on a dark ground
+   the well is darker, which is also how the parchment shell reads its fields
+   (brightest fill on a mid surface) -- same idea, inverted ground. */
+.st-field {
+  display: flex;
+  align-items: center;
+  gap: var(--st-s2);
+  height: 32px;
+  padding: 0 var(--st-s2);
+  border: 1px solid var(--st-line-strong);
+  border-radius: var(--st-r-sm);
+  background: var(--st-raise);
+  color: var(--st-on-chrome);
+  transition: border-color var(--st-dur) var(--st-ease);
+}
+
+.st-field:focus-within {
+  border-color: var(--st-on-chrome-dim);
+}
+
+.st-field svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--st-on-chrome-dim);
+}
+
+.st-field input,
+.st-field textarea {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: var(--st-face-ui);
+  font-size: var(--st-t-base);
+  line-height: var(--st-lh);
+}
+
+.st-field input:focus,
+.st-field textarea:focus {
+  outline: none;
+}
+
+/* A placeholder is TEXT, so 1.4.3 applies and --st-on-chrome-dim (3.3:1, non-text
+   only) cannot carry it. This is the field label for an empty search box and for
+   the justification textarea, which is a required input on three dispositions. */
+.st-field ::placeholder {
+  color: var(--st-on-chrome-faint);
+  opacity: 1;
+}
+
+/* --- document status glyph ------------------------------------------------ */
+
+/* A shape and a colour; RepositoryTree gives screen readers the same state in
+   words. Solid = something to act on, ring = settled or not yet begun. */
+.st-glyph {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--st-r-pill);
+  box-shadow: inset 0 0 0 1.5px currentcolor;
+  color: var(--st-on-chrome-dim);
+}
+
+.st-glyph--findings {
+  background: var(--st-flag);
+  color: var(--st-flag);
+}
+
+/* Ring, not disc. The rule above says solid means "act on this", and clean is
+   settled -- drawing it solid made it a red/green pair 1.6:1 apart in greyscale,
+   which is the one distinction the whole rail exists to make. */
+.st-glyph--clean {
+  color: var(--st-clear);
+}
+
+.st-glyph--settled {
+  color: var(--st-clear);
+}
+
+.st-glyph--unchecked {
+  color: var(--st-on-chrome-dim);
+}
+
+.st-glyph--checking {
+  color: var(--st-gold);
+  animation: st-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes st-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Scrollbars: present but recessive
+   ------------------------------------------------------------------------ */
+
+.studio ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.studio ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.studio ::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: var(--st-r-pill);
+  background-clip: content-box;
+  background-color: var(--st-line);
+}
+
+.studio ::-webkit-scrollbar-thumb:hover {
+  background-color: var(--st-on-chrome-dim);
+}
+
+.studio * {
+  scrollbar-width: thin;
+  scrollbar-color: var(--st-line) transparent;
+}
+
+/* ---------------------------------------------------------------------------
+   Responsive. The studio is a desktop instrument; below the breakpoints it
+   degrades to the same surfaces reached one at a time rather than pretending a
+   three-pane workbench fits on a phone.
+   ------------------------------------------------------------------------ */
+
+@media (max-width: 1240px) {
+  .studio {
+    --st-panel-w: 21rem;
+    --st-tree-w: 15.5rem;
+    --st-page-w: 41rem;
+  }
+}
+
+@media (max-width: 960px) {
+  .st-tree {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 30;
+    width: 17.5rem;
+    transform: translateX(-100%);
+    transition: transform var(--st-dur) var(--st-ease);
+    box-shadow: var(--st-shadow-panel);
+  }
+
+  .st-tree.is-open {
+    transform: translateX(0);
+  }
+
+  .st-panel {
+    position: absolute;
+    right: var(--st-rail-w);
+    top: 0;
+    bottom: 0;
+    z-index: 30;
+    width: var(--st-panel-w);
+    transform: translateX(calc(100% + var(--st-rail-w)));
+    transition: transform var(--st-dur) var(--st-ease);
+    border-left: 1px solid var(--st-line);
+    box-shadow: var(--st-shadow-panel);
+  }
+
+  .st-panel.is-open {
+    width: var(--st-panel-w);
+    transform: translateX(0);
+  }
+
+  .st-spine {
+    display: none;
+  }
+
+  .st-scrim {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    background: rgba(22, 33, 58, 0.32);
+    border: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .studio *,
+  .studio *::before,
+  .studio *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

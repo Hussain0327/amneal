@@ -1,0 +1,138 @@
+/* ---------------------------------------------------------------------------
+   Assistant panel
+   ----------------------------------------------------------------------------
+   An answer is text, not chat furniture: the assistant's own turn sits flush
+   left with no bubble, and the room's ink carries it. Only the analyst's own
+   turn -- the one thing they typed -- gets a filled chip, right-aligned, so
+   the two voices in the transcript are told apart by shape rather than by a
+   colour each. Citations compose .st-chip in bounded gold, the house sign for
+   grounded and sourced; compose and send compose .st-field and .st-btn so a
+   text box and a primary button are the same controls everywhere else in the
+   room, just sized for this footer.
+   ------------------------------------------------------------------------ */
+
+.st-ctx {
+  margin: 0 0 var(--st-s3);
+  font-size: var(--st-t-small);
+  line-height: var(--st-lh);
+  color: var(--st-on-chrome-faint);
+}
+
+/* The document name here is a CTD-path filename, not a caption -- an
+   identifier wears the identifier face. */
+.st-ctx b {
+  font-family: var(--st-face-id);
+  font-weight: 500;
+  color: var(--st-on-chrome);
+}
+
+.st-msg {
+  margin-bottom: var(--st-s3);
+  color: var(--st-on-chrome);
+  font-size: var(--st-t-base);
+  line-height: var(--st-lh);
+}
+
+.st-msg--user {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.st-msg__user {
+  max-width: 85%;
+  padding: var(--st-s2) var(--st-s3);
+  border-radius: var(--st-r-md);
+  background: var(--st-chrome-2);
+  color: var(--st-on-chrome);
+}
+
+.st-msg__body {
+  white-space: pre-wrap;
+}
+
+/* Only matters once a reply carries more than one paragraph; the token is
+   named so a future multi-paragraph render does not have to invent a value. */
+.st-msg__body p {
+  margin: 0 0 var(--st-s2);
+}
+
+.st-msg__body p:last-child {
+  margin-bottom: 0;
+}
+
+/* The streaming cursor: its own keyframes so it never depends on, or fights
+   with, the glyph-checking pulse in foundation.css. Reduced motion is caught
+   globally there too. */
+.st-msg__caret {
+  display: inline-block;
+  width: 2px;
+  height: 0.85em;
+  margin-left: 1px;
+  vertical-align: -0.1em;
+  background: var(--st-gold);
+  animation: st-msg-caret-blink 1s steps(2) infinite;
+}
+
+@keyframes st-msg-caret-blink {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.st-msg__nosrc {
+  margin-top: var(--st-s2);
+  font-size: var(--st-t-small);
+  color: var(--st-on-chrome-faint);
+}
+
+/* Citation chips: bounded gold, composed from .st-chip in the TSX. An
+   unbounded gold wash would read as the analyst's own hand, not a source. */
+.st-src {
+  margin-top: var(--st-s2);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--st-s1);
+}
+
+.st-src__item {
+  border-color: var(--st-gold-deep);
+  color: var(--st-gold);
+}
+
+.st-foot-note {
+  margin: var(--st-s2) 0 0;
+  font-size: var(--st-t-small);
+  line-height: var(--st-lh);
+  color: var(--st-on-chrome-faint);
+}
+
+/* Composes .st-field: the recessed well, the border, the focus-within ring
+   and the textarea/placeholder rules all come from the primitive. This only
+   overrides what a growing multi-line composer needs that a single-line
+   field does not. */
+.st-compose {
+  height: auto;
+  min-height: 64px;
+  align-items: stretch;
+  padding: var(--st-s2) var(--st-s2) var(--st-s2) var(--st-s3);
+}
+
+.st-compose textarea {
+  padding: var(--st-s1) 0;
+  max-height: 7rem;
+  resize: none;
+}
+
+/* Composes .st-btn .st-btn--primary: fill, hover-brighten and disabled state
+   all come from the primitive. This is only the icon-button footprint. */
+.st-compose__send {
+  align-self: flex-end;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}

@@ -377,19 +377,22 @@ export function DocumentCanvas({
 
   return (
     <div className="st-scroll" ref={scrollRef}>
-      {doc.checkState === "stale" && (
-        <div className="st-page__stale" role="status">
-          <NoteIcon />
-          <span>
-            <b>Edited since the last check.</b> Findings below the edited text no longer describe
-            this document. Run the check again.
-          </span>
-        </div>
-      )}
-
       {/* Keyed on the document: block ids are only unique within one, and a
           stale innerHTML would otherwise survive a switch. */}
       <article className="st-page" key={doc.id}>
+        {/* The warning is about this document, so it belongs on it. Floated
+            above the page it read as one more strip of chrome, and the analyst
+            could scroll away from it while it still applied to what they read. */}
+        {doc.checkState === "stale" && (
+          <div className="st-page__stale" role="status">
+            <NoteIcon className="st-icon" />
+            <span>
+              <b>Edited since the last check.</b> Findings below the edited text no longer describe
+              this document. Run the check again.
+            </span>
+          </div>
+        )}
+
         {doc.blocks.map((block, i) => (
           <DocBlock
             key={block.id}
@@ -403,6 +406,14 @@ export function DocumentCanvas({
             onSelectFinding={onSelectFinding}
           />
         ))}
+
+        {/* A controlled document repeats its identity at the foot of every page,
+            because a page separated from its cover sheet is only traceable if it
+            names itself. */}
+        <footer className="st-foot">
+          <span>{doc.name}</span>
+          <span className="st-foot__v">v{doc.version}</span>
+        </footer>
       </article>
     </div>
   );
