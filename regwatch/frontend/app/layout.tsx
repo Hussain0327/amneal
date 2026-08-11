@@ -1,41 +1,85 @@
 import type { Metadata, Viewport } from "next";
-import { Fraunces, IBM_Plex_Mono, Public_Sans, Source_Serif_4, Yellowtail } from "next/font/google";
+import localFont from "next/font/local";
 
 import { AuthProvider } from "@/components/AuthProvider";
 import "./globals.css";
 
 // Editorial display serif — gravitas with warmth (page titles, pull quotes).
-const fraunces = Fraunces({
-  subsets: ["latin"],
+const fraunces = localFont({
+  src: [
+    {
+      path: "./fonts/fraunces/fraunces-latin-wght-normal.woff2",
+      weight: "100 900",
+      style: "normal",
+    },
+    {
+      path: "./fonts/fraunces/fraunces-latin-wght-italic.woff2",
+      weight: "100 900",
+      style: "italic",
+    },
+  ],
   variable: "--font-display",
-  weight: ["400", "500", "600", "900"],
-  style: ["normal", "italic"],
+  display: "swap",
 });
 // Public Sans — the US government design-system typeface. The right body voice
 // for an FDA-facing tool, and pointedly not Inter.
-const publicSans = Public_Sans({
-  subsets: ["latin"],
+const publicSans = localFont({
+  src: "./fonts/public-sans/public-sans-latin-wght-normal.woff2",
   variable: "--font-body",
-  weight: ["300", "400", "500", "600", "700"],
+  weight: "100 900",
+  style: "normal",
+  display: "swap",
 });
 // Monospace for the codes this domain runs on: PSG / application / NDC numbers.
-const plexMono = IBM_Plex_Mono({
-  subsets: ["latin"],
+const plexMono = localFont({
+  src: [
+    {
+      path: "./fonts/ibm-plex-mono/ibm-plex-mono-latin-400-normal.woff2",
+      weight: "400",
+      style: "normal",
+    },
+    {
+      path: "./fonts/ibm-plex-mono/ibm-plex-mono-latin-500-normal.woff2",
+      weight: "500",
+      style: "normal",
+    },
+    {
+      path: "./fonts/ibm-plex-mono/ibm-plex-mono-latin-600-normal.woff2",
+      weight: "600",
+      style: "normal",
+    },
+  ],
   variable: "--font-mono",
-  weight: ["400", "500", "600"],
+  display: "swap",
 });
 // Text serif for the document body in the Compliance Studio. The artifact under
 // review is a controlled printed record; setting it in a workhorse text serif
 // keeps it visually distinct from the app chrome around it. Fraunces is a
 // display face and does not hold up at 1rem across a full page of prose.
-const sourceSerif = Source_Serif_4({
-  subsets: ["latin"],
+const sourceSerif = localFont({
+  src: [
+    {
+      path: "./fonts/source-serif-4/source-serif-4-latin-wght-normal.woff2",
+      weight: "200 900",
+      style: "normal",
+    },
+    {
+      path: "./fonts/source-serif-4/source-serif-4-latin-wght-italic.woff2",
+      weight: "200 900",
+      style: "italic",
+    },
+  ],
   variable: "--font-serif",
-  weight: ["400", "600"],
-  style: ["normal", "italic"],
+  display: "swap",
 });
 // The Amneal brush wordmark, kept as the brand mark.
-const yellowtail = Yellowtail({ subsets: ["latin"], variable: "--font-script", weight: "400" });
+const yellowtail = localFont({
+  src: "./fonts/yellowtail/yellowtail-latin-400-normal.woff2",
+  variable: "--font-script",
+  weight: "400",
+  style: "normal",
+  display: "swap",
+});
 
 export const metadata: Metadata = {
   title: "Amneal REGWATCH",
