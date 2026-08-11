@@ -3,19 +3,56 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import StudioPage from "@/app/studio/page";
-import type { PsgDocumentContent, PsgLibraryDoc } from "@/lib/api";
+import type {
+  PsgDocumentContent,
+  PsgLibraryDoc,
+  PsgRequirementsResponse,
+} from "@/lib/api";
 
 // The page's only real-network imports: the reference-library list and one
 // PSG's text. Runtime closures (the WatchPage pattern) so the hoisted factory
 // never dereferences the mocks before this module body runs.
 const fetchPsgLibraryMock = vi.fn<() => Promise<PsgLibraryDoc[]>>();
 const fetchPsgContentMock = vi.fn<(id: number) => Promise<PsgDocumentContent>>();
+const fetchPsgRequirementsMock =
+  vi.fn<(id: number) => Promise<PsgRequirementsResponse>>();
+const askQueryMock = vi.fn<(q: string, f?: unknown) => Promise<QueryAnswer>>();
 vi.mock("@/lib/api", () => ({
   fetchPsgLibrary: () => fetchPsgLibraryMock(),
   fetchPsgContent: (id: number) => fetchPsgContentMock(id),
+  fetchPsgRequirements: (id: number) => fetchPsgRequirementsMock(id),
+  askQuery: (q: string, f?: unknown) => askQueryMock(q, f),
   psgPdfPath: (id: number) => `/api/psg/documents/${id}/pdf`,
   psgDocxPath: (id: number) => `/api/psg/documents/${id}/docx`,
 }));
+
+type QueryAnswer = Awaited<ReturnType<typeof import("@/lib/api").askQuery>>;
+
+function psgRequirements(
+  over: Partial<PsgRequirementsResponse> = {},
+): PsgRequirementsResponse {
+  return {
+    id: 12,
+    extracted: true,
+    requirements: [
+      {
+        key: "study_type",
+        label: "Recommended study",
+        value: "Bioequivalence",
+        page: 1,
+        quote: "Recommended Studies:",
+      },
+      {
+        key: "study_design",
+        label: "Study design",
+        value: "Three in vitro studies",
+        page: 2,
+        quote: "Three in vitro bioequivalence studies",
+      },
+    ],
+    ...over,
+  };
+}
 
 function psgContent(over: Partial<PsgDocumentContent> = {}): PsgDocumentContent {
   return {
@@ -607,8 +644,10 @@ describe("Reference library", () => {
     render(<StudioPage />);
 
     expect(
-      await screen.findByRole("heading", { name: /Reference library - 3 PSGs/ }),
+      await screen.findByRole("heading", { name: /Reference library/ }),
     ).toBeInTheDocument();
+    // Same shape as the repository header: label, then a count chip.
+    expect(screen.getByText("3 PSGs")).toBeInTheDocument();
     // Letter buckets, collapsed by default, carrying their doc counts.
     const bucketA = await screen.findByRole("button", { name: /^A - / });
     expect(bucketA).toHaveAttribute("aria-expanded", "false");
@@ -625,7 +664,7 @@ describe("Reference library", () => {
     expect(screen.getByText("7 docs")).toBeInTheDocument();
   });
 
-  it("opens a PSG as a read-only document with the chrome hidden", async () => {
+  it("opens a PSG as a read-only document with the same chrome a draft gets", async () => {
     await openAlbuterol();
 
     // The PSG's own text, on the same canvas a working document uses.
@@ -639,17 +678,84 @@ describe("Reference library", () => {
     // It carries FDA's date, never an invented internal version number.
     expect(screen.getByText("PSG_020503 Albuterol Sulfate.docx")).toBeInTheDocument();
     expect(document.querySelector(".st-foot__v")?.textContent).toBe("2024-05-01");
-    // The compliance chrome describes the draft, so beside a PSG it is hidden.
-    expect(screen.queryByRole("group", { name: "Compliance spine" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /^Compliance results/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Tracked changes" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Check this document" })).toBeDisabled();
-    expect(screen.getByText(/Compliance checks run on working documents/)).toBeInTheDocument();
+    // The chrome a working document gets, a PSG gets: rail, panels, check.
+    expect(screen.getByRole("button", { name: /^Compliance results/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check this document" })).toBeEnabled();
+    expect(
+      screen.getByText(/Reads what this guidance requires of an application/),
+    ).toBeInTheDocument();
+    // The repository-wide sweep still belongs to the working documents.
+    expect(screen.getByRole("button", { name: /^Check all/ })).toBeDisabled();
     const link = screen.getByRole("link", { name: "Open on fda.gov" });
     expect(link).toHaveAttribute(
       "href",
       "https://www.accessdata.fda.gov/drugsatfda_docs/psg/PSG_020503.pdf",
     );
+  });
+
+  it("checks a PSG against what the guidance actually requires", async () => {
+    fetchPsgRequirementsMock.mockResolvedValue(psgRequirements());
+    await openAlbuterol();
+
+    await userEvent.click(screen.getByRole("button", { name: "Check this document" }));
+
+    // Real extracted requirements, anchored to the FDA words they came from.
+    expect(await screen.findByText("Recommended study")).toBeInTheDocument();
+    expect(screen.getByText("Study design")).toBeInTheDocument();
+    const marks = [...document.querySelectorAll("[data-finding-id]")].map(
+      (el) => el.textContent,
+    );
+    expect(marks).toContain("Recommended Studies:");
+    expect(marks).toContain("Three in vitro bioequivalence studies");
+    expect(fetchPsgRequirementsMock).toHaveBeenCalledWith(12);
+  });
+
+  it("drops a requirement whose quote is not in the rendered text", async () => {
+    fetchPsgRequirementsMock.mockResolvedValue(
+      psgRequirements({
+        requirements: [
+          {
+            key: "dissolution",
+            label: "Dissolution test",
+            value: "USP <711>",
+            page: 3,
+            quote: "a sentence this document does not contain",
+          },
+        ],
+      }),
+    );
+    await openAlbuterol();
+    await userEvent.click(screen.getByRole("button", { name: "Check this document" }));
+
+    // Anchoring it to a guess would highlight the wrong sentence of an FDA
+    // guidance, so it is dropped rather than shown.
+    expect(
+      await screen.findByRole("button", { name: /^Compliance results/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Dissolution test")).not.toBeInTheDocument();
+  });
+
+  it("answers questions about a PSG from the real guidance service", async () => {
+    askQueryMock.mockResolvedValue({
+      answer: "A waiver may be requested under 21 CFR 320.22(b)(1).",
+      citations: [{ short_name: "Albuterol Sulfate", page: 2 }],
+    } as QueryAnswer);
+    await openAlbuterol();
+
+    await userEvent.click(screen.getByRole("button", { name: /^Ask/ }));
+    await userEvent.type(
+      screen.getByRole("textbox", { name: /Ask about this document/i }),
+      "What study is recommended?",
+    );
+    await userEvent.keyboard("{Enter}");
+
+    expect(await screen.findByText(/A waiver may be requested/)).toBeInTheDocument();
+    // Scoped to this PSG's drug, so the answer cannot come from another one.
+    expect(askQueryMock).toHaveBeenCalledWith(
+      "What study is recommended?",
+      expect.objectContaining({ normalized_name: "albuterol sulfate" }),
+    );
+    expect(screen.getByText("Albuterol Sulfate - page 2")).toBeInTheDocument();
   });
 
   it("offers the PSG as a .docx download from the same-origin path", async () => {
@@ -733,22 +839,37 @@ describe("Reference library", () => {
     expect(document.querySelector("mark.st-mark--highlight")).not.toBeNull();
   });
 
-  it("keeps the assistant actions off a reference PSG and highlights it in place", async () => {
+  it("offers every selection action on a reference PSG", async () => {
     await openAlbuterol();
 
     selectText("Recommended Studies:");
-    expect(await screen.findByRole("toolbar", { name: /selected text/ })).toBeInTheDocument();
-    // Withheld: this assistant answers about the working repository, and
-    // pointing it at FDA's guidance would invent answers about a document it
-    // was never given.
-    expect(screen.queryByRole("button", { name: "Explain" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Summarize" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Ask" })).not.toBeInTheDocument();
+    const toolbar = await screen.findByRole("toolbar", { name: /selected text/ });
+    // Scoped to the toolbar: "Check" also names the footer's check button.
+    for (const action of ["Highlight", "Summarize", "Explain", "Check", "Ask"]) {
+      expect(within(toolbar).getByRole("button", { name: action })).toBeInTheDocument();
+    }
 
-    // Highlighting is local to the text, so it stays -- and lands on the PSG.
+    // Highlighting is local to the text, and lands on the PSG.
     await userEvent.click(screen.getByRole("button", { name: /Highlight/ }));
     const mark = document.querySelector("mark.st-mark--highlight");
     expect(mark?.textContent).toBe("Recommended Studies:");
+  });
+
+  it("sends a selection action on a PSG to the real guidance service", async () => {
+    askQueryMock.mockResolvedValue({
+      answer: "Three in vitro studies are recommended.",
+      citations: [],
+    } as unknown as QueryAnswer);
+    await openAlbuterol();
+
+    selectText("Recommended Studies:");
+    await userEvent.click(await screen.findByRole("button", { name: /Explain/ }));
+
+    expect(await screen.findByText(/Three in vitro studies are recommended/)).toBeInTheDocument();
+    expect(askQueryMock).toHaveBeenCalledWith(
+      expect.stringContaining("Recommended Studies:"),
+      expect.objectContaining({ normalized_name: "albuterol sulfate" }),
+    );
   });
 
   it("ignores a slow reply for a PSG the analyst has left", async () => {

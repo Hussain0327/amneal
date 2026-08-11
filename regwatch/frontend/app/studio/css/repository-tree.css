@@ -299,3 +299,11 @@
   line-height: var(--st-lh);
   color: var(--st-on-chrome-faint);
 }
+
+/* The reference-library heading carries a count chip, so it lays out as a row
+   instead of as a line of text (the repository header above it does the same). */
+.st-tree__section--count {
+  display: flex;
+  align-items: center;
+  gap: var(--st-s2);
+}

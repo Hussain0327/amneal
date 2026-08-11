@@ -25,6 +25,7 @@ Endpoints (per spec §10.16):
     HEAD   /psg/documents/{id}/pdf - availability probe, DB row only (auth)
     GET    /psg/documents/{id}/content - one PSG as studio blocks (auth)
     GET    /psg/documents/{id}/docx - the same PSG as a Word download (auth)
+    GET    /psg/documents/{id}/requirements - what this PSG requires (auth)
     GET    /health         — liveness + component diagnostics (open)
     GET    /ready          - readiness: db + vector store + LLM constructable (open)
     GET    /metrics        - Prometheus counters from the query_log audit
@@ -120,6 +121,7 @@ from regwatch.store.queries import (
     fetch_citation_recency,
     fetch_psg_document_detail,
     fetch_psg_pdf_source,
+    fetch_psg_requirements,
     list_psg_documents,
 )
 from regwatch.store.vector_store import collection_size, document_chunks
@@ -2328,6 +2330,64 @@ def psg_document_content(doc_id: int) -> dict[str, Any]:
         "truncated": body.truncated,
         "blocks": [
             {"id": b.id, "type": b.type, "text": b.text, "page": b.page} for b in body.blocks
+        ],
+    }
+
+
+class PsgRequirementOut(BaseModel):
+    """One extracted requirement, with the FDA words it was taken from."""
+
+    key: str
+    label: str
+    value: str
+    page: int | None
+    quote: str | None
+
+
+class PsgRequirementsResponse(BaseModel):
+    """What one PSG requires of an ANDA, as ingest extracted it.
+
+    ``extracted`` is False when no extraction row exists for this version
+    (the ``--no-extract`` ingest path). The client must say so rather than
+    render an empty list as "this guidance requires nothing" -- the two are
+    opposite claims.
+    """
+
+    id: int
+    extracted: bool
+    requirements: list[PsgRequirementOut]
+
+
+@protected.get(
+    "/psg/documents/{doc_id}/requirements",
+    response_model=PsgRequirementsResponse,
+)
+def psg_document_requirements(doc_id: int) -> dict[str, Any]:
+    """The BE requirements ingest extracted from this PSG's current version.
+
+    These are not compliance findings about the document: a PSG has no
+    defects to report. They are what the guidance asks an applicant to do,
+    each carrying the page and the verbatim quote it came from, so the studio
+    can anchor them in the rendered text instead of restating them loose.
+    """
+    detail = fetch_psg_document_detail(doc_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="psg document not found")
+    if detail.current_version_id is None:
+        raise HTTPException(status_code=404, detail="psg document has no stored version")
+    rows = fetch_psg_requirements(detail.id, detail.current_version_id)
+    return {
+        "id": detail.id,
+        "extracted": bool(rows),
+        "requirements": [
+            {
+                "key": r.key,
+                "label": r.label,
+                "value": r.value,
+                "page": r.page,
+                "quote": r.quote,
+            }
+            for r in rows
         ],
     }
 
