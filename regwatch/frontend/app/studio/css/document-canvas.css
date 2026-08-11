@@ -1,0 +1,290 @@
+/* ---------------------------------------------------------------------------
+   Document canvas: the page, its type, and the marks on it
+   ----------------------------------------------------------------------------
+   The subject. Everything else in the studio is a workbench around this object,
+   so the page is the only surface that carries the paper token set, the only
+   place the serif and the display face appear, and the only thing on screen
+   with a real shadow under it.
+
+   Structurally the page absorbed two things that used to float outside it: the
+   staleness warning, which is a statement about this document and now sits on
+   it, and a footer that names the record. Both are what makes the rectangle
+   read as a page rather than as a text column on a dark background -- and the
+   page now runs to the bottom of the viewport instead of stopping mid-air.
+
+   Nothing here uses a chrome token. Those were measured against navy and every
+   one of them fails against cream.
+   ------------------------------------------------------------------------ */
+
+.st-page {
+  position: relative;
+  max-width: var(--st-page-w);
+  /* A sheet ends where the desk does, not two thirds of the way down it. */
+  min-height: calc(100vh - var(--st-top-h) - 12rem);
+  margin: var(--st-s6) auto var(--st-s7);
+  padding: var(--st-s7) 3.25rem;
+  border-radius: var(--st-r-xs);
+  background: var(--st-paper);
+  color: var(--st-ink);
+  font-family: var(--st-face-doc);
+  font-size: var(--st-t-doc);
+  line-height: var(--st-lh-doc);
+  box-shadow: var(--st-shadow-page);
+}
+
+/* Paper grain in multiply. The room lays down its own grain in overlay; a
+   record and the desk it lies on are different materials and cannot share a
+   blend mode without one of them looking printed onto the other. */
+/* The one thing on the page the app is saying rather than the record: it stays
+   in the UI face so it cannot be mistaken for part of the controlled text. */
+.st-page__stale {
+  display: flex;
+  align-items: center;
+  gap: var(--st-s2);
+  margin: 0 0 var(--st-s5);
+  padding: var(--st-s2) var(--st-s3);
+  border-radius: var(--st-r-sm);
+  background: var(--st-oxblood-wash);
+  color: var(--st-oxblood);
+  font-family: var(--st-face-ui);
+  font-size: var(--st-t-small);
+  line-height: var(--st-lh);
+}
+
+.st-page__stale b {
+  font-weight: 600;
+}
+
+/* An icon beside prose is a glyph, not a column: it must not stretch when the
+   sentence beside it wraps to two lines. */
+.st-icon {
+  flex: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Document type
+   ------------------------------------------------------------------------ */
+
+.st-blk {
+  margin: 0;
+  outline: none;
+}
+
+/* A caret in a block is an ordinary state, not an alert: a hairline says which
+   block is live without shouting over the prose around it. The global focus
+   rule is :where()-scoped precisely so a surface can make this call. */
+.st-blk[contenteditable]:focus-visible {
+  outline: 1px solid var(--st-ink-soft);
+  outline-offset: var(--st-s1);
+  border-radius: var(--st-r-xs);
+}
+
+/* The only display face in the studio. A controlled record has a title, and it
+   is the one line on screen allowed to behave like one. */
+.st-blk--title {
+  margin-bottom: var(--st-s4);
+  font-family: var(--font-display), Georgia, serif;
+  font-size: var(--st-t-title);
+  font-weight: 600;
+  line-height: var(--st-lh-tight);
+  color: var(--st-ink);
+}
+
+/* The header block of a controlled document is a line of identifiers -- the
+   document ID, the version, the effective date -- which is the one place inside
+   the record where mono is the honest face rather than decoration. */
+.st-blk--meta {
+  margin-bottom: var(--st-s1);
+  font-family: var(--st-face-id);
+  font-size: var(--st-t-small);
+  line-height: var(--st-lh);
+  color: var(--st-ink-2);
+}
+
+.st-blk--h2 {
+  margin: var(--st-s6) 0 var(--st-s3);
+  font-family: var(--st-face-doc);
+  font-size: var(--st-t-doch);
+  font-weight: 600;
+  line-height: var(--st-lh-tight);
+  color: var(--st-ink);
+}
+
+.st-blk--p {
+  margin: 0 0 var(--st-s4);
+  font-family: var(--st-face-doc);
+  font-size: var(--st-t-doc);
+  line-height: var(--st-lh-doc);
+  color: var(--st-ink);
+}
+
+.st-blk--table {
+  margin: var(--st-s4) 0 var(--st-s5);
+  overflow-x: auto;
+}
+
+/* A specification table is part of the record, so it is set in the record's own
+   face at the smaller step rather than borrowing the chrome's sans. */
+.st-blk--table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--st-face-doc);
+  font-size: var(--st-t-small);
+}
+
+.st-blk--table th,
+.st-blk--table td {
+  padding: var(--st-s2) var(--st-s3);
+  border: 1px solid var(--st-paper-edge);
+  color: var(--st-ink);
+  text-align: left;
+  vertical-align: top;
+  line-height: var(--st-lh);
+}
+
+.st-blk--table th {
+  background: var(--st-paper-2);
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------------------
+   Marks on paper
+   ----------------------------------------------------------------------------
+   One problem hue, and WEIGHT carries severity: solid under a wash is critical,
+   solid is major, dashed is minor, dotted and slate is a note. A reader can
+   rank them without a legend, and nobody has to tell two ambers apart.
+
+   Gold means the analyst's own hand -- unbounded as a marker wash, bounded as a
+   tracked change under a rule.
+   ------------------------------------------------------------------------ */
+
+.st-mark {
+  /* <mark> ships a yellow UA background; every severity sets its own or none. */
+  background: transparent;
+  color: inherit;
+  border-radius: var(--st-r-xs);
+  padding-bottom: 1px;
+  cursor: pointer;
+  transition: background var(--st-dur) var(--st-ease);
+}
+
+.st-mark--critical {
+  background: var(--st-oxblood-wash);
+  border-bottom: 2px solid var(--st-oxblood);
+}
+
+.st-mark--major {
+  border-bottom: 1px solid var(--st-oxblood);
+}
+
+.st-mark--minor {
+  border-bottom: 1px dashed var(--st-oxblood);
+}
+
+.st-mark--info {
+  border-bottom: 1px dotted var(--st-ink-soft);
+}
+
+/* A stale finding describes text that no longer exists. It keeps its span so
+   the claim stays visible, and drops the weight that would rank it. */
+.st-mark--stale {
+  border-bottom: 1px dotted var(--st-ink-soft);
+  opacity: 0.55;
+  cursor: default;
+}
+
+.st-mark--insert {
+  color: var(--st-gold-ink);
+  border-bottom: 0;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  cursor: text;
+}
+
+/* The marker stroke: the analyst's own hand, so unbounded gold.
+   The wash ALONE cannot carry it. #fcefca on #fffdf8 paper is 1.13:1 -- on the
+   navy build this mark sat on a dark page and read at ~13:1, and the wash was
+   genuinely the whole mark. On parchment it is invisible, which made Highlight
+   a control that silently did nothing: the only evidence it had worked was
+   "Clear highlights" quietly becoming enabled.
+
+   So the wash keeps the hand-drawn feel and a 2px gold-ink rule underneath does
+   the actual work of being seen. Still unbounded (no box around the span), so
+   it stays distinct from a bounded citation chip. */
+.st-mark--highlight {
+  background: var(--st-gold-paper-wash);
+  border-bottom: 2px solid var(--st-gold-ink);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* The finding under discussion is the one the analyst just pointed at, so it is
+   marked in the hand colour, not in a louder defect colour.
+
+   The outline, not another wash: this rule out-specifies .st-mark--critical, so
+   a background swap here ERASED the critical mark's own wash on exactly the
+   span the analyst had selected. An outline layers on top of whatever severity
+   treatment is underneath instead of replacing it, and it is the only cue a
+   reduced-motion reader gets, since st-flash is collapsed to 0.001ms for them. */
+.st-mark.is-active {
+  outline: 2px solid var(--st-gold-ink);
+  outline-offset: 1px;
+  border-radius: var(--st-r-xs);
+  animation: st-flash 0.85s ease-out;
+}
+
+@keyframes st-flash {
+  0% {
+    background: rgba(245, 180, 0, 0.5);
+  }
+  100% {
+    background: var(--st-gold-paper-wash);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Page foot
+   ------------------------------------------------------------------------ */
+
+.st-foot {
+  display: flex;
+  align-items: baseline;
+  gap: var(--st-s3);
+  margin-top: var(--st-s6);
+  padding-top: var(--st-s3);
+  border-top: 1px solid var(--st-paper-edge);
+  font-family: var(--st-face-doc);
+  font-size: var(--st-t-small);
+  color: var(--st-ink-faint);
+}
+
+/* A version is a code, and a code is the one thing that reads as mono here. */
+.st-foot__v {
+  margin-left: auto;
+  font-family: var(--st-face-id);
+  font-size: var(--st-t-micro);
+  letter-spacing: 0.06em;
+}
+
+/* ---------------------------------------------------------------------------
+   Responsive. The margins are the first thing a narrow viewport can spend:
+   losing them costs the page nothing, and losing the measure costs it its
+   readability.
+   ------------------------------------------------------------------------ */
+
+@media (max-width: 1240px) {
+  .st-page {
+    padding: var(--st-s6) var(--st-s5);
+  }
+}
+
+@media (max-width: 960px) {
+  .st-page {
+    /* The scroller carries no gutter of its own, so the page keeps one here
+       and still centres, which margin-inline would give up. */
+    width: calc(100% - var(--st-s5));
+    margin: var(--st-s4) auto var(--st-s6);
+    padding: var(--st-s5) var(--st-s4);
+  }
+}

@@ -1,0 +1,565 @@
+/* ---------------------------------------------------------------------------
+   Findings panel: the verdict, the stepper, the finding cards, the record
+   ----------------------------------------------------------------------------
+   The structural change is weight. The panel used to put eighteen identically
+   outlined buttons in a 376px column -- four dispositions in a 2x2 grid plus
+   two tools, per card, three cards -- so no control was the one to reach for.
+   Now each card offers exactly one filled button (Fixed, the outcome the
+   reviewer is working towards), three quiet text buttons that argue against it,
+   and two icon tools that moved up into the card head and off the card body.
+
+   The panel is also where the two typographic families meet: chrome sans for
+   everything the tool says, the document serif for the one thing that is
+   document prose -- the suggested replacement, which is shown in the face it
+   will land in.
+   ------------------------------------------------------------------------ */
+
+/* --- the panel shell ------------------------------------------------------ */
+
+.st-panel {
+  flex: none;
+  width: 0;
+  overflow: hidden;
+  background: var(--st-chrome-1);
+  transition: width var(--st-dur) var(--st-ease);
+}
+
+.st-panel.is-open {
+  width: var(--st-panel-w);
+  border-left: 1px solid var(--st-line);
+}
+
+/* Fixed inner width so content does not reflow while the panel animates. */
+.st-panel__inner {
+  width: var(--st-panel-w);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.st-panel__head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--st-s2);
+  height: 44px;
+  padding: 0 var(--st-s3);
+  border-bottom: 1px solid var(--st-line);
+}
+
+.st-panel__title {
+  display: flex;
+  align-items: center;
+  gap: var(--st-s2);
+  font-size: var(--st-t-mid);
+  font-weight: 600;
+  color: var(--st-on-chrome);
+}
+
+.st-panel__title svg {
+  flex: none;
+  color: var(--st-gold);
+}
+
+.st-panel__close {
+  margin-left: auto;
+}
+
+.st-panel__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--st-s3);
+  padding: var(--st-s3);
+}
+
+.st-panel__empty {
+  margin: 0;
+  line-height: var(--st-lh);
+  color: var(--st-on-chrome-soft);
+}
+
+.st-panel__empty b {
+  color: var(--st-on-chrome);
+  font-weight: 600;
+}
+
+.st-panel__foot {
+  flex: none;
+  padding: var(--st-s3);
+  border-top: 1px solid var(--st-line);
+}
+
+/* --- verdict -------------------------------------------------------------- */
+
+.st-verdict {
+  padding: var(--st-s3);
+  border: 1px solid var(--st-line);
+  border-radius: var(--st-r-md);
+  background: var(--st-raise);
+}
+
+.st-verdict__label {
+  display: flex;
+  align-items: center;
+  gap: var(--st-s2);
+  font-size: var(--st-t-mid);
+  font-weight: 600;
+  color: var(--st-on-chrome);
+}
+
+.st-verdict__label svg {
+  flex: none;
+}
+
+.st-verdict--blocking .st-verdict__label {
+  color: var(--st-flag);
+}
+
+.st-verdict--review .st-verdict__label {
+  color: var(--st-on-chrome);
+}
+
+.st-verdict--clear .st-verdict__label {
+  color: var(--st-clear);
+}
+
+/* Every finding answered, not every finding fixed. Deliberately not the settled
+   green: a document argued down to zero is not a clean document. */
+.st-verdict--settled .st-verdict__label {
+  color: var(--st-on-chrome);
+}
+
+.st-verdict__counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--st-s1);
+  margin-top: var(--st-s2);
+}
+
+.st-count--blocking {
+  background: var(--st-flag-wash);
+  border-color: var(--st-flag);
+  color: var(--st-flag);
+}
+
+/* Recorded, in the settled green the White Paper already uses for a closed cell. */
+.st-count--done {
+  background: var(--st-clear-wash);
+  border-color: var(--st-clear);
+  color: var(--st-clear);
+}
+
+.st-verdict__against {
+  margin: var(--st-s2) 0 0;
+  font-size: var(--st-t-small);
+  line-height: var(--st-lh);
+  color: var(--st-on-chrome-faint);
+}
+
+/* --- moving between findings ---------------------------------------------- */
+
+.st-step {
+  display: flex;
+  gap: var(--st-s2);
+}
+
+/* The two labels are phrases, not words, and the panel narrows to 21rem. Equal
+   width plus a wrapping label is what keeps them equal and whole; truncating a
+   navigation control is how a reviewer loses the keyboard path. */
+.st-step__btn {
+  flex: 1 1 0;
+  height: auto;
+  min-height: 30px;
+  padding: var(--st-s1) var(--st-s2);
+  white-space: normal;
+  line-height: var(--st-lh-tight);
+  text-align: center;
+}
+
+.st-step__up {
+  transform: rotate(180deg);
+}
+
+/* --- the finding card ----------------------------------------------------- */
+
+.st-find__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--st-s3);
+}
+
+/* The card is a list item, not a button: it holds several distinct actions and
+   a button cannot legally contain another. */
+.st-find {
+  display: block;
+  padding: var(--st-s3);
+  border: 1px solid var(--st-line);
+  border-left-width: 2px;
+  border-left-color: var(--st-line);
+  border-radius: var(--st-r-md);
+  background: var(--st-raise);
+  color: inherit;
+  transition:
+    border-color var(--st-dur) var(--st-ease),
+    box-shadow var(--st-dur) var(--st-ease);
+}
+
+/* Severity on the card edge, in the same weight-not-hue vocabulary the chips
+   and the spine already use: one problem colour, solid for what blocks and
+   hairline-quiet for what does not.
+
+   FindingsPanel renders st-find--{severity} on every card and nothing styled
+   it, so every card -- submission-blocking through informational -- drew an
+   identical neutral border and the only surviving cue was the word inside a
+   small chip. The pre-redesign build carried these four selectors; the rewrite
+   dropped the asymmetric edge they coloured, which made the modifiers inert. */
+.st-find--critical,
+.st-find--major {
+  border-left-color: var(--st-flag);
+}
+
+/* Dashed, not washed. --st-flag-wash on the card is 1.15:1 and would be another
+   invisible indicator; varying the STYLE at full strength keeps one problem
+   hue and is the same solid-vs-dashed pair the document marks already use. */
+.st-find--minor {
+  border-left-style: dashed;
+  border-left-color: var(--st-flag);
+}
+
+.st-find--info {
+  border-left-color: var(--st-line);
+}
+
+/* The card the analyst is working, marked in the same gold the page marks a
+   live span with. The edge is an inset shadow so it does not shift the padding
+   the other cards keep. */
+.st-find.is-active {
+  border-color: var(--st-gold-deep);
+  box-shadow: inset 2px 0 0 0 var(--st-gold);
+}
+
+/* Edited under, nothing recorded. Not faded: the card still holds required
+   controls, and a wash over a control is a legibility problem, not emphasis.
+   The edge going dashed is what says "suspended". */
+.st-find.is-stale {
+  border-style: dashed;
+}
+
+/* Recorded and out of the way. This one may recede: everything inside it is
+   settled text plus a single Change button that keeps full contrast. */
+.st-find.is-disposed {
+  background: transparent;
+}
+
+.st-find.is-disposed .st-find__detail,
+.st-find.is-disposed .st-find__meta {
+  display: none;
+}
+
+.st-find__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--st-s2);
+}
+
+/* Critical and major share the solid chip; the halo is the extra weight that
+   says this one blocks the seal. */
+.st-find__sev--blocking {
+  box-shadow: 0 0 0 2px var(--st-flag);
+}
+
+.st-find__title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--st-t-mid);
+  font-weight: 600;
+  line-height: var(--st-lh-tight);
+  color: var(--st-on-chrome);
+}
+
+.st-find__tools {
+  flex: none;
+  display: flex;
+  align-self: center;
+  gap: var(--st-s1);
+}
+
+.st-find__detail {
+  margin: var(--st-s2) 0 0;
+  font-size: var(--st-t-base);
+  line-height: var(--st-lh);
+  color: var(--st-on-chrome-soft);
+}
+
+.st-find__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--st-s1);
+  margin-top: var(--st-s2);
+}
+
+/* A contradiction the surface must not resolve on its own. */
+.st-find__flag {
+  margin: var(--st-s3) 0 0;
+  padding: var(--st-s2);
+  border-left: 2px solid var(--st-flag);
+  border-radius: 0 var(--st-r-sm) var(--st-r-sm) 0;
+  background: var(--st-flag-wash);
+  font-size: var(--st-t-small);
+  line-height: var(--st-lh);
+  color: var(--st-on-chrome);
+}
+
+/* --- suggested fix -------------------------------------------------------- */
+
+.st-fix {
+  margin-top: var(--st-s3);
+}
+
+/* The replacement is document prose quoted inside chrome: it is set in the
+   document's own serif and recessed into the desk, because that is what it will
+   look and read like once it lands. */
+.st-fix__text {
+  margin: var(--st-s1) 0 0;
+  padding: var(--st-s2);
+  border-radius: var(--st-r-sm);
+  background: var(--st-canvas);
+  font-family: var(--st-face-doc);
+  font-size: var(--st-t-base);
+  line-height: var(--st-lh);
+  color: var(--st-on-chrome);
+}
+
+.st-fix__apply {
+  margin-top: var(--st-s2);
+}
+
+/* --- disposition ---------------------------------------------------------- */
+
+/* One row, wrapping. Four legal-record words never truncate, so when they do not
+   fit the row breaks instead. */
+.st-disp {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--st-s1) var(--st-s2);
+  margin-top: var(--st-s3);
+}
+
+/* The picked-but-unrecorded disposition is the analyst's own hand, which the
+   vocabulary sets in unbounded gold. Fixed is already filled gold and needs no
+   second mark. */
+.st-disp__btn.st-btn--quiet.is-on {
+  background: var(--st-gold-wash);
+  border-color: var(--st-gold-deep);
+  color: var(--st-on-chrome);
+}
+
+/* aria-disabled, never the disabled attribute: a disabled control is skipped by
+   assistive tech and by the keyboard, so the one person who most needs the gate
+   explained could never reach the explanation. It stays focusable and still
+   answers when pressed -- and it drops out of the filled treatment, because a
+   primary button that cannot yet be used is a lie about what is available. */
+.st-disp__btn.is-blocked,
+.st-disp__btn.is-blocked:hover {
+  border-style: dashed;
+  border-color: var(--st-line-strong);
+  background: transparent;
+  color: var(--st-on-chrome-faint);
+  cursor: not-allowed;
+}
+
+/* Skips the copy that is only spoken: .studio__sr owns that element's box. */
+.st-disp__gate:not(.studio__sr) {
+  margin: var(--st-s2) 0 0;
+  font-size: var(--st-t-small);
+  line-height: var(--st-lh);
+  color: var(--st-on-chrome-faint);
+}
+
+/* --- justification -------------------------------------------------------- */
+
+.st-just {
+  margin-top: var(--st-s3);
+  padding: var(--st-s3);
+  border: 1px solid var(--st-line);
+  border-radius: var(--st-r-sm);
+  background: var(--st-chrome-1);
+}
+
+.st-just__label {
+  display: block;
+}
+
+.st-just__help {
+  margin: var(--st-s1) 0 var(--st-s2);
+  font-size: var(--st-t-small);
+  line-height: var(--st-lh);
+  color: var(--st-on-chrome-faint);
+}
+
+/* A justification runs to sentences, so the field grows down from the single
+   line the primitive assumes. */
+.st-just__field {
+  height: auto;
+  min-height: 72px;
+  align-items: stretch;
+  padding: var(--st-s2);
+}
+
+.st-just__field textarea {
+  resize: vertical;
+}
+
+.st-just__field:has(textarea[aria-invalid="true"]) {
+  border-color: var(--st-flag);
+}
+
+/* Errors say what happened and what to do next. No apology, no "oops". */
+.st-just__error {
+  margin: var(--st-s2) 0 0;
+  font-size: var(--st-t-small);
+  line-height: var(--st-lh);
+  color: var(--st-flag);
+}
+
+.st-just__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--st-s2);
+  margin-top: var(--st-s3);
+}
+
+/* --- the recorded judgement ----------------------------------------------- */
+
+.st-find__record {
+  margin-top: var(--st-s3);
+}
+
+.st-find__recorded {
+  display: flex;
+  align-items: baseline;
+  gap: var(--st-s2);
+  margin: 0;
+  font-size: var(--st-t-base);
+  line-height: var(--st-lh);
+  color: var(--st-on-chrome-soft);
+}
+
+.st-find__recorded svg {
+  flex: none;
+  color: var(--st-clear);
+}
+
+.st-find__recorded b {
+  color: var(--st-clear);
+  font-weight: 600;
+}
+
+.st-find__just {
+  margin: var(--st-s2) 0 0;
+  padding-left: var(--st-s2);
+  border-left: 2px solid var(--st-line);
+  font-size: var(--st-t-small);
+  line-height: var(--st-lh);
+  color: var(--st-on-chrome-soft);
+}
+
+.st-find__earlier {
+  margin: var(--st-s2) 0 0;
+  font-size: var(--st-t-small);
+  line-height: var(--st-lh);
+  color: var(--st-on-chrome-faint);
+}
+
+.st-find__change {
+  margin-top: var(--st-s3);
+}
+
+/* --- the exported record -------------------------------------------------- */
+
+.st-record__fallback-label {
+  display: block;
+  margin-top: var(--st-s3);
+  font-size: var(--st-t-small);
+  font-weight: 600;
+  color: var(--st-on-chrome);
+}
+
+/* Tab-separated columns headed for a resolution log. Mono because it is a
+   verbatim record artefact and the columns have to line up, not because it is
+   small. */
+.st-record__fallback {
+  width: 100%;
+  margin-top: var(--st-s1);
+  padding: var(--st-s2);
+  border: 1px solid var(--st-line);
+  border-radius: var(--st-r-sm);
+  background: var(--st-canvas);
+  color: var(--st-on-chrome-soft);
+  font-family: var(--st-face-ui);
+  font-size: var(--st-t-micro);
+  line-height: var(--st-lh);
+  resize: vertical;
+}
+
+/* The honesty line. Nothing recorded in this surface is a controlled record,
+   and the panel has to say so where the record is made, not in a tooltip. */
+.st-record__note {
+  margin: var(--st-s3) 0 0;
+  font-size: var(--st-t-small);
+  line-height: var(--st-lh);
+  color: var(--st-on-chrome-faint);
+}
+
+/* --- assistant context and citations -------------------------------------- */
+
+.st-ctx {
+  margin: 0;
+  font-size: var(--st-t-small);
+  line-height: var(--st-lh);
+  color: var(--st-on-chrome-faint);
+}
+
+.st-ctx b {
+  font-weight: 600;
+  color: var(--st-on-chrome-soft);
+}
+
+.st-src {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--st-s1);
+  margin-top: var(--st-s2);
+}
+
+/* Bounded gold: mono, hairline, no fill. Grounded and sourced, exactly as the
+   Ask surface stamps a citation. The unbounded gold in this panel means the
+   analyst's hand and must not be confused with it. */
+.st-src__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--st-s1);
+  max-width: 100%;
+  padding: var(--st-s1) var(--st-s2);
+  border: 1px solid var(--st-gold-deep);
+  border-radius: var(--st-r-xs);
+  font-family: var(--st-face-id);
+  font-size: var(--st-t-micro);
+  letter-spacing: 0.06em;
+  line-height: var(--st-lh);
+  color: var(--st-gold);
+}
+
+.st-src__item svg {
+  flex: none;
+}

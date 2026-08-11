@@ -70,7 +70,7 @@ export function PdfPane({ doc }: PdfPaneProps) {
   const href = safeHref(doc.sourceUrl);
   const linkOut = href ? (
     <a
-      className="st-pdf__link"
+      className="st-pdf__link st-btn st-btn--outline"
       href={href}
       target="_blank"
       rel="noopener noreferrer"
@@ -79,8 +79,10 @@ export function PdfPane({ doc }: PdfPaneProps) {
     </a>
   ) : (
     // Keep the slot so the header never reflows; an unsafe or missing URL
-    // renders inert rather than binding an unguarded href.
-    <span className="st-pdf__link--inert">No source link</span>
+    // renders inert rather than binding an unguarded href. Borrows the
+    // .st-btn disabled treatment (opacity, not-allowed cursor) without being
+    // a real button.
+    <span className="st-pdf__link--inert st-btn st-btn--outline">No source link</span>
   );
 
   return (
@@ -90,10 +92,9 @@ export function PdfPane({ doc }: PdfPaneProps) {
           PSG: {doc.ingredient}
         </h2>
         <span className="st-pdf__meta">
-          {doc.label}
-          {doc.recommendedDate ? ` - ${doc.recommendedDate}` : ""}
-          {" - "}
-          {doc.psgType === "final" ? "Final" : "Draft"}
+          <span className="st-chip">{doc.label}</span>
+          {doc.recommendedDate ? <span className="st-chip">{doc.recommendedDate}</span> : null}
+          <span className="st-chip">{doc.psgType === "final" ? "Final" : "Draft"}</span>
         </span>
         {linkOut}
       </div>
@@ -109,11 +110,16 @@ export function PdfPane({ doc }: PdfPaneProps) {
       {status === "error" && (
         <div className="st-pdf__fallback" role="alert">
           <span>Couldn&apos;t load this PDF in the studio.</span>
-          <button type="button" className="st-tree__retry" onClick={retry}>
+          <button type="button" className="st-btn st-btn--quiet st-tree__retry" onClick={retry}>
             Retry
           </button>
           {href ? (
-            <a className="st-pdf__link" href={href} target="_blank" rel="noopener noreferrer">
+            <a
+              className="st-pdf__link st-btn st-btn--outline"
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
               Open on fda.gov
             </a>
           ) : null}

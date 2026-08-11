@@ -23,6 +23,11 @@ export function TopBar({ doc, library, onToggleTree }: TopBarProps) {
       ? `Edited since last check - v${doc.version}`
       : `All changes saved - v${doc.version}`;
 
+  // Same three-way split as `state` above, driving a colour instead of a
+  // sentence: clear when saved, gold when the check is behind the text,
+  // dim when there is nothing to save at all.
+  const dotState = library ? "readonly" : doc.checkState === "stale" ? "stale" : "saved";
+
   return (
     <header className="st-top">
       <button type="button" className="st-icon-btn st-top__menu" aria-label="Show repository" onClick={onToggleTree}>
@@ -43,11 +48,11 @@ export function TopBar({ doc, library, onToggleTree }: TopBarProps) {
       )}
 
       <div className="st-top__state">
-        <span className="st-top__dot" />
+        <span className={`st-top__dot st-top__dot--${dotState}`} />
         {library ? "Read-only - FDA reference" : state}
       </div>
 
-      <Link href="/" className="st-top__exit">
+      <Link href="/" className="st-btn st-btn--quiet st-top__exit">
         Exit studio
       </Link>
     </header>

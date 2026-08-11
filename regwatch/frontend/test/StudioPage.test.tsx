@@ -94,7 +94,9 @@ describe("Compliance Studio", () => {
   it("opens on the pre-checked specification with the repository listed", () => {
     render(<StudioPage />);
 
-    expect(screen.getByText("Repository - 7 docs")).toBeInTheDocument();
+    // The head is a label plus a count chip, not one string.
+    expect(screen.getByText("Repository")).toBeInTheDocument();
+    expect(screen.getByText("7 docs")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /3\.2\.S\.4\.1 Specification\.docx/ })).toBeInTheDocument();
     // The document itself is on the page, not just its file name in the tree.
     expect(screen.getByText(/3\.2\.S\.4\.1 Specification - Drug Substance/)).toBeInTheDocument();
@@ -542,7 +544,9 @@ describe("Reference library", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Tablet \(Oral\).*Draft/ })).toBeInTheDocument();
     // The working-documents header stays untouched.
-    expect(screen.getByText("Repository - 7 docs")).toBeInTheDocument();
+    // The head is a label plus a count chip, not one string.
+    expect(screen.getByText("Repository")).toBeInTheDocument();
+    expect(screen.getByText("7 docs")).toBeInTheDocument();
   });
 
   it("opens a PSG read-only in the inline viewer with the chrome hidden", async () => {

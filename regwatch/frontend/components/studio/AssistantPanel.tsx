@@ -100,7 +100,7 @@ export function AssistantPanel({
                 (m.sources.length > 0 ? (
                   <div className="st-src">
                     {m.sources.map((s, i) => (
-                      <div key={`${m.id}-src-${i}`} className="st-src__item">
+                      <div key={`${m.id}-src-${i}`} className="st-chip st-src__item">
                         <BookIcon size={11} />
                         <span>{s}</span>
                       </div>
@@ -121,7 +121,7 @@ export function AssistantPanel({
       </div>
 
       <div className="st-panel__foot">
-        <div className="st-compose">
+        <div className="st-field st-compose">
           <textarea
             ref={boxRef}
             rows={1}
@@ -131,7 +131,13 @@ export function AssistantPanel({
             placeholder="Ask about this document, a guideline, or a cross-reference"
             aria-label="Ask about this document"
           />
-          <button type="button" className="st-compose__send" onClick={submit} disabled={!canSend} aria-label="Send">
+          <button
+            type="button"
+            className="st-btn st-btn--primary st-compose__send"
+            onClick={submit}
+            disabled={!canSend}
+            aria-label="Send"
+          >
             <SendIcon />
           </button>
         </div>

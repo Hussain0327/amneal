@@ -273,6 +273,22 @@ export default function StudioPage() {
       later(() => {
         patch(id, (d) => applyFindings(d, CHECK_RESULTS[id] ?? []));
         if (id === activeId && !libraryDocRef.current) setPanel("findings");
+        // Announced from the page's single live region rather than from the
+        // format bar that displays the same count: two polite regions updating
+        // on one state change double-announce, and applying a fix already
+        // writes here while flipping the bar to "edited since last check".
+        //
+        // Counted from CHECK_RESULTS rather than from the patched document:
+        // this callback fires CHECK_MS after runCheck was created, so any doc
+        // read out of the closure is stale by then. A freshly returned finding
+        // is never disposed, so severity is the whole filter.
+        const found = CHECK_RESULTS[id] ?? [];
+        const open = found.filter((f) => f.severity !== "info").length;
+        setLive(
+          open === 0
+            ? "Check complete. No open findings."
+            : `Check complete. ${open} open ${open === 1 ? "finding" : "findings"}.`,
+        );
       }, CHECK_MS);
     },
     [activeId, docs, later, patch],
@@ -593,6 +609,10 @@ export default function StudioPage() {
           onOpenLibraryDoc={openLibraryDoc}
           onRetryLibrary={loadLibrary}
           onCheck={() => runCheck(activeId)}
+          // The repository-wide run lives with the repository. It used to sit
+          // rotated 90 degrees at the foot of the activity rail, which put the
+          // widest-scope action in the least readable place in the studio.
+          onRunFullCheck={runFullCheck}
         />
 
         {libraryDoc ? (
@@ -617,6 +637,12 @@ export default function StudioPage() {
                 onTrackedChange={setTracked}
                 canClear={doc.blocks.some((b) => b.marks.some((m) => m.kind === "highlight"))}
                 onClearHighlights={() => patch(activeId, clearHighlights)}
+                // The bar used to spend its width on a sentence teaching the
+                // selection gesture. It now reports the state the analyst is
+                // actually tracking while they read.
+                checkState={doc.checkState}
+                openCount={openFindings}
+                totalCount={doc.findings.length}
               />
               <DocumentCanvas
                 doc={doc}
@@ -673,7 +699,6 @@ export default function StudioPage() {
               findingCount={openFindings}
               checking={checking}
               onTogglePanel={(id) => setPanel((prev) => (prev === id ? null : id))}
-              onRunFullCheck={runFullCheck}
             />
           </>
         )}

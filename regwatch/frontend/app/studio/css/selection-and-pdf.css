@@ -1,0 +1,154 @@
+/* ---------------------------------------------------------------------------
+   Selection toolbar + PDF pane
+   ---------------------------------------------------------------------------
+   These are the one place the two palettes meet: a chrome control floating
+   over paper, and a document viewer sitting in the canvas. Both are pinned
+   unambiguously to chrome -- the toolbar composes .st-btn/.st-btn--quiet so
+   it never reads as a document control, and the PDF frame is treated as its
+   own small "page" (paper-toned, centred, shadowed) floating on --st-canvas
+   rather than filling the pane edge-to-edge. Meta moved from a dash-joined
+   string to discrete .st-chip badges.
+   ------------------------------------------------------------------------ */
+
+/* --- selection toolbar --------------------------------------------------- */
+
+.st-sel {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 34px;
+  padding: 0 var(--st-s1);
+  border: 1px solid var(--st-line);
+  border-radius: var(--st-r-md);
+  background: var(--st-raise);
+  box-shadow: var(--st-shadow-pop);
+  animation: st-rise var(--st-dur) var(--st-ease);
+}
+
+@keyframes st-rise {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Composes .st-btn .st-btn--quiet in the TSX; this only carries what the
+   toolbar needs on top of that. */
+.st-sel__btn {
+  height: 26px;
+  color: var(--st-on-chrome-soft);
+}
+
+/* Highlighting is the analyst's own hand, not a neutral action -- it keeps
+   the gold identity through hover instead of bleaching to on-chrome like its
+   siblings. */
+.st-sel__btn--mark {
+  color: var(--st-gold);
+}
+
+.st-sel__btn--mark:hover:not(:disabled) {
+  color: var(--st-gold);
+}
+
+.st-sel__sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 2px;
+  background: var(--st-line);
+}
+
+/* ---------------------------------------------------------------------------
+   PDF pane: a reference PSG on the canvas, read-only
+   ------------------------------------------------------------------------ */
+
+.st-pdf {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--st-canvas);
+}
+
+.st-pdf__head {
+  flex: none;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: var(--st-s3);
+  padding: 0 var(--st-s4);
+  background: var(--st-chrome-1);
+  border-bottom: 1px solid var(--st-line);
+}
+
+.st-pdf__title {
+  margin: 0;
+  font-size: var(--st-t-mid);
+  font-weight: 600;
+  color: var(--st-on-chrome);
+}
+
+.st-pdf__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--st-s1);
+  flex-wrap: wrap;
+}
+
+.st-pdf__link {
+  margin-left: auto;
+}
+
+/* An inert link (unsafe or missing URL) keeps its slot but drops the voice:
+   the .st-btn disabled look (opacity, not-allowed) without being a real
+   button, so it also has to opt out of the outline hover by hand. */
+.st-pdf__link--inert {
+  margin-left: auto;
+  opacity: 0.42;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.st-pdf__frame {
+  display: block;
+  flex: 1;
+  width: 100%;
+  max-width: 60rem;
+  margin: var(--st-s5) auto;
+  border: 0;
+  border-radius: var(--st-r-xs);
+  box-shadow: var(--st-shadow-page);
+  background: var(--st-paper);
+}
+
+.st-pdf__note {
+  margin: auto;
+  padding: var(--st-s4);
+  font-size: var(--st-t-small);
+  color: var(--st-on-chrome-faint);
+}
+
+.st-pdf__fallback {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--st-s2);
+  padding: var(--st-s5);
+  font-size: var(--st-t-small);
+  color: var(--st-on-chrome-faint);
+  text-align: center;
+}
+
+/* The retry button here composes .st-btn .st-btn--quiet like every other
+   .st-tree__retry instance; this only zeroes the margin-top that context
+   carries for its usual spot in a vertical list. */
+.st-pdf__fallback .st-tree__retry {
+  margin-top: 0;
+}

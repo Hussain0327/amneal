@@ -1,17 +1,24 @@
 "use client";
 
-// The compliance spine: a 22px column carrying one tick per finding, each at
-// that finding's measured position in the document.
+// The compliance spine: a 30px column carrying one tick per finding, each at
+// that finding's measured position in the document, threaded onto a continuous
+// rail. Marks need something to be on -- three specks in an empty column read as
+// rendering debris rather than as a map of a document.
 //
 // It answers two questions without opening a panel. How weak is this document,
-// and how much of that is still yours to answer. An open finding is a solid
-// mark at full width; a recorded one drops to a hairline across the left half
-// only. Working a document closes the spine down, and when every actionable
-// finding was genuinely FIXED the column resolves to a single gold thread.
+// and how much of that is still yours to answer. An open finding is a full bead
+// on the rail; a recorded one shrinks to a settled chip. Working a document
+// closes the spine down, and when every actionable finding was genuinely FIXED
+// the column resolves to a single gold thread.
 //
-// Disposition is carried by geometry, not by fading. A faded tick on parchment
-// lands under the 3:1 contrast floor a non-text indicator owes, and half-width
-// versus full-width survives greyscale, 8px, and both common colour-blindnesses.
+// Disposition is carried by geometry first and hue second. A tick that only
+// changed colour dies in greyscale and under both common colour-blindnesses, and
+// one that only faded lands under the 3:1 contrast floor a non-text indicator
+// owes; size survives all three.
+//
+// A translucent window tracks which slice of the document is on screen. Without
+// it a column of marks says how much is wrong but not where the reader is
+// standing, which is the half of a minimap that makes it navigable.
 //
 // Positions are measured from the live DOM against the PAGE box rather than the
 // scroll container: the container carries 5rem of bottom padding, so measuring
@@ -79,6 +86,33 @@ function samePositions(a: Record<string, number>, b: Record<string, number>): bo
   return keys.every((k) => a[k] === b[k]);
 }
 
+/** The on-screen slice of the document, as fractions of the whole. */
+interface Viewport {
+  top: number;
+  height: number;
+}
+
+const WHOLE_DOCUMENT: Viewport = { top: 0, height: 1 };
+
+/**
+ * scrollHeight is the only honest denominator: it grows as blocks are edited,
+ * which is precisely when a window measured against a cached extent starts
+ * lying about where the reader is. Clamped so the window cannot run off the
+ * bottom of the rail on a scroller mid-relayout.
+ */
+function readViewport(el: HTMLElement | null): Viewport | null {
+  if (!el) return null;
+  const extent = el.scrollHeight;
+  if (!(extent > 0)) return null;
+  const top = clamp01(el.scrollTop / extent);
+  return { top, height: Math.min(clamp01(el.clientHeight / extent), 1 - top) };
+}
+
+function sameViewport(a: Viewport | null, b: Viewport | null): boolean {
+  if (!a || !b) return a === b;
+  return a.top === b.top && a.height === b.height;
+}
+
 /**
  * The tick's whole meaning in words. Disposition leads, because a recorded tick
  * is a hairline carrying no severity weight at all -- a screen reader user would
@@ -104,6 +138,7 @@ interface ComplianceSpineProps {
 
 export function ComplianceSpine({ doc, scrollRef, activeFindingId, onSelect }: ComplianceSpineProps) {
   const [positions, setPositions] = useState<Record<string, number>>({});
+  const [viewport, setViewport] = useState<Viewport | null>(null);
 
   const { blocks, findings } = doc;
 
@@ -131,18 +166,53 @@ export function ComplianceSpine({ doc, scrollRef, activeFindingId, onSelect }: C
 
   // Switching documents, running a check and editing a block all hand down new
   // blocks/findings arrays, so measure's identity is what "the document changed"
-  // reduces to here: the observer is torn down and re-subscribed.
+  // reduces to here: everything below is torn down and re-subscribed.
   useEffect(() => {
     const container = scrollRef.current;
-    // jsdom has no ResizeObserver; the fallback positions already stand in there.
-    if (!container || typeof ResizeObserver === "undefined") return;
+    if (!container) return;
 
+    // A window chasing the scroller is exactly the continuous motion the request
+    // is asking not to see, so it degrades to the whole rail: still true, since
+    // all of the document is reachable, it just stops claiming to know where.
+    const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+
+    let frame = 0;
+    const syncWindow = () => {
+      frame = 0;
+      // Re-read the ref rather than close over it: a frame scheduled just before
+      // unmount can still run, and the container is gone by then.
+      const next = still ? WHOLE_DOCUMENT : readViewport(scrollRef.current);
+      setViewport((prev) => (sameViewport(prev, next) ? prev : next));
+    };
+    // Scroll outruns the compositor several times over, and every read of
+    // scrollTop forces a layout flush. One per frame is both enough and the
+    // cheapest honest rate -- which is also why the first read is scheduled
+    // rather than taken in the effect body, where it would land on the commit.
+    const schedule = () => {
+      if (frame === 0) frame = requestAnimationFrame(syncWindow);
+    };
+
+    schedule();
+    if (!still) container.addEventListener("scroll", schedule, { passive: true });
+
+    // jsdom has no ResizeObserver; the fallback positions already stand in there.
     // observe() delivers an initial observation, so the subscription is also
     // what takes the first measurement. Measuring in the effect body instead
     // would read boxes and set state on every commit, cascading renders.
-    const observer = new ResizeObserver(() => measure());
-    observer.observe(container);
-    return () => observer.disconnect();
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            measure();
+            schedule();
+          });
+    observer?.observe(container);
+
+    return () => {
+      if (frame !== 0) cancelAnimationFrame(frame);
+      container.removeEventListener("scroll", schedule);
+      observer?.disconnect();
+    };
   }, [measure, scrollRef]);
 
   // DOM order is document order, which is also tab order. Paint order is handled
@@ -171,6 +241,13 @@ export function ComplianceSpine({ doc, scrollRef, activeFindingId, onSelect }: C
 
   return (
     <div className={`st-spine${sealed ? " st-spine--clear" : ""}`} role="group" aria-label="Compliance spine">
+      {viewport && (
+        <div
+          className="st-spine__window"
+          aria-hidden="true"
+          style={{ top: `${viewport.top * 100}%`, height: `${viewport.height * 100}%` }}
+        />
+      )}
       {checking && <div className="st-spine__scan" aria-hidden="true" />}
       <p className="studio__sr">{status}</p>
 

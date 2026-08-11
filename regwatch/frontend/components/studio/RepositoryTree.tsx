@@ -30,6 +30,26 @@ const GLYPH_LABEL: Record<ReturnType<typeof docGlyph>, string> = {
 /** Neither action has a document service behind it yet, so both say so on hover. */
 const PENDING_TITLE = "Uploading arrives with the document service.";
 
+/** A CTD coordinate or an SOP number: uppercase and digits with dots and dashes
+ * between them. Deliberately narrow -- a word that merely opens a filename is
+ * not a code, and a wrong split is worse than no split. */
+const DOC_CODE = /^[0-9A-Z][0-9A-Z.-]*[0-9A-Z]$/;
+
+/**
+ * Split a filename into its leading identifier and the rest. "3.2.S.4.1
+ * Specification.docx" is a coordinate plus a name and the two carry different
+ * weight in the rail; a filename with no code in front stays a single line.
+ * Pure and exported so the derivation is testable without a DOM.
+ */
+export function splitDocName(name: string): { code: string | null; title: string } {
+  const cut = name.search(/\s/);
+  if (cut > 0) {
+    const head = name.slice(0, cut);
+    if (DOC_CODE.test(head)) return { code: head, title: name.slice(cut + 1).trim() };
+  }
+  return { code: null, title: name };
+}
+
 function countDocs(nodes: TreeNode[]): number {
   return nodes.reduce((total, node) => total + (node.kind === "doc" ? 1 : countDocs(node.children)), 0);
 }
@@ -72,6 +92,8 @@ interface RepositoryTreeProps {
   onOpenLibraryDoc: (doc: LibraryDoc) => void;
   onRetryLibrary: () => void;
   onCheck: () => void;
+  /** Runs every working document. It belongs with the repository it acts on. */
+  onRunFullCheck: () => void;
 }
 
 export function RepositoryTree({
@@ -86,6 +108,7 @@ export function RepositoryTree({
   onOpenLibraryDoc,
   onRetryLibrary,
   onCheck,
+  onRunFullCheck,
 }: RepositoryTreeProps) {
   const [query, setQuery] = useState("");
   // Folders start expanded, so the state that has to be tracked is the ones the
@@ -116,6 +139,7 @@ export function RepositoryTree({
         if (!doc) return null;
         const isActive = doc.id === activeId;
         const glyph = docGlyph(doc);
+        const { code, title } = splitDocName(doc.name);
         return (
           <div key={node.id}>
             <button
@@ -126,7 +150,14 @@ export function RepositoryTree({
               onClick={() => onOpenDoc(doc.id)}
             >
               <FileIcon className="st-node__icon" />
-              <span className="st-node__label">{doc.name}</span>
+              {/* The two lines are typography. The filename reaches the
+                  accessible name whole in the span below, so it is never
+                  announced in pieces and never depends on how these lay out. */}
+              <span className="st-node__name" aria-hidden="true">
+                {code ? <span className="st-node__code">{code}</span> : null}
+                <span className="st-node__title">{title}</span>
+              </span>
+              <span className="studio__sr">{doc.name}</span>
               <span className={`st-glyph st-glyph--${glyph}`} />
               <span className="studio__sr">{GLYPH_LABEL[glyph]}</span>
             </button>
@@ -151,7 +182,7 @@ export function RepositoryTree({
             <CaretIcon className={`st-node__caret${isOpen ? " st-node__caret--open" : ""}`} />
             <FolderIcon className="st-node__icon" />
             <span className="st-node__label">{node.label}</span>
-            {node.badge ? <span className="st-node__badge">{node.badge}</span> : null}
+            {node.badge ? <span className="st-chip st-node__badge">{node.badge}</span> : null}
           </button>
           <div id={groupId} hidden={!isOpen}>
             {renderNodes(node.children, depth + 1)}
@@ -164,8 +195,9 @@ export function RepositoryTree({
   return (
     <aside className={`st-tree${open ? " is-open" : ""}`} aria-label="Document repository">
       <div className="st-tree__head">
-        <span className="st-tree__title">
-          Repository - {docCount} {docCount === 1 ? "doc" : "docs"}
+        <span className="st-eyebrow">Repository</span>
+        <span className="st-chip">
+          {docCount} {docCount === 1 ? "doc" : "docs"}
         </span>
         <div className="st-tree__actions">
           <button type="button" className="st-icon-btn" aria-label="New folder" title={PENDING_TITLE} disabled>
@@ -177,7 +209,7 @@ export function RepositoryTree({
         </div>
       </div>
 
-      <div className="st-search">
+      <div className="st-field st-search">
         <SearchIcon />
         <input
           type="text"
@@ -191,7 +223,7 @@ export function RepositoryTree({
       </div>
 
       <div className="st-tree__scroll">
-        <h3 className="st-tree__section">Working documents</h3>
+        <h3 className="st-eyebrow st-tree__section">Working documents</h3>
         {visible.length > 0 ? (
           renderNodes(visible, 0)
         ) : (
@@ -200,7 +232,7 @@ export function RepositoryTree({
           </div>
         )}
 
-        <h3 className="st-tree__section">
+        <h3 className="st-eyebrow st-tree__section">
           Reference library
           {library.phase === "ready"
             ? ` - ${countLibraryDocs(library.buckets)} ${
@@ -220,7 +252,7 @@ export function RepositoryTree({
       <div className="st-check">
         <button
           type="button"
-          className="st-check__btn"
+          className="st-btn st-btn--primary st-btn--lg st-btn--block"
           onClick={onCheck}
           // Disabled, not hidden, while a reference PSG is open: the footer is
           // a stable landmark, and the swapped note explains the refusal.
@@ -229,11 +261,18 @@ export function RepositoryTree({
           <ShieldIcon />
           {checking ? "Checking..." : "Check this document"}
         </button>
+        <button
+          type="button"
+          className="st-btn st-btn--outline st-btn--block"
+          onClick={onRunFullCheck}
+          disabled={checking || activeLibraryId !== null}
+        >
+          Check all {docCount} {docCount === 1 ? "document" : "documents"}
+        </button>
         <p className="st-check__note">
           {activeLibraryId !== null
             ? "Reference PSGs are FDA source documents. Compliance checks run on working documents."
-            : "Checks the open document against ICH, USP, 21 CFR and your internal SOPs. " +
-              "Run the whole repository from the right rail."}
+            : "Against ICH, USP, 21 CFR and your internal SOPs."}
         </p>
       </div>
     </aside>

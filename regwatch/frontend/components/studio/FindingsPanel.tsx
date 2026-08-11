@@ -23,7 +23,7 @@ import {
   verdictFor,
 } from "@/lib/studio-marks";
 import { JUSTIFICATION_MAX } from "@/lib/studio-types";
-import type { Disposition, DispositionError, Finding, StudioDoc } from "@/lib/studio-types";
+import type { Disposition, DispositionError, Finding, Severity, StudioDoc } from "@/lib/studio-types";
 
 /** A disposition the analyst has picked but not yet recorded. */
 export interface PendingDisposition {
@@ -61,6 +61,19 @@ const DISPOSITION_LABEL: Record<Disposition, string> = {
   fixed_elsewhere: "Fixed elsewhere",
   not_applicable: "Not applicable",
   disputed: "Disputed",
+};
+
+/**
+ * Four severities onto the three weights the severity chip carries. Critical
+ * and major are both defects and both read solid; what separates them is the
+ * word in the chip, the ring the critical one takes, and the blocking count in
+ * the verdict. A fourth fill would turn the ladder into a rainbow.
+ */
+const SEVERITY_WEIGHT: Record<Severity, "major" | "minor" | "info"> = {
+  critical: "major",
+  major: "major",
+  minor: "minor",
+  info: "info",
 };
 
 /** What each disposition needs written down, and why. */
@@ -192,13 +205,40 @@ function FindingCard({
       <div className="st-find__head">
         {/* The chip is a colour and a word; the word alone goes to a screen reader
             so the severity is not announced twice. */}
-        <span className={`st-sev st-sev--${f.severity}`} aria-hidden="true">
+        <span
+          className={`st-sev st-sev--${SEVERITY_WEIGHT[f.severity]}${
+            f.severity === "critical" ? " st-find__sev--blocking" : ""
+          }`}
+          aria-hidden="true"
+        >
           {f.severity.toUpperCase()}
         </span>
         <h3 className="st-find__title" id={titleId}>
           <span className="studio__sr">{f.severity} finding. </span>
           {f.title}
         </h3>
+        {/* Both tools name the finding in their accessible name: an icon reached
+            out of card order still has to say which finding it acts on. */}
+        <div className="st-find__tools">
+          <button
+            type="button"
+            className="st-icon-btn st-find__tool"
+            title="Show in document"
+            aria-label={`Show in document: ${f.title}`}
+            onClick={() => onSelect(f.id)}
+          >
+            <PinIcon />
+          </button>
+          <button
+            type="button"
+            className="st-icon-btn st-find__tool"
+            title="Explain the rule"
+            aria-label={`Explain the rule behind ${f.title}`}
+            onClick={() => onAsk(f)}
+          >
+            <ChatIcon />
+          </button>
+        </div>
       </div>
 
       <p className="st-find__detail" id={detailId}>
@@ -206,11 +246,11 @@ function FindingCard({
       </p>
 
       <div className="st-find__meta">
-        <span>
+        <span className="st-chip">
           <PinIcon />
           {f.location}
         </span>
-        <span>
+        <span className="st-chip">
           <BookIcon />
           {f.standard}
         </span>
@@ -246,7 +286,11 @@ function FindingCard({
               session.
             </p>
           )}
-          <button type="button" className="st-find__change" onClick={() => onPickDisposition(f, "disputed")}>
+          <button
+            type="button"
+            className="st-btn st-btn--outline st-find__change"
+            onClick={() => onPickDisposition(f, "disputed")}
+          >
             Change
             <span className="studio__sr"> the disposition on {f.title}</span>
           </button>
@@ -255,15 +299,23 @@ function FindingCard({
         <>
           {f.suggestion !== undefined && (
             <div className="st-fix">
-              <p className="st-fix__label">Suggested replacement</p>
+              <p className="st-eyebrow st-fix__label">Suggested replacement</p>
               <p className="st-fix__text">{f.suggestion}</p>
               {applicable.ok ? (
-                <button type="button" className="st-fix__apply" onClick={() => onApplySuggestion(f.id)}>
+                <button
+                  type="button"
+                  className="st-btn st-btn--primary st-fix__apply"
+                  onClick={() => onApplySuggestion(f.id)}
+                >
                   Apply suggested fix
                   <span className="studio__sr"> for {f.title}</span>
                 </button>
               ) : (
-                <button type="button" className="st-fix__apply" onClick={() => onRevert(f.blockId)}>
+                <button
+                  type="button"
+                  className="st-btn st-btn--primary st-fix__apply"
+                  onClick={() => onRevert(f.blockId)}
+                >
                   <UndoIcon size={12} />
                   Restore the checked text
                   <span className="studio__sr"> under {f.title}</span>
@@ -278,11 +330,16 @@ function FindingCard({
               // skipped by assistive tech, so the one person who most needs the
               // gate explained would never reach the explanation.
               const blocked = d === "fixed" && !fixCheck.ok;
+              // Fixed is the outcome the reviewer is working towards, so it is the
+              // only filled control on the card and the other three argue quietly.
+              const weight = d === "fixed" ? "st-btn--primary" : "st-btn--quiet";
               return (
                 <button
                   key={d}
                   type="button"
-                  className={`st-disp__btn${editing === d ? " is-on" : ""}${blocked ? " is-blocked" : ""}`}
+                  className={`st-btn ${weight} st-disp__btn${editing === d ? " is-on" : ""}${
+                    blocked ? " is-blocked" : ""
+                  }`}
                   aria-disabled={blocked || undefined}
                   aria-describedby={blocked ? gateId : undefined}
                   onClick={() => onPickDisposition(f, d)}
@@ -305,34 +362,35 @@ function FindingCard({
 
           {editing && editing !== "fixed" && (
             <div className="st-just">
-              <label className="st-just__label" htmlFor={`${uid}-field`}>
+              <label className="st-eyebrow st-just__label" htmlFor={`${uid}-field`}>
                 {JUSTIFICATION_PROMPT[editing].label}
               </label>
               <p className="st-just__help" id={`${uid}-help`}>
                 {JUSTIFICATION_PROMPT[editing].help}
               </p>
-              <textarea
-                id={`${uid}-field`}
-                ref={editorRef}
-                className="st-just__field"
-                value={draft}
-                rows={3}
-                required
-                aria-required="true"
-                aria-invalid={cardError ? "true" : undefined}
-                aria-describedby={cardError ? `${uid}-help ${errorId}` : `${uid}-help`}
-                onChange={(e) => onDraftChange(f.id, e.target.value)}
-              />
+              <div className="st-field st-just__field">
+                <textarea
+                  id={`${uid}-field`}
+                  ref={editorRef}
+                  value={draft}
+                  rows={3}
+                  required
+                  aria-required="true"
+                  aria-invalid={cardError ? "true" : undefined}
+                  aria-describedby={cardError ? `${uid}-help ${errorId}` : `${uid}-help`}
+                  onChange={(e) => onDraftChange(f.id, e.target.value)}
+                />
+              </div>
               {cardError && (
                 <p className="st-just__error" id={errorId}>
                   {errorMessage(cardError, editing, draft.trim().length)}
                 </p>
               )}
               <div className="st-just__actions">
-                <button type="button" className="st-just__record" onClick={() => onRecord(f)}>
+                <button type="button" className="st-btn st-btn--primary st-just__record" onClick={() => onRecord(f)}>
                   Record
                 </button>
-                <button type="button" className="st-just__cancel" onClick={onCancelPending}>
+                <button type="button" className="st-btn st-btn--quiet st-just__cancel" onClick={onCancelPending}>
                   Cancel
                 </button>
               </div>
@@ -346,19 +404,6 @@ function FindingCard({
           )}
         </>
       )}
-
-      <div className="st-find__tools">
-        <button type="button" className="st-find__tool" onClick={() => onSelect(f.id)}>
-          <PinIcon />
-          Show in document
-          <span className="studio__sr">: {f.title}</span>
-        </button>
-        <button type="button" className="st-find__tool" onClick={() => onAsk(f)}>
-          <ChatIcon size={12} />
-          Explain the rule
-          <span className="studio__sr"> behind {f.title}</span>
-        </button>
-      </div>
     </li>
   );
 }
@@ -409,11 +454,13 @@ export function FindingsPanel(props: FindingsPanelProps) {
                 {v.label}
               </div>
               <div className="st-verdict__counts">
-                {v.blocking > 0 && <span className="st-count st-count--blocking">{v.blocking} blocking</span>}
-                <span className="st-count">{v.toResolve} to resolve</span>
-                {v.notes > 0 && <span className="st-count">{countLabel(v.notes, "note")}</span>}
-                {v.disposed > 0 && <span className="st-count st-count--done">{v.disposed} recorded</span>}
-                {v.stale > 0 && <span className="st-count">{v.stale} stale</span>}
+                {v.blocking > 0 && (
+                  <span className="st-chip st-count st-count--blocking">{v.blocking} blocking</span>
+                )}
+                <span className="st-chip st-count">{v.toResolve} to resolve</span>
+                {v.notes > 0 && <span className="st-chip st-count">{countLabel(v.notes, "note")}</span>}
+                {v.disposed > 0 && <span className="st-chip st-count st-count--done">{v.disposed} recorded</span>}
+                {v.stale > 0 && <span className="st-chip st-count">{v.stale} stale</span>}
               </div>
               <p className="st-verdict__against">Checked against {against}.</p>
             </div>
@@ -422,14 +469,19 @@ export function FindingsPanel(props: FindingsPanelProps) {
               <div className="st-step" role="group" aria-label="Move between open findings">
                 <button
                   type="button"
-                  className="st-step__btn"
+                  className="st-btn st-btn--outline st-step__btn"
                   aria-keyshortcuts="Shift+F8"
                   onClick={() => onStep(-1)}
                 >
                   <ArrowIcon className="st-step__up" />
                   Previous open finding
                 </button>
-                <button type="button" className="st-step__btn" aria-keyshortcuts="F8" onClick={() => onStep(1)}>
+                <button
+                  type="button"
+                  className="st-btn st-btn--outline st-step__btn"
+                  aria-keyshortcuts="F8"
+                  onClick={() => onStep(1)}
+                >
                   <ArrowIcon />
                   Next open finding
                 </button>
@@ -453,7 +505,7 @@ export function FindingsPanel(props: FindingsPanelProps) {
 
       {hasRecords && (
         <div className="st-panel__foot">
-          <button type="button" className="st-record__copy" onClick={onCopyRecord}>
+          <button type="button" className="st-btn st-btn--outline st-record__copy" onClick={onCopyRecord}>
             <CopyIcon />
             Copy record
           </button>
