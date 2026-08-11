@@ -360,7 +360,8 @@ Endpoints:
 - `POST /whitepaper` plus the `/whitepaper/runs/*` read, edit, finalize, reopen,
   delete, and `.docx` export routes
 - `POST /deficiency/analyze`, `GET /deficiency/runs`, `GET /deficiency/runs/{id}`
-- `GET /watch/latest`, `GET /psg/documents`, `GET /psg/documents/{id}/pdf`
+- `GET /watch/latest`, `GET /psg/documents`, `GET /psg/documents/{id}/pdf`,
+  `GET /psg/documents/{id}/content`, `GET /psg/documents/{id}/docx`
 - `GET /products`, `POST /products` (Go)
 - `GET /sessions`, `GET /sessions/{id}`, `DELETE /sessions/{id}` (Go). A
   `session_id` belonging to another user 404s.

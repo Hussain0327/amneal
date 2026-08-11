@@ -27,10 +27,18 @@ const EDGE = 90;
 
 interface Props {
   selection: StudioSelection | null;
+  /**
+   * Offer the assistant-backed actions. False over a reference PSG: those
+   * three route into the document assistant, which answers about the working
+   * repository, and pointing it at FDA's own guidance would produce confident
+   * answers about a document it was never given. Highlighting is local to the
+   * text and stays.
+   */
+  assistant?: boolean;
   onAction: (a: SelectionAction) => void;
 }
 
-export function SelectionToolbar({ selection, onAction }: Props) {
+export function SelectionToolbar({ selection, assistant = true, onAction }: Props) {
   if (!selection) return null;
 
   const { rect } = selection;
@@ -63,37 +71,41 @@ export function SelectionToolbar({ selection, onAction }: Props) {
         <HighlightIcon />
         Highlight
       </button>
-      <span className="st-sel__sep" aria-hidden="true" />
-      <button
-        type="button"
-        className="st-btn st-btn--quiet st-sel__btn"
-        onClick={() => onAction("summarize")}
-      >
-        Summarize
-      </button>
-      <button
-        type="button"
-        className="st-btn st-btn--quiet st-sel__btn"
-        onClick={() => onAction("explain")}
-      >
-        Explain
-      </button>
-      <button
-        type="button"
-        className="st-btn st-btn--quiet st-sel__btn"
-        onClick={() => onAction("check")}
-      >
-        Check
-      </button>
-      <span className="st-sel__sep" aria-hidden="true" />
-      <button
-        type="button"
-        className="st-btn st-btn--quiet st-sel__btn"
-        onClick={() => onAction("ask")}
-      >
-        <ChatIcon />
-        Ask
-      </button>
+      {assistant ? (
+        <>
+        <span className="st-sel__sep" aria-hidden="true" />
+        <button
+          type="button"
+          className="st-btn st-btn--quiet st-sel__btn"
+          onClick={() => onAction("summarize")}
+        >
+          Summarize
+        </button>
+        <button
+          type="button"
+          className="st-btn st-btn--quiet st-sel__btn"
+          onClick={() => onAction("explain")}
+        >
+          Explain
+        </button>
+        <button
+          type="button"
+          className="st-btn st-btn--quiet st-sel__btn"
+          onClick={() => onAction("check")}
+        >
+          Check
+        </button>
+        <span className="st-sel__sep" aria-hidden="true" />
+        <button
+          type="button"
+          className="st-btn st-btn--quiet st-sel__btn"
+          onClick={() => onAction("ask")}
+        >
+          <ChatIcon />
+          Ask
+        </button>
+        </>
+      ) : null}
     </div>
   );
 }

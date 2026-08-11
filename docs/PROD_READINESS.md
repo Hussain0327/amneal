@@ -115,7 +115,9 @@ Two of these are now done. The numbers are kept because other docs cite them.
   the provisional text is cosmetic and can be reset.
 - **The Compliance Studio (`/studio`) is not production-relevant yet.** It sits
   outside the shell. One seam is real: the left rail lists the FDA PSG corpus
-  from the database (`GET /psg/documents`) and streams PDFs inline. The document
+  from the database (`GET /psg/documents`), renders each PSG as a document
+  (`/content`), generates a .docx of it on request (`/docx`) and streams the
+  original PDF inline. The document
   service, the compliance pipeline and the assistant are fixtures, and nothing
   recorded there survives a refresh. See
   [`COMPLIANCE_STUDIO.md`](COMPLIANCE_STUDIO.md).

@@ -324,6 +324,7 @@ visitors through the proxy.
 | GET / POST / DELETE | `/whitepaper/runs*` | yes | Saved White Paper runs: list, detail, per-cell edit, finalize, reopen, render, delete |
 | GET | `/watch/latest` | yes | Recent alerts, optional `since` filter |
 | GET | `/psg/documents`, `/psg/documents/{id}/pdf` | yes | PSG reference library listing and inline PDF |
+| GET | `/psg/documents/{id}/content`, `/psg/documents/{id}/docx` | yes | one PSG as studio blocks, and as a generated Word download |
 | POST | `/deficiency/analyze` | yes | Start a deficiency analysis (202 plus background work) |
 | GET | `/deficiency/runs`, `/deficiency/runs/{id}` | yes | Deficiency run list and detail |
 | GET / POST | `/products` | yes | List or add watchlist products (Go) |
