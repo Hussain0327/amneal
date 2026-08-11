@@ -6,6 +6,14 @@ surviving memory record plus a 4-agent code exploration over main @ f3e4aa4
 reconstructed and re-verified it). All file:line anchors below refer to
 main @ f3e4aa4.
 
+> **Read as history, not current state (noted 2026-08-11).** This is a dated
+> design doc and its "today" statements were true on 2026-08-10 only. Two of them
+> are now wrong: the prod model is `gpt-oss-120b` (served id `gpt-oss-120b-080525`),
+> repointed on 2026-08-05, not `gpt-oss-20b`; and `REGWATCH_PROSE_SYNTHESIS` is no
+> longer dark, it is ON in prod along with `REGWATCH_LIVE_DRAFT` and
+> `REGWATCH_SELECTIVE_CITATION`. The design itself shipped in PR #179. For current
+> state see `docs/DEPLOY.md` and `docs/ARCHITECTURE.md`.
+
 ## 1. Context and premise
 
 The Ask page (surface 01) already streams over SSE end-to-end, but the

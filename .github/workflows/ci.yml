@@ -38,7 +38,7 @@ jobs:
   lint-type-test:
     runs-on: ubuntu-latest
     env:
-      # B8: exercise the production datastore (Postgres + pgvector) in CI — the
+      # B8: exercise the production datastore (Postgres + pgvector) in CI, the
       # mode prod actually runs in. Without this, test_pgvector_store.py and
       # test_postgres_bootstrap.py skip and the prod path ships untested.
       # DATABASE_URL is absent on purpose: pytest must keep using
@@ -220,7 +220,7 @@ jobs:
       # Container image scan: FIXABLE CRITICAL/HIGH vulns (--ignore-unfixed:
       # base-image OS packages routinely carry CVEs with no released fix, and
       # failing on those would just pin the build to a moving target with no
-      # action to take) PLUS any embedded secrets (--scanners vuln,secret —
+      # action to take) PLUS any embedded secrets (--scanners vuln,secret:
       # secret findings ignore --ignore-unfixed and gate the build the same way).
       # Trivy caches its DB across runs. The tag is PINNED (0.72.0, current
       # 2026-07-20) for the same reason deploy.yml pins flyctl: an unpinned

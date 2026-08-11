@@ -1,139 +1,156 @@
 # REGWATCH Non-Technical Guide
 
-This guide explains REGWATCH in plain English for Clinical Regulatory Affairs,
-business stakeholders, managers, and reviewers who do not need to read code.
+Last updated: 2026-08-11
+
+Plain English, for Clinical Regulatory Affairs, business stakeholders, managers,
+and reviewers who do not need to read code.
 
 ## What REGWATCH Is
 
-REGWATCH is a research assistant for FDA public drug databases.
+REGWATCH is a research assistant for the public FDA drug databases. Its job is
+to help a Clinical Regulatory Affairs team find, organize, and cite FDA
+information faster.
 
-Its job is to help a Clinical Regulatory Affairs team find, organize, and cite
-FDA information faster.
-
-It does not replace a regulatory professional. It does not make regulatory
-decisions. It does not write FDA submissions. It helps people research FDA
-sources and see exactly where each answer came from.
+It does not replace a regulatory professional, make regulatory decisions, or
+write FDA submissions. It helps people research FDA sources and see exactly
+where each answer came from.
 
 ## The Problem It Helps With
 
-Clinical Regulatory Affairs teams often need to answer questions like:
+Regulatory teams answer questions like:
 
 - Is there an FDA Product-Specific Guidance for this product?
 - What bioequivalence studies does the guidance describe?
 - What is the RLD or reference standard?
 - Has the FDA guidance changed?
 - Is the product listed in an FDA database?
-- Are there related FDA records that need to be checked?
 - Where did this information come from?
 
-Without a tool, this means manually checking multiple FDA websites, opening
-PDFs, searching pages, comparing records, and copying source links.
-
-REGWATCH is meant to reduce that research time.
+Without a tool that means checking several FDA websites by hand, opening PDFs,
+searching pages, comparing records, and copying source links. REGWATCH is meant
+to cut that time down.
 
 ## What It Does Today
 
-REGWATCH is a working system, not just a sketch. It is deployed and running on
-approved hosting, with connections encrypted in transit. Some finishing work
-remains before it is opened up more widely (see "Important Current
-Limitations"), but the core research features are built, tested, and live.
+REGWATCH is deployed and running on approved hosting, with connections
+encrypted in transit. Some finishing work remains before it is opened up more
+widely (see "What Is Still Missing"), but the core research features are built,
+tested, and live.
 
-Today, it can:
+Today it can:
 
-- Download and store the full FDA PSG catalog — roughly 1,795 Product-Specific
-  Guidances, pulled across the A-Z letter listings (not just the ~70 the FDA
-  index page shows at a glance).
-- Parse PSG PDFs page by page.
-- Split the PDF text into searchable pieces.
-- Store those searchable pieces in a vector database.
-- Ingest and store the other FDA sources as structured records: Orange Book
-  (products, patents, exclusivity), Drugs@FDA, the NDC Directory, DailyMed SPL
-  labels, Drug Shortages, and REMS.
-- Ask questions over the FDA corpus through a cited conversational chat.
-- Return cited answers with page references and links to the FDA source.
-- Refuse to answer when it cannot find support in the FDA source text.
-- Resolve a question to one exact product before answering, and ask for
-  clarification when the product is ambiguous.
+- Crawl and store FDA Product-Specific Guidances from the A-Z letter listings,
+  not just the handful the FDA index page shows at a glance.
+- Parse PSG PDFs page by page and split the text into searchable pieces.
+- Store those pieces so they can be searched by meaning, not just by keyword.
+- Ingest the other FDA sources as structured records: Orange Book (products,
+  patents, exclusivity), Drugs@FDA, the NDC Directory, DailyMed SPL labels,
+  Drug Shortages, and REMS.
+- Answer questions in a chat, with FDA citations attached.
+- Work out which exact product you mean before answering, and ask you which one
+  when the name is ambiguous.
 - Build a product dossier ("Assemble") from stored FDA data.
 - Build a multi-source White Paper for a product, with every cell traced to its
-  FDA source, and export it to a Word (.docx) file.
-- Track a product watchlist.
-- Match FDA PSG changes against watchlist products and write an alert digest.
-- Require sign-in: every user has their own account, their own chat history, and
-  their own rate limits.
-- Log every Q&A interaction for auditability.
+  FDA source, and export it to Word (.docx).
+- Track a product watchlist, match FDA PSG changes against it, and write an
+  alert digest.
+- Require sign-in. Every user has their own account, chat history, and rate
+  limits.
+- Log every question and answer for auditability.
 
-## The Six FDA Source Areas
+The stored corpus held 5,494 searchable text pieces when it was measured on
+2026-08-11.
 
-Your manager provided six FDA database areas:
+## The FDA Sources
 
-1. Orange Book
-2. Product-Specific Guidances
-3. Drugs@FDA
-4. Drug Shortages
-5. NDC Directory
-6. REMS
-
-REGWATCH treats each of these as a first-class FDA source today (DailyMed SPL
-labels are also ingested as a seventh source).
-
-The important point: not every source is handled the same way.
-
-Product-Specific Guidances are PDFs, so they get text search and citations.
-Orange Book, NDC, shortages, Drugs@FDA, DailyMed, and REMS are handled as
-structured records, like database rows.
-
-## The Six FDA Sources In Plain English
+Your manager provided six FDA database areas. REGWATCH treats each as a
+first-class source, and adds DailyMed SPL labels as a seventh.
 
 | FDA source | What people use it for | How REGWATCH uses it |
 |---|---|---|
-| Orange Book | RLD, reference standard, TE codes, patents, exclusivity | Stored as structured data and looked up |
-| Product-Specific Guidances | FDA product-specific bioequivalence guidance | PDFs parsed, text searched, pages cited |
-| Drugs@FDA | Applications, sponsors, approval history, labels | Stored as structured data and looked up |
-| Drug Shortages | Current shortage status | Stored as structured data and refreshed |
-| NDC Directory | NDC product/package information | Stored as structured data and looked up |
-| REMS | REMS programs and requirements | Stored as structured data with source cited |
-| DailyMed SPL | Structured product labels for the RLD | Stored as structured data and cited |
+| Orange Book | RLD, reference standard, TE codes, patents, exclusivity | Structured data, looked up |
+| Product-Specific Guidances | Product-specific bioequivalence guidance | PDFs parsed, text searched, pages cited |
+| Drugs@FDA | Applications, sponsors, approval history, labels | Structured data, looked up |
+| Drug Shortages | Current shortage status | Structured data, refreshed |
+| NDC Directory | NDC product and package information | Structured data, looked up |
+| REMS | REMS programs and requirements | Structured data, source cited |
+| DailyMed SPL | Structured product labels for the RLD | Structured data, cited |
 
-## What A User Experience Should Feel Like
+Not every source is handled the same way. Product-Specific Guidances are PDFs,
+so they get text search and page citations. The rest behave like database rows,
+so they get looked up directly.
 
-A regulatory user should be able to ask:
+## How The Assistant Answers
+
+This changed in August 2026, and it is worth understanding, because the old
+behaviour was noticeably more robotic.
+
+The rule used to be "cite every sentence or refuse". It made the assistant read
+like a machine, and when it had nothing useful it produced a stiff canned
+refusal.
+
+The rule now is **cite the facts, talk like a person.**
+
+Every sentence the assistant writes falls into one of three buckets, and it
+labels itself by how it is written:
+
+1. **An FDA fact.** Anything it tells you that FDA guidance requires,
+   recommends, permits, or prohibits carries a citation right there in the
+   sentence. No citation, no claim: the system removes an FDA fact that arrives
+   without a source before you ever see it.
+2. **Its own reading.** Sometimes the useful thing to say goes a step past what
+   the documents literally say. The assistant is allowed to do that, but it has
+   to flag it, and it always opens with a phrase like "My reading is ..." or
+   "The guidance does not state this directly; my reading is ...". So you can
+   always tell an FDA fact from an interpretation at a glance. It is also not
+   allowed to slip a requirement or a prohibition into one of those sentences.
+   If it says what is required, it counts as an FDA fact and needs a citation.
+3. **Normal conversation.** Greetings, an offer to look at something else, a
+   question back to you. No citations, because there is nothing to cite.
+
+**When it does not have the answer, it says so like a person would.** There is
+no code word and no canned refusal any more. It tells you plainly that the
+guidance it retrieved does not cover the question, names what it does have on
+the topic, and suggests where to go next.
+
+The underlying safety rule has not loosened at all. An FDA fact without a source
+is still dropped. What changed is the tone around it.
+
+## What A Session Feels Like
+
+A regulatory user asks:
 
 > What BE studies does FDA recommend for albuterol sulfate inhalation aerosol?
 
-The system should:
+The system:
 
-1. Understand the user is asking about PSG bioequivalence guidance.
-2. Resolve the product as albuterol sulfate inhalation aerosol.
-3. Search only the relevant PSG material for that product.
-4. Produce an answer with inline citations.
-5. Show the FDA source and page number.
+1. Recognizes this is a PSG bioequivalence question.
+2. Resolves the product to albuterol sulfate inhalation aerosol.
+3. Searches only that product's guidance material.
+4. Writes an answer with citations in the sentences.
+5. Lists the FDA sources and page numbers underneath.
 
-The answer should look conceptually like:
+The answer reads roughly like:
 
-> The PSG describes the recommended bioequivalence study design for this
-> product and cites the relevant page in the FDA guidance. [PSG_020503, p.2]
+> A single-dose fasting study is recommended [PSG_020503, p.2]. My reading is
+> that this is the study most reviewers will expect to see first. Want me to
+> pull the fed study conditions too?
 
-Then it should show a source list:
+Then a source list:
 
-- PSG_020503, page 2, FDA source link
+- PSG_020503, page 2, with a link to the FDA source
 
 ## Why Citations Matter
 
-REGWATCH is for regulatory research. A confident answer without a source is not
+This is regulatory research. A confident answer with no source is not
 acceptable.
 
-Every factual answer should be traceable to:
+Every FDA fact should be traceable to the source name, the document or record,
+the page number when the source is a PDF, the source URL, and when the source
+was captured.
 
-- FDA source name
-- document or record
-- page number when the source is a PDF
-- source URL
-- time the source was captured
-
-If REGWATCH cannot support an answer with FDA evidence, it should refuse.
-
-That refusal is not a failure. In this domain, refusal is a safety feature.
+If REGWATCH cannot support a fact with FDA evidence, it does not state it. That
+is a safety feature, not a failure.
 
 ## What It Must Not Do
 
@@ -148,257 +165,204 @@ REGWATCH must not:
 - Send anything to FDA.
 - Take autonomous regulatory action.
 
-The system is for research and organization, not decision-making.
+It is for research and organization, not decision-making.
 
-## Why The System Sometimes Asks For Clarification
+## Why It Sometimes Asks Which Product You Mean
 
-FDA drug names can be confusing. Different products can have similar language in
-their guidances.
+Different FDA guidances share a lot of the same language. Two unrelated PSGs may
+both mention single actuation, crossover design, fasting study, and
+bioequivalence.
 
-For example, two different PSGs may both mention:
-
-- single actuation
-- crossover design
-- fasting study
-- bioequivalence
-
-If the system searches all PSGs at once, it might find the right phrase in the
-wrong product's guidance.
-
-To prevent that, REGWATCH should first identify the exact product. If the user
-is unclear, it should ask:
+If the system searched every PSG at once it could find the right phrase in the
+wrong product's guidance. So it pins down the exact product first. If your
+wording could mean more than one product, it asks:
 
 > Which product do you mean?
 
-Then it should show choices.
+and shows you the choices. That is better than quietly answering from the wrong
+FDA document.
 
-This is better than silently answering from the wrong FDA document.
+## The Safety Rules
 
-## How REGWATCH Thinks About A Question
-
-In simple terms, REGWATCH should follow this flow:
-
-1. What is the user asking about?
-2. Which FDA source should answer this?
-3. Which product or application is the user asking about?
-4. Do we have trusted FDA evidence?
-5. Can we answer with citations?
-6. If yes, answer with sources.
-7. If no, ask for clarification or refuse.
-
-## The Current Safety Rules
-
-The code has compliance invariants. These are hard rules, not suggestions.
+The code enforces these as hard rules with automated tests behind them, not as
+written guidance.
 
 | Rule | Plain-English meaning |
 |---|---|
-| INV-1 Grounding | Every factual claim needs a source and page |
-| INV-2 Refuse over guess | If evidence is weak, do not guess |
+| INV-1 Grounding | Every FDA fact needs a source and page |
+| INV-2 Refuse over guess | If the evidence is weak, do not guess |
 | INV-3 Operational only | Do not write submissions or make regulatory judgments |
 | INV-4 No fabricated execution | Do not report work that did not actually happen |
 | INV-5 Verified provenance | Product facts must come from verified sources |
 | INV-6 Auditability | Log every query and answer path |
 
-The White Paper feature adds three more guards (INV-7, INV-8, INV-9) that stop
-one product's facts from leaking into another product's white paper and collapse
-any cell whose citation does not actually back it. All of these rules are
-enforced as automated tests, not just written down.
+The White Paper adds three more (INV-7, INV-8, INV-9). They stop one product's
+facts from leaking into another product's white paper and collapse any cell
+whose citation does not actually back it.
 
 ## What The Watch Feature Does
 
-The watch feature is meant to help the team notice relevant FDA guidance
-changes.
+The watch feature helps the team notice relevant FDA guidance changes.
 
-It works like this:
-
-1. REGWATCH has a verified product watchlist.
-2. It crawls FDA PSG listings.
+1. REGWATCH holds a verified product watchlist.
+2. It crawls FDA PSG listings on a daily schedule.
 3. It checks which FDA PSG records match watchlist products.
-4. It only emits alerts for PSG versions that were actually fetched and stored.
-5. It writes a local digest that the UI or API can show.
+4. It only raises an alert for a PSG version it actually fetched and stored.
+5. It writes a digest the UI or API can show.
 
-This avoids saying "there was a change" unless the system actually has the
-underlying FDA record.
+That last point is the important one. It never says "there was a change" unless
+it has the underlying FDA record in hand.
 
 ## What The Dossier Feature Does
 
-The dossier feature builds a research brief for a product.
+The dossier builds a research brief for one product: matched PSGs, extracted
+bioequivalence requirements, cited PSG fields, RLD label information from
+openFDA when available, a PSG-based Q&A summary, and a checklist scaffold.
 
-It can include:
-
-- matched PSGs
-- extracted bioequivalence requirements
-- cited PSG fields
-- RLD label information from openFDA when available
-- a PSG-based Q&A summary
-- a checklist scaffold
-
-The checklist is not saying what the company has done. It is only organizing
-what FDA source material appears to call for.
+The checklist is not a claim about what the company has done. It only organizes
+what the FDA source material appears to call for.
 
 ## What The White Paper Feature Does
 
-The White Paper feature builds a structured product brief that pulls from all of
-the FDA sources at once — Orange Book, Drugs@FDA, NDC, DailyMed, Drug Shortages,
-REMS, and the PSGs.
+The White Paper builds a structured product brief that pulls from all the FDA
+sources at once: Orange Book, Drugs@FDA, NDC, DailyMed, Drug Shortages, REMS,
+and the PSGs.
 
-Each cell in the white paper is one of three things:
+Each cell is one of three things:
 
-- Populated — filled from an FDA source, with the citation attached.
-- "No" — the system checked and the source confirms the answer is absent.
-- Analyst input required — the system could not confirm it from FDA evidence, so
-  it leaves the cell for a human to fill.
+- **Populated**: filled from an FDA source, with the citation attached.
+- **"No"**: the system checked and the source confirms the answer is absent.
+- **Analyst input required**: it could not confirm this from FDA evidence, so it
+  leaves the cell for a person.
 
-Some cells are marked as analyst-authored on purpose. The system never writes
-those; only a person does. The finished white paper can be exported to a Word
-(.docx) file that matches exactly what was reviewed on screen, and the FDA
-source freshness (when each source was last fetched) is recorded with it.
+Some cells are analyst-authored on purpose and the system never writes them. The
+finished white paper exports to a Word file that matches exactly what was
+reviewed on screen, and it records when each FDA source was last fetched.
 
 ## What The Audit Log Does
 
-Every Q&A interaction is logged.
+Every question and answer is logged: the question, the evidence retrieved, the
+answer text, the citations, whether the system declined, the model name, and the
+chat session and turn it belonged to.
 
-The log records:
-
-- question
-- retrieved evidence
-- answer text
-- citations
-- whether the system refused
-- model name
-- the chat session and turn it belonged to, and the response type
-  (answer / summary / clarify / scope warning / refused)
-
-This matters because a reviewer may ask:
-
-> Why did the system say this?
-
-The audit log helps reconstruct the answer.
-
-## What Docker Adds
-
-Docker is packaging for the application.
-
-It lets the same code run in a predictable container instead of depending on a
-developer's laptop setup.
-
-The current Docker setup can run:
-
-- the API
-- a separate ingest job for loading FDA data
-
-(The web UI is a separate Next.js app under `regwatch/frontend/` and is run on
-its own.) This same packaging is what the deployed service runs on today, so
-the code behaves the same way in production as it does in testing.
+This matters because a reviewer will eventually ask "why did the system say
+this?", and the log is how you reconstruct it.
 
 ## How The Web App Is Organized
 
-The web app (built with Next.js) puts five surfaces — Ask, Assemble, Watch,
-White Paper, and Deficiency — inside one shell, with a single sidebar and a
-shared design. A sixth, the Compliance Studio, opens on its own full screen and
-is described at the end of this section.
+The web app puts five surfaces (Ask, Assemble, Watch, White Paper, and
+Deficiency) inside one shell with a single sidebar and a shared design. A sixth,
+the Compliance Studio, opens on its own full screen and is described below.
 
 A few things to know as a user:
 
-- Ask is a chat. You type a question and get a cited answer back, with the FDA
-  sources shown as clickable chips; if the product is ambiguous, it offers you
-  clarify options to pick from. The answer is shown being typed out live as a
-  draft, but the final cited answer only appears once its citations have been
+- **Ask is a chat.** You type a question and get a cited answer back, with the
+  FDA sources shown as clickable chips. If the product is ambiguous it offers
+  clarify options to pick from. You see the answer being typed out live as a
+  draft, but the final cited version only appears once its citations have been
   checked against the FDA sources.
-- At the top of every surface there is an "Under review" product-scope bar. It
-  shows which product the whole app is currently focused on, and you can change
-  the focus there with a product picker.
-- The product focus is shareable: it lives in the page address, so a link you
-  send to a colleague opens on the same product. You can also set the focus from
-  the White Paper (after a successful build) or from a Watch row.
-- The picker is backed by a deterministic resolver. If your product can't be
-  matched to a single FDA application, it declines rather than guessing.
+- **There is an "Under review" bar at the top of every surface.** It shows which
+  product the whole app is focused on right now, and you can change it there.
+- **The focus is shareable.** It lives in the page address, so a link you send a
+  colleague opens on the same product. You can also set the focus from a
+  finished White Paper or from a Watch row.
+- **The product picker will not guess.** If your wording cannot be matched to a
+  single FDA application, it declines instead of picking one.
 
 ### The Compliance Studio
 
-Everything above reads **public FDA material**. The Compliance Studio is the one
-place that reads **our own draft documents** instead.
+Everything above reads public FDA material. The Compliance Studio is the one
+place that reads our own draft documents instead.
 
-It looks like a document editor. Your documents are listed on the left, the one
-you are reading fills the middle, and two panels slide in from the right: the
-compliance findings, and an assistant you can ask about any passage you select.
+It looks like a document editor. Your documents are on the left, the one you are
+reading fills the middle, and two panels slide in from the right: the compliance
+findings, and an assistant you can ask about any passage you select.
 
 What a reviewer does there:
 
 1. Open a CMC document and read it, or select a passage and ask the assistant to
    summarize or explain it.
 2. Run the compliance check. Findings come back attached to the exact sentence
-   that triggered them, highlighted in the text rather than listed away from it.
-3. Fix each one, and record what you decided: **Fixed**, **Fixed elsewhere**,
-   **Not applicable**, or **Disputed**. The last three ask you to write down why.
+   that triggered them, highlighted in the text.
+3. Fix each one and record what you decided: Fixed, Fixed elsewhere, Not
+   applicable, or Disputed. The last three ask you to write down why.
 4. Copy the resulting record out to paste into the comment-resolution log.
 
-Two things are deliberate and worth knowing:
+Two things are deliberate:
 
 - **You cannot mark something "Fixed" until you have actually changed the text
-  it points at.** If you have not edited it, the button explains why it is
-  unavailable and offers "Fixed elsewhere" instead, which asks where the fix
-  landed. This is so the record cannot claim a fix that never happened.
+  it points at.** If you have not edited it, the button explains why and offers
+  "Fixed elsewhere" instead, which asks where the fix landed. The record cannot
+  claim a fix that never happened.
 - **What you record here is a working note, not a controlled record.** There is
   no electronic signature behind it and the timestamp comes from your own
-  computer. The panel says so, and the exported record repeats it. It is meant to
-  be copied into a system that *is* controlled.
+  computer. The panel says so and the exported record repeats it. It is meant to
+  be copied into a system that is controlled.
 
 **It is a working prototype.** The documents in it are samples, the compliance
-check is a stand-in rather than a real analysis, and **nothing is saved** — close
-the tab and your work is gone. It is there to agree on how the tool should feel
+check is a stand-in rather than a real analysis, and nothing is saved. Close the
+tab and your work is gone. It exists so we can agree on how the tool should feel
 before the machinery behind it is built.
 
-## Important Current Limitations
+## Where The Data Goes
 
-REGWATCH is deployed and running, but some finishing work remains before it is
-opened up more widely. The consolidated list of remaining work lives in
-`docs/ROADMAP.md`. The headline items:
+This was the biggest open question on the project and it is now settled.
 
-- It runs on approved hosting with encrypted connections. What remains is
-  connecting it to the company's single sign-on, and a rehearsed exercise that
-  proves backups can actually be restored.
-- The database move is done: one managed database now holds everything the
-  system stores. The only remaining piece there is that restore exercise.
-- The data-handling decision was made on 2026-07-28: the AI model that writes
-  answers now runs inside the company's own Databricks environment, so analyst
-  questions no longer leave the company boundary to get answered. One piece
-  still uses OpenAI: the "matching" step that finds the right FDA passages for
-  a question. Its in-company replacement is already set up in Databricks and
-  is waiting to be connected.
-- The daily watcher runs as a scheduled production job (on GitHub's
-  scheduler). What is still missing is fuller monitoring that raises an alarm
-  if a run fails.
-- The evaluation gold set should grow (from 12 Q&A + 16 white-paper rows toward
-  30-50).
-- Human review is still required.
+All three pieces that touch an analyst's question run inside the company's own
+Databricks environment:
 
-## The Architecture (Now Built)
+- The model that writes the answer.
+- The model that matches a question to the right FDA passages.
+- The database that stores everything.
 
-The system is organized exactly the way it was originally recommended:
+So a normal question does not leave the company boundary to get answered. The
+outside vendor is kept configured only as a fallback if we ever need to switch
+back, and it serves nothing today.
 
-1. A TypeScript web UI for users (the Next.js app described above).
-2. A gatekeeper service (written in Go) that guards the door: it checks
-   logins, manages sessions, applies rate limits, and keeps the record of
-   every question asked, standing in front of the answering engine.
-3. A Python answering engine for FDA evidence, retrieval, citations, and AI.
+## What Is Still Missing
+
+REGWATCH is deployed and running, but some work remains before it opens up more
+widely. The full list lives in `docs/ROADMAP.md`. The headline items:
+
+- **Single sign-on.** It runs on approved hosting with encrypted connections,
+  but it is not connected to the company's SSO yet, so it is not exposed
+  externally.
+- **A rehearsed restore exercise** that proves backups can actually be brought
+  back.
+- **Tighter database credentials** for the application account.
+- **Alerting on the daily watcher.** The scheduled job runs, but nothing raises
+  an alarm yet if a run fails. There is also a known configuration gap: the
+  scheduled job has not been given the settings for the new in-house matching
+  model, so the first time a real FDA revision lands it could store material
+  that the search index cannot see. Setting those values fixes it.
+- **Re-tuning the confidence cut-off.** There is a score below which the system
+  will not use a retrieved passage. That number was tuned against the previous
+  matching model. The matching model has since changed, so the number needs
+  checking again.
+- **Human review is still required.** Nothing here is a substitute for a
+  regulatory professional reading the source.
+
+## The Architecture, In One Pass
+
+1. A web UI for users.
+2. A gatekeeper service that guards the door: it checks logins, manages
+   sessions, applies rate limits, and keeps the record of every question asked.
+3. An answering engine for FDA evidence, retrieval, citations, and AI.
 4. A router that decides which FDA source should answer.
-5. Source handlers for each FDA database.
-6. A final answer synthesizer that writes cited answers.
-7. Strong validation before anything is shown to users.
+5. A handler for each FDA database.
+6. A synthesizer that writes the cited answer.
+7. Validation before anything reaches a user.
 8. Audit logs for every decision.
 
-The language model and embedding model are pluggable: no specific model name is
-hard-coded into the logic. That is what made the recent swap possible: the
-language model was switched to one running inside the company's own
-environment (the data-handling decision described in the Limitations above),
-without changing how the system works.
+The language model and the matching model are both pluggable. No specific model
+name is baked into the logic. That is what made the move into the company's own
+environment possible without rewriting how the system works.
 
-The goal is not to build a chatbot that guesses. The goal is to build a
-research system that knows where to look and shows the source.
+The goal is not a chatbot that guesses. It is a research system that knows where
+to look and shows you the source.
 
 ## One-Sentence Summary
 
 REGWATCH helps Clinical Regulatory Affairs teams research public FDA sources
-faster by finding relevant FDA evidence, organizing it by product, and producing
-cited answers or refusing when the evidence is not there.
+faster: it finds the relevant FDA evidence, organizes it by product, and gives
+cited answers, in plain language, without claiming anything it cannot back up.

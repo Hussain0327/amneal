@@ -16,7 +16,7 @@ DB credentials, a rehearsed restore drill, and secrets policy).
 
 ## Current Security Status
 
-The pilot **is** deployed on a public network — behind Fly's edge with
+The pilot **is** deployed on a public network, behind Fly's edge with
 `force_https = true`, an allow-listed CORS origin, and login required on every
 product endpoint. It is scoped to internal pilot users and is not approved for
 external or general availability.
@@ -26,7 +26,7 @@ Known launch blockers:
 - Authentication and authorization are enforced on every **product** endpoint.
   Since the polyglot step-4 cutover the **Go edge** owns cookie sessions
   (DB-backed opaque tokens, sha256 at rest, bcrypt passwords, per-user ownership
-  of chat history) — not FastAPI. The only unauthenticated routes are the
+  of chat history), not FastAPI. The only unauthenticated routes are the
   operational probes: `GET /health`, `GET /ready`, `GET /metrics` (bearer-gated
   when `METRICS_TOKEN` is set, world-readable when it is not), and the Go edge's
   own `GET /healthz`. Broad production exposure still needs an approved identity
@@ -142,8 +142,8 @@ Before any external or broad internal production launch, REGWATCH needs:
   the only datastore since R5. `DATABASE_URL` is mandatory and the app refuses to
   boot without it; pgvector dimension checks fail fast; boot verifies the Alembic
   stamp equals head and refuses to start on mismatch. **Still required:**
-  least-privilege application DB credentials and a rehearsed restore drill —
-  neither has been done.
+  least-privilege application DB credentials and a rehearsed restore drill.
+  Neither has been done.
 - Centralized logs, metrics, tracing, error reporting, and security alerts.
   Structured logging, audit rows, Sentry, `/health`, `/ready` and `/metrics`
   counters ship today; latency and cost metrics are recorded but not exported,

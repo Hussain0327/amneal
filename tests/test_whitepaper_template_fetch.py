@@ -1,4 +1,4 @@
-"""White-Paper template fetch - Supabase Storage fetch-and-cache lane.
+"""White-Paper template fetch - private object-store fetch-and-cache lane.
 
 Covers the failure discipline: every fetch problem (HTTP error, timeout,
 oversize, wrong magic, unset URL) must return None with NO file written, so

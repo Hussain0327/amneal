@@ -2,6 +2,10 @@
 
 Nothing is hard-coded in business logic. Anything that might change between
 demos, environments, or experiments lives here.
+
+Last updated: 2026-08-11. Where a default differs from what production runs,
+the comment says so. The defaults here are local-dev defaults; production
+values live in fly.toml and in Fly secrets.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # OpenAI dated-snapshot suffix: what follows "<alias>-" in the server-reported
 # model name, e.g. "gpt-5.4-nano-2026-01-15" or legacy "gpt-4-0613". Digits and
-# hyphens only — "gpt-5-nano-mini" is a DIFFERENT model, not a snapshot.
+# hyphens only: "gpt-5-nano-mini" is a DIFFERENT model, not a snapshot.
 _SNAPSHOT_SUFFIX_RE = re.compile(r"\d[\d-]*")
 
 # Default final-k after optional reranking. Used to detect whether RERANK_TOP_K
@@ -43,7 +47,7 @@ SYNTH_MAX_TOKENS_CEILING = 6000
 # Databricks serving-endpoint name prefixes for PARTNER-hosted model families.
 # Databricks brands these alongside its open-weight endpoints and they are
 # indistinguishable at the call site, but they carry the partner's retention
-# terms — which is precisely the exposure D1 exists to remove. Matched
+# terms, which is precisely the exposure D1 exists to remove. Matched
 # case-insensitively as a prefix; see the _check_d1_enforcement validator.
 _D1_PARTNER_MODEL_PREFIXES = ("databricks-gpt", "databricks-claude", "databricks-gemini")
 
@@ -96,9 +100,10 @@ class Settings(BaseSettings):
     qwen_embedding_base_url: str | None = None
     qwen_embedding_token: str | None = None
     qwen_embedding_model: str = "Qwen/Qwen3-Embedding-4B"
-    # Qwen3-Embedding-4B is natively 2560-dimensional. Regwatch starts with an
-    # explicit 1536-dimensional Matryoshka profile so it can be evaluated
-    # against the existing pgvector shape; this is not the model's default.
+    # Qwen3-Embedding-4B is natively 2560-dimensional. The 1536 default is a
+    # Matryoshka profile chosen so local dev matches the legacy pgvector shape;
+    # it is not the model's default and it is not what prod runs. The live prod
+    # profile is 1024-dim on the Databricks Qwen3 serving endpoint.
     qwen_embedding_dimension: int = 1536
     qwen_embedding_batch_size: int = 128
     qwen_embedding_query_instruction: str = (
@@ -107,50 +112,60 @@ class Settings(BaseSettings):
     )
     qwen_embedding_query_instruction_version: str = "regwatch-regulatory-retrieval-v1"
     qwen_embedding_revision: str = "5cf2132abc99cad020ac570b19d031efec650f2b"
-    # "legacy" keeps the existing chunk.embedding path. A non-legacy profile
-    # must already have complete coverage and a compatible index before it can
-    # be selected. The optional shadow profile is dual-written/backfilled but
-    # never serves user retrieval until explicitly promoted.
+    # This is what picks the embedder on the query path. "legacy" keeps the
+    # chunk.embedding column and is the only arm that reads embedding_provider.
+    # A non-legacy profile must already have complete coverage and a compatible
+    # index before it can be selected. The optional shadow profile is
+    # dual-written/backfilled but never serves user retrieval until explicitly
+    # promoted. Prod promoted a Databricks Qwen3 profile on 2026-07-30, so
+    # "legacy" below is a local-dev default only.
     active_embedding_profile: str = "legacy"
     embedding_shadow_profile: str | None = None
 
-    # Private Databricks Chat Completions endpoint serving Gemma. Thinking is a
-    # runtime mode, not a different checkpoint. The provider enforces that it is
-    # eligible only for the synthesizer role and strips reasoning from outputs.
+    # Private Databricks Chat Completions endpoint. Prod points this at the
+    # Unity Catalog alias workspace.default.regwatch, which serves gpt-oss-120b
+    # (served id gpt-oss-120b-080525) for every role. Gemma is the other
+    # supported family; for Gemma, thinking is a runtime mode rather than a
+    # different checkpoint, and the provider allows it only for the synthesizer
+    # role and strips reasoning from outputs.
     databricks_llm_base_url: str | None = None
     databricks_llm_token: str | None = None
     # No default: this is a Databricks SERVING ENDPOINT NAME, which only the
-    # operator who deployed the endpoint knows. The previous default was a
-    # HuggingFace repo id ("google/gemma-4-31B-it"), which no endpoint answers
-    # to — a half-configured deploy would 404 every synthesis, and llm.py's
-    # provider-error boundary would convert each one into an audited refusal.
-    # The app would look alive while refusing every question. Unset instead, so
-    # get_llm_provider's `missing` check fails the turn loudly.
+    # operator who deployed the endpoint knows. A wrong default would 404 every
+    # synthesis, and llm.py's provider-error boundary would turn each 404 into
+    # an audited refusal, so the app would look alive while refusing every
+    # question. Unset instead, so get_llm_provider's `missing` check fails the
+    # turn loudly.
     databricks_llm_model: str | None = None
     gemma_thinking_enabled: bool = False
-    # Bound what a reasoning model spends THINKING before it answers. Open-weight
-    # reasoning models (gpt-oss-20b) draw thought and answer from the SAME
-    # max_tokens budget, so an unbounded effort level burns the whole synthesis
-    # budget on reasoning, returns finish_reason="length", and llm.py raises --
-    # which grounded_qa degrades into an audited refusal. Measured against the
-    # live endpoint at a 900-token cap: "low" finished (272 completion tokens,
-    # visible answer); default/medium/high all hit the cap and raised. "low" is
-    # therefore the default, not a tuning preference. Unset ("") sends no
-    # parameter, for endpoints that reject it.
+    # Bound what a reasoning model spends THINKING before it answers.
+    # Open-weight reasoning models (gpt-oss-120b) draw thought and answer from
+    # the SAME max_tokens budget, so an unbounded effort level burns the whole
+    # synthesis budget on reasoning, returns finish_reason="length", and llm.py
+    # raises -- which grounded_qa degrades into an audited refusal.
+    #
+    # HISTORICAL MEASUREMENT: taken on the gpt-oss-20b endpoint at a 900-token
+    # cap, before the alias was repointed to gpt-oss-120b on 2026-08-05. There,
+    # "low" finished (272 completion tokens, visible answer) and
+    # default/medium/high all hit the cap and raised. It has NOT been
+    # re-measured on 120b, so "low" is the default on the strength of that
+    # older measurement, not a fresh one. Unset ("") sends no parameter, for
+    # endpoints that reject it.
     databricks_reasoning_effort: str | None = "low"
     # v6 prose synthesis (slm-layer Phase A). False = the v5 claims-JSON
     # synthesis contract, byte-identical to before the flag existed. True =
     # prose + [n] markers parsed server-side (generate/prose_turn.py) and
-    # admitted by the same gate -- the refuse-or-cite POLICY is unchanged
-    # either way; only the model-facing format flips. Aliased so the prod
-    # flip reads as a REGWATCH_* Fly secret, like REGWATCH_ALLOW_TEST_PROVIDERS.
+    # admitted by the same gate. v5 and v6 share one policy, cite or refuse;
+    # only the model-facing FORMAT flips. The policy change is the v7 flag
+    # below. Aliased so the prod flip reads as a REGWATCH_* Fly secret, like
+    # REGWATCH_ALLOW_TEST_PROVIDERS. ON in prod.
     prose_synthesis_enabled: bool = Field(
         default=False, validation_alias="REGWATCH_PROSE_SYNTHESIS"
     )
     # Live provisional draft streaming over SSE (owner-amended INV-1,
     # 2026-08-10). Dark by default; effective only when prose synthesis is
     # also on AND the request opts in. Alias so the prod flip is a REGWATCH_*
-    # Fly secret like the prose flag.
+    # Fly secret like the prose flag. ON in prod.
     live_draft_enabled: bool = Field(default=False, validation_alias="REGWATCH_LIVE_DRAFT")
     # Conversational route-call rollout. PR11b observes only: both ``shadow``
     # and the reserved ``live`` value execute as shadow and cannot steer Ask.
@@ -167,12 +182,16 @@ class Settings(BaseSettings):
         le=SYNTH_MAX_TOKENS_CEILING,
         validation_alias="REGWATCH_ROUTE_MAX_TOKENS",
     )
-    # v7 selective citation (slm-layer Phase B). False = v6's refuse-or-cite
-    # policy. True = SOURCE_FACT cite-required, REASONING framed-uncited,
-    # CONVERSATION plain, found-nothing conversational -- the POLICY change on
-    # top of v6's FORMAT change. Only honored when prose_synthesis_enabled is
-    # also true (v7 is a prose prompt). Aliased so the flip reads as a
-    # REGWATCH_* Fly secret.
+    # v7 selective citation (slm-layer Phase B). This is the live answer
+    # policy: cite the facts, talk like a person. False = v6's older
+    # cite-or-refuse policy. True = SOURCE_FACT must carry its passage
+    # number(s), REASONING is framed and uncited, CONVERSATION is plain, and
+    # "found nothing" is written as ordinary prose with no code word. It is a
+    # POLICY change on top of v6's FORMAT change. INV-1 is unchanged and still
+    # enforced in code either way: an uncited source fact is still dropped.
+    # Only honored when prose_synthesis_enabled is also true (v7 is a prose
+    # prompt). Aliased so the flip reads as a REGWATCH_* Fly secret. ON in
+    # prod.
     selective_citation_enabled: bool = Field(
         default=False, validation_alias="REGWATCH_SELECTIVE_CITATION"
     )
@@ -220,8 +239,9 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     # ---------- LLM client transport (B3) ----------
-    # The OpenAI/Anthropic SDKs default to a 600s read timeout with 2 retries —
-    # a stalled provider would pin a sync-route worker for ~10-20 min. Bound it.
+    # The OpenAI/Anthropic SDKs default to a 600s read timeout with 2 retries,
+    # so a stalled provider would pin a sync-route worker for 10-20 min. Bound
+    # it.
     # The embedder owns its own retry loop, so it constructs the shared client
     # with max_retries=0 to avoid stacking SDK retries on top of that loop.
     llm_timeout_s: float = 60.0
@@ -287,7 +307,7 @@ class Settings(BaseSettings):
     def _require_https_endpoint(cls, v: str | None) -> str | None:
         """Private inference endpoints must be TLS.
 
-        These two URLs carry the confidential analyst QUESTION off the box —
+        These two URLs carry the confidential analyst QUESTION off the box:
         the query embedding and the synthesis prompt. A typo'd ``http://``
         would ship it in plaintext and nothing downstream would notice: the
         OpenAI-compatible client honors whatever scheme it is given. Refusing
@@ -298,7 +318,7 @@ class Settings(BaseSettings):
             return None
         if not v.lower().startswith("https://"):
             raise ValueError(
-                "provider endpoint URLs must use https:// — these carry the "
+                "provider endpoint URLs must use https:// - these carry the "
                 f"analyst question off-host; got {v.split(':', 1)[0]}://"
             )
         return v
@@ -353,14 +373,18 @@ class Settings(BaseSettings):
         return v
 
     # ---------- D1 residency tripwires ----------
-    # Inert until an operator arms D1_ENFORCED. It exists because, once
-    # LLM_PROVIDER=databricks, the two ways to silently break the residency
-    # claim are both a one-string edit away and neither fails on its own:
+    # D1 itself is CLOSED: generation, query embedding and the database all sit
+    # inside the company's own Databricks tenant. This is the guardrail that
+    # keeps it closed, and it stays inert until an operator arms D1_ENFORCED.
+    #
+    # It exists because, once LLM_PROVIDER=databricks, the two ways to silently
+    # break the residency claim are both a one-string edit away and neither
+    # fails on its own:
     #
     #   1. Pointing DATABRICKS_LLM_MODEL at a partner-brand serving endpoint.
     #      Byte-identical at the call site (llm.py passes `model` verbatim), but
-    #      partner-hosted models carry their own documented retention regimes —
-    #      the question reaches the provider D1 exists to keep it away from.
+    #      partner-hosted models carry their own documented retention regimes,
+    #      so the question reaches the provider D1 exists to keep it away from.
     #   2. A half-flip: generation on Databricks while retrieval still embeds
     #      the query on OpenAI, or the inverse. The question still leaves to
     #      OpenAI, while a status page would read "migrated".
@@ -419,7 +443,7 @@ class Settings(BaseSettings):
     # USD per 1M tokens, keyed by model name. Env-overridable as JSON, e.g.
     #   LLM_MODEL_PRICES='{"gpt-5.4-nano": {"input": 0.05, "output": 0.40}}'
     # Defaults cover the gpt-5 nano family the app actually runs. An unknown
-    # model yields cost_usd NULL in the audit log — never a guessed price.
+    # model yields cost_usd NULL in the audit log, never a guessed price.
     llm_model_prices: dict[str, dict[str, float]] = Field(
         default_factory=lambda: {
             "gpt-5-nano": {"input": 0.05, "output": 0.40},
@@ -434,7 +458,7 @@ class Settings(BaseSettings):
         dated snapshot id (e.g. ``gpt-5.4-nano-2026-01-15``) rather than the
         configured alias, so a miss falls back to the longest table key that is
         a dated-snapshot prefix of the reported name. Genuinely unknown model
-        families (including non-snapshot suffixes like ``-mini``) stay None —
+        families (including non-snapshot suffixes like ``-mini``) stay None,
         never a guessed price.
         """
         entry = self.llm_model_prices.get(model)
@@ -454,7 +478,7 @@ class Settings(BaseSettings):
         return entry
 
     # ---------- Observability (H1) ----------
-    # Sentry is OFF unless SENTRY_DSN is set — zero behavior change otherwise.
+    # Sentry is OFF unless SENTRY_DSN is set: zero behavior change otherwise.
     # No question text ever goes to Sentry: query_text lives in our own audit
     # log (query_log), and request bodies are never attached to events.
     sentry_dsn: str | None = None
@@ -484,7 +508,7 @@ class Settings(BaseSettings):
     # Two-stage retrieval (per spec diagram):
     #   stage 1: vector search returns VECTOR_TOP_K candidates (wide net)
     #   stage 2: rerank to RERANK_TOP_K (the set we actually cite from)
-    # When the reranker is off, stage 2 is the identity — we just take the
+    # When the reranker is off, stage 2 is the identity: we just take the
     # first RERANK_TOP_K of the wide net. This keeps the diagram and the
     # config in agreement at all times.
     vector_top_k: int = 50
@@ -493,8 +517,13 @@ class Settings(BaseSettings):
     # identity (first rerank_top_k of the wide net). Read via Settings (not a
     # bare os.getenv) so the knob is documented and validated like every other.
     reranker_enabled: bool = False
-    # Legacy alias — populated from RETRIEVAL_TOP_K if set (backwards compat).
+    # Legacy alias, populated from RETRIEVAL_TOP_K if set (backwards compat).
     retrieval_top_k: int | None = None
+    # Cosine floor: passages below it are withheld from the synthesizer, so a
+    # turn with nothing above it declines before any model call.
+    # 0.30 was validated against the OLD OpenAI vector space. The live space is
+    # Qwen3 1024-dim, so that validation does not carry over and 0.30 is
+    # unvalidated in production today.
     refusal_score_threshold: float = 0.30
     # TTL for the in-process distinct-metadata cache (the resolver's "which
     # drugs exist" set). Bounds how long the long-lived API process can serve a
@@ -508,7 +537,7 @@ class Settings(BaseSettings):
 
         Prefers an explicitly-set RERANK_TOP_K (the current name). The legacy
         RETRIEVAL_TOP_K is honored ONLY when RERANK_TOP_K is still at its
-        default — so a stale legacy var lingering in the environment can no
+        default, so a stale legacy var lingering in the environment can no
         longer silently override an explicit new RERANK_TOP_K.
         """
         if self.rerank_top_k != _DEFAULT_RERANK_TOP_K:
@@ -525,20 +554,19 @@ class Settings(BaseSettings):
         return v
 
     # ---------- Storage ----------
-    # DATABASE_URL names the one and only datastore: Postgres + pgvector
-    # (Supabase in prod, a disposable local Postgres in tests). Postgres-only
-    # since R5 — the SQLite/Chroma dual-mode is gone. The field stays optional
-    # at the pydantic layer so tooling can construct Settings without a DB,
-    # but store/db.py refuses to build an engine when it is empty (the B1
-    # fail-loud posture, now unconditional).
+    # DATABASE_URL names the one and only datastore: Postgres + pgvector.
+    # Production is Databricks Lakebase; tests use a disposable local Postgres.
+    # Postgres-only since R5, so the SQLite/Chroma dual-mode is gone. The field
+    # stays optional at the pydantic layer so tooling can construct Settings
+    # without a DB, but store/db.py refuses to build an engine when it is empty
+    # (the B1 fail-loud posture, now unconditional).
     database_url: str | None = None
 
-    # Postgres connection-level timeouts (Supabase session pooler). The app
-    # connects as the `postgres` role, which — unlike Supabase's
-    # anon/authenticated roles — ships with NO server-side statement/lock/idle
-    # timeouts. Without them a connection that stalls mid-transaction holds its
-    # locks forever: on 2026-06-18 an idle-in-transaction chunk read blocked the
-    # boot-time `ALTER TABLE chunk ENABLE RLS` and wedged prod. These are applied
+    # Postgres connection-level timeouts. The app connects as an ordinary role
+    # that ships with NO server-side statement/lock/idle timeouts. Without them
+    # a connection that stalls mid-transaction holds its locks forever: on
+    # 2026-06-18 an idle-in-transaction chunk read blocked the boot-time
+    # `ALTER TABLE chunk ENABLE RLS` and wedged prod. These are applied
     # per-connection via libpq `options` in store/db.py:get_engine(). Each takes
     # a GUC duration string ('30s', '500ms'); set to '0' or '' to disable one.
     # idle_in_transaction + lock timeouts are the load-bearing fix and are safe
@@ -550,11 +578,11 @@ class Settings(BaseSettings):
     db_lock_timeout: str = "10s"
     # Bound the TCP/TLS connection handshake itself (libpq `connect_timeout`,
     # integer seconds). statement_timeout only bounds a query AFTER the session
-    # exists, and pool_pre_ping opens a fresh connection on checkout — so without
-    # this a stalled handshake to the public Supabase pooler hangs a request
+    # exists, and pool_pre_ping opens a fresh connection on checkout, so without
+    # this a stalled handshake to the remote Postgres endpoint hangs a request
     # thread forever (store-1). Integer seconds; '0' or '' disables the bound.
     db_connect_timeout: str = "10"
-    # Recycle pooled connections before Supavisor's own idle cutoff so a stale
+    # Recycle pooled connections before the server's own idle cutoff so a stale
     # server-side socket is never handed to a request (pairs with pool_pre_ping).
     db_pool_recycle_s: int = 1800
 
@@ -601,7 +629,7 @@ class Settings(BaseSettings):
     # ---------- PDF ingest safety (cron/ingest worker only) ----------
     # The daily `regwatch watch` run is the SOLE driver of FDA alerts and it
     # fetches+parses PDFs from accessdata.fda.gov. A malformed or oversized PDF
-    # must not be able to hang or OOM that run — that would silently stop all
+    # must not be able to hang or OOM that run: that would silently stop all
     # alerting. These bound the input size, the page count, and the parse
     # wall-clock. None of the guards is reachable from the API (parse runs only
     # in the CLI/cron ingest path). Set any of them to 0 to disable that guard.
@@ -629,8 +657,8 @@ class Settings(BaseSettings):
     whitepaper_template_path: Path = Path("./CRA White Paper Template May 2026 - Raja.docx")
     # Prod machines have no persistent volume, so the gitignored template never
     # survives a deploy and every prod render fell back. When set (a long-lived
-    # signed URL to the private Supabase Storage object, delivered as a Fly
-    # secret), the render path lazily fetches and caches the template at
+    # signed URL to a private object-store copy of the template, delivered as a
+    # Fly secret), the render path lazily fetches and caches the template at
     # whitepaper_template_path on first use; any fetch failure keeps today's
     # loud FALLBACK_MARKER behavior. Rotation = re-sign + update the secret.
     whitepaper_template_url: str | None = None
@@ -728,7 +756,7 @@ class Settings(BaseSettings):
     # Comma-separated CORS allowlist for the Next.js UI in regwatch/frontend/.
     # Defaults to the Next.js dev server. With allow_credentials=True on the
     # API, this allowlist is what stops other origins from riding the HttpOnly
-    # session cookie — keep it tight.
+    # session cookie, so keep it tight.
     cors_allow_origins_csv: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     @property
@@ -736,10 +764,12 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.cors_allow_origins_csv.split(",") if o.strip()]
 
     # ---------- Refusal ----------
-    # The refusal sentinel: the model is told to emit it verbatim, and grounded_qa
-    # matches it by prefix, so keep it SHORT and stable (a long paraphrase-prone
-    # string would miss the fast match and skip the named-drug->clarify guide).
-    # Directional warmth lives in the UI (reason copy + "Related" pointers).
+    # The application's own decline copy. Under v7 the model normally writes its
+    # own "I do not have that" reply in plain words; this string is what gets
+    # served instead when a gate guard blocks the model's wording, or when the
+    # turn declines before there is any model text at all (no product resolved,
+    # weak retrieval, provider error). The echo test provider also returns it.
+    # Keep it short and stable: tests and the UI's reason copy read it.
     refusal_text: str = (
         "I couldn't find this in the current FDA guidance corpus, "
         "and I won't guess on a regulatory question."

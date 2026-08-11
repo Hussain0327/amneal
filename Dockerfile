@@ -31,8 +31,10 @@ RUN go build -trimpath -ldflags "-s -w" -o /usr/local/bin/regwatch-proxy ./cmd/p
 # Two build flavors, gated by INSTALL_LOCAL_EMBEDDINGS:
 #   * slim (default, production): no torch/sentence-transformers. Run with
 #     EMBEDDING_PROVIDER=openai + OPENAI_API_KEY (+ DATABASE_URL for
-#     Postgres/pgvector on Supabase) — the openai SDK ships via the `llm`
-#     extra, so the slim image is fully embedding-capable. See docs/DEPLOY.md.
+#     Postgres/pgvector). The openai SDK ships via the `llm` extra, so the slim
+#     image is fully embedding-capable. Production runs this flavor against
+#     Databricks Lakebase Postgres, and embeds through the active Qwen3 profile
+#     rather than through EMBEDDING_PROVIDER. See docs/DEPLOY.md.
 #   * local ingest: --build-arg INSTALL_LOCAL_EMBEDDINGS=true, then run with
 #     EMBEDDING_PROVIDER=local-bge-small.
 # The in-image EMBEDDING_PROVIDER=echo default below is for empty-corpus smoke
@@ -114,7 +116,7 @@ COPY --from=proxy-build /usr/local/bin/regwatch-proxy /usr/local/bin/regwatch-pr
 # the official .docx at data/templates/cra_white_paper_template.docx to enable
 # real-template fill. Absent it, POST /whitepaper/runs/{id}/docx still returns a
 # structurally-equivalent document stamped "(generated without the official CRA
-# template file)" — see docs/DEPLOY.md and src/regwatch/whitepaper/docx_writer.py.
+# template file)". See docs/DEPLOY.md and src/regwatch/whitepaper/docx_writer.py.
 EXPOSE 8000
 
 # Hand /app (the .venv + everything the entrypoint writes under DATA_DIR) to the

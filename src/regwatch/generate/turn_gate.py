@@ -1,7 +1,17 @@
-"""Claim-level admission gate for the structured synthesizer turn.
+"""Claim-level admission gate for the synthesizer turn.
+
+Last updated: 2026-08-11.
 
 This module is the reliability boundary: it is the ONLY place model-authored
 bytes can become user-visible text, and it admits them one claim at a time.
+
+WHAT THE POLICY IS NOW (v7, live in prod)
+"Cite the facts, talk like a person." A sentence that states what FDA guidance
+says must carry its passage number(s); reasoning and conversation sentences may
+carry none. INV-1 is unchanged underneath that: an UNCITED SOURCE FACT is still
+dropped here, exactly as it always was. What changed is that the gate can now
+admit an uncited sentence when the parser classified it as reasoning or
+conversation, instead of refusing the whole turn.
 
 Amended 2026-08-10: the flag-gated live-draft SSE channel (REGWATCH_LIVE_DRAFT,
 see grounded_qa._stream_structured) may emit un-gated PROVISIONAL bytes; the
@@ -12,14 +22,16 @@ passages that were actually sent this turn, and the question. Output: an
 ``AdmittedTurn`` (what the caller may render) or a ``GateFailure`` (the payload
 did not parse). The caller decides which decline branch a verdict maps to.
 
-WHY THIS REPLACES THE PROSE SEGMENT SPLITTER
+WHY THIS REPLACED THE PROSE SEGMENT SPLITTER
 The old gate split the model's prose on sentence/newline boundaries and refused
 the WHOLE TURN if any segment lacked a citation marker. A model that answers
-correctly but places its citations as a trailing bibliography therefore had
-every content sentence read as uncited -- a citation PLACEMENT bug that refused
-three of three interactive production queries. Here the model never writes a
-marker at all: it declares (short_name, page) per claim, and the renderer writes
-canonical markers from validated passages.
+correctly but puts its citations in a trailing bibliography therefore had every
+content sentence read as uncited: a citation PLACEMENT bug that refused three
+of three interactive production queries. This gate takes a claims payload
+instead. Under v6/v7 the model does write [n] markers again, but prose_turn
+resolves them to passage POSITIONS before this module sees them, so the marker
+text itself is never trusted and the renderer still writes every canonical
+marker from a validated passage.
 
 FIVE PROPERTIES THE OLD GATE DID NOT HAVE
 1. A markdown header cannot occupy a claim slot (claim text is collapsed to one
@@ -216,9 +228,10 @@ DROP_NO_CITES = "no_cites"
 DROP_UNKNOWN_CITATION = "unknown_citation"
 
 # ---------------------------------------------------------------------------
-# Epistemic claim kinds and the citation corrector (dark until a caller passes
-# admit_turn(correct=True); v5 callers never do, so today these only surface as
-# ledger fields at their defaults).
+# Epistemic claim kinds and the citation corrector. Reached only when a caller
+# passes admit_turn(correct=True): the v6 and v7 prose callers do, the v5
+# caller does not, so under v5 these stay at their defaults and only show up as
+# ledger fields.
 # ---------------------------------------------------------------------------
 CLAIM_KIND_SOURCE_FACT = "source_fact"
 CLAIM_KIND_REASONING = "reasoning"
@@ -600,11 +613,11 @@ def admit_turn(
 
     ``downgrade_uncited`` splits the two corrector behaviors along the phase
     boundary: None (default) follows ``correct``; False keeps re-stamp
-    correction while an uncited benign claim stays on today's DROP_NO_CITES
-    path. The v6 prose caller passes False because its policy is still
-    refuse-or-cite -- serving a gate-framed UNCITED sentence is the v7
-    selective-citation policy shift (and the renderer's marker line assumes a
-    non-empty pair set until v7 changes it).
+    correction while an uncited benign claim stays on the DROP_NO_CITES path.
+    The v6 prose caller passes False because v6's policy is cite or refuse, so
+    it must never serve a gate-framed UNCITED sentence. v7 is where uncited
+    sentences became servable, and it gets there through ``selective`` below,
+    not through this flag.
 
     ``kinds``/``selective`` (v7, B.10.3.4): ``kinds`` is the parser's per-claim
     epistemic reading, positional against ``turn.claims`` (the bridge emits

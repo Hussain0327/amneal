@@ -5,8 +5,9 @@ Why this exists
 ``config.settings.Settings.refusal_score_threshold`` (default ``0.30``) gates the
 ``low_top_score`` refusal in ``grounded_qa.ask`` (grounded_qa.py: the INV-2 gate
 ``max(p.score for p in passages) < refusal_score_threshold``). That ``0.30`` was
-calibrated in the bge-384 cosine era. Production now embeds with OpenAI-1536, a
-DIFFERENT vector space with a DIFFERENT cosine-similarity distribution. The
+calibrated in the bge-384 cosine era. Production has embedded with the Databricks
+Qwen3 profile since 2026-07-30 (1024 dims, endpoint workspace.default.regwatch-embed),
+a DIFFERENT vector space with a DIFFERENT cosine-similarity distribution. The
 deterministic CI retrieval fixture does not re-validate that live distribution;
 only a provider-backed run, such as the credentialed watch-daily job, can do so.
 

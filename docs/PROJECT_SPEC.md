@@ -1,43 +1,49 @@
-# PROJECT SPEC — Codename: REGWATCH
+# PROJECT SPEC - Codename: REGWATCH
 
 **A regulatory prep accelerator for a generic-drug Clinical Regulatory Affairs team.**
 Spec author persona: Principal Software Engineer. Audience: Claude Code (implementer).
 Status: v1.0, build-ready. Rename the codename freely.
 
-> **Note — this is the original build spec.** It is preserved as the foundational
-> design document. Where the shipped implementation has since evolved, the
-> current-state docs win:
+> **This is the original build spec.** Last updated: 2026-08-11. It is kept for
+> the design it locked in. Where the shipped system has moved on, the
+> current-state docs win. What has changed since it was written:
 >
-> - **UI:** now a **Next.js** App Router app in `regwatch/frontend/` — Streamlit is
->   fully retired (the `ui/app.py` and "Streamlit / three pages" references below
->   no longer reflect reality). The five surfaces (Ask, Assemble, Watch, White
->   Paper, Deficiency) render inside one unified shell with a URL-scoped CurrentProduct
->   (`?rp=&appl=`) and a shared "Under review" product-scope bar. **Ask** is a
->   cited conversational chat (citation chips, clarify pills, bottom-pinned
->   composer), not the editorial/three-page layout described below.
-> - **LLM:** the OpenAI provider uses the **Responses API** with role-specific
->   models.
-> - **Backend additions:** conversational sessions with per-turn audit,
->   current-version retrieval, entity-resolution hardening, a White Paper populator
->   (multi-source cited cells), `POST /resolve` (deterministic entity resolution,
->   not an LLM turn), DB-backed auth on every endpoint except `GET /health`, and a
->   dual-mode datastore (SQLite/Chroma by default; Postgres + pgvector when
->   `DATABASE_URL` is set). Alembic migrations through `0005`.
-> - **Invariants:** Section 4 below codifies INV-1..6; three later invariants
->   (INV-7..9, cross-product / structured-citation / resolution-before-retrieval
->   guards) are now also enforced as tests — see the note in Section 4.
+> - **UI.** A Next.js App Router app in `regwatch/frontend/`. Streamlit is gone,
+>   so ignore the `ui/app.py` and "three pages" text below. Five surfaces (Ask,
+>   Assemble, Watch, White Paper, Deficiency) share one shell with a URL-scoped
+>   CurrentProduct (`?rp=&appl=`) and an "Under review" product-scope bar. Ask is
+>   a cited conversational chat. A sixth surface, Compliance Studio, reads our own
+>   CMC drafts and is UI plus fixtures only.
+> - **Models.** Production generation and embeddings both run on Databricks Model
+>   Serving inside the company tenant: `gpt-oss-120b-080525` for every LLM role,
+>   and a Qwen3 embedding endpoint at 1024 dimensions. OpenAI is the rollback
+>   path, not current state.
+> - **Storage.** One Postgres, Databricks Lakebase, with pgvector in the same
+>   database. The SQLite/Chroma dual-mode path was deleted in R5. Alembic
+>   migrations run to `0020_eval_run`.
+> - **Backend additions.** Conversational sessions with per-turn audit,
+>   current-version retrieval, entity-resolution hardening, a White Paper
+>   populator with multi-source cited cells, `POST /resolve` (deterministic
+>   entity resolution, not an LLM turn), and DB-backed auth on every endpoint
+>   except `GET /health`. A Go proxy now holds the public port and orchestrates
+>   `POST /query`.
+> - **Answer policy.** "Cite or refuse" was the v5 and v6 rule. v7 selective
+>   citation replaced it and is live in production: cite the facts, talk like a
+>   person. See Section 11.
+> - **Invariants.** Section 4 codifies INV-1..6. INV-7..9 were added later and are
+>   also enforced as tests. See the note in Section 4.
 >
-> See the root `README.md`, `docs/DECISIONS.md`, `docs/PROD_READINESS.md`, and
-> `docs/ROADMAP.md` (consolidated open items) for what is true today.
+> For what is true today see the root `README.md`, `docs/ARCHITECTURE.md`,
+> `docs/DECISIONS.md`, `docs/PROD_READINESS.md` and `docs/ROADMAP.md`.
 
 ---
 
 ## 0. How to read this spec
 
-At the time it was written, this document was the source of truth. It is now an
-archived foundational spec; current-state docs win when implementation has
-evolved. The Compliance Invariants in Section 4 remain the enduring design
-constraints unless a newer decision record explicitly supersedes them.
+This was the source of truth when it was written. It is now a historical spec:
+current-state docs win wherever the implementation has moved on. The Compliance
+Invariants in Section 4 are the exception. They still hold unless a newer
+decision record explicitly supersedes them.
 
 ---
 
@@ -49,7 +55,7 @@ The opportunity is to compress the team's own prep cycle, not to automate any FD
 
 ## 2. Users
 
-Non-technical regulatory professionals. They will not read JSON or run scripts. Every surface must be a plain-language question-in / cited-answer-out interaction. The single most important UX property is trust: a non-expert cannot detect a confident hallucination, so the system must show its source on every claim and refuse when it has none.
+Non-technical regulatory professionals. They will not read JSON or run scripts. Every surface must be a plain-language question-in / cited-answer-out interaction. The single most important UX property is trust: a non-expert cannot detect a confident hallucination, so the system must show its source on every factual claim and say plainly when it has none.
 
 ## 3. Goals and non-goals
 
@@ -57,7 +63,7 @@ Non-technical regulatory professionals. They will not read JSON or run scripts. 
 
 - G1. **Watch:** detect new and revised PSGs/guidances, match them against the company's real product pipeline, and surface a cited summary of what changed.
 - G2. **Assemble:** for a target product, auto-build an organized, fully cited requirements dossier (BE study design, RLD label, applicable guidances, dissolution method, requirements checklist).
-- G3. **Cited Q&A:** answer plain-language questions over the corpus, every answer carrying source + page, or an explicit "not found."
+- G3. **Cited Q&A:** answer plain-language questions over the corpus. Every FDA fact carries its source and page. When the corpus does not cover the question, say so plainly instead of guessing.
 - G4. An eval harness that proves the system is faithful (Section 10.11). This is the quality gate.
 
 **Non-goals (do NOT build these)**
@@ -68,20 +74,33 @@ Non-technical regulatory professionals. They will not read JSON or run scripts. 
 - N4. No autonomous actions (no filing, no submitting, no emailing FDA).
 - N5. Not a production deployment. This is a demoable POC to hand to the internal IT/AI team.
 
+N1 through N4 still hold and are enforced by the invariants. N5 has been overtaken:
+the system is deployed and running (Fly app `amneal`, Vercel frontend, Lakebase
+Postgres). It is not yet exposed outside the tenant, which still needs an SSO plus
+TLS gateway. See `docs/PROD_READINESS.md`.
+
 ## 4. Compliance invariants (HARD constraints, each must have a test)
 
 These encode both FDA expectations (the Jan 2025 draft guidance treats AI that supports a regulatory decision very differently from AI that only improves operational efficiency) and hard-won lessons. They are invariants, not features.
 
 - **INV-1 Grounding.** Every factual claim in any output must be traceable to a retrieved source passage with a document id and page number. No ungrounded claims, ever.
 
-  Amendment (owner, 2026-08-07, implemented 2026-08-10): live un-gated prose
+  Amendment 1 (owner, 2026-08-07, implemented 2026-08-10): live un-gated prose
   MAY stream to the client as an explicitly provisional draft on the dedicated
   `draft` SSE channel, dual-gated by REGWATCH_LIVE_DRAFT and a per-request
-  opt-in and available only in prose-synthesis mode. Nothing un-audited may be
+  opt-in, and available only in prose-synthesis mode. Nothing un-audited may be
   PRESENTED AS VALIDATED: draft frames carry no citations, no audit id, and no
-  validated affordances, and the terminal `result` frame remains the only
+  validated affordances, and the terminal `result` frame stays the only
   validated artifact. See docs/superpowers/specs/2026-08-10-ask-sse-live-draft-design.md.
-- **INV-2 Refuse over guess.** If retrieval does not surface a sufficiently relevant passage (Section 11), the system returns an explicit refusal ("Not found in the current FDA guidance corpus"). It never fabricates an answer.
+
+  Amendment 2 (v7 selective citation, live 2026-08-10): "factual claim" means a
+  sentence that says what FDA guidance requires, recommends, permits or
+  prohibits. Those sentences must carry their passage numbers, and
+  `src/regwatch/generate/turn_gate.py` drops any that do not. Sentences that are
+  our own reading, or plain conversation, carry no numbers and assert no FDA
+  facts. The enforcement is unchanged: an uncited source fact still never reaches
+  the user. See Section 11.
+- **INV-2 Refuse over guess.** If retrieval does not surface a sufficiently relevant passage (Section 11), the system says so instead of answering. It never fabricates an answer. Since v7 there is no fixed refusal string: the model says in ordinary words that the corpus does not cover the question, names what it does have nearby, and offers a next step. The API still marks the turn `refused` with an empty citation list.
 - **INV-3 Operational only.** The system surfaces, organizes, compares, and cites public information. It never authors submission content and never renders a regulatory judgment.
 - **INV-4 No fabricated execution.** The system must never report or narrate a process, run, or result it did not actually execute. A match that was not fetched does not exist.
 - **INV-5 Verified provenance.** Pipeline and product facts come only from verified sources (Drugs@FDA, uploaded approval letters), never from a language model's memory.
@@ -89,41 +108,39 @@ These encode both FDA expectations (the Jan 2025 draft guidance treats AI that s
 
 If a requested behavior would violate an invariant, do not implement it; flag it in `DECISIONS.md`.
 
-> **Implementation status (current).** INV-1..6 above remain the enduring
-> constraints and are tested in `tests/test_invariants.py`. Three additional
-> invariants have since been added and are enforced as tests across the
-> resolution, white-paper, and citation code: **INV-7..9** (cross-product
-> integrity — never blend two applications' data; structured-citation grammar with
-> a central validation guard that collapses any cell whose token is not backed; and
-> product-resolution-before-retrieval to prevent cross-drug citation leak). They
-> extend, and do not supersede, INV-1..6.
+> **Implementation status, 2026-08-11.** INV-1..6 above still hold and are tested
+> in `tests/test_invariants.py`. Three more invariants were added later and are
+> enforced as tests across the resolution, white-paper and citation code:
+> **INV-7** cross-product integrity, never blend two applications' data;
+> **INV-8** structured-citation grammar, with a central guard that collapses any
+> cell whose token is not backed; **INV-9** product resolution before retrieval,
+> which is what stops a cross-drug citation leak. They extend INV-1..6, they do
+> not supersede them.
 
 ## 5. System overview
 
-Two product functions on one shared backbone.
+Two product functions on one shared backbone. The shape below is the original
+design. The stores and the UI named in it are gone: see `docs/ARCHITECTURE.md`
+for the system as it runs today.
 
 ```
-                         ┌─────────────────────────────────────────┐
- PUBLIC FDA DATA         │              BACKBONE                    │
- ───────────────         │                                          │
- PSG DB (scrape)  ─────▶  ingest ─▶ parse ─▶ chunk+tag ─▶ embed ──▶ vector store
- Guidance PDFs    ─────▶                         │                  (Chroma)
- Drugs@FDA (API)  ─────▶  watchlist build        ├─▶ extract BE ──▶ structured DB
- Drug labels(API) ─────▶                         │      fields        (SQLite)
- Orange Book(DL)  ─────▶                         └─▶ version diff ─▶ change log
-                         └───────────────┬──────────────┬───────────┘
-                                         │              │
-                            ┌────────────▼───┐   ┌──────▼─────────────┐
-                            │ RETRIEVE +     │   │ WATCH:             │
-                            │ GROUNDED QA    │   │ match changes vs   │
-                            │ (cited, refuse)│   │ watchlist ─▶ alert │
-                            └───────┬────────┘   └──────┬─────────────┘
-                                    │                   │
-                            ┌───────▼────────┐   ┌──────▼─────────────┐
-                            │ ASSEMBLE:      │   │ API (FastAPI) +    │
-                            │ dossier builder│──▶│ UI (Streamlit)     │
-                            └────────────────┘   └────────────────────┘
-                                    cross-cutting: AUDIT LOG, EVAL HARNESS
+PUBLIC FDA DATA                 BACKBONE
+---------------                 --------
+PSG DB (scrape)     -->  ingest -> parse -> chunk+tag -> embed -> vector store
+Guidance PDFs       -->                  |
+Drugs@FDA (API)     -->  watchlist build |-> extract BE fields -> structured DB
+Drug labels (API)   -->                  |
+Orange Book (files) -->                  |-> version diff -> change log
+
+                            |                          |
+                            v                          v
+                   RETRIEVE + GROUNDED QA        WATCH: match changes
+                   (cited answers)               against the watchlist,
+                            |                    then alert
+                            v                          |
+                   ASSEMBLE: dossier builder -----> API (FastAPI) + UI
+
+cross-cutting: AUDIT LOG, EVAL HARNESS
 ```
 
 ## 6. Data sources (exact, with access method)
@@ -163,34 +180,35 @@ Notes:
 - **Testing:** `pytest`. **Linting/format:** `ruff` + `black`. **Typing:** `mypy` on `src/`.
 - **Config:** `pydantic-settings`, all secrets/thresholds in env or `config/settings.py`, nothing hard-coded.
 
+> **What actually shipped, 2026-08-11.** Python, `uv`, `httpx`, `pdfplumber`,
+> FastAPI, pytest, ruff, black, mypy and `pydantic-settings` all stand. Five
+> choices did not:
+>
+> - Vector store is pgvector inside the app's Postgres, not Chroma. R5 deleted the
+>   Chroma path.
+> - Structured store is that same Postgres, Databricks Lakebase in production, not
+>   SQLite.
+> - Embeddings run on a Databricks-hosted Qwen3 endpoint at 1024 dimensions.
+>   `bge-small` is offline and eval tooling only.
+> - The LLM decision was not deferred. Production runs Databricks Model Serving
+>   inside the company tenant, `gpt-oss-120b-080525`, one model for every role.
+> - UI is Next.js on Vercel, and a Go proxy holds the public port. Watch runs as a
+>   GitHub Actions schedule, not APScheduler.
+
 ## 8. Repository structure
 
-```
-regwatch/
-  pyproject.toml
-  README.md
-  CLAUDE.md                # operating instructions for Claude Code (mirror of Section 15)
-  DECISIONS.md             # running log of choices made
-  .env.example
-  config/settings.py
-  src/regwatch/
-    ingest/   psg_crawler.py  guidance_fetcher.py  pdf_parser.py
-    process/  chunker.py  embedder.py  extractor.py  change_detector.py
-    store/    vector_store.py  db.py  models.py
-    retrieve/ retriever.py  reranker.py
-    generate/ llm.py  grounded_qa.py  prompts.py
-    watch/    watchlist.py  matcher.py  alerts.py
-    assemble/ dossier.py
-    eval/     run_eval.py  metrics.py  gold_set.jsonl
-    api/      main.py
-    ui/       app.py
-    common/   logging.py  audit.py  text_normalize.py
-  tests/
-  data/  raw/ (gitignored)  processed/
-  scripts/  ops helpers (seeding is the `uv run regwatch seed` CLI command)
-```
+The original layout was one package per pipeline stage under `src/regwatch/`:
+`ingest`, `process`, `store`, `retrieve`, `generate`, `watch`, `assemble`, `eval`,
+`api`, `common`. That spine is still there. The tree printed here has drifted too
+far to be useful, so it has been dropped. For the real folder map, including the
+Go proxy and the Next.js frontend, see
+[TECH_GUIDE_SIMPLE.md](TECH_GUIDE_SIMPLE.md).
 
-## 9. Data model (SQLite via SQLModel)
+## 9. Data model
+
+Written for SQLite via SQLModel. The tables below survived; the database did not.
+Everything now lives in one Postgres (Lakebase in production) under Alembic
+migrations, currently at head `0020_eval_run`, with more tables than this list.
 
 ```
 product
@@ -256,7 +274,7 @@ query_log                      # INV-6
   model_name
 ```
 
-Vector store (Chroma) holds chunk text + metadata: `{doc_id, version_id, active_ingredient, normalized_name, dosage_form, route, recommended_date, source_url, page}`.
+The vector store holds chunk text plus metadata: `{doc_id, version_id, active_ingredient, normalized_name, dosage_form, route, recommended_date, source_url, page}`. Written for Chroma; it is pgvector in the same Postgres now, with profile vectors in `chunk_embedding`.
 
 ## 10. Component specifications
 
@@ -286,7 +304,9 @@ On re-crawl, if a `content_hash` changed, store a new `psg_version` and produce 
 
 ### 10.7 Stores (`store/`)
 
-`vector_store.py` wraps Chroma (add, similarity_search_with_score, filter by metadata). `db.py` + `models.py` define schemas and CRUD. Acceptance: round-trip persistence across process restarts.
+`vector_store.py` wraps the vector backend (add, similarity search with score, filter by metadata). `db.py` and `models.py` define schemas and CRUD. Acceptance: round-trip persistence across process restarts.
+
+`vector_store.py` is still the seam every caller imports, but it is a facade over pgvector now (`store/pgvector_store.py`). The Chroma half of the old dual-mode dispatch went away in R5.
 
 ### 10.8 Retrieval (`retrieve/`)
 
@@ -294,7 +314,12 @@ On re-crawl, if a `content_hash` changed, store a new `psg_version` and produce 
 
 ### 10.9 Generation (`generate/`)
 
-`llm.py`: `LLMProvider` interface. `prompts.py`: a strict grounding system prompt — answer ONLY from provided context, cite every claim as `[<doc short-name>, p.<n>]`, and if context is insufficient, reply exactly with the refusal string. `grounded_qa.py`: orchestrates retrieve to generate, enforces the refusal path (Section 11), returns `{answer, citations[], refused}`, writes `query_log`. Acceptance: INV-1, INV-2, INV-6 hold under tests, including adversarial questions whose answer is not in the corpus.
+`llm.py`: `LLMProvider` interface. `prompts.py`: the grounding system prompt. `grounded_qa.py`: orchestrates retrieve to generate, returns `{answer, citations[], refused}`, writes `query_log`. Acceptance: INV-1, INV-2, INV-6 hold under tests, including adversarial questions whose answer is not in the corpus.
+
+`turn_gate.py` was added later and is now the reliability boundary. It is the only
+place model-authored bytes become user-visible text, and it admits them one claim
+at a time. The renderer, not the model, writes the citation markers. See Section
+11.
 
 ### 10.10 Audit and logging (`common/`)
 
@@ -331,30 +356,78 @@ Input: a product (active ingredient + dosage form + RLD). Gather and assemble in
 
 ### 10.17 UI (`ui/app.py`, Streamlit)
 
-> **Superseded — see the top-of-file note.** The UI is no longer Streamlit and is
-> no longer three pages. It is a Next.js App Router app in `regwatch/frontend/`
-> with four unified surfaces (Ask, Assemble, Watch, White Paper) sharing one
-> shell, a URL-scoped CurrentProduct, and an "Under review" product-scope bar; Ask
-> is a cited conversational chat. The original three-page intent below is
-> preserved for design context.
+> **Superseded. See the top-of-file note.** The UI is not Streamlit and is not
+> three pages. It is a Next.js App Router app in `regwatch/frontend/` with five
+> surfaces (Ask, Assemble, Watch, White Paper, Deficiency) sharing one shell, a
+> URL-scoped CurrentProduct, and an "Under review" product-scope bar. Ask is a
+> cited conversational chat. The original three-page intent below is kept for
+> design context.
 
 Three pages: Ask (Q&A with inline sources), Assemble (pick a product to a brief), Watch (recent alerts). Sources are always visible and clickable. Acceptance: a non-technical user can ask a question, get a cited answer or a clear "not found," and open the source, with zero command line.
 
-## 11. Citation and refusal spec (precise)
+## 11. Citation and refusal spec
 
-- Every answer ends with a **Sources** list: `[short-name, p.N](source_url)` for each cited chunk.
-- Inline claims carry `[short-name, p.N]`.
-- **Refusal trigger:** top retrieval score below `REFUSAL_SCORE_THRESHOLD` (configurable, tune on the gold set) OR the LLM, under the grounding prompt, determines context is insufficient. On trigger, return exactly: `"I can't find this in the current FDA guidance corpus. I won't guess on a regulatory question."` and set `refused=true`.
-- The model is forbidden from using prior knowledge to fill gaps. Test this with questions whose answers are real-world true but absent from the corpus; the system must refuse.
+**What this section originally said:** every sentence carried `[short-name, p.N]`,
+and a refusal returned one exact fixed string. That was the "cite or refuse" rule.
+It described v5 and v6. v7 replaced it and is live in production. The fixed
+refusal string no longer exists anywhere in the code.
+
+**The rule today: cite the facts, talk like a person.** Every sentence the model
+writes is one of three kinds.
+
+1. **Source fact.** Says what FDA guidance requires, recommends, permits or
+   prohibits. It must end with the numbers of the passages it came from, placed
+   right before the final period, like `[1]` or `[1, 3]`. An uncited source fact
+   is dropped by `src/regwatch/generate/turn_gate.py`. That is INV-1, and it is
+   enforced in code, not in the prompt.
+2. **Reasoning.** Our own reading, going past what the passages say. It carries no
+   number and must open with one of four exact phrases, pinned byte for byte in
+   `turn_gate.REASONING_FRAME_PREFIXES`: "The guidance does not state this
+   directly; my reading is ...", "Reading the guidance together, ...", "My reading
+   is ...", "Beyond the guidance, ...". An obligation or a prohibition may not
+   hide inside a reasoning sentence. The source-assertion lexicon reclassifies it
+   back to a source fact, which then needs a citation or gets dropped.
+3. **Conversation.** Greetings, offers, transitions, a question back to the user.
+   Plain text, no numbers, no FDA facts.
+
+The model does not write the visible citation markers. It declares its sources per
+claim, the gate validates them against the passages actually sent that turn, and
+the renderer stamps the markers. A claim whose declared sources do not all resolve
+is dropped whole, never partly rewritten. The API returns the validated set as
+`citations[]`.
+
+**When the corpus does not answer.** There is no sentinel and no code word. The
+model says so in ordinary words, names what it does have nearby, and offers a next
+step. The whole reply is plain prose with no passage numbers at all. v6 used a
+fixed marker for this and it broke every refusal in the battery, which is why v7
+removed it. The turn is still recorded as `refused` with an empty citation list.
+
+**Gate verdicts** in `generate/turn_gate.py`: `answer`, `partial`,
+`material_drop`, `no_valid_citations`, `no_evidence`, and
+`conversational_decline`, which is new in v7 and fires when every admitted claim
+is uncited.
+
+**Retrieval floor.** Passages scoring below `REFUSAL_SCORE_THRESHOLD` (default
+0.30) are withheld from the synthesizer before it runs, so it never sees the weak
+evidence. The 0.30 value was tuned on the old OpenAI vector space and has not been
+revalidated against the current Qwen3 space.
+
+**Unchanged from the original spec.** The model may never use prior knowledge to
+fill a gap. Test that with questions whose answers are real-world true but absent
+from the corpus. Product scope is resolved before retrieval, so a citation cannot
+cross drugs (INV-9). Every query writes exactly one `query_log` row, answered or
+not.
 
 ## 12. Milestones and definition of done
 
-- **Phase 0 — Scaffold.** Repo, config, stores, provider interfaces, CI (ruff/black/mypy/pytest), `CLAUDE.md`, `.env.example`. DoD: `uv run pytest` green on a smoke test; app boots.
-- **Phase 1 — Ingest + extract (seed).** Crawl and parse PSGs for the three seed products; extract cited BE requirements. DoD: `uv run regwatch seed` populates `psg_document`, `psg_version`, `be_requirement` for albuterol, beclomethasone, romidepsin, every field cited; idempotent re-run.
-- **Phase 2 — Retrieval + cited Q&A.** Embed, retrieve, grounded generation with citations and refusal; audit logging. DoD: INV-1/2/6 tests pass incl. adversarial refusals.
-- **Phase 3 — Watch.** Build watchlist from Drugs@FDA; change detection; matcher; alerts. DoD: on the pasted batch, albuterol + beclomethasone are flagged with cited diffs; additions correctly ignored; INV-4/5 tests pass.
-- **Phase 4 — Assemble.** Dossier builder + the two non-Q&A UI pages. DoD: a seed product yields a fully cited brief, reproducible via `/assemble`.
-- **Phase 5 — Eval + demo polish.** Gold set, eval scorecard wired into CI with thresholds; Streamlit polish. DoD targets: recall@8 >= 0.90, citation precision >= 0.95, refusal accuracy >= 0.95, zero ungrounded claims on the gold set.
+All six phases are done: scaffold, ingest and extract for the three seed products,
+retrieval and cited Q&A with audit logging, Watch, Assemble, and eval. The
+demo-polish phase targeted Streamlit, which the Next.js frontend has since
+replaced.
+
+The Phase 5 quality bar is still the bar: recall@8 >= 0.90, citation precision
+>= 0.95, refusal accuracy >= 0.95, and zero ungrounded claims on the gold set.
+Measured numbers live in [EVAL_STATUS.md](EVAL_STATUS.md).
 
 ## 13. Testing strategy
 
@@ -370,13 +443,15 @@ Unit tests per module. Integration test for the full ingest to cited-answer path
 
 ## 15. Instructions to Claude Code
 
-- Build phase by phase (Section 12). After each phase, run the full test suite and the relevant DoD check before moving on.
-- Treat Section 4 invariants as code with tests. If any requested behavior conflicts with them, stop and note it in `DECISIONS.md`.
-- Keep `EmbeddingProvider` and `LLMProvider` behind interfaces; never hard-code a model in business logic.
-- For scraping: inspect the live PSG page first to find a backing data endpoint before writing any parser; prefer it over a headless browser; be a polite crawler.
+`docs/CLAUDE.md` is the live version of this section. Read that one. What still
+holds here:
+
+- Treat the Section 4 invariants as code with tests. If a requested behavior conflicts with them, stop and note it in `DECISIONS.md`.
+- Keep `EmbeddingProvider` and `LLMProvider` behind their interfaces. Never hard-code a model in business logic.
+- For scraping: find the backing data endpoint on the live PSG page before writing any parser, prefer it over a headless browser, and be a polite crawler.
 - Public FDA sources only. Do not touch internal or proprietary data. Do not invent product statuses; pull them from Drugs@FDA or the provided approval letter.
-- Make reasonable default decisions where the spec is silent and log them. Ask the user only for: (a) any watchlist products beyond the three seeds, and (b) LLM/embedding provider preference if they have one. Otherwise proceed with the defaults here.
-- Write clear commit messages mapped to phases. Keep functions small and typed. Prefer clarity over cleverness.
+- Where the spec is silent, pick a sensible default and log it. Ask the user only about (a) watchlist products beyond the three seeds and (b) LLM or embedding provider preference.
+- Keep functions small and typed. Prefer clarity over cleverness.
 
 ## 16. Seed data (verified)
 
@@ -390,10 +465,16 @@ Start ingestion with these three real, verified products. Albuterol and beclomet
 
 ---
 
-### Appendix A — Glossary
+### Appendix A. Glossary
 
 ANDA: Abbreviated New Drug Application. PSG: Product-Specific Guidance. BE: bioequivalence. RLD: Reference Listed Drug. CRL: Complete Response Letter. RTR: Refuse to Receive. eCTD: electronic Common Technical Document.
 
-### Appendix B — Why this scope is correct
+### Appendix B. Why this scope is correct
 
-The system compresses the team's own prep time (retrieval, extraction, organization, comparison) and never touches FDA-facing regulatory authorship or judgment. That single boundary is simultaneously the compliance posture (operational efficiency, outside the FDA's credibility-assessment burden for decision-supporting AI) and the competitive strategy (faster internal cycle time, which is where generics are won). Every other capability either crosses that line or is a later extension on the same backbone.
+The system speeds up the team's own prep work: retrieval, extraction,
+organization, comparison. It never touches FDA-facing authorship or judgment.
+That one boundary does double duty. It keeps the tool on the operational-efficiency
+side of the FDA's line, away from the credibility burden that falls on
+decision-supporting AI. It is also where the money is, because in generics the win
+comes from a faster internal cycle. Anything else either crosses the line or is a
+later extension on the same backbone.
