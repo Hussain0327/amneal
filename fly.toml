@@ -1,11 +1,14 @@
+# Last updated: 2026-08-11
+# The Go proxy holds the public port; Python serves the RAG core behind it.
 app = "amneal"
 primary_region = "iad"
+
 # Fly sends SIGTERM, then SIGKILL after kill_timeout (default 5s). This is a
 # ceiling after the signal, not a fixed delay: a process that exits promptly
 # (uvicorn does) is unaffected. Keep 30s so in-flight requests -- live SSE
-# streams included -- can drain on deploys, and so the phase-3 Go proxy
+# streams included -- can drain on deploys, and so the Go proxy
 # (20s SIGTERM drain, go/internal/proxy/proxy.go shutdownGrace; see
-# docs/GO_PROXY_ROLLOUT.md) needs no fly.toml change when it lands. Plain
+# docs/GO_PROXY_ROLLOUT.md) needs no fly.toml change. Plain
 # integer seconds -- the one timeout in fly.toml documented WITHOUT a unit
 # suffix.
 kill_timeout = 30
@@ -54,6 +57,12 @@ kill_timeout = 30
   proxy = "regwatch-proxy"
 
 [env]
+  # INERT ON THE QUERY PATH. Retrieval picks its embedder from
+  # ACTIVE_EMBEDDING_PROFILE, and only the "legacy" arm ever reads this key.
+  # Prod promoted a real Databricks Qwen3 profile (1024-dim) on 2026-07-30, so
+  # nothing on the live query path reads this line today. It is left in place
+  # as the rollback setting for the legacy arm; do not cite it as the current
+  # embedding provider.
   EMBEDDING_PROVIDER = "openai"
   AUTH_COOKIE_SECURE = "true"
   CORS_ALLOW_ORIGINS_CSV = "https://amneal.vercel.app"
@@ -82,14 +91,14 @@ kill_timeout = 30
   # B4: SENTRY_DSN is a Fly secret (`fly secrets set SENTRY_DSN=...`). Without
   # it the app boots but logs a loud warning -- errors would otherwise vanish.
   #
-  # Staged for the phase-3 traffic flip (docs/GO_PROXY_ROLLOUT.md) and read
-  # ONLY by the Go proxy's ConfigFromEnv (go/internal/proxy/proxy.go:43) --
+  # Where the Go proxy relays to. The phase-3 traffic flip is DONE
+  # (docs/GO_PROXY_ROLLOUT.md); the proxy holds the public edge today. Read
+  # ONLY by the proxy's ConfigFromEnv (go/internal/proxy/proxy.go:43) --
   # nothing in the Python app reads it, so it rides along inert on app
   # machines ([env] is app-wide on Fly). The 6PN name resolves AAAA/IPv6-only
-  # to RUNNING app-group machines with no health filtering, which is exactly
-  # why the flip is gated on the phase-2 dual-stack listener. The proxy
-  # listens on its PORT default 8080, which must match internal_port once
-  # [http_service] fronts the proxy group.
+  # to RUNNING app-group machines with no health filtering, which is why the
+  # flip needed the phase-2 dual-stack listener first. The proxy listens on
+  # its PORT default 8080, which must match internal_port below.
   UPSTREAM_URL = "http://app.process.amneal.internal:8000"
 
 [http_service]

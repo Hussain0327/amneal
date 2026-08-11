@@ -1,302 +1,212 @@
 # GO_NATIVE_QUERY rollout (strangler Step 5): the query-cutover runbook
 
-Status 2026-07-29: PROD IS FLAG-ON AND THE PIN IS DEPLOYED. The flip went
-live on 2026-07-24 via `fly secrets set GO_NATIVE_QUERY=true -a amneal`;
-prod serves POST /query natively from the Go edge. The pin PR (#127) has
-since merged and deployed `GO_NATIVE_QUERY = "true"` in fly.toml [env], and
-the same-named secret was unset. The versioned [env] pin is now the ONLY
-authority for this flag (INTERNAL_RAG_TOKEN remains a Deployed secret). PR B
-(the Go CompleteQuery cutover, merged #124) and the open-model work (#125)
-are deployed since 2026-07-23.
+Status 2026-07-29: PROD IS FLAG-ON AND THE PIN IS DEPLOYED. The flip went live
+on 2026-07-24 via `fly secrets set GO_NATIVE_QUERY=true -a amneal`. Prod serves
+`POST /query` natively from the Go edge. The pin PR (#127) then put
+`GO_NATIVE_QUERY = "true"` into `fly.toml` `[env]` and the same-named secret was
+unset, so the versioned pin is now the only authority for this flag.
+`INTERNAL_RAG_TOKEN` is still a Fly secret.
 
-ROLLBACK STATE: state B in "Monitoring window and rollback" is TRUE TODAY.
-The incident command is `fly secrets set GO_NATIVE_QUERY=false -a amneal`
-(a secret overrides the [env] pin); `fly secrets unset GO_NATIVE_QUERY` is a
-NO-OP reboot that leaves the flag ON. Read that section before typing
-anything. Phases 0 and 1 below are HISTORICAL (already executed on
-2026-07-24); they are kept as the record of what was run, not as a to-do.
+Last updated: 2026-08-11. Wording refresh only. Nothing about the flag changed.
 
-What the flip changes (and only this): with GO_NATIVE_QUERY=true, the Go
-edge serves POST /query natively (go/internal/api/query.go
-handleCompleteQuery) instead of relaying it. Go runs the gates (auth 401,
-pydantic-parity validation 422, per-user rate limit 429, session-ownership
-404), writes T1 (user chat message, best-effort), calls Python's
-token-guarded POST /internal/query/compute (src/regwatch/api/main.py
-internal_query_compute) which computes and returns {response, persist} and
-writes NOTHING, then Go writes T2 (query_log, AUTHORITATIVE -- INV-6) and
-T3 (assistant chat message, best-effort) as three isolated writes
-(go/internal/api/persist.go). /query/stream stays a relay behind StreamGate
-(go/internal/api/query_stream_gate.go: pre-stream 401/429 in Go, streaming
-persistence still Python -- plan R3, docs/POLYGLOT_TARGET_2026-07-10.md).
+Two things about the line above. `tests/test_go_native_query_pin.py` reads this
+file and checks that status line against `fly.toml`, so keep exactly one of them
+and keep it truthful. And the rollback below is state-dependent: today it is
+state B, so `fly secrets unset` does NOT revert anything. Read the rollback
+section before typing anything during an incident.
 
-The flag is BOOT-TIME and PER-PROCESS: go/internal/api/config.go reads
-GO_NATIVE_QUERY (envBool, default false) once in ConfigFromEnv, and
-routes.go registers the native POST /query handler (and its 405 row) only
-when it is true. Changing it means restarting proxy machines; there is no
-runtime toggle. The same file resolves INTERNAL_RAG_TOKEN (NO boot-time
-coupling check: flag-on with an empty or mismatched token still boots, but
-Python's guard then 404s every compute call and every native /query
-degrades to a synthesized upstream_error turn -- stage the secret BEFORE
-the flip), INTERNAL_RAG_URL (falls back to UPSTREAM_URL, so
-prod needs no new URL var -- fly.toml [env] already carries
-UPSTREAM_URL=http://app.process.amneal.internal:8000), and RAG_TIMEOUT_S
-(default 240s, the finite Go->Python compute deadline).
+## What the flip changed
 
-## Preconditions (hard gates, in order)
+With `GO_NATIVE_QUERY=true` the Go edge serves `POST /query` itself
+(`go/internal/api/query.go` `handleCompleteQuery`) instead of relaying it. Go:
 
-1. The three step-5-C parity fixes (branch go/step5-c-preflip-fixes) are
-   MERGED AND DEPLOYED. They are prerequisites, not hygiene -- each closes a
-   Go-vs-Python behavior divergence on a path the flip exposes. Target
-   post-fix state, which this runbook assumes everywhere below:
-   - Lost-create session-ownership race: a T1 upsert that loses the
-     create race to another user's session now ABORTS the turn as an
-     unaudited 404 (ownership-guarded upsert in
-     go/internal/api/persist.go persistUserTurn), parity with Python's
-     ensure_session. No more silent degrade onto a turn-id session for
-     this case.
-   - Strict-path audit failure with no serialized fallback: when the
-     authoritative T2 write fails AND persist.fallback is nil, Go now
-     WITHHOLDS the answer with a 500 (go/internal/api/persist.go
-     persistTurn) -- INV-6 no-audit-no-answer, parity with Python's raise.
-     (The normal strict-path degrade is unchanged: fallback present ->
-     fixed-copy error turn, skip-audited.)
-   - Python-side saturation: when the compute endpoint sheds under
-     _ASK_LIMITER saturation, Python returns the SAME
-     503 {"detail": "server is busy, retry shortly"} as the public route
-     (src/regwatch/api/main.py) and Go passes it through as a 503 with NO
-     audit row -- a shed is not a turn. Go relays ONLY that byte-fixed busy
-     body; any other 503 on the compute hop (none exists today) lands on
-     the audited upstream_error path instead of the unaudited relay
-     (go/internal/api/ragclient.go). KNOWN ACCEPTED DIVERGENCE: T1 has
-     already been written by then, so the shed leaves an orphaned user
-     chat message, unlike Python's zero-write shed. See the divergence
-     table below.
-2. CI fully green on main at the deployed commit, INCLUDING the
-   cross-service contract lane: tests_contract/ (the S1-S23 harness plus
-   the S28-S30 gap-fillers, over the REAL compiled Go proxy + uvicorn +
-   disposable Postgres). Native mode is
-   the harness DEFAULT (tests_contract/conftest.py stack(native=True)), so
-   a green contract lane is direct evidence for the post-flip topology; the
-   base_relay_stack rows are what keep the flag-off rollback path proven.
-3. The standing pre-merge checklist from docs/GO_PROXY_ROLLOUT.md (green
-   docker-build, go lane, full python gate, fly config validate) plus a
-   low-traffic window with `fly logs`, `fly status`, and this runbook open.
+1. runs the gates: auth 401, pydantic-parity validation 422, per-user rate limit
+   429, session ownership 404
+2. writes T1, the user chat message, best effort
+3. calls Python's token-guarded `POST /internal/query/compute`
+   (`src/regwatch/api/main.py` `internal_query_compute`), which computes and
+   returns `{response, persist}` and writes nothing
+4. writes T2, the `query_log` row. This one is authoritative, it is INV-6
+5. writes T3, the assistant chat message, best effort
 
-## Phase 0 (HISTORICAL, executed 2026-07-24) -- stage the secret
+T1, T2 and T3 are three isolated writes (`go/internal/api/persist.go`).
 
-ALREADY DONE. INTERNAL_RAG_TOKEN is a Deployed secret. Do not re-run any of
-this during an incident: rotating the token mid-flight 404s every compute
-call. Its exit criteria below are PRE-FLIP expectations (row 2 in particular
-asserts `GO_NATIVE_QUERY absent`, which is deliberately false today) and are
-retained as the record of the state phase 0 left behind.
+`/query/stream` is still a relay behind StreamGate
+(`go/internal/api/query_stream_gate.go`): Go does the pre-stream 401 and 429,
+Python still owns streaming persistence. That is plan R3 in
+`docs/POLYGLOT_TARGET_2026-07-10.md`.
 
-Generate and set the shared internal token:
+## How the flag is read
 
-    openssl rand -hex 32
-    fly secrets set INTERNAL_RAG_TOKEN=<the-64-hex-value> -a amneal
+It is boot-time and per-process. `go/internal/api/config.go` reads
+`GO_NATIVE_QUERY` once in `ConfigFromEnv` (`envBool`, default false), and
+`routes.go` registers the native `POST /query` handler and its 405 row only when
+it is true. Changing it means restarting proxy machines. There is no runtime
+toggle.
 
-Facts to hold in mind while running that:
+The same file resolves three related settings:
 
-- Fly secrets are APP-WIDE: both process groups (proxy AND app machines)
-  receive it, which is exactly what the design needs -- the Python compute
-  endpoint's guard (main.py _require_internal_token) and the Go ragclient
-  (go/internal/api/ragclient.go, X-Internal-Token header) must carry the
-  SAME value, and one `fly secrets set` reaches both.
-- Setting a secret triggers a ROLLING RESTART of all 4 machines (2 proxy +
-  2 app), one at a time, each gated by its health check ([[http_service.checks]]
-  for the proxy group, [checks.app_health] for the app group). Treat it as
-  a deploy: watch it.
-- The token is INERT while GO_NATIVE_QUERY is off. Nothing calls the
-  compute endpoint (the native handler is not even registered,
-  go/internal/api/routes.go), the endpoint 404s any mismatched or missing
-  token without confirming it exists, and the Go edge 404s the whole
-  /internal/ subtree UNCONDITIONALLY -- so staging the secret first is a
-  zero-behavior-change deploy, which is why it is its own phase.
+- `INTERNAL_RAG_TOKEN`. There is no boot-time coupling check. Flag-on with an
+  empty or wrong token still boots, but Python's guard then 404s every compute
+  call and every native `/query` degrades into a synthesized `upstream_error`
+  turn. Stage the secret before any flip.
+- `INTERNAL_RAG_URL`, which falls back to `UPSTREAM_URL`. Prod needs no new URL
+  variable: `fly.toml` `[env]` already carries
+  `UPSTREAM_URL=http://app.process.amneal.internal:8000`.
+- `RAG_TIMEOUT_S`, default 240s. That is the finite Go to Python compute
+  deadline.
 
-Phase 0 exit criteria (all read-only) -- PRE-FLIP snapshot, satisfied on
-2026-07-24 before phase 1 ran:
+## Behavior worth knowing (the three pre-flip parity fixes)
 
-| # | command | pass looks like |
-| - | ------- | --------------- |
-| 1 | `fly status` | 2 proxy + 2 app machines, all started, checks passing, all on the same VERSION (per-machine column, not the header) |
-| 2 | `fly secrets list -a amneal` | INTERNAL_RAG_TOKEN listed with a fresh created-at; GO_NATIVE_QUERY absent |
-| 3 | `curl -fsS https://amneal.fly.dev/health` | 200, db ok -- the restart converged |
-| 4 | `curl -s -o /dev/null -w '%{http_code}' -X POST https://amneal.fly.dev/internal/query/compute` | 404 -- the edge still walls off /internal/ |
-| 5 | an authed POST /query via the frontend | normal answer/refusal -- still the relay path, proving the restart changed nothing |
+These shipped before the flip and describe how prod behaves today.
 
-## Phase 1 (HISTORICAL, executed 2026-07-24) -- the flip
+- **Lost-create session race.** A T1 upsert that loses the create race to
+  another user's session aborts the turn as an unaudited 404 (ownership-guarded
+  upsert in `go/internal/api/persist.go` `persistUserTurn`). This matches
+  Python's `ensure_session`. There is no silent degrade onto a turn-id session
+  for this case.
+- **Audit failure on the strict path.** If the authoritative T2 write fails and
+  `persist.fallback` is nil, Go withholds the answer with a 500
+  (`persistTurn`). That is INV-6: no audit, no answer. With a fallback present
+  the normal degrade is unchanged, a fixed-copy error turn, skip-audited.
+- **Python-side saturation.** When the compute endpoint sheds under
+  `_ASK_LIMITER` saturation, Python returns the same
+  `503 {"detail": "server is busy, retry shortly"}` as the public route and Go
+  passes it straight through with no audit row. A shed is not a turn. Go relays
+  only that byte-fixed busy body. Any other 503 on the compute hop lands on the
+  audited `upstream_error` path instead (`go/internal/api/ragclient.go`).
 
-ALREADY DONE. Mechanism used: flip by SECRET, then pin by PR once proven.
+## Live smoke checklist
 
-    fly secrets set GO_NATIVE_QUERY=true -a amneal
-
-- On Fly, secrets take precedence over fly.toml [env], so this wins even
-  after the pin lands. That precedence is also what makes the revert command
-  state-dependent -- the ONE authoritative account of reverting lives in
-  "Monitoring window and rollback" below. Do not reconstruct it from memory.
-- Once the smoke checklist and monitoring window below are clean, land a
-  follow-up PR that pins `GO_NATIVE_QUERY = "true"` in fly.toml [env] so
-  the state is versioned (the step-3 precedent), and after THAT deploy is
-  green, `fly secrets unset GO_NATIVE_QUERY -a amneal` so the versioned
-  value is the only authority. Leaving the secret set forever would make
-  fly.toml lie about who controls the flag. NOTE: that unset CHANGES THE
-  REVERT COMMAND (state B below); re-read the rollback section the moment it
-  is run. Status today (2026-07-29): DONE -- the pin PR (#127) is merged and
-  deployed, the secret is unset, and state B is the live state.
-
-Alternative considered: fly.toml-first (flip in a PR, the step-3
-GO_PROXY_ROLLOUT.md precedent -- versioned, reviewed, CI-gated). Rejected
-for the FIRST flip this time because revert speed dominates: a fly.toml
-revert is merge + CI + deploy (~15-20 min under the workflow_run chain,
-longer if CI queues), while a secrets unset is one command and one rolling
-restart. Step 3 changed topology (machine groups, ports), where versioning
-was the safety property; step 5 changes ONE boot-time boolean whose off
-state is the continuously-proven relay path -- speed-of-revert is the
-safety property here. The pin PR restores the versioned end state either
-way.
-
-Restart mechanics to expect:
-
-- `fly secrets set` rolls ALL FOUR machines (secrets are app-wide), one at
-  a time. The app machines pick up nothing new (Python never reads
-  GO_NATIVE_QUERY); only the proxy machines change behavior.
-- The flag is boot-time and per-process, so during the roll one proxy
-  machine serves /query natively while the other still relays. Both paths
-  produce the same wire bytes and the same DB rows (that is the whole PR B
-  parity surface, pinned by tests_contract), so the mixed window is
-  harmless. It ends when the second proxy machine restarts.
-
-## Live smoke checklist (run every row, in order, right after the roll)
+Run every row, in order, after any deploy or restart that could touch this path.
 
 | # | check | how | pass looks like |
 | - | ----- | --- | --------------- |
 | 1 | fleet | `fly status` | 2 proxy + 2 app, all checks passing, same VERSION |
-| 2 | native buffered query | authed POST /query (frontend, or curl with a session cookie) | 200; body has the full QueryResponse key set; `audit_id > 0` (a -1 here means the audit store is down -- stop and investigate) |
-| 3 | audit row (INV-6) | SQL against prod Supabase: `SELECT id, mode, refused, status, route_json, model_name, input_tokens, output_tokens FROM query_log WHERE id = <audit_id from row 2>` | EXACTLY ONE row, id == audit_id; route_json a sane object (route/filters/reason/context_applied/response_mode); tokens NULL on refusals, populated on answers |
+| 2 | native buffered query | authed POST /query (frontend, or curl with a session cookie) | 200; body has the full QueryResponse key set; `audit_id > 0`. A -1 means the audit store is down, stop and investigate |
+| 3 | audit row (INV-6) | SQL against the prod database (Databricks Lakebase): `SELECT id, mode, refused, status, route_json, model_name, input_tokens, output_tokens FROM query_log WHERE id = <audit_id from row 2>` | exactly one row, id == audit_id; `route_json` a sane object (route/filters/reason/context_applied/response_mode); tokens NULL on refusals, populated on answers |
 | 4 | chat trail | `SELECT role, audit_id, status FROM chat_message WHERE turn_id = '<turn_id from row 2>' ORDER BY created_at` | exactly [user, assistant]; the assistant row's audit_id equals row 2's audit_id |
-| 5 | 405 wiring | `curl -s -o /dev/null -w '%{http_code}' https://amneal.fly.dev/query` (GET) | 405 -- Go now owns the method table for /query |
+| 5 | 405 wiring | `curl -s -o /dev/null -w '%{http_code}' https://amneal.fly.dev/query` (GET) | 405. Go owns the method table for /query |
 | 6 | internal stays internal | `curl -s -o /dev/null -w '%{http_code}' -X POST https://amneal.fly.dev/internal/query/compute` | 404, before and after the flip |
-| 7 | streaming untouched | authed `curl -N -X POST https://amneal.fly.dev/query/stream ...` | `event: token` frames arrive incrementally, terminal result frame last -- still the relay + StreamGate path |
+| 7 | streaming untouched | authed `curl -N -X POST https://amneal.fly.dev/query/stream ...` | `event: token` frames arrive incrementally, terminal result frame last. Still the relay + StreamGate path |
 | 8 | auth gate | unauthenticated `curl -s -o /dev/null -w '%{http_code}' -X POST https://amneal.fly.dev/query -H 'content-type: application/json' -d '{"question":"ping?"}'` | 401, unaudited |
 
-## Monitoring window and rollback
+## What to watch
 
-Watch for AT LEAST an hour of real traffic, then again at the next
-watch-daily run:
+- **Missing audit rows.** Any `/query` 200 whose `audit_id` has no `query_log`
+  row, or an `audit_id == -1` response. Grep `fly logs` for
+  `qa_audit_write_failed` and `qa_answer_audit_write_failed`. This is the INV-6
+  surface. One confirmed miss is a rollback trigger, not a ticket.
+- **5xx spike on /query** against the pre-flip baseline. Remember that
+  strict-path audit failure without a fallback 500s on purpose. A trickle during
+  a DB blip is the design working. A sustained rate is the trigger.
+- **`upstream_error` rows.**
+  `SELECT count(*) FROM query_log WHERE route_json->>'reason' = 'upstream_error' AND ts > now() - interval '1 hour'`.
+  Each one means the Go to Python compute hop failed: dial, 240s deadline, or a
+  non-200. A handful during deploy churn is expected. A steady stream means the
+  internal hop is misconfigured, and a token mismatch shows up exactly here as
+  compute 404s.
+- **Sentry**, for new error groups on the query path in either runtime.
+- **`qa_session_setup_failed` / `qa_user_record_failed` /
+  `qa_assistant_record_failed`** log lines. Best-effort write failures. A
+  degradation signal, not by itself a trigger.
 
-- Missing audit rows: any /query 200 whose audit_id has no query_log row,
-  or audit_id == -1 responses (grep `fly logs` for
-  `qa_audit_write_failed` / `qa_answer_audit_write_failed`). This is the
-  INV-6 surface -- a single confirmed miss is a rollback trigger, not a
-  ticket.
-- 5xx spike on /query relative to the pre-flip baseline (Fly metrics /
-  `fly logs`). Remember the post-fix semantics: strict-path
-  audit-failure-without-fallback 500s ON PURPOSE -- a trickle of those
-  during a DB blip is the design working; a sustained rate is the trigger.
-- status="error" / reason="upstream_error" query_log rows
-  (`SELECT count(*) FROM query_log WHERE route_json->>'reason' = 'upstream_error' AND ts > now() - interval '1 hour'`):
-  each one means the Go->Python compute hop failed (dial, 240s deadline,
-  or non-200). A handful under deploy churn is expected; a steady stream
-  means the internal hop is misconfigured (token mismatch shows up
-  EXACTLY here, as compute 404s).
-- Sentry: new error groups from the query path in either runtime.
-- `qa_session_setup_failed` / `qa_user_record_failed` /
-  `qa_assistant_record_failed` log lines (best-effort write failures --
-  degradation signal, not by themselves a trigger).
+## The exact revert: it depends on the current state, so check first
 
-### The exact revert -- IT DEPENDS ON THE CURRENT STATE. CHECK FIRST.
-
-There is no single revert command. Fly secrets take precedence over fly.toml
-[env], so `fly secrets unset` reverts the flag ONLY while a secret is what
-holds it on; once the fly.toml pin is the authority, an unset is a NO-OP and
-the machines come back STILL FLAG-ON. At 02:00 mid-incident, run this first
-and let the answer pick your command:
+There is no single revert command. Fly secrets take precedence over `fly.toml`
+`[env]`, so `fly secrets unset` reverts the flag only while a secret is what
+holds it on. Once the `fly.toml` pin is the authority, an unset is a no-op and
+the machines come back still flag-on. Run this first and let the answer pick
+your command:
 
     fly secrets list -a amneal | grep GO_NATIVE_QUERY
 
-State A -- GO_NATIVE_QUERY IS LISTED as a secret (HISTORICAL: true from the
-2026-07-24 flip until the pin PR #127 deployed and the secret was unset):
+**State A, the secret IS listed.** Historical: this was true from the
+2026-07-24 flip until the pin PR #127 deployed and the secret was unset.
 
     fly secrets unset GO_NATIVE_QUERY -a amneal
 
-Removes the only authority; a deployed fly.toml that pins nothing lets the
-machines boot flag-off. If the pin PR has ALSO deployed by then, this unset
-drops back to the pinned "true" and does NOT revert -- in that case use
-state B instead.
+That removes the only authority, and a deployed `fly.toml` that pins nothing
+lets the machines boot flag-off. If the pin has also deployed by then, this
+unset just drops back to the pinned "true" and reverts nothing. Use state B.
 
-State B -- NO secret listed, the fly.toml [env] pin is the only authority
-(TRUE TODAY, 2026-07-29: the pin PR #127 is deployed and the secret was
-unset -- this is the live state):
+**State B, NO secret listed and the `fly.toml` pin is the only authority.**
+This is the live state today.
 
     fly secrets set GO_NATIVE_QUERY=false -a amneal
 
-A secret OVERRIDES the [env] pin, and the Go loader parses "false" to boolean
-false (envBool, go/internal/api/config.go:86), so this is a genuine
-one-command revert with no git round-trip. `fly secrets unset` here does
-NOTHING except roll the machines back onto the same pin.
+A secret overrides the `[env]` pin, and the Go loader parses "false" to boolean
+false (`envBool`, `go/internal/api/config.go`), so this is a genuine one-command
+revert with no git round trip. `fly secrets unset` here does nothing except roll
+the machines back onto the same pin.
 
-Permanent revert (either state, when the flag should stay off): delete the
-`GO_NATIVE_QUERY = "true"` line from fly.toml [env] and deploy. This is a
-merge + CI + deploy cycle (~15-20 min), so it is the follow-up to a secret
-revert, not the incident action. If a secret is set, it still overrides the
-absent pin -- clear the secret too, or the deploy changes nothing.
+**Permanent revert, either state.** Delete the `GO_NATIVE_QUERY = "true"` line
+from `fly.toml` `[env]` and deploy. That is a merge plus CI plus deploy cycle,
+roughly 15 to 20 minutes, so it is the follow-up to a secret revert, not the
+incident action. If a secret is set it still overrides the absent pin, so clear
+the secret too or the deploy changes nothing.
 
-Every form above is a rolling restart back to the relay path; the token can
-stay set (it goes back to being inert). No schema or data change is involved
-in any direction. The relay path does not rot while flag-on is live: the
-contract suite's base_relay_stack rows (tests_contract/conftest.py,
-tests_contract/test_query_relay_parity.py) run flag-off on every CI run,
-so the rollback target stays continuously proven.
+Every form above is a rolling restart back to the relay path. The token can stay
+set, it just goes back to being inert. No schema or data change is involved in
+any direction. The relay path does not rot while flag-on is live: the contract
+suite's `base_relay_stack` rows (`tests_contract/conftest.py`,
+`tests_contract/test_query_relay_parity.py`) run flag-off on every CI run, so
+the rollback target stays continuously proven.
 
 ## Known divergences (accepted, with file refs)
 
-Each row was verified against the code, is covered by the contract suite
-where wire-visible, and is accepted rather than fixed. Do not re-report
-them as flip regressions.
+Each row was checked against the code and is covered by the contract suite where
+it is visible on the wire. These are accepted, not bugs. Do not re-report them as
+flip regressions.
 
 | # | divergence | where | why accepted |
 | - | ---------- | ----- | ------------ |
-| 1 | 503 shed leaves an ORPHANED USER TURN: Go writes T1 before the compute call, so a Python-side saturation shed (503 passthrough, no audit row) leaves the user chat message with no assistant sibling; Python's own shed wrote nothing at all | go/internal/api/query.go (T1 before the rag call); src/regwatch/api/main.py (_shed_if_ask_pool_saturated / _dispatch_ask 503) | audit-first ordering (T1 pre-RAG) is the INV-6-preserving design; an orphaned user turn is display-benign and the session survives a retry |
-| 2 | strict-path audit failure with a NIL fallback now 500s (post-fix state) | go/internal/api/persist.go persistTurn | BOTH runtimes withhold an unaudited validated answer -- this is parity with Python's raise, listed here because the pre-fix Go build degraded to -1 instead |
-| 3 | 422 validation detail granularity: Go reproduces status, top-level shape, and per-field loc/type for the checks it implements, but not every pydantic detail nuance | go/internal/api/query.go (validation block) | contract pins are status-level + shape-level; no client parses detail items |
-| 4 | JSON key ORDER differs (Go re-marshals through a map in spliceAuditID; Python preserves model field order) | go/internal/api/persist.go spliceAuditID | shape parity, not byte parity, is the contract; every consumer parses |
-| 5 | StreamGate 401/429 responses lack CORS headers | go/internal/api/query_stream_gate.go | dev-only exposure: prod traffic rides the Vercel same-origin /api rewrite, which never needs CORS |
-| 6 | rate-limit buckets are PER-PROCESS across 2 proxy machines, so the effective fleet ceiling is ~2x RATE_LIMIT_PER_MINUTE | go/internal/api/ratelimit.go; fly.toml min_machines_running = 2 | pre-existing (Python's limiter split across 2 app machines the same way); Go is at least now the SINGLE authority across /query + /query/stream |
-| 7 | Fly edge idle-timeout exposure on a ZERO-BYTE buffered response: the native /query sends nothing until compute returns, up to RAG_TIMEOUT_S = 240s (go/internal/api/config.go) | go/internal/api/ragclient.go (finite client timeout) | UNMEASURED whether Fly's edge would cut an idle buffered response before 240s -- but the relay path had byte-identical exposure (Python's buffered /query also sends nothing until done), so it is NOT a flip regression. OBSERVATION ITEM, not a blocker: if long-tail turns start dying at a fixed wall-clock, measure this first |
-| 8 | NULL-owner adopt race is STRICTER in Go: two callers racing to adopt a legacy NULL-owner session between the ownership pre-check and T1 both succeed in Python (ensure_session's unconditional row.user_id = user_id lets the last commit clobber the owner, so the earlier adopter's turns land in a session finally owned by the other user), while Go's guarded upsert re-evaluates ownership against the winner's committed row and 404s the loser with zero writes | go/internal/store/queries/chat.sql (guarded ON CONFLICT update); src/regwatch/common/conversation.py ensure_session | divergence is in the SAFE direction: Go closes a genuine Python clobber and matches SessionOwnershipError's "last line of defense" intent; a turn is never attributed to a session another user owns |
+| 1 | A 503 shed leaves an orphaned user turn. Go writes T1 before the compute call, so a Python saturation shed (503 passthrough, no audit row) leaves the user chat message with no assistant sibling. Python's own shed wrote nothing at all | `go/internal/api/query.go` (T1 before the rag call); `src/regwatch/api/main.py` (`_shed_if_ask_pool_saturated` / `_dispatch_ask` 503) | audit-first ordering is the INV-6-preserving design; an orphaned user turn is display-benign and the session survives a retry |
+| 2 | Strict-path audit failure with a nil fallback 500s | `go/internal/api/persist.go` `persistTurn` | both runtimes withhold an unaudited validated answer, which is parity with Python's raise. Listed because the pre-fix Go build degraded to -1 instead |
+| 3 | 422 validation detail granularity. Go reproduces status, top-level shape, and per-field loc/type for the checks it implements, but not every pydantic detail nuance | `go/internal/api/query.go` (validation block) | contract pins are status-level and shape-level; no client parses detail items |
+| 4 | JSON key order differs. Go re-marshals through a map in `spliceAuditID`; Python preserves model field order | `go/internal/api/persist.go` `spliceAuditID` | shape parity, not byte parity, is the contract; every consumer parses |
+| 5 | StreamGate 401/429 responses carry no CORS headers | `go/internal/api/query_stream_gate.go` | dev-only exposure. Prod traffic rides the Vercel same-origin `/api` rewrite, which never needs CORS |
+| 6 | Rate-limit buckets are per-process across 2 proxy machines, so the effective fleet ceiling is about 2x `RATE_LIMIT_PER_MINUTE` | `go/internal/api/ratelimit.go`; `fly.toml` `min_machines_running = 2` | pre-existing. Python's limiter split across 2 app machines the same way, and Go is at least the single authority across `/query` and `/query/stream` now |
+| 7 | Fly edge idle-timeout exposure on a zero-byte buffered response. Native `/query` sends nothing until compute returns, up to `RAG_TIMEOUT_S` = 240s | `go/internal/api/ragclient.go` (finite client timeout) | UNMEASURED whether Fly's edge cuts an idle buffered response before 240s. The relay path had identical exposure, so it is not a flip regression. Observation item: if long-tail turns start dying at a fixed wall clock, measure this first |
+| 8 | The NULL-owner adopt race is stricter in Go. Two callers racing to adopt a legacy NULL-owner session both succeed in Python (`ensure_session`'s unconditional `row.user_id = user_id` lets the last commit clobber the owner), while Go's guarded upsert re-checks ownership against the winner's committed row and 404s the loser with zero writes | `go/internal/store/queries/chat.sql` (guarded ON CONFLICT update); `src/regwatch/common/conversation.py` `ensure_session` | the divergence is in the safe direction. Go closes a real Python clobber, and a turn is never attributed to a session another user owns |
 
-## After the flip is proven
+## What is left
 
-In order, each its own PR. Items 1 and 2 are DONE as of 2026-07-29; the
-remaining work is item 3 (the deletion PR), item 4 (R3), and plan steps 6-9.
+1. **The deletion PR.** Delete Python's buffered `POST /query` route and its
+   now-dead persistence branches. De-flag Go, so `GO_NATIVE_QUERY` and its
+   `routes.go` conditionals go away and native becomes the only path. Regenerate
+   the OpenAPI schema and the frontend api-types, and move the Query wire types
+   to the hand-maintained pattern the step-4 surfaces use. The INV-mapping audit
+   that gates this is done, see
+   [`archive/STEP5_INV_TEST_MAPPING.md`](archive/STEP5_INV_TEST_MAPPING.md): no
+   INV test may be lost, and a test with no mapped contract successor blocks the
+   deletion.
+2. **R3, the stream terminal-frame move.** Keep relaying token frames, move only
+   the terminal-frame persistence to Go. See
+   `docs/POLYGLOT_TARGET_2026-07-10.md` R3. The flag-gated live draft channel
+   shipped on 2026-08-10, but streaming persistence is still Python. R3 gets its
+   own runbook slice.
+3. **Plan steps 6 to 9**: CommitIngest, CompleteWatchRun, CommitWhitepaperRun,
+   and Python's read-only DB role. Python still holds write credentials during
+   this flag-gated phase; dropping them is gated on the deletion PR landing.
 
-1. DONE (PR #127, deployed): the pin PR (fly.toml [env]
-   GO_NATIVE_QUERY = "true"), then unset the secret -- see Phase 1. The
-   unset moved the rollback from state A to state B: `fly secrets unset` no
-   longer reverts anything and the incident command is
-   `fly secrets set GO_NATIVE_QUERY=false -a amneal`.
-2. DONE (docs/STEP5_INV_TEST_MAPPING.md): the tests/ -> tests_contract
-   INV-mapping audit. Walk every INV-tagged and query-path test in tests/
-   that exercises Python's buffered query() route and record, per test,
-   the tests_contract scenario that now carries its invariant. The gate is
-   "no INV test lost": a test with no mapped successor blocks the deletion
-   PR until a contract scenario is written for it.
-3. The phase-gated deletion PR (the step-4 B2/C2 pattern): delete
-   Python's buffered POST /query route and its now-dead persistence
-   branches; de-flag Go (GO_NATIVE_QUERY and its routes.go conditionals
-   go away, native becomes the only path); regenerate the OpenAPI schema
-   and frontend api-types; move the Query wire types to the
-   hand-maintained pattern the step-4 surfaces use.
-4. Then, and only then, the R3 stream terminal-frame move: keep relaying
-   token frames, move ONLY the terminal-frame persistence to Go
-   (docs/POLYGLOT_TARGET_2026-07-10.md R3 -- "keep /query/stream a
-   pass-through proxy until CompleteQuery is proven"). That work gets its
-   own runbook slice; it is out of scope here.
+## History (executed 2026-07-24, kept as the record)
 
-## Out of scope for this slice
-
-- /query/stream persistence and the SSE terminal frame (R3, above).
-- CommitIngest / CompleteWatchRun / CommitWhitepaperRun (plan steps 6-9).
-- Python's read-only DB role (plan step 7) -- Python still holds write
-  creds during the flag-gated phase; dropping them is gated on the
-  deletion PR landing.
+- **Phase 0, stage the secret.** `openssl rand -hex 32`, then
+  `fly secrets set INTERNAL_RAG_TOKEN=<value> -a amneal`. Fly secrets are
+  app-wide, so both process groups get it, which is what the design needs: the
+  Python guard (`main.py` `_require_internal_token`) and the Go ragclient
+  (`X-Internal-Token` header) must carry the same value. Setting a secret rolls
+  all four machines one at a time, so treat it as a deploy and watch it. The
+  token is inert while the flag is off. Do not rotate it mid-incident: that 404s
+  every compute call.
+- **Phase 1, the flip.** `fly secrets set GO_NATIVE_QUERY=true -a amneal`,
+  proven live, then pinned in `fly.toml` by PR #127 and the secret unset. Flipping
+  by secret rather than by PR was deliberate: step 5 changes one boot-time
+  boolean whose off state is the continuously proven relay path, so speed of
+  revert mattered more than versioning. The pin PR restored the versioned end
+  state right after.
+- During the roll, one proxy machine served natively while the other still
+  relayed. Both paths produce the same wire bytes and the same DB rows, which is
+  the whole parity surface `tests_contract` pins, so the mixed window was
+  harmless.

@@ -1,7 +1,12 @@
-# DEPLOY - Supabase + Fly.io + Vercel runbook
+# DEPLOY - Lakebase + Fly.io + Vercel runbook
 
-This is the production cutover runbook, written to be executed top-to-bottom.
-Live shape (Go proxy on the public edge since the 2026-07 phase-3 flip):
+Last updated: 2026-08-11
+
+This is the production runbook. Read it top to bottom the first time; after that
+jump to the section you need. Section numbers are stable, other files link to
+them.
+
+What is running right now:
 
 ```text
 browser -- https --> Vercel (Next.js, regwatch/frontend, https://amneal.vercel.app)
@@ -11,292 +16,373 @@ browser -- https --> Vercel (Next.js, regwatch/frontend, https://amneal.vercel.a
                         |  6PN private network (UPSTREAM_URL)
                         v
                      FastAPI ("regwatch serve", dual-stack :8000, process group "app")
-                        |  DATABASE_URL (psycopg v3, session pooler)
+                        |  DATABASE_URL (psycopg v3, direct endpoint)
                         v
-                     Supabase Postgres 17 + pgvector (structured store + chunks)
-
-embeddings: OpenAI text-embedding-3-small (1536)
-LLM: Databricks Model Serving since 2026-07-28 (LLM_PROVIDER=databricks,
-     endpoint alias workspace.default.regwatch, served model gpt-oss-20b-080525,
-     ONE model for all roles; called from the Python tier). OpenAI is the
-     rollback path: `fly secrets set LLM_PROVIDER=openai` reverts in ~60s.
-auth: custom cookie sessions (unchanged) -- Supabase Auth is NOT used
+                     Databricks Lakebase Postgres + pgvector (rows, vectors, audit)
 ```
 
-Postgres + pgvector is the only datastore (R5 deleted the SQLite/Chroma
-dual-mode): `DATABASE_URL` is mandatory and the app refuses to boot without
-it. `EMBEDDING_PROVIDER` must be `openai` (the `chunk` table is
-`vector(1536)`; the API fails fast on a dimension mismatch). Moving off
-OpenAI embeddings goes through the embedding-profile mechanism
-(`ACTIVE_EMBEDDING_PROFILE` / `EMBEDDING_SHADOW_PROFILE`, migration 0015),
-not by editing `EMBEDDING_PROVIDER`; prod still runs the legacy OpenAI
-profile today.
+Both models live in the company's own Databricks tenant:
 
-Prerequisites on your machine: `uv`, `docker`, `flyctl`, `vercel` CLI
-(optional -- the dashboard works too), repo checked out, and the production
-secret values: `OPENAI_API_KEY` (embeddings + the LLM rollback path),
-`DATABRICKS_LLM_BASE_URL` / `DATABRICKS_LLM_TOKEN` / `DATABRICKS_LLM_MODEL`
-(the live LLM), and `INTERNAL_RAG_TOKEN` (auth for the Go proxy's internal
-RAG relay to the Python tier).
+- Generation: serving alias `workspace.default.regwatch`, served model
+  `gpt-oss-120b-080525`. One model does every role: router, synthesizer,
+  extractor. `LLM_PROVIDER=databricks`.
+- Embeddings: serving endpoint `workspace.default.regwatch-embed`, Qwen3, 1024
+  dimensions, active profile `ep_2e7368b354d911ea3a013c3125e276c2`. All 5,494
+  chunks are embedded on that profile (measured 2026-08-11).
+
+Generation, embeddings and the database are all inside the tenant, so data
+residency item D1 is closed. OpenAI is the rollback path only. `OPENAI_API_KEY`
+is still set and the OpenAI provider still ships and is still tested, but it
+serves nothing in production today.
+
+Auth is custom cookie sessions, minted by the Go proxy.
+
+Postgres + pgvector is the only datastore. `DATABASE_URL` is mandatory and the
+app refuses to boot without it.
+
+One thing that reads wrong at a glance: `fly.toml` still sets
+`EMBEDDING_PROVIDER = "openai"`. That is not the live query embedder. Retrieval
+picks its arm from `ACTIVE_EMBEDDING_PROFILE` (`retrieve/retriever.py`), and only
+the `legacy` arm ever reads `EMBEDDING_PROVIDER`. Prod runs a real profile, so
+the setting now only governs the old `vector(1536)` chunk column and the boot
+dimension check in `store/pgvector_store.py`.
+
+Prerequisites on your machine: `uv`, `docker`, `flyctl`, the `vercel` CLI
+(optional, the dashboard works too), the repo checked out, and the production
+secret values listed in step 3.2.
 
 ---
 
-## 1. Supabase project
+## 1. The database (Databricks Lakebase)
 
-1. Go to <https://supabase.com/dashboard> → **New project**.
-   - Organization: yours. Name: `regwatch-prod`. Region: closest to the API
-     host you'll pick in step 3 (e.g. `us-east-1`).
-   - **Database password**: click *Generate a password*, save it in the
-     password manager NOW — you need it for the connection string.
-   - Click **Create new project** and wait for provisioning (~2 min).
-2. Verify the vector extension: **Database → Extensions**, search `vector` —
-   on current Supabase projects pgvector 0.8.x is already installed in the
-   `extensions` schema. If it shows disabled, toggle it on (schema
-   `extensions`). Our bootstrap also runs
-   `CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions`, which
-   no-ops when present.
-3. Get the connection string: top bar **Connect** → tab **Session pooler**
-   (NOT the transaction pooler on port 6543 — the long-lived API and the
-   migration script need session mode). Copy the URI:
+Production Postgres is Databricks Lakebase, in the company's own tenant.
 
-   ```text
-   postgresql://postgres.<project-ref>:[YOUR-PASSWORD]@aws-0-<region>.pooler.supabase.com:5432/postgres
-   ```
+- Host `ep-super-hat-d8wkrjd9.database.us-east-2.cloud.databricks.com`, us-east-2
+- Database `databricks_postgres`, app role `regwatch_app`
+- pgvector is preinstalled in the `extensions` schema
+- 5,494 chunk rows on 2026-08-11, which is exactly what `/health` reports as
+  `corpus_count`
 
-   Replace `[YOUR-PASSWORD]`; URL-encode any special characters in it
-   (`@` → `%40`, `#` → `%23`, …). A bare `postgresql://` is fine — the app and
-   the migration script normalize it to `postgresql+psycopg://` themselves.
-4. Export it for the next step:
+An older note argued for staying on Supabase
+(`docs/DATABRICKS_ADOPTION_2026-07-28.md`). That call was reversed and the move
+already happened. Anything still saying Supabase is out of date.
 
-   ```bash
-   export SUPABASE_DB_URL='postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres'
-   ```
+### 1.1 What the connection string has to get right
 
-**RLS note (do not "fix" this):** the bootstrap enables row level security on
-every `public` table with NO policies. That is deliberate deny-all for
-Supabase's auto-exposed Data API roles (`anon`/`authenticated`) — the REST
-surface sees nothing. Our API connects as the `postgres` role, which bypasses
-RLS. Do not add policies and do not disable RLS from the dashboard.
+All four of these are enforced in code, so a mistake fails loudly.
 
-## 2. Migrate the data (historical, SQLite + Chroma → Postgres + pgvector)
+1. **Use the DIRECT endpoint, never the `-pooler` host.** The pooler is PgBouncer
+   in transaction mode. That breaks pgx's server-side prepared statements in the
+   Go proxy (`go/internal/store/pool.go`), and the proxy is the service holding
+   the public port, so it presents as a full edge outage. Treat the host suffix
+   as a release-gate check.
+2. **TLS is automatic.** You do not have to append `sslmode=require`: both tiers
+   add it for any non-local host (`store/db.py:_enforce_sslmode`,
+   `go/internal/store/pool.go:enforceSSLMode`). An `sslmode` you set yourself
+   wins, so appending it is harmless.
+3. **URL-encode the password.** `@` becomes `%40`, `#` becomes `%23`, and so on.
+   A bare `postgresql://` prefix is fine, both tiers normalize the scheme.
+4. **The role needs BYPASSRLS.** Boot enables deny-all row level security on
+   every public table, because Lakebase exposes a PostgREST-style Data API over
+   them. A grant-only role connects fine and then reads zero rows, so the app
+   would boot "healthy" and refuse every question. `regwatch_app` holds
+   BYPASSRLS.
 
-This step no longer applies: R5 deleted the SQLite/Chroma dual-mode, so there
-is no local datastore left to cut over from — Postgres + pgvector is the only
-datastore from a fresh checkout onward. `scripts/migrate_to_supabase.py` (the
-one-time SQLite/Chroma-to-Supabase copier) and its `scripts/restore_drill.sh`
-wrapper were deleted in the same change. For the original cutover procedure
-and its verification steps, see git history (the pre-R5 revision of this
-file). A PG-native `pg_dump`/restore drill is the noted open follow-up (see
-§6.4).
+Two more facts worth knowing before you touch the database:
 
-## 3. API on Fly.io (primary)
+- Lakebase's default `search_path` is `"$user", public` and does not include
+  `extensions`. The app role carries `ALTER ROLE regwatch_app SET search_path`.
+  Migrations and bootstrap DDL schema-qualify the `vector` type instead of
+  relying on that.
+- The RLS sweep at boot is deliberately tolerant: it skips a table it cannot
+  lock right now rather than crash-looping the fleet (the 2026-06-18 incident).
+  It is not silent, though. Anything it failed to protect is published and
+  `GET /ready` fails while the list is non-empty.
 
-The slim image (no torch) + `EMBEDDING_PROVIDER=openai` is the production
-combination.
+**Not written down anywhere:** how to provision a fresh Lakebase instance from
+zero. Everything above describes the instance that exists. A from-scratch
+rebuild is unrehearsed, same as the restore drill in 6.5.
 
-1. App + config. The Fly app is `amneal`, and `fly.toml` is COMMITTED at the
-   repo root -- it is authoritative, load-bearing config (two process groups,
-   the migration release_command, the step-5 flag pin). Do not regenerate it
-   with `fly launch`; a fresh checkout deploys with the committed file as-is.
-   Abridged excerpt -- the real `fly.toml` is heavily commented and is the
-   source of truth:
+## 2. Schema and migrations
 
-   ```toml
-   app = "amneal"
-   primary_region = "iad"
-   kill_timeout = 30                        # drain in-flight SSE on deploys
+The Fly deploy is the single migration authority. `fly.toml` sets
+`[deploy] release_command = "alembic upgrade head"`, which runs in a one-off
+machine BEFORE the rolling replace, so a schema-advancing release migrates
+itself. There is no manual pre-migration step on the normal path.
 
-   [build]
-     [build.args]
-       INSTALL_LOCAL_EMBEDDINGS = "false"   # slim image: no torch
+The live DB is at `0020_eval_run`, which matches the repo head
+(`migrations/versions/0020_eval_run.py`). Nothing is pending.
 
-   [deploy]
-     release_command = "alembic upgrade head"   # migrates BEFORE the roll
+The boot guard is the other half. The entrypoint runs `regwatch init-db`, which
+compares the alembic stamp to the head this image expects and refuses to start on
+a mismatch. That refusal is the signal that image and schema came from different
+commits. To heal it, from a checkout of the DEPLOYED commit on `main`:
 
-   [processes]
-     app = "regwatch serve"      # dual-stack uvicorn on :8000
-     proxy = "regwatch-proxy"    # Go proxy, holds the public port
+```bash
+DATABASE_URL="$PROD_DB_URL" uv run alembic upgrade head
+```
 
-   [env]
-     EMBEDDING_PROVIDER = "openai"
-     AUTH_COOKIE_SECURE = "true"
-     CORS_ALLOW_ORIGINS_CSV = "https://amneal.vercel.app"
-     SENTRY_ENVIRONMENT = "production"
-     TRUST_PROXY_HEADERS = "true"     # Go login limiter keys on Fly-Client-IP
-     REQUIRE_DATABASE_URL = "true"    # read by the GO PROXY only (see step 2)
-     GO_NATIVE_QUERY = "true"         # step-5 pin: proxy serves POST /query natively
-     UPSTREAM_URL = "http://app.process.amneal.internal:8000"
+**Never run that from an unmerged branch against prod.** That is the 2026-07-07
+outage rule: a branch's head revision is not in the deployed image, so the boot
+guard then kills every machine.
 
-   [http_service]
-     processes = ["proxy"]
-     internal_port = 8080
-     force_https = true
-     auto_stop_machines = false
-     min_machines_running = 2
-     [[http_service.checks]]     # end-to-end GET /health through the proxy
-       # interval/timeout/grace + method GET, path /health -- see fly.toml
+The daily Watch cron does NOT migrate, on purpose. If a migration is merged but
+not deployed, the cron fails loudly instead of pushing the live schema ahead of
+the running API machines.
 
-   [checks.app_health]           # deploy-gates the now-private app group on :8000
-     # processes ["app"], http GET /health -- see fly.toml
-   ```
+## 3. API on Fly.io
 
-   Three tests guard this file against well-meaning "simplifications":
-   `tests/test_trust_proxy_fly_toml.py`, `tests/test_boot_command_drift.py`,
-   and `tests/test_dual_stack_bind.py`. Read the comments in `fly.toml`
-   before touching any guarded line.
+The slim image (no torch) is the production build.
 
-2. Secrets (never in `fly.toml`):
+### 3.1 App and config
 
-   Comments go ABOVE the command, never on a continuation line: `\` followed by
-   spaces is an escaped space, not a line continuation, so a trailing `#` silently
-   truncates the command and every variable after it is never set.
+The Fly app is `amneal`. `fly.toml` is COMMITTED at the repo root and is
+authoritative, load-bearing config: two process groups, the migration
+`release_command`, the step-5 flag pin. Do not regenerate it with `fly launch`. A
+fresh checkout deploys with the committed file as-is.
 
-   ```bash
-   # OPENAI_API_KEY       query + chunk embeddings, and the LLM rollback path
-   # LLM_PROVIDER         databricks; live since 2026-07-28
-   # LLM_MODEL            DISPLAY VALUE ONLY (GET /settings). Hand-sync it to
-   #                      DATABRICKS_LLM_MODEL -- nothing enforces that they agree.
-   # INTERNAL_RAG_TOKEN   Go proxy -> Python /internal/query/compute relay auth
-   # METRICS_TOKEN        optional bearer gate on GET /metrics; UNSET = world-readable
-   # SENTRY_DSN           error tracking (B4)
-   # OPENFDA_API_KEY      optional; raises the openFDA rate limit
-   fly secrets set \
-     DATABASE_URL="$SUPABASE_DB_URL" \
-     OPENAI_API_KEY="sk-..." \
-     LLM_PROVIDER="databricks" \
-     DATABRICKS_LLM_BASE_URL="https://<workspace-host>/serving-endpoints" \
-     DATABRICKS_LLM_TOKEN="..." \
-     DATABRICKS_LLM_MODEL="workspace.default.regwatch" \
-     LLM_MODEL="workspace.default.regwatch" \
-     INTERNAL_RAG_TOKEN="..." \
-     METRICS_TOKEN="..." \
-     SENTRY_DSN="https://...ingest.sentry.io/..." \
-     OPENFDA_API_KEY="..."
-   ```
+Abridged excerpt. The real `fly.toml` is heavily commented and is the source of
+truth:
 
-   `WHITEPAPER_TEMPLATE_URL` is **not set in prod today**. Without it the `.docx`
-   writer falls back to marker output -- that is current behavior, not a
-   hypothetical; see the template note below.
+```toml
+app = "amneal"
+primary_region = "iad"
+kill_timeout = 30                        # drain in-flight SSE on deploys
 
-   `D1_ENFORCED` / `D1_ALLOWED_LLM_MODELS` are STAGED, deliberately unset:
-   they arm the runtime served-model residency guard and stay unarmed until
-   the embedding flip closes the last D1 leak.
+[build]
+  [build.args]
+    INSTALL_LOCAL_EMBEDDINGS = "false"   # slim image: no torch
 
-   `DATABASE_URL` is mandatory everywhere since R5 (Postgres + pgvector is
-   the only datastore), so if this secret is missing the app **refuses to
-   boot** rather than losing the audit trail (B1). A `REQUIRE_DATABASE_URL`
-   flag DOES still exist -- in `fly.toml` `[env]`, read by the GO PROXY only:
-   with it set, a proxy machine refuses to serve auth when `DATABASE_URL` is
-   missing. The Python side no longer reads it. `SENTRY_DSN` is strongly
-   recommended: without it the app still boots but logs a loud
-   `sentry_disabled_in_production` warning, and 500s go only to stderr (B4).
+[deploy]
+  release_command = "alembic upgrade head"   # migrates BEFORE the roll
 
-3. Deploy. The NORMAL path is automatic: every green `ci` run on `main`
-   triggers `deploy.yml`, which rebuilds the image, re-scans it with Trivy,
-   and ships via `scripts/fly-deploy.sh`. Fly then runs the committed
-   `[deploy] release_command = "alembic upgrade head"` in a one-off machine
-   BEFORE the rolling replace, so schema-advancing releases migrate
-   themselves -- there is no manual pre-migration step on the normal path.
+[processes]
+  app = "regwatch serve"      # dual-stack uvicorn on :8000
+  proxy = "regwatch-proxy"    # Go proxy, holds the public port
 
-   Manual deploys (`fly deploy`, or `bash scripts/fly-deploy.sh` from the
-   exact commit) are for recovery only. The entrypoint runs `regwatch
-   init-db` on boot: it verifies the alembic stamp matches head and starts;
-   on a mismatch it refuses to start (that's the signal image and schema came
-   from different commits). Recovery for that refusal -- from a checkout of
-   the DEPLOYED commit on `main`, never an unmerged branch (the 2026-07-07
-   outage rule):
+[env]
+  EMBEDDING_PROVIDER = "openai"    # legacy column only, NOT the query embedder
+  AUTH_COOKIE_SECURE = "true"
+  CORS_ALLOW_ORIGINS_CSV = "https://amneal.vercel.app"
+  SENTRY_ENVIRONMENT = "production"
+  TRUST_PROXY_HEADERS = "true"     # Go login limiter keys on Fly-Client-IP
+  REQUIRE_DATABASE_URL = "true"    # read by the GO PROXY only
+  GO_NATIVE_QUERY = "true"         # step-5 pin: proxy serves POST /query natively
+  UPSTREAM_URL = "http://app.process.amneal.internal:8000"
 
-   ```bash
-   DATABASE_URL="$SUPABASE_DB_URL" uv run alembic upgrade head
-   ```
+[http_service]
+  processes = ["proxy"]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  min_machines_running = 2
+  [[http_service.checks]]     # end-to-end GET /health through the proxy
 
-   then deploy again. A message like `stamped at alembic revision '0007_...'
-   but this build expects '0008_...'` means exactly this command.
+[checks.app_health]           # deploy-gates the now-private app group on :8000
+```
 
-4. Verify:
+Three tests guard this file against well-meaning simplifications:
+`tests/test_trust_proxy_fly_toml.py`, `tests/test_boot_command_drift.py`, and
+`tests/test_dual_stack_bind.py`. Read the comments in `fly.toml` before touching
+any guarded line.
 
-   ```bash
-   curl -s https://amneal.fly.dev/health | python -m json.tool
-   ```
+### 3.2 Secrets
 
-   Expect `"status": "ok"`, `db.ok true`, **`db.dialect "postgresql"`** (B1 —
-   if you see `"sqlite"` here the prod stack is on the wrong datastore),
-   embedding provider `openai`, **`llm.provider "databricks"`** (the
-   2026-07-28 flip; `"openai"` here means the rollback secret is set),
-   `llm.key_present true`, and a non-zero corpus count.
+Secrets never go in `fly.toml`. Put comments ABOVE the command, never on a
+continuation line: a `\` followed by spaces is an escaped space, not a line
+continuation, so a trailing `#` silently truncates the command and every variable
+after it is never set.
 
-5. Provision users (CLI-only, no self-signup; password is prompted). Target
-   an `app`-group machine: the `proxy` machines run only the Go binary and
-   have no Python CLI, and a bare `fly ssh console` may land on one.
+These are the names set on the app today:
 
-   ```bash
-   fly ssh console -s -C "regwatch create-user analyst@amneal.com --name 'CRA Analyst'"
-   # at the -s picker, choose a machine from the "app" process group
-   ```
+```bash
+# DATABASE_URL              Lakebase DIRECT endpoint (see step 1.1)
+# OPENAI_API_KEY            rollback path only; serves nothing in prod today
+# LLM_PROVIDER              databricks
+# DATABRICKS_LLM_MODEL      the serving alias that actually gets called
+# LLM_MODEL                 DISPLAY VALUE ONLY (GET /settings). Hand-sync it to
+#                           DATABRICKS_LLM_MODEL, nothing enforces they agree.
+# ACTIVE_EMBEDDING_PROFILE  picks the live vector space. This is the setting
+#                           that matters, not EMBEDDING_PROVIDER.
+# QWEN_EMBEDDING_DIMENSION  1024. The code default is 1536, so this must be set.
+# INTERNAL_RAG_TOKEN        Go proxy -> Python /internal/query/compute auth
+# METRICS_TOKEN             bearer gate on GET /metrics; unset = world-readable
+# SENTRY_DSN                error tracking
+# OPENFDA_API_KEY           optional, raises the openFDA rate limit
+# D1_ALLOWED_LLM_MODELS     JSON array of serving endpoints / served model ids
+fly secrets set \
+  DATABASE_URL="postgresql://regwatch_app:...@ep-...cloud.databricks.com:5432/databricks_postgres" \
+  OPENAI_API_KEY="sk-..." \
+  LLM_PROVIDER="databricks" \
+  DATABRICKS_LLM_BASE_URL="https://<workspace-host>/serving-endpoints" \
+  DATABRICKS_LLM_TOKEN="..." \
+  DATABRICKS_LLM_MODEL="workspace.default.regwatch" \
+  LLM_MODEL="workspace.default.regwatch" \
+  ACTIVE_EMBEDDING_PROFILE="ep_2e7368b354d911ea3a013c3125e276c2" \
+  QWEN_EMBEDDING_BASE_URL="https://<workspace-host>/serving-endpoints/regwatch-embed" \
+  QWEN_EMBEDDING_TOKEN="..." \
+  QWEN_EMBEDDING_MODEL="..." \
+  QWEN_EMBEDDING_REVISION="..." \
+  QWEN_EMBEDDING_DIMENSION="1024" \
+  INTERNAL_RAG_TOKEN="..." \
+  METRICS_TOKEN="..." \
+  SENTRY_DSN="https://...ingest.sentry.io/..." \
+  OPENFDA_API_KEY="..." \
+  D1_ALLOWED_LLM_MODELS='["workspace.default.regwatch","gpt-oss-120b-080525"]'
+```
 
-Notes:
+Plus the three answer-policy flags, all ON in prod today:
 
-- **White-paper template:** `CRA White Paper Template May 2026 - Raja.docx` is
-  gitignored (internal artifact) and deliberately **not** baked into the image.
-  The image defaults `WHITEPAPER_TEMPLATE_PATH` to
-  `/app/data/templates/cra_white_paper_template.docx` (under the data volume),
-  and the entrypoint creates that directory. To enable real-template fill:
-    - **Compose:** drop the file at `./data/templates/cra_white_paper_template.docx`
-      (the `./data:/app/data` mount makes it visible at the default path — no
-      config change needed).
-    - **Fly (this runbook attaches no volume):** set the
-      `WHITEPAPER_TEMPLATE_URL` secret to a long-lived signed Supabase Storage
-      URL for the template -- the render path lazily fetches and caches it on
-      first use (`src/regwatch/whitepaper/template_fetch.py`); any fetch
-      failure falls back loudly, never a 500. Alternatives: bake it into a
-      *private* overlay image (`FROM regwatch:... ; COPY
-      cra_white_paper_template.docx /app/data/templates/`) so it never enters
-      this public repo, or attach a Fly volume at `/app/data/templates`.
-  Absent the file, `/whitepaper/runs/{id}/docx` returns a structurally-equivalent document
-  stamped `(generated without the official CRA template file)` and logs a
-  `whitepaper_template_missing` warning — never a silent or failed render.
-- **`data/` inside the container is scratch** in Postgres mode (raw PDFs from
-  ingest runs land there). Q&A/whitepaper serving needs only Postgres; don't
-  attach a volume unless you run ingest/watch on this machine.
-- **Watch:** the production Watch path is the `watch-daily.yml` GitHub Actions
-  cron (the sole scheduler; Dagster was removed in R5). Configure
-  `WATCH_DATABASE_URL`, `WATCH_OPENAI_API_KEY`, optional `OPENFDA_API_KEY`,
-  optional `WATCH_HEALTHCHECK_URL` / `SLACK_WEBHOOK_URL`, and -- the moment a
-  non-legacy embedding profile is promoted in prod -- the six parity secrets
-  `WATCH_ACTIVE_EMBEDDING_PROFILE` and
-  `WATCH_QWEN_EMBEDDING_{BASE_URL,TOKEN,MODEL,REVISION,DIMENSION}`, all per
-  `docs/SECRETS_RUNBOOK.md`. Keep ad hoc `regwatch watch` runs for break-glass
-  recovery, not as the normal production schedule.
+```bash
+fly secrets set \
+  REGWATCH_PROSE_SYNTHESIS="1" \
+  REGWATCH_SELECTIVE_CITATION="1" \
+  REGWATCH_LIVE_DRAFT="1" \
+  -a amneal
+```
 
-  > **Known gap, tracked in `ROADMAP.md`:** `watch-daily.yml` does not yet map
-  > `QWEN_EMBEDDING_DIMENSION`, and its preflight does not require it. The
-  > `qwen_embedding_dimension` default is 1536 while the deployed endpoint is
-  > 1024-dim, so the first FDA revision after a profile promotion fails *after*
-  > the preflight passes. Close this before flipping the profile.
+- `REGWATCH_PROSE_SYNTHESIS` is the v6 prose format.
+- `REGWATCH_SELECTIVE_CITATION` is the v7 answer policy. It is only honored when
+  the prose flag is also on.
+- `REGWATCH_LIVE_DRAFT` streams the provisional draft over SSE.
+
+**Roll these back with `fly secrets unset`, not by setting them to `""`.** The
+prose and selective flags read a blank value as OFF, but `REGWATCH_LIVE_DRAFT`
+does not: an empty string fails bool parsing and takes the process down at boot.
+
+Notes on what is deliberately NOT set:
+
+- `D1_ENFORCED` is unset, so the runtime served-model check in `generate/llm.py`
+  is inert. `D1_ALLOWED_LLM_MODELS` is already populated, which is what arming it
+  needs. When armed, the check rejects a response served by a model outside the
+  allowlist, and rejects partner-hosted families (`databricks-gpt*`,
+  `databricks-claude*`, `databricks-gemini*`) even if someone allowlists them by
+  hand. It also refuses to boot if generation and query embedding are not both
+  inside the tenant.
+- `REGWATCH_ROUTE_CALL` is unset, so the route/scope shadow observer is off (see
+  6.3).
+- `WHITEPAPER_TEMPLATE_URL` is unset, so `.docx` renders fall back to marker
+  output. `/health` reports `whitepaper_template: absent`. That is current
+  behavior, not a hypothetical. See 3.6.
+
+`DATABASE_URL` is mandatory. Without it the app refuses to boot rather than
+losing the audit trail. `REQUIRE_DATABASE_URL` in `fly.toml` `[env]` is a
+separate thing, read by the Go proxy only: with it set, a proxy machine refuses
+to serve auth when `DATABASE_URL` is missing. `SENTRY_DSN` is strongly
+recommended: without it the app boots but logs a loud
+`sentry_disabled_in_production` warning and 500s go only to stderr.
+
+### 3.3 Deploy
+
+The normal path is automatic. Every green `ci` run on `main` triggers
+`deploy.yml`, which rebuilds the image, re-scans it with Trivy, and ships via
+`scripts/fly-deploy.sh`. Fly runs the migration release command first (see
+section 2). The current release is **v104**, deployed 2026-08-10.
+
+Manual deploys (`fly deploy`, or `bash scripts/fly-deploy.sh` from the exact
+commit) are for recovery only.
+
+If a machine refuses to start with `stamped at alembic revision '00XX_...' but
+this build expects '00YY_...'`, that is the boot guard. Run the
+`alembic upgrade head` one-liner from section 2, from the deployed commit, then
+deploy again.
+
+### 3.4 Verify
+
+```bash
+curl -s https://amneal.fly.dev/health | python -m json.tool
+```
+
+The live response today:
+
+```json
+{
+  "status": "ok",
+  "components": {
+    "db": {"ok": true, "dialect": "postgresql"},
+    "vector_store": {"ok": true, "corpus_count": 5494},
+    "llm": {"provider": "databricks", "key_present": true},
+    "embedding": {"provider": "qwen3", "profile": "ep_2e7368b354d911ea3a013c3125e276c2"}
+  },
+  "whitepaper_template": "absent",
+  "warnings": []
+}
+```
+
+What to check, and what a wrong value means:
+
+- `db.dialect` must be `postgresql`. Anything else means the stack is on the
+  wrong datastore.
+- `embedding.provider` must be `qwen3` and `embedding.profile` must be the
+  profile id above. A profile of `legacy` means the query path fell back to the
+  old OpenAI vector space.
+- `llm.provider` must be `databricks`. `openai` means the rollback secret is set.
+- `corpus_count` must be non-zero.
+
+Also hit `GET /ready`. It fails closed if the boot RLS sweep left any public
+table unprotected.
+
+### 3.5 Provision users
+
+CLI only, no self-signup, password is prompted. Target an `app`-group machine:
+the `proxy` machines run only the Go binary and have no Python CLI, and a bare
+`fly ssh console` may land on one.
+
+```bash
+fly ssh console -s -C "regwatch create-user analyst@amneal.com --name 'CRA Analyst'"
+# at the -s picker, choose a machine from the "app" process group
+```
+
+### 3.6 Notes
+
+- **White-paper template.** The real CRA `.docx` template is gitignored and not
+  baked into the image, so prod renders a fallback document stamped
+  `(generated without the official CRA template file)` plus a
+  `whitepaper_template_missing` warning. Never a silent or failed render. To turn
+  on real-template fill on Fly, set `WHITEPAPER_TEMPLATE_URL` to a long-lived
+  signed HTTPS URL for the file. The render path fetches and caches it on first
+  use (`src/regwatch/whitepaper/template_fetch.py`), and the fetch is
+  URL-generic, so a Databricks Volume URL works with no code change. Any fetch
+  failure falls back loudly. Under compose, drop the file at
+  `./data/templates/cra_white_paper_template.docx` instead, which is where
+  `WHITEPAPER_TEMPLATE_PATH` already points.
+- **`data/` inside the container is scratch.** Raw PDFs from ingest runs land
+  there. Q&A and white-paper serving need only Postgres, so do not attach a
+  volume unless you run ingest or watch on that machine.
+- **Watch.** The production Watch path is the `watch-daily.yml` GitHub Actions
+  cron at 07:17 UTC, the only scheduler. Its secrets are documented in
+  [`SECRETS_RUNBOOK.md`](SECRETS_RUNBOOK.md).
+
+  > **Open hazard.** The cron does NOT carry the prod embedding profile. Prod
+  > promoted its Qwen3 profile on 2026-07-30, but
+  > `WATCH_ACTIVE_EMBEDDING_PROFILE` and the `WATCH_QWEN_EMBEDDING_*` secrets are
+  > still unset, so the first day a real FDA revision lands the watch run commits
+  > chunk rows with no embedding on the live profile. Coverage goes incomplete
+  > and the next Python boot refuses. Full write-up and the fix in
+  > [`SECRETS_RUNBOOK.md`](SECRETS_RUNBOOK.md) section 3.4.
+
+  Keep ad hoc `regwatch watch` runs for break-glass recovery, not as the normal
+  schedule.
 
 ## 4. Frontend on Vercel
 
 The Next.js app proxies `/api/*` server-side to the API
 (`regwatch/frontend/next.config.mjs`), so the browser only ever talks to the
-Vercel origin — the HttpOnly session cookie is set on and sent to the Vercel
-domain and forwarded through the rewrite. This is why `AUTH_COOKIE_SECURE=true`
+Vercel origin. The HttpOnly session cookie is set on and sent to the Vercel
+domain and forwarded through the rewrite. That is why `AUTH_COOKIE_SECURE=true`
 just works: Vercel terminates TLS.
 
-1. <https://vercel.com/new> → **Import** the GitHub repo.
-2. **Root Directory**: click *Edit* and set `regwatch/frontend` (the build
-   will fail without this). Framework preset: Next.js (auto-detected).
-3. **Environment Variables** (Production):
-   - `API_PROXY_TARGET` = `https://amneal.fly.dev`.
-     Server-side only — no `NEXT_PUBLIC_` prefix.
-4. Click **Deploy**. Note the production URL
-   (`https://amneal.vercel.app` in prod).
-5. If the final Vercel URL differs from what you set in
-   `CORS_ALLOW_ORIGINS_CSV` in step 3, update it. A Fly secret of the same name
-   overrides `[env]` and applies immediately, so
-   `fly secrets set CORS_ALLOW_ORIGINS_CSV=... -a amneal` fixes it in ~60s with
-   no CI cycle. Make it durable afterwards by editing `fly.toml` and redeploying,
-   then `fly secrets unset` the override so the committed file stays the source
-   of truth.
+1. <https://vercel.com/new>, then **Import** the GitHub repo.
+2. **Root Directory**: click *Edit* and set `regwatch/frontend`. The build fails
+   without this. Framework preset Next.js is auto-detected.
+3. **Environment Variables** (Production): `API_PROXY_TARGET` =
+   `https://amneal.fly.dev`. Server-side only, no `NEXT_PUBLIC_` prefix.
+4. **Deploy**. Production URL is `https://amneal.vercel.app`.
+5. If the final Vercel URL differs from `CORS_ALLOW_ORIGINS_CSV`, fix it. A Fly
+   secret of the same name overrides `[env]` and applies in about 60 seconds:
+   `fly secrets set CORS_ALLOW_ORIGINS_CSV=... -a amneal`. Make it durable
+   afterwards by editing `fly.toml` and redeploying, then `fly secrets unset` the
+   override so the committed file stays the source of truth.
 
 CLI alternative:
 
@@ -309,308 +395,280 @@ vercel deploy --prod
 
 ## 5. Smoke checklist (run every deploy)
 
-Do these in order; stop at the first failure.
+Do these in order. Stop at the first failure.
 
-1. `curl https://<api-host>/health` → 200, `status: ok`, `db.ok: true`,
-   embedding `openai`, `llm.key_present: true`, corpus count > 0.
-2. Supabase **Table Editor**: `chunk` count equals the migration's verified
-   count; `alembic_version` shows the current head.
-3. Supabase **Advisors/Database**: RLS enabled on all public tables, no
-   policies — expected (deny-all for the Data API); ignore "RLS enabled, no
-   policy" infos.
-4. Open the Vercel URL → login page renders (no console errors).
-5. Wrong-password login → "invalid email or password"; no cookie set.
-6. **Analyst logs in** (provisioned user) → lands inside the unified shell with
-   the Ask chat in view (one sidebar, the "Under review" product-scope bar
-   across all five shell surfaces — Ask, Assemble, Watch, White Paper,
-   Deficiency); reload keeps
-   the session (cookie survives).
-7. **Sets product scope**: from the "Under review" bar's picker, resolve an RLD
-   name + application number (POST `/resolve`) → the scope pins to the canonical
-   `{normalized_name, six-digit appl}` and the URL gains `?rp=&appl=` (shareable,
-   survives reload). A mismatched application 422s and leaves the scope unset
-   (refuse over guess); `/resolve` writes NO audit row.
-8. **Asks a question**: "What bioequivalence studies does FDA recommend for
-   albuterol sulfate metered aerosol?" → right-aligned user bubble, then a cited
-   answer with `[PSG_xxxxxx, p.N]` citation chips that open the FDA source (full
-   snippets under the Sources disclosure); an off-corpus question still refuses.
-9. **Populates a white paper**: White Paper tab → RLD name + NDA number (e.g.
-   one of the seeded products) → cells fill with provenance
-   (source/locator/fetched-at), manual cells say "Analyst input required" (a
-   successful populate also sets product scope).
-10. **Downloads the docx** → file opens in Word, populated cells and the
-    Provenance appendix are present (rendered verbatim from the reviewed
-    populate result).
+1. `curl https://<api-host>/health`: 200, `status: ok`, `db.ok: true`, embedding
+   provider `qwen3` on the expected profile, `llm.provider: databricks`,
+   `corpus_count` > 0. Then `GET /ready`: `status: ready`.
+2. Chunk count matches. `psql "$PROD_DB_URL" -c "select count(*) from chunk"`
+   should agree with `corpus_count`, and
+   `select version_num from alembic_version` should show the current head.
+3. Open the Vercel URL. The login page renders with no console errors.
+4. Wrong-password login gives "invalid email or password" and sets no cookie.
+5. A provisioned analyst logs in and lands in the shell with Ask in view. Reload
+   keeps the session.
+6. Set product scope from the "Under review" bar: resolve an RLD name plus
+   application number (`POST /resolve`). The scope pins to the canonical
+   `{normalized_name, six-digit appl}` and the URL gains `?rp=&appl=`, which is
+   shareable and survives reload. A mismatched application 422s and leaves the
+   scope unset. `/resolve` writes no audit row.
+7. Ask a question, for example "What bioequivalence studies does FDA recommend
+   for albuterol sulfate metered aerosol?". You get a right-aligned user bubble,
+   then an answer whose factual sentences carry `[1]`-style markers backed by a
+   Sources list, and the chips open the FDA source PDF. Ask something the corpus
+   does not cover: you should get a plain-language reply that says so and offers
+   a next step, with no citation markers and no invented facts.
+8. Populate a white paper: White Paper tab, RLD name plus NDA number. Cells fill
+   with provenance (source, locator, fetched-at) and manual cells say "Analyst
+   input required". A successful populate also sets product scope.
+9. Download the docx. It opens in Word with the populated cells and the
+   Provenance appendix.
 
-If 6–10 pass, the deploy is good.
+If 5 through 9 pass, the deploy is good.
 
 ## 6. Operations
 
-Day-2 runbook: rollback, uptime monitoring, and the monthly staging restore
-drill. Everything here is operator-driven — agents and CI never touch
-production data paths.
+Day-2 runbook: rollback, uptime, the route/scope shadow rollout, the refusal
+threshold, and the restore drill. Everything here is operator-driven. Agents and
+CI never touch production data paths.
 
 ### 6.1 Rollback
 
-Independent levers, least to most drastic. Pick the smallest one that
-covers the failure.
+Independent levers, least to most drastic. Pick the smallest one that covers the
+failure.
 
-**Lever 0 -- config flip (fastest; ~60s, no redeploy, no CI cycle).** Fly
-secrets take precedence over `fly.toml` `[env]`, so a bad provider or flag
+**Lever 0, config flip.** Fastest: about 60 seconds, no redeploy, no CI cycle.
+Fly secrets take precedence over `fly.toml` `[env]`, so a bad provider or flag
 flip reverts with a secret:
 
 ```bash
-fly secrets set LLM_PROVIDER=openai -a amneal    # revert the 2026-07-28 Databricks LLM flip
-fly secrets set GO_NATIVE_QUERY=false -a amneal  # proxy relays POST /query to Python again
+fly secrets set LLM_PROVIDER=openai -a amneal      # back to the OpenAI LLM
+fly secrets set GO_NATIVE_QUERY=false -a amneal    # proxy relays POST /query to Python
+fly secrets unset REGWATCH_SELECTIVE_CITATION -a amneal   # v7 policy off, v6 format stays
+fly secrets unset REGWATCH_LIVE_DRAFT -a amneal           # stop streaming the draft
 ```
 
-1. **App rollback (bad deploy, schema unchanged).** List releases, note the
-   image ref of the last good one, pin it:
+Unset, do not set to empty. See the warning in step 3.2.
 
-   ```bash
-   fly releases --image                       # last good release's image ref
-   fly deploy --image <previous-image-ref>    # e.g. registry.fly.io/amneal:deployment-...
-   ```
+Reverting `LLM_PROVIDER` to `openai` sends questions back out to OpenAI. That
+undoes the residency posture, so it is an incident lever, not a tuning knob.
 
-   > **Image and config are VERSION-COUPLED since the phase-2 dual-stack
-   > listener (docs/GO_PROXY_ROLLOUT.md).** `fly deploy --image <old>` sends
-   > your CURRENT fly.toml with that old image. Across the phase-2 boundary
-   > that combination does not boot: fly.toml says `[processes].app =
-   > "regwatch serve"` and a pre-phase-2 image has no `serve` subcommand, so
-   > every machine exits non-zero. To roll back ACROSS phase 2, deploy the
-   > reverted CHECKOUT instead -- `git revert` + push to main (CI -> deploy.yml),
-   > or `bash scripts/fly-deploy.sh` from the reverted commit in an emergency --
-   > so the image and `[processes].app` come from the same commit. The same
-   > constraint makes `--strategy immediate` safe ONLY when image and fly.toml
-   > are from one commit. Within a single phase this lever is unaffected.
-   >
-   > The STEP-5 boundary added a second coupling of the same class: `fly.toml`
-   > `[env]` pins `GO_NATIVE_QUERY = "true"` (PR #127), so `fly deploy --image
-   > <old>` hands the pin to a proxy binary from before the CompleteQuery
-   > cutover. To roll back across step 5, deploy the reverted CHECKOUT, or
-   > neutralize the pin first with `fly secrets set GO_NATIVE_QUERY=false -a
-   > amneal` (lever 0 -- secrets override `[env]`).
+**Lever 1, app rollback (bad deploy, schema unchanged).** List releases, note the
+image ref of the last good one, pin it:
 
-   The DB
-   schema is alembic-stamped and verified on boot: an older app that expects
-   an older head **refuses to start** rather than running against a newer
-   schema. If the bad deploy also migrated the schema, an image rollback
-   alone is not enough — restore data (lever 2) or roll forward with a fix.
+```bash
+fly releases --image                       # last good release's image ref
+fly deploy --image <previous-image-ref>    # e.g. registry.fly.io/amneal:deployment-...
+```
 
-2. **Data rollback (bad write / bad migration).** Supabase **Database →
-   Backups** (daily on paid plans) → restore the last good backup, then
-   restart the API (`fly apps restart amneal`). A restore overwrites
-   the whole database — stop the API first, and accept that sessions, audit
-   rows, and any other writes since that backup are lost. Verify with the §5
-   smoke checklist before calling it done.
+> **Image and config are version-coupled.** `fly deploy --image <old>` sends your
+> CURRENT `fly.toml` with that old image, and two boundaries make that
+> combination refuse to boot:
+>
+> - The phase-2 dual-stack listener (`docs/GO_PROXY_ROLLOUT.md`). `fly.toml` says
+>   `[processes].app = "regwatch serve"`, and a pre-phase-2 image has no `serve`
+>   subcommand, so every machine exits non-zero.
+> - The step-5 pin. `fly.toml` `[env]` sets `GO_NATIVE_QUERY = "true"`, which
+>   hands the pin to a proxy binary from before the CompleteQuery cutover.
+>
+> To roll back across either boundary, deploy the reverted CHECKOUT instead:
+> `git revert` and push to main, or `bash scripts/fly-deploy.sh` from the
+> reverted commit in an emergency, so image and config come from one commit. For
+> step 5 you can also neutralize the pin first with lever 0. The same constraint
+> makes `--strategy immediate` safe only when image and `fly.toml` are from one
+> commit. Within a single phase this lever is unaffected.
 
-3. ~~**App-level fallback (Postgres unusable).**~~ **(removed in R5)** —
-   unsetting `DATABASE_URL` to fall back to a local SQLite/Chroma copy was
-   possible before R5 deleted that dual-mode; the app now refuses to boot
-   without `DATABASE_URL`, so there is no local fallback lever. If Postgres
-   is unusable, lever 2 (restore from a Supabase backup) is the only option
-   short of standing up a new Postgres instance.
+The schema is alembic-stamped and checked on boot, so an older image that expects
+an older head refuses to start rather than running against a newer schema. If the
+bad deploy also migrated, an image rollback alone is not enough: restore data or
+roll forward with a fix.
+
+**Lever 2, data rollback (bad write or bad migration).** Restore the database
+from a Lakebase backup, then restart the API (`fly apps restart amneal`). A
+restore overwrites everything, so stop the API first and accept that sessions,
+audit rows and every other write since that backup are gone. Verify with the
+section 5 checklist before calling it done.
+
+> **This procedure is not written down and has never been rehearsed on
+> Lakebase.** The old text here described the Supabase dashboard backup flow,
+> which no longer applies. Writing and rehearsing the Lakebase restore is an open
+> item (6.5).
+
+There is no local-datastore fallback. R5 deleted the SQLite/Chroma dual-mode, so
+if Postgres is unusable, lever 2 is the only option short of standing up a new
+Postgres instance.
 
 ### 6.2 Uptime
 
 Point an external monitor at the one open endpoint:
 
-- **URL:** `GET https://<api-host>/health` (no auth).
-- **Expected:** HTTP `200` with compact JSON shaped like
-
-  ```json
-  {"status":"ok","components":{"db":{"ok":true},"vector_store":{"ok":true,"corpus_count":1795},"llm":{"provider":"databricks","key_present":true},"embedding":{"provider":"openai"}},"warnings":[]}
-  ```
-
-  (the `vector_store` key reports pgvector, the only vector store since R5).
-  When the DB or vector store is unreachable the API
-  returns **503** with `"status":"unhealthy"`, so a plain HTTP-status monitor
-  already catches real outages.
-- **UptimeRobot** (free tier): HTTP(s) monitor on the URL, 5-minute interval;
-  optionally a keyword monitor that alerts when `"status":"ok"` is *absent*
-  from the body. **healthchecks.io** alternative: a cron on any box you
-  control —
+- **URL:** `GET https://<api-host>/health`, no auth.
+- **Expected:** HTTP 200 with `"status":"ok"` (see the body in step 3.4). When
+  the DB or vector store is unreachable the API returns **503** with
+  `"status":"unhealthy"`, so a plain HTTP-status monitor already catches real
+  outages.
+- **UptimeRobot** (free tier): HTTP(s) monitor on the URL, 5-minute interval, and
+  optionally a keyword monitor that alerts when `"status":"ok"` is absent from
+  the body. **healthchecks.io** alternative: a cron on any box you control,
   `curl -fsS --max-time 20 https://<api-host>/health >/dev/null && curl -fsS https://hc-ping.com/<your-uuid>`.
-- **Alert threshold:** 2 consecutive failures (~10 minutes at a 5-minute
-  interval). Single blips happen during deploys; sustained failure pages.
+- **Alert threshold:** 2 consecutive failures, about 10 minutes at a 5-minute
+  interval. Single blips happen during deploys.
 
-**CI backstop — `.github/workflows/uptime-eval.yml`:** a scheduled GitHub
-Action curls the production health URL every 30 minutes and fails the run
-when the response is not 200 / `"status":"ok"`. It is driven entirely by a
-repository secret — **Settings → Secrets and variables → Actions → New
-repository secret**: name `PROD_HEALTH_URL`, value
-`https://<api-host>/health`. While the secret is unset the workflow skips
-cleanly (no failures, no invented URLs). This complements — does not
-replace — the external monitor: GitHub cron schedules can lag or pause on
-inactive repos.
+**CI backstop, `.github/workflows/uptime-eval.yml`.** A scheduled GitHub Action
+curls the production health URL every 30 minutes and fails the run when the
+response is not 200 / `"status":"ok"`. It is driven entirely by the
+`PROD_HEALTH_URL` repository secret. While that secret is unset the workflow
+skips cleanly. It is currently unset. This complements the external monitor, it
+does not replace it: GitHub cron schedules can lag or pause on inactive repos.
 
-### 6.3 Route/scope shadow rollout (PR11b)
+### 6.3 Route/scope shadow rollout
 
-This rollout measures the conversational router before it is allowed to change
-anything. The code default is `REGWATCH_ROUTE_CALL=off`; with `shadow`, the
-additional route decision and deterministic scope compile are recorded under
-`query_log.route_json.route_call`, while the existing product resolver,
-retrieval query/mode/filters, response, citations, and session update remain
-authoritative. The reserved value `live` is intentionally shadow-equivalent in
-PR11b and must not be treated as a promotion.
+This measures the conversational router before it is allowed to change anything.
+The code default is `REGWATCH_ROUTE_CALL=off`, and it is unset in prod today.
 
-Before enabling it, probe the actual Databricks endpoint's effective reasoning
-floor. The earlier qwen35-122b observation was about 761 reasoning tokens, so
-the committed default is 1200, but the served endpoint is the authority. Set a
-cap comfortably above its measured floor plus the small JSON body:
+With `shadow`, the extra route decision and deterministic scope compile are
+recorded under `query_log.route_json.route_call`. The existing product resolver,
+retrieval query, mode, filters, response, citations and session update all stay
+authoritative. The reserved value `live` is intentionally shadow-equivalent right
+now and must not be treated as a promotion.
+
+Before enabling it, probe the reasoning floor of the endpoint you actually run.
+The committed default of 1200 max tokens was sized from an older observation of
+about 761 reasoning tokens on a different served model. The endpoint serving
+today is the authority. Set the cap comfortably above its measured floor plus the
+small JSON body:
 
 ```bash
 fly secrets set REGWATCH_ROUTE_CALL=shadow REGWATCH_ROUTE_MAX_TOKENS=1200 -a amneal
 ```
 
-Start with a small traffic window and inspect `/metrics`:
+Start with a small traffic window and watch `/metrics`:
 
 - `regwatch_route_shadow_calls_total{outcome=...}` separates `success`,
-  `provider_error`, `invalid`, and `request_error`;
-- `regwatch_route_shadow_failures_total` is the sum of unsuccessful calls; and
+  `provider_error`, `invalid` and `request_error`
+- `regwatch_route_shadow_failures_total` is the sum of unsuccessful calls
 - `regwatch_route_shadow_compilations_total{status=...}` separates successful,
-  failed, and unattempted deterministic scope compiles.
+  failed and unattempted scope compiles
 
-Alert only after enough traffic to make the ratio meaningful: at least 20 calls
-in 15 minutes and
-`increase(regwatch_route_shadow_failures_total[15m]) /
-clamp_min(sum(increase(regwatch_route_shadow_calls_total[15m])), 1) > 0.02`.
-Also monitor Ask latency p95 and Databricks QPS: shadow adds one sequential model
+Alert only once there is enough traffic for the ratio to mean something: at least
+20 calls in 15 minutes, and
+
+```text
+increase(regwatch_route_shadow_failures_total[15m]) /
+clamp_min(sum(increase(regwatch_route_shadow_calls_total[15m])), 1) > 0.02
+```
+
+Also watch Ask latency p95 and Databricks QPS. Shadow adds one sequential model
 call per enabled turn even though it cannot change the answer.
 
-The promotion packet for owner checkpoint 3 must contain the joint
-`(mode, scope)` confusion matrix, failure rate, route latency p95, QPS headroom,
-and a manual review showing zero unsafe corpus authorizations. For #163, verify
-that the five corpus-wide rows propose/compile bounded `EXACT_CORPUS`, the
-beclomethasone control compiles `EXACT_SCOPED`, and the ambiguous generic BE
-question compiles clarification. None of those compiled results executes in
-this PR.
-
-Rollback is immediate and requires no deploy:
+Rollback needs no deploy:
 
 ```bash
 fly secrets unset REGWATCH_ROUTE_CALL REGWATCH_ROUTE_MAX_TOKENS -a amneal
 ```
 
-A provider, request, parse, or catalog failure is audit-only and falls through
-to today's deterministic turn. `D1ResidencyError` remains deliberately
-fail-closed; never weaken that exception to improve the shadow success rate.
+A provider, request, parse or catalog failure is audit-only and falls through to
+today's deterministic turn. `D1ResidencyError` stays fail-closed. Never weaken
+that exception to improve the shadow success rate.
 
 ### 6.4 Refusal-threshold revalidation
 
-`REFUSAL_SCORE_THRESHOLD` (default `0.30`) gates the `low_top_score` refusal in
-`grounded_qa.ask`: a question is refused when the best retrieved passage's cosine
-score is below it. That `0.30` was calibrated in the **bge-384** cosine era.
-Production now embeds with **OpenAI text-embedding-3-small (1536)** — a different
-vector space with a different cosine-similarity distribution — so `0.30` is
-**PROVISIONAL** until it is revalidated in the prod space. CI cannot do this:
-CI runs pgvector against a disposable local Postgres (`TEST_DATABASE_URL`)
-with the 1536-dim `echo` test provider, not real OpenAI embeddings.
+`REFUSAL_SCORE_THRESHOLD` defaults to `0.30` and does two things in
+`grounded_qa.ask`. If the best retrieved passage scores below it, the turn
+declines with reason `low_top_score` and never reaches the synthesizer. If some
+passages clear it and some do not, only the ones above it are allowed to support
+an answer. Either way, weak evidence cannot become citation cover.
 
-**Where it runs:** the daily `watch-daily` job (§ the watch cron) now emits an
-**advisory, non-gating** revalidation. After the crawl, it re-runs the gold set
-through the real `ask` path in this job's prod embedding space
-(`EMBEDDING_PROVIDER=openai` + the live `DATABASE_URL`) and uploads
-**`threshold_sweep.json`** as a workflow artifact (Actions run → **Artifacts** →
-`threshold-sweep`). It is read-only w.r.t. the safety path: it never changes
-`REFUSAL_SCORE_THRESHOLD` and never fails the crawl — `continue-on-error: true`
-means a sweep hiccup, or a recommendation that differs from `0.30`, can never
-block ingestion or alerting.
+**That 0.30 has never been validated against the vector space prod actually
+uses.** It was calibrated in the old bge-384 era, checked once in the OpenAI
+1536 space, and prod has since moved to the Qwen3 1024 profile. Cosine
+distributions differ between spaces, so neither earlier calibration transfers.
+Treat 0.30 as provisional.
 
-**Latest verified artifact (2026-07-30):** watch run
-[30531864530](https://github.com/Hussain0327/amneal/actions/runs/30531864530)
-produced a real OpenAI-1536 + pgvector sweep. Its six must-answer rows scored
-0.812-0.896, but all five must-refuse rows stopped before retrieval and had no
-cosine score. The one must-clarify row correctly clarified and was
-misclassified by the old harness. Thus the reported `0.917`
-`current_decision_accuracy` was not `run_eval.refusal_accuracy`, and the old
-`0.00` recommendation did not calibrate the cutoff. The corrected harness
-excludes must-clarify rows and returns no recommendation without scored rows on
-both sides. See [`EVAL_STATUS.md`](EVAL_STATUS.md).
+**The daily sweep does not close this today.** The `watch-daily` job runs an
+advisory, non-gating sweep after the crawl and uploads `threshold_sweep.json` as
+a workflow artifact (Actions run, then **Artifacts**, then `threshold-sweep`).
+But that job sets `EMBEDDING_PROVIDER=openai` and carries no
+`ACTIVE_EMBEDDING_PROFILE`, so it measures the legacy OpenAI space, not the live
+Qwen3 one. Pointing the sweep at the prod profile is the work that would make the
+number meaningful. It is blocked on the same missing cron secrets as the ingest
+path (`SECRETS_RUNBOOK.md` section 3.4).
 
-**D1 note (deliberate residual):** this sweep AND the watch cron's change-day
-ingest embeds still call OpenAI (via `WATCH_OPENAI_API_KEY`), even though prod
-LLM inference moved to Databricks on 2026-07-28. That is the known remaining
-D1 leak; the fix goes through the embedding-profile mechanism
-(`ACTIVE_EMBEDDING_PROFILE` / `EMBEDDING_SHADOW_PROFILE`) once the Databricks
-embedding endpoint is wired into the app.
+The sweep is read-only with respect to the safety path. It never changes
+`REFUSAL_SCORE_THRESHOLD` and never fails the crawl (`continue-on-error: true`),
+so a hiccup or an off-0.30 recommendation cannot block ingestion or alerting.
 
-**How to read `threshold_sweep.json`** (the same content is printed as a table in
-the step log):
+**How to read `threshold_sweep.json`** (the same content prints as a table in the
+step log):
 
-- `distributions.must_answer` and `distributions.must_refuse` — the two
-  per-question max-passage-cosine distributions (`min`/`median`/`max`,
-  `n_scored`). A threshold is calibratable only when both groups have scored
-  rows. When they do, a healthy threshold sits **above** the must-refuse max and
-  **at or below** the must-answer min.
-- `counts.must_clarify_excluded` - resolver clarification cases retained for
-  audit but excluded from the numeric cutoff curve.
-- `recommendation.recommended` vs `recommendation.current` (0.30), with
-  `recommendation.rationale`. The rule: pick the cutoff that **maximizes
-  refuse_recall without refusing anything 0.30 currently answers**
-  (`answer_retention` floor). `recommendation.provisional`/`overlap` is `true`
-  when the two distributions overlap — no clean separator exists, so the
-  recommendation is the best available tradeoff, not a fix.
-- Two `0.30` **pathology flags** — these are the action triggers:
-  - `recommendation.wrongly_refused_at_current` — must-answer questions whose
-    best score is already `< 0.30` (over-refused TODAY in the prod space).
-  - `recommendation.leaking_at_current` — must-refuse questions whose best score
-    is already `>= 0.30` (leaking through TODAY).
+- `distributions.must_answer` and `distributions.must_refuse` are the two
+  per-question max-passage-cosine distributions. A cutoff is calibratable only
+  when both groups have scored rows. A healthy threshold sits above the
+  must-refuse max and at or below the must-answer min.
+- `counts.must_clarify_excluded` counts resolver clarification cases, kept for
+  audit but excluded from the cutoff curve.
+- `recommendation.recommended` vs `recommendation.current`, with a rationale. The
+  rule is: maximize refuse recall without refusing anything 0.30 currently
+  answers. `provisional`/`overlap: true` means the two distributions overlap, so
+  no clean separator exists and the recommendation is a tradeoff, not a fix.
+- Two pathology flags, which are the actual action triggers:
+  `wrongly_refused_at_current` (must-answer questions already scoring below 0.30)
+  and `leaking_at_current` (must-refuse questions already scoring at or above
+  0.30).
 
-**Decision procedure (human-in-the-loop):** a human reviews the recommendation
-and the two pathology lists. **Only if warranted** — a clean (`overlap: false`)
-recommendation that differs from `0.30`, or a non-empty pathology list — update
-the live threshold by setting the `REFUSAL_SCORE_THRESHOLD` env var
-(`fly secrets set REFUSAL_SCORE_THRESHOLD=... -a amneal`).
-The sweep only **recommends**; it never changes the value. `0.30` stays
-PROVISIONAL until a human has reviewed a prod-space sweep with scored positive
-and negative distributions. There is no gate and no auto-tune — over-tuning the
-refusal cutoff trades directly against INV safety, so it is an explicit
-operator decision.
+**Decision procedure.** A human reads the recommendation and both pathology
+lists. Only if warranted, meaning a clean recommendation that differs from 0.30
+or a non-empty pathology list, change the live value with
+`fly secrets set REFUSAL_SCORE_THRESHOLD=... -a amneal`. There is no gate and no
+auto-tune: over-tuning this cutoff trades directly against INV safety, so it is
+an explicit operator decision.
 
-### 6.5 Staging + restore drill (monthly, ~30 min)
+The last real sweep artifact is from 2026-07-30, watch run
+[30531864530](https://github.com/Hussain0327/amneal/actions/runs/30531864530), in
+the OpenAI 1536 space. Its six must-answer rows scored 0.812 to 0.896, but all
+five must-refuse rows stopped before retrieval and had no cosine score, so it
+produced no usable recommendation. Details in [`EVAL_STATUS.md`](EVAL_STATUS.md).
 
-A backup you have never restored is a hope, not a backup.
+### 6.5 Staging and restore drill
 
-**One-time setup:** create a second free Supabase project,
-`regwatch-staging`, same region as prod (§1 steps 1–3; the free tier holds
-this corpus comfortably). Save its session-pooler URL next to the prod one —
-they differ by project ref.
+A backup you have never restored is a hope, not a backup. We are currently in
+that position: there is no rehearsed restore for Lakebase.
 
-**Monthly drill:**
+**What is needed, and is not built:**
 
-1. Get a restorable copy into staging via the Backup path (the only
-   recovery lever now — the SQLite/Chroma snapshot path and its
-   `scripts/restore_drill.sh` wrapper were deleted in R5 along with the
-   dual-mode datastore; see git history for the old snapshot-based drill):
-   Supabase prod → **Database → Backups** → download the latest daily
-   backup and restore it into `regwatch-staging` (dashboard restore, or
-   `psql "<staging-url>" < backup.sql` run by the operator).
+1. A written `pg_dump` / `pg_restore` procedure against the Lakebase endpoint,
+   plus a staging target to restore into.
+2. A monthly run of it, roughly 30 minutes, with the date and result recorded.
 
-   A staging DB still stamped at an older revision (e.g. by last month's
-   drill, run before a schema-advancing release) needs advancing before the
+Until that exists, the shape of the drill is:
+
+1. Get a restorable copy into a staging database.
+2. If the staging DB is stamped at an older revision, advance it before the
    restore is usable:
 
    ```bash
    DATABASE_URL='<staging-url>' uv run alembic upgrade head
    ```
 
-   **Open follow-up:** a PG-native `pg_dump`/`pg_restore` drill script
-   (replacing the deleted `restore_drill.sh`) is not yet built; until then
-   this step is a manual dashboard restore.
-2. Point a local API at staging and smoke it:
-   `DATABASE_URL='<staging-url>' EMBEDDING_PROVIDER=openai uv run uvicorn
-   regwatch.api.main:app --port 8099`, then run the §5 checklist against
-   `localhost:8099` (step 1 directly; steps 6–9 via curl or a local
-   frontend with `API_PROXY_TARGET=http://localhost:8099`).
-3. Record date + result (a line in the team log is enough). Anything that
-   fails here failed on staging — fix it now, not mid-incident.
+3. Point a local API at staging and smoke it. It needs the same embedding
+   profile and Qwen credentials as prod, otherwise it boots into the legacy
+   vector space and you are testing something prod does not run:
 
-**(removed in R5):** `scripts/restore_drill.sh` used to guard against pointing
-the snapshot-restore path at the production project ref
-(`xvhbfmoynibkcghazzxc`) before any network call, refusing to run against it
-or against a bare non-loopback IP host. That script and its dedicated test
-(`tests/test_restore_drill.py`) were deleted along with the SQLite/Chroma
-migration tooling; the same "never target prod by accident" discipline still
-applies operator-side to the manual dashboard restore above. See git history
-for the guard's original implementation if a scripted equivalent is rebuilt.
+   ```bash
+   DATABASE_URL='<staging-url>' \
+   ACTIVE_EMBEDDING_PROFILE='ep_2e7368b354d911ea3a013c3125e276c2' \
+   QWEN_EMBEDDING_BASE_URL='...' QWEN_EMBEDDING_TOKEN='...' \
+   QWEN_EMBEDDING_MODEL='...' QWEN_EMBEDDING_DIMENSION=1024 \
+   uv run uvicorn regwatch.api.main:app --port 8099
+   ```
+
+   Then run the section 5 checklist against `localhost:8099`: step 1 directly,
+   steps 5 through 8 by curl or a local frontend with
+   `API_PROXY_TARGET=http://localhost:8099`.
+4. Record date and result. Anything that fails here failed on staging, which is
+   where you want it to fail.
+
+The old `scripts/restore_drill.sh` and `scripts/migrate_to_supabase.py` were
+deleted with the SQLite/Chroma dual-mode in R5. See git history if you rebuild a
+scripted equivalent. The discipline they enforced still applies by hand: never
+point a restore at the production endpoint by accident.

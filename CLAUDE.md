@@ -2,7 +2,7 @@
 
 - No preamble, closing fluff, flattery, or restating the question. Answer directly.
 - Concise prose. Cut filler, keep substance. For non-trivial changes still state
-  approach + alternatives + risks (see `.claude/CLAUDE.md`) — terse, not absent.
+  approach + alternatives + risks (see `.claude/CLAUDE.md`): terse, not absent.
 - Read files before writing; read each once unless it changed.
 - Prefer targeted edits over full-file rewrites.
 - Verify/test before claiming done; report failures with the actual output.

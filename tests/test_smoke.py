@@ -213,7 +213,7 @@ def test_cli_status_runs() -> None:
 
 
 def test_enforce_sslmode_adds_require_for_remote_host() -> None:
-    """Public-internet Supabase pooler → sslmode=require is injected."""
+    """Public-internet hosted Postgres: sslmode=require is injected."""
     from regwatch.store.db import _enforce_sslmode
 
     url = _enforce_sslmode(

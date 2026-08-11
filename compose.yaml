@@ -20,8 +20,9 @@ x-regwatch-environment: &regwatch-environment
   # official CRA template file)" marker. The template is gitignored (internal).
   WHITEPAPER_TEMPLATE_PATH: /app/data/templates/cra_white_paper_template.docx
   # Postgres-only since R5: defaults to the compose `db` service (pgvector
-  # image, same as CI). Point at a Supabase session-pooler URL to run against
-  # a hosted database instead — see docs/DEPLOY.md.
+  # image, same as CI). To run against the hosted database instead, point at the
+  # Databricks Lakebase DIRECT endpoint URL with ?sslmode=require. Never a
+  # `-pooler` host: docs/DEPLOY.md treats that as a release gate.
   DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/postgres}
   # Postgres-only means the chunk table is vector(1536), so the provider must
   # be 1536-dim: openai (set OPENAI_API_KEY in .env). local-bge-small is

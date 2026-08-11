@@ -1,11 +1,11 @@
 name: uptime-eval
 
 # Scheduled probe of the production GET /health endpoint (CI backstop to the
-# external uptime monitor — see docs/DEPLOY.md §6.2 "Uptime").
+# external uptime monitor: see docs/DEPLOY.md §6.2 "Uptime").
 #
-# Driven entirely by the PROD_HEALTH_URL repository secret (Settings →
-# Secrets and variables → Actions): set it to https://<api-host>/health.
-# While the secret is unset, the job skips cleanly — no failures and no
+# Driven entirely by the PROD_HEALTH_URL repository secret (Settings ->
+# Secrets and variables -> Actions): set it to https://<api-host>/health.
+# While the secret is unset, the job skips cleanly: no failures and no
 # invented URLs. No checkout, no tokens, no repo access.
 
 on:
@@ -37,4 +37,4 @@ jobs:
 
       - name: skipped (secret not configured)
         if: env.PROD_HEALTH_URL == ''
-        run: echo "PROD_HEALTH_URL secret not set — see docs/DEPLOY.md §6.2; skipping."
+        run: echo "PROD_HEALTH_URL secret not set - see docs/DEPLOY.md §6.2; skipping."

@@ -1,5 +1,8 @@
 """Deterministic parser from prose synthesizer output to a gate-ready turn.
 
+Last updated: 2026-08-11. ``selective=True`` is the v7 path and it is what prod
+runs; ``selective=False`` is the older v6 path, kept reachable by the flag.
+
 TRUST MODEL. Every byte this module reads is untrusted model output: a [n]
 marker is a CLAIM about evidence, not evidence. This module only parses, and it
 parses deterministically -- no provider, no DB, no settings, no randomness. The
@@ -39,9 +42,14 @@ from regwatch.generate.turn_gate import REASONING_FRAME_PREFIXES as REASONING_FR
 from regwatch.generate.turn_gate import frame_split, materiality_trigger, source_assertion_trigger
 from regwatch.retrieve.retriever import RetrievedPassage
 
-# The exact single-sentence completion the v6 prose prompt instructs the model
-# to emit when the passages do not answer the question. Defined HERE as the
-# single source of truth; the prompt and the echo provider must import it.
+# V6 ONLY. The exact single-sentence completion the v6 prose prompt tells the
+# model to emit when the passages do not answer the question. Defined HERE as
+# the single source of truth; the v6 prompt and the echo provider must match it.
+#
+# v7 has NO sentinel and no code word: the model says "I do not have that" in
+# ordinary words and the gate re-scans that text before it is served. This
+# constant stays because v6 is still reachable with the flag off, and because
+# the streaming path holds deltas back while the text is still a prefix of it.
 PROSE_NO_EVIDENCE_SENTINEL = "NO_EVIDENCE."
 
 # One numeric marker bracket body: "1", "1, 2". Digits only, so the pair
@@ -115,11 +123,12 @@ def gate_payload(parsed: ParsedProseTurn, passages: list[RetrievedPassage]) -> s
     pairs the gate validates against THIS turn's passages. A numeric marker the
     parser carried as declared-but-unresolvable becomes a deliberately unknown
     cite (UNRESOLVED_<n>) so the gate still sees an ASSERTED source fact on its
-    drop-or-correct path -- never uncited conversation. Parser-classified
-    reasoning/conversation sentences bridge with zero cites: under v6's
-    unchanged refuse-or-cite policy they land on DROP_NO_CITES exactly as a v5
-    zero-cite claim would. Still serialization, not admission: the gate remains
-    the only judge of what renders.
+    drop-or-correct path, never uncited conversation. Parser-classified
+    reasoning/conversation sentences bridge with zero cites, and what happens to
+    them next is the gate's call, not this function's: under v6 they land on
+    DROP_NO_CITES exactly as a v5 zero-cite claim would, while under v7
+    (``selective=True``) the gate admits them uncited. Still serialization, not
+    admission.
     """
     claims: list[dict[str, object]] = []
     for claim in parsed.claims:

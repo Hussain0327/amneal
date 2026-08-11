@@ -1,12 +1,17 @@
-"""INV-1 in REAL OpenAI-1536 geometry: no cross-drug leak, refuse-or-cite.
+"""INV-1 in REAL OpenAI-1536 geometry: no cross-drug leak, cite-or-drop.
 
 The rest of the suite runs ``EMBEDDING_PROVIDER=echo`` (conftest forces it), so
 the cross-drug guard is only ever proven against hash-noise vectors. Echo
 geometry is degenerate: two unrelated drugs' chunks are near-orthogonal by
 construction, which is the EASY case. This test re-proves INV-1 against the
-production embedding space (text-embedding-3-small, 1536 dims) where FDA PSG
+OpenAI-1536 space (text-embedding-3-small) where FDA PSG
 boilerplate genuinely pulls unrelated drugs close together -- the space the
 ``normalized_name`` retrieval filter actually has to defend against.
+
+NOTE (2026-08-11): this is no longer the production space. Prod moved to the
+Databricks Qwen3 profile (1024 dims) on 2026-07-30, so this test now proves the
+cross-drug guard in the OpenAI-1536 ROLLBACK space only. Nothing re-proves INV-1
+geometry in the live 1024-dim space yet. That gap is tracked in docs/ROADMAP.md.
 
 It is an EXTRA, opt-in test, gated on a DEDICATED flag so it never conscripts
 the standard CI pytest step into live OpenAI spend. The repo's blocking CI job

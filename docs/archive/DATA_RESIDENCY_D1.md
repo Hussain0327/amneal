@@ -5,7 +5,7 @@ Status: DECIDED 2026-07-28 (was: OPEN). Owner: Amneal IT/Legal + regwatch eng. D
 > **STATUS 2026-07-29:**
 > - The decision is TAKEN (2026-07-28): Databricks as the inference plane only,
 >   inside Amneal's existing tenant; Supabase stays the datastore. See
->   [`DATABRICKS_ADOPTION_2026-07-28.md`](DATABRICKS_ADOPTION_2026-07-28.md).
+>   [`DATABRICKS_ADOPTION_2026-07-28.md`](../DATABRICKS_ADOPTION_2026-07-28.md).
 > - Exfil point B (synthesis) is CLOSED as of 2026-07-28: prod generation runs
 >   gpt-oss-20b behind the Databricks endpoint alias
 >   `workspace.default.regwatch`; OpenAI is rollback only.

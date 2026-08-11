@@ -1,5 +1,59 @@
 # Databricks for regwatch: recommendation
 
+> **Update 2026-08-11: read this first.**
+> Last updated: 2026-08-11.
+>
+> This is a dated decision record written on 2026-07-28. Most of the plan below
+> shipped. One of its central calls was later reversed. The reasoning is left
+> exactly as it was written; this box says what is actually true today.
+>
+> - **Generation runs on Databricks.** Unity Catalog serving alias
+>   `workspace.default.regwatch`. The alias first routed to
+>   `system.ai.gpt-oss-20b` and was repointed to `system.ai.gpt-oss-120b` on
+>   2026-08-05, so the served model today is `gpt-oss-120b-080525`. One endpoint
+>   serves router, synthesizer and extractor. `DATABRICKS_REASONING_EFFORT=low`.
+>   Anywhere below that says the prod model is `gpt-oss-20b`, that is history.
+> - **Embeddings run on Databricks too.** Endpoint
+>   `workspace.default.regwatch-embed`, Qwen3, 1024 dimensions, active profile
+>   `ep_2e7368b354d911ea3a013c3125e276c2`. All 5,494 chunks are embedded on it,
+>   measured 2026-08-11. Retrieval picks its embedder from
+>   `ACTIVE_EMBEDDING_PROFILE`, and only the `legacy` arm ever reads
+>   `EMBEDDING_PROVIDER`, so the `EMBEDDING_PROVIDER = "openai"` line in
+>   `fly.toml` is dead weight on the query path.
+> - **OpenAI is the rollback path only.** `OPENAI_API_KEY` is still set and the
+>   provider still ships and is still tested. It serves nothing in production.
+> - **The database moved to Databricks Lakebase.** Section 4 argued at length
+>   that Supabase stays and Lakebase is "NOT NOW". That call was reversed and
+>   the move happened.
+> - **None of the three hazards section 4 raised against Lakebase blocked the
+>   move.** The live Alembic head is `0020_eval_run` with nothing pending, so
+>   `release_command` was never wedged by migration 0011's event trigger. The
+>   pgx pooler assumption held because the app connects to the DIRECT Lakebase
+>   endpoint and never the `-pooler` host, which is now a documented release
+>   gate in `docs/DEPLOY.md`. And OLTP was never split from the vectors: rows,
+>   vectors and the audit log all moved together into one Postgres.
+> - **D1 is CLOSED.** All three legs, generation, embeddings and the database,
+>   sit inside the company's own Databricks tenant. Status lines below reading
+>   "D1 NOT CLOSED" or "D1 half closed" describe stages of a rollout that has
+>   since finished. The guardrails from step 1 are still in the code and still
+>   worth keeping: `D1_ALLOWED_LLM_MODELS` plus the runtime served-model check
+>   in `generate/llm.py`, which rejects a response served by a model outside the
+>   allowlist and rejects partner-hosted families outright.
+> - **Corpus numbers below are July figures.** Wherever this file says 10,749
+>   chunks, the live count is 5,494, measured 2026-08-11.
+> - **The cost table in section 5 is stale.** It prices `gemma-3-12b` synthesis
+>   against an OpenAI baseline. Prod now runs a 120b model for every role and
+>   embeds on Databricks, so both sides of that comparison are wrong. Nobody has
+>   re-priced it.
+> - **Step 6 was never applied to the watch cron, and that is an open risk.**
+>   `.github/workflows/watch-daily.yml` still has no `ACTIVE_EMBEDDING_PROFILE`
+>   and no `QWEN_EMBEDDING_*` repo secrets, and still hardcodes
+>   `EMBEDDING_PROVIDER: "openai"`. With the profile promoted in prod and absent
+>   in the cron, the first day a real FDA revision lands the watch run commits
+>   chunk rows with no embedding on the live profile. Coverage goes incomplete
+>   and the next Python boot refuses inside `assert_profile_ready_for_activation`.
+>   Setting those secrets is the owner's action.
+
 ## 1. What Databricks can actually do for regwatch
 
 | Workload | Fit | What it replaces | Honest verdict |
@@ -27,6 +81,8 @@ The Go edge adds no third egress: it does zero inference and zero vector math an
 
 **Does Databricks close both halves? Yes, on the code path, and only after both switches move.** `LLM_PROVIDER` and `EMBEDDING_PROVIDER`/`ACTIVE_EMBEDDING_PROFILE` are independent settings with nothing coupling them. Shipping the generation flip alone and calling D1 closed is exactly the security theater the requirement warns about; the internal status until the profile is promoted must read "D1 NOT CLOSED".
 
+*[Both switches moved. The profile was promoted on 2026-07-30 and the database followed. D1 is closed as of 2026-08-11.]*
+
 **What stays open, and it is legal, not engineering:**
 
 - "Our data stays in Amneal's tenant" is **false**. Databricks Model Serving is serverless-only and the serverless compute plane runs in Databricks' account.
@@ -39,7 +95,9 @@ The only sentence we can defend: *"Analyst queries leave Amneal to Databricks as
 
 Databricks as the **inference plane only**. Supabase stays the one and only datastore, Fly keeps both process groups, Vercel keeps the frontend, GitHub Actions keeps CI and the watch cron. Foundation Model APIs pay-per-token against Databricks-hosted open-weight models, not Custom Model Serving.
 
-### Step 0 - Workspace, legal gate, and two curls (no repo change)
+*[REVERSED 2026-07-28, recorded 2026-08-11: the datastore half of that sentence did not hold. Production Postgres is Databricks Lakebase now. Everything else in this paragraph is still how it runs.]*
+
+### Step 0 - Workspace, legal gate, and two curls (no repo change) *[DONE, engineering half]*
 
 **Amneal already runs Databricks** (owner-supplied, 2026-07-28). That removes vendor selection and net-new procurement from the critical path: the DPA exists, the security review happened, and "may our data go to Databricks" is already answered institutionally at the company level. It does NOT by itself answer three things, which is what this step is now for: (a) which tier and add-ons that existing workspace carries, (b) whether Foundation Model APIs are enabled on it or disabled by policy, and (c) whether the FMAPI abuse-retention window was in scope of the agreement Amneal signed. Ask the existing workspace owner, not procurement.
 
@@ -59,7 +117,7 @@ Legal, in writing: (a) is "processor swap, <=30-day abuse retention, no training
 
 **Effort.** 2 days engineering. Calendar time is now workspace access plus a DPA scope check against an existing agreement, not vendor procurement.
 
-### Step 1 - PR A: guards and tripwires, shipped inert
+### Step 1 - PR A: guards and tripwires, shipped inert *[DONE, migration 0016 is live]*
 
 **Work.**
 - Enforce an `https://` scheme in `_normalize_optional_provider_value` (config/settings.py:101-107, verified: it only calls `str(v).strip()` today). A typo'd `http://` base URL would ship confidential queries in plaintext.
@@ -76,11 +134,13 @@ Legal, in writing: (a) is "processor swap, <=30-day abuse retention, no training
 
 **Effort.** 2-3 days.
 
-### Step 2 - Flip generation (secrets only)
+### Step 2 - Flip generation (secrets only) *[DONE 2026-07-28]*
 
 **Work.** `fly secrets set LLM_PROVIDER=databricks DATABRICKS_LLM_BASE_URL=<root from step 0> DATABRICKS_LLM_TOKEN=<sp-pat> DATABRICKS_LLM_MODEL=databricks-gemma-3-12b GEMMA_THINKING_ENABLED=false LLM_MODEL=databricks-gemma-3-12b`.
 
 Model choice is not arbitrary. The shipped output sanitizer matches **Gemma delimiters only** - `<|channel>thought` and `<think>` (`_GEMMA_THOUGHT_START` / `_GEMMA_XML_THOUGHT_START` feeding `_visible_gemma_text`, src/regwatch/generate/llm.py, verified) - and the `_visible_gemma_text` docstring warns that "some OpenAI-compatible servers expose reasoning in `content` instead of a separate field". A chain-of-thought model such as `databricks-gpt-oss-120b` uses different delimiters and would risk leaking reasoning into a cited regulatory answer; it also burns the synthesis output budget (`SYNTHESIZER_MAX_TOKENS`, default 900, read once per turn in grounded_qa.ask) on reasoning tokens, and `finish_reason == "length"` **raises** in DatabricksProvider, converting real answers into refusals. *[Graft from the critique of the all-in design.]* **This is what happened on 2026-07-28**, when `LLM_PROVIDER=databricks` went live against `gpt-oss-20b-080525`. Two mitigations shipped: `DATABRICKS_REASONING_EFFORT` (default `low`) bounds the thinking spend at the request, measured to finish at 272 completion tokens under the 900 cap where default/medium/high all hit it; and `SYNTHESIZER_MAX_TOKENS` makes the cap an operator knob so headroom needs no deploy. The default stays 900 because `LLM_PROVIDER=openai` is the rollback path.
+
+*[Outcome, 2026-08-11: prod runs a reasoning model anyway. The alias serves `gpt-oss-120b-080525` and has since 2026-08-05, with `DATABRICKS_REASONING_EFFORT=low`. The leak worry was handled in code rather than by model choice: `generate/llm.py` drops `reasoning`, `reasoning_content`, `thinking` and `analysis` content parts through an allow-list, and `_visible_gemma_text` plus its streaming twin scrub thought-channel markup out of both the buffered and the streamed answer.]*
 
 `LLM_MODEL` is a zero-code fix for a cosmetic split brain: Go resolves `/settings` from env `LLM_MODEL`, defaulting to `gpt-5.4-nano` (go/internal/api/config.go:143), while Python records the Databricks endpoint. It is inert on Python's databricks branch. Without it the UI tells analysts they are still on OpenAI - to the exact stakeholders D1 exists for.
 
@@ -92,7 +152,7 @@ Known accepted regression: streaming becomes one blob. `_complete_stream` buffer
 
 **Effort.** 1-2 days.
 
-### Step 3 - Register and backfill a 1024-dim profile on PROD, serving nothing
+### Step 3 - Register and backfill a 1024-dim profile on PROD, serving nothing *[DONE 2026-07-30]*
 
 **Work.** Do this directly against production, not a branch. Supabase branches start with **no data** from the parent project, so a "clone prod" branch benchmark cannot execute as commonly assumed. It is also unnecessary: `chunk_embedding` is a separate table (migration 0015, already live, 0 rows) and nothing reads it until `ACTIVE_EMBEDDING_PROFILE` changes. *[This corrects a fatal flaw in the minimal-inference design as originally drafted.]*
 
@@ -108,7 +168,7 @@ Backfill the **full** corpus, not a sample: at pay-per-token it costs about 1.4 
 
 **Effort.** 2 days, mostly wall clock.
 
-### Step 4 - Retrieval quality gate (this is the real go/no-go)
+### Step 4 - Retrieval quality gate (this is the real go/no-go) *[the profile was promoted, but no record of this rank-by-rank comparison having been run exists in the repo. The 0.30 refusal threshold has still never been validated against the Qwen3 vector space, which is the half of this gate that visibly did not happen.]*
 
 **Work.** From a workstation process with `ACTIVE_EMBEDDING_PROFILE=<ep_id>` in its own env (no app change, no deploy), run the eval harness and `threshold_sweep` against prod, then repeat with `ACTIVE_EMBEDDING_PROFILE=legacy` as the control. Keep `LLM_PROVIDER` fixed across both so retrieval is the only variable.
 
@@ -120,7 +180,7 @@ The Q&A gold set is 12 items (6 ordinary must-answer, 5 must-refuse, 1 must-clar
 
 **Effort.** 3 days.
 
-### Step 5 - PR B: real incremental streaming
+### Step 5 - PR B: real incremental streaming *[DONE]*
 
 **Work.** Replace the buffer-everything path (`_complete_stream`, llm.py) with a safe-prefix emitter that holds back only the longest suffix that could still be a partial thought delimiter under the `_GEMMA_*` regexes and flushes the rest as it arrives. Keep `stream()`'s existing exception fallback to buffered `complete()` so an endpoint without SSE still works - and keep `D1ResidencyError` excluded from that fallback: the safe-prefix rewrite must not reintroduce the re-send of the analyst question to an off-perimeter endpoint. Extend the split-delimiter test in tests/test_databricks_llm_provider.py to assert more than one delta and that no delimiter fragment escapes.
 
@@ -130,7 +190,7 @@ The Q&A gold set is 12 items (6 ordinary must-answer, 5 must-refuse, 1 must-clar
 
 **Effort.** 3 days.
 
-### Step 6 - PR C: watch-cron parity (must land BEFORE step 7)
+### Step 6 - PR C: watch-cron parity (must land BEFORE step 7) *[NOT DONE, and step 7 went first. This is the open risk in the box at the top of the file.]*
 
 **Work.** .github/workflows/watch-daily.yml pins `EMBEDDING_PROVIDER: "openai"` (line 71, verified) and hard-fails preflight when `OPENAI_API_KEY` is empty (lines 97-101, verified: "Ingest embeds via OpenAI on change days"). It sets no `ACTIVE_EMBEDDING_PROFILE` and no `QWEN_EMBEDDING_*`. After promotion, a watch run that ingests a revised PSG builds profile targets from its **own** process env, so it commits chunk rows with no profile embedding. Coverage goes incomplete, and the next app boot refuses inside `assert_profile_ready_for_activation` during `regwatch init-db` (docker/entrypoint.sh:25-32), crash-looping every Python machine while the Go proxy - which deliberately skips init-db - keeps holding the public port and relaying into a dead upstream. The outage presents as edge 502/503, not as machines that fail to start.
 
@@ -144,13 +204,13 @@ Fix: add `ACTIVE_EMBEDDING_PROFILE` and the `QWEN_EMBEDDING_*` set to the workfl
 
 **Effort.** 1 day.
 
-### Step 7 - Promote the profile: D1 closes here
+### Step 7 - Promote the profile: D1 closes here *[DONE 2026-07-30]*
 
 **Work.** Dry-run the boot guard from a workstation against prod first: `ACTIVE_EMBEDDING_PROFILE=<ep_id> QWEN_EMBEDDING_*=... DATABASE_URL=<prod> uv run regwatch init-db`. That runs the exact chain the container runs (db.py:718-726 -> pgvector_store.py:273-305), so a promotion that would crash-loop the fleet fails on a laptop instead.
 
 Then `fly secrets set ACTIVE_EMBEDDING_PROFILE=<ep_id>` and deploy. **Deliberately leave `EMBEDDING_PROVIDER = "openai"` in fly.toml:57.** `retrieve()` selects the query embedder from the **profile**, not the global provider (retriever.py:206-212, verified), so the confidential analyst query goes to Databricks the instant the profile is active, while the global provider only affects ingest embedding of public FDA text and keeps `chunk.embedding` current as rollback insurance. This also keeps the rollback safe: setting `ACTIVE_EMBEDDING_PROFILE=legacy` while `EMBEDDING_PROVIDER=qwen3` would raise at boot (pgvector_store.py:277-283, verified). Keeping the global provider on openai means the rollback is a single, safe secret.
 
-Then `fly secrets set D1_ENFORCED=true` to arm the allowlist and mixed-pair tripwires. **Populate `D1_ALLOWED_LLM_MODELS` with BOTH names first.** `DATABRICKS_LLM_MODEL` is a Unity Catalog alias (`workspace.default.regwatch`), which the boot validator checks, and the alias is repointable with no deploy - so the provider also checks the model id the endpoint reports on each response (`gpt-oss-20b-080525`) against the same allowlist and refuses the answer when it is off-perimeter. With only the alias listed, the first armed boot refuses every turn (audited `status=error`, app looks alive). That runtime check is detective, not preventive: the question has already been disclosed by the time the response arrives; what it buys is that the answer is not served and every subsequent turn fails loudly. Be honest internally: that tripwire prevents future regression, it does **not** cover the window between steps 2 and 7. During that window the correct status line is "D1 half closed: synthesis on Databricks, query embedding still on OpenAI."
+Then `fly secrets set D1_ENFORCED=true` to arm the allowlist and mixed-pair tripwires. **Populate `D1_ALLOWED_LLM_MODELS` with BOTH names first.** `DATABRICKS_LLM_MODEL` is a Unity Catalog alias (`workspace.default.regwatch`), which the boot validator checks, and the alias is repointable with no deploy - so the provider also checks the model id the endpoint reports on each response against the same allowlist and refuses the answer when it is off-perimeter. *[That reported id was `gpt-oss-20b-080525` when this was written. The alias was repointed on 2026-08-05 and it is `gpt-oss-120b-080525` today, which is exactly the repointable-alias case this paragraph exists to cover. `tests/test_d1_guards.py` pins both served ids plus the alias.]* With only the alias listed, the first armed boot refuses every turn (audited `status=error`, app looks alive). That runtime check is detective, not preventive: the question has already been disclosed by the time the response arrives; what it buys is that the answer is not served and every subsequent turn fails loudly. Be honest internally: that tripwire prevents future regression, it does **not** cover the window between steps 2 and 7. During that window the correct status line is "D1 half closed: synthesis on Databricks, query embedding still on OpenAI."
 
 **Gate.** Laptop dry-run exits 0. Post-deploy: `/ready` 200 on every app machine; 20 gold-set Asks correct; no `status=error` rows; `latency_ms` p95 from step 1's column no worse than 1.5x the pre-promotion week. Expect *some* increase: the profile path adds `FROM chunk_embedding ce JOIN chunk c` under the same `SET LOCAL enable_indexscan = off` filtered branch (embedding_profiles.py:756-766, verified) that the legacy path uses (pgvector_store.py:578-588, verified). Measure it; do not assume it.
 
@@ -158,7 +218,7 @@ Then `fly secrets set D1_ENFORCED=true` to arm the allowlist and mixed-pair trip
 
 **Effort.** 1 day.
 
-### Step 8 (optional, not D1) - durable parsed text
+### Step 8 (optional, not D1) - durable parsed text *[NOT DONE. `psg_version` still has only `parsed_text_path`.]*
 
 **Work.** `psg_version.parsed_text_path` points at `data/parsed_text` under `DATA_DIR=/app/data` with no `[mounts]` block in fly.toml and an ephemeral Actions runner as the sole ingest driver, so `_read_parsed_text` returns None and the cited diff degrades on every revision. Total corpus text is roughly 9-15 MB. Add a nullable TEXT column on `psg_version`, write parsed text there in the ingest pipeline, and fall back to it in `_read_parsed_text`. *[Graft from the lakehouse design's real finding, minus its delivery vehicle: this does not need Unity Catalog, Delta, Auto Loader or a Lakeflow job.]* Observed production impact so far is zero events (0 revised across 23 runs), so this is a latent-defect fix, not urgent.
 
@@ -168,7 +228,7 @@ Then `fly secrets set D1_ENFORCED=true` to arm the allowlist and mixed-pair trip
 
 **Effort.** 0.5-1 day.
 
-### Step 9 (one-way door, gate on a 30-day soak) - decommission OpenAI
+### Step 9 (one-way door, gate on a 30-day soak) - decommission OpenAI *[NOT DONE, deliberately. OPENAI_API_KEY is still set as the rollback path.]*
 
 **Work.** Change fly.toml:57 to `EMBEDDING_PROVIDER = "databricks-qwen3"` (already in `_QWEN3_PROVIDER_NAMES`), mirror it in the watch workflow, delete `WATCH_OPENAI_API_KEY`, `fly secrets unset OPENAI_API_KEY`. From this point ingest writes NULL into `chunk.embedding` rather than mixing geometries, so the legacy rollback decays with every new FDA revision.
 
@@ -184,7 +244,7 @@ Then `fly secrets set D1_ENFORCED=true` to arm the allowlist and mixed-pair trip
 
 **The vector store stays in Supabase pgvector.** 10,749 chunks / 174 MB table / 77 MB HNSW index / 208 MB whole database / 99 queries in the last 7 days / 471 in 30 days / 23 consecutive daily crawls with 0 added, 0 revised, 0 errors. Databricks AI Search costs a $204.40/month floor (1 unit x $0.28/hr x 730h, billed 24/7 at zero traffic) to hold those vectors in a unit sized for 2,000,000 - 0.5% utilization, and a dev/staging/prod split is $613/month before storage. It also breaks three things: the 1024-element-per-filter-clause cap cannot express the ~1,794-element `version_id $in` list retriever.py:218-223 builds on every query; the L2 metric with undocumented score semantics invalidates the 0.30 threshold calibrated against `1 - d/2`; and async Delta Sync creates a window where superseded PSG versions remain citable, which for a regulatory product is the most expensive failure mode available. The prior "adopt iterative scan at ~100k rows or p95 > 50ms" trigger is at ~10% of its threshold.
 
-**Supabase stays as the datastore.** Lakebase is a real product and a technically credible Postgres-for-Postgres swap - the repo has near-zero Supabase SDK coupling (the only string in src/ or go/ is a hostname comment) - but it contributes exactly zero to D1, and the leak is why we are here. Three concrete hazards if we did it anyway: migration 0011's `CREATE EVENT TRIGGER` needs privileges Lakebase's `databricks_superuser` is not documented to have and it would fail inside `alembic upgrade head` in `release_command`; Lakebase's `-pooler` endpoint is PgBouncer transaction mode, which breaks pgx's default `QueryExecModeCacheStatement` (go/internal/store/pool.go:100-105) as a total edge outage on the service that now holds the public port; and a half-move that split OLTP from vectors would break the single transaction that commits psg_version + psg_document content + chunk rows + be_requirement together (src/regwatch/ingest/pipeline.py:399-441). Revisit only if Supabase itself becomes a residency problem.
+**Supabase stays as the datastore.** *[REVERSED. The move to Lakebase happened on 2026-07-28. None of the three hazards below blocked it: see the update box at the top of this file. This paragraph is kept as the record of the call that was made, not as current guidance.]* Lakebase is a real product and a technically credible Postgres-for-Postgres swap - the repo has near-zero Supabase SDK coupling (the only string in src/ or go/ is a hostname comment) - but it contributes exactly zero to D1, and the leak is why we are here. Three concrete hazards if we did it anyway: migration 0011's `CREATE EVENT TRIGGER` needs privileges Lakebase's `databricks_superuser` is not documented to have and it would fail inside `alembic upgrade head` in `release_command`; Lakebase's `-pooler` endpoint is PgBouncer transaction mode, which breaks pgx's default `QueryExecModeCacheStatement` (go/internal/store/pool.go:100-105) as a total edge outage on the service that now holds the public port; and a half-move that split OLTP from vectors would break the single transaction that commits psg_version + psg_document content + chunk rows + be_requirement together (src/regwatch/ingest/pipeline.py:399-441). Revisit only if Supabase itself becomes a residency problem.
 
 **The corpus stays out of Delta.** Landing 1,795 public FDA PDFs in Unity Catalog is 2-3 weeks of vendor plumbing to solve a 9-15 MB durability gap that a nullable column solves in half a day, and it creates a second source of truth that drifts silently while the compliance claim it exists to support quietly becomes false.
 
@@ -206,13 +266,17 @@ Assumptions stated: 424 Asks/month (99 query_log rows in 7 days), per Ask roughl
 
 Baseline being replaced: `gpt-5.4-nano` at $0.05/M in and $0.40/M out is about $0.25/month, plus text-embedding-3-small at under a cent. **The inference swap is a delta of roughly +$0.30 to +$1.30/month at current volume.** Inference is not the cost story.
 
-Unchanged: Supabase $0-25/month (208 MB fits the Free tier), Fly, Vercel, GitHub Actions.
+*[STALE 2026-08-11. This whole table prices `gemma-3-12b` synthesis and an OpenAI embedding baseline. Prod runs `gpt-oss-120b-080525` for every role and embeds on Databricks Qwen3, and the corpus is 5,494 chunks rather than 10,749, so both the new-cost and the replaced-baseline columns are wrong. The shape of the finding, that inference is not the cost story, has not been re-checked at 120b. Nobody has re-priced it.]*
+
+Unchanged at the time: Supabase $0-25/month (208 MB fits the Free tier), Fly, Vercel, GitHub Actions. *[Supabase is no longer the datastore; Lakebase cost is not priced here.]*
 
 What this avoids: Custom Model Serving of self-registered weights needs a warm replica per endpoint because documented cold start is "one to several minutes" with no SLA, at 20.00 DBU/hour = about $1,022/month per endpoint, $2,044/month for both - roughly 3,700x this plan for the identical two calls. AI Search adds $204.40/month floor.
 
 **The cost that actually matters is unpriced and contractual.** Serverless egress control requires Enterprise tier; the Compliance Security Profile is a paid Enhanced Security and Compliance add-on. Those two are exactly the controls that make the D1 claim provable and auditable - a cheap workspace cannot produce the evidence. Get that quote in step 0, before any engineering. It is near-certainly larger than the entire inference bill. Engineering cost is about 3 weeks of one person.
 
 ## 6. Open questions / blockers for the user
+
+*[Status 2026-08-11: the workspace, region and service principal questions (2, 3, 6) were answered in practice, since the endpoints exist and prod has run on them since 2026-07-28. Question 5 is moot: real incremental streaming shipped, and the live draft channel went to prod on 2026-08-10. Questions 1 and 4, the legal and GxP positions, are not something engineering can mark closed from the code, so they are left as written. Token rotation (6) still has no named owner that this file can point to.]*
 
 1. **Does Amneal legal accept "processor swap under a DPA, up to 30 days abuse retention, no training on inputs, never reaches OpenAI" as satisfying D1?** If the bar is zero retention or in-tenant processing, this entire architecture is wrong and the answer is self-hosted vLLM in Amneal's network or Azure OpenAI in Amneal's own subscription with approved Modified Abuse Monitoring (which uniquely gives a machine-checkable `ContentLogging=false` artifact). This is the single gating question.
 2. **Amneal already runs Databricks - at what tier, and who owns the workspace?** Enterprise tier plus the Enhanced Security and Compliance add-on are required for the provable-negative controls (serverless egress policy, Compliance Security Profile). An existing Standard/Premium workspace would need an upgrade, and that is the only remaining commercial question. Also confirm Foundation Model APIs are not disabled by account policy, and get a service principal we own rather than borrowing a human's PAT.
@@ -243,4 +307,4 @@ Nobody should plan on these.
 - Whether the ~1,794-element `version_id` array is actually emitted on every production path, or whether name resolution narrows it first.
 - ~~Whether any Sentry `capture_exception` path carries verbatim question text off-tenant.~~ **AUDITED 2026-07-28, CLEAN.** Python `common/observability.py:59-78` sets `send_default_pii=False`, `max_request_body_size="never"`, `include_local_variables=False` (explicitly because `/query` frames hold question/answer/prompt), `LoggingIntegration(event_level=None)`, and `before_send=_scrub_event` cutting SQLAlchemy's `[SQL:`/`[parameters:` echo. Go `internal/obs/obs.go:69-85` installs no HTTP integration at all, sets `SendDefaultPII: false`, and `scrubEvent` cuts pgx's `failed to encode args` echo (the path carrying `query_text` and `answer_text` from `InsertQueryLog`). All six `capture_exception` sites in `grounded_qa.py` pass only the exception object. One residual, now fixed in PR A: a provider SDK error whose response body echoes prompt fragments would land in `exc.value`, since Python's scrubber only cut on `[SQL:`.
 - Whether `WHITEPAPER_TEMPLATE_URL` is set as a Fly secret. The live Supabase project has 0 storage buckets and 0 objects, so if set it points somewhere else.
-- Whether `CREATE EVENT TRIGGER` and `SECURITY DEFINER` trigger functions work on Lakebase. Only relevant if the Supabase decision is revisited.
+- Whether `CREATE EVENT TRIGGER` and `SECURITY DEFINER` trigger functions work on Lakebase. *[The Supabase decision WAS revisited and the move happened. The migration chain reached head `0020_eval_run` on Lakebase with nothing pending, and the boot RLS sweep works and is gated by `GET /ready` (`docs/DEPLOY.md`). Whether the `ensure_rls` event-trigger object itself exists on Lakebase, as opposed to the boot path degrading past a privilege error, was NOT checked on 2026-08-11. Check it before relying on it.]*

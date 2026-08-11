@@ -1,182 +1,171 @@
 # Polyglot Target Architecture - 2026-07-10 (APPROVED direction)
 
-Owner decision: all-Python is unacceptable; regwatch moves to a four-runtime
+Last updated: 2026-08-11. **Steps 0 through 5 are done and live.** What is left
+is the legacy-path deletion, hardening step R3, and steps 6 to 9.
+
+Owner decision: all-Python is unacceptable, so regwatch moves to a four-runtime
 architecture. This supersedes the "no new language" default of
-`archive/POLYGLOT_ARCHITECTURE_REVIEW_2026-06-17.md` and the same-day conservative
-verdict in `archive/POLYGLOT_ASSESSMENT_2026-07-10.md` as a matter of owner-level
-architecture policy (bus factor / control-plane rigor), not measured perf.
-The two docs remain the record of what is and is not a perf-driven move.
+`archive/POLYGLOT_ARCHITECTURE_REVIEW_2026-06-17.md` and the same-day
+conservative verdict in `archive/POLYGLOT_ASSESSMENT_2026-07-10.md`. That was an
+owner-level architecture call about bus factor and control-plane rigor, not a
+measured performance result. The two archived docs remain the record of what is
+and is not a perf-driven move.
 
-Approved with two adjustments (owner's):
-1. Rust owns PDF/document processing first - NOT production embeddings.
-2. Go owns database writes through coarse transactional commands - NOT a
-   chatty CRUD microservice.
+Approved with two adjustments (the owner's):
 
-## Ownership map (approved)
+1. Rust owns PDF and document processing first, NOT production embeddings.
+2. Go owns database writes through coarse transactional commands, NOT a chatty
+   CRUD microservice.
+
+## Ownership map
 
 | Runtime    | Owns |
 |---|---|
 | TypeScript | UI, browser state, generated API client |
 | Go         | Public API, auth/SSO, authorization, rate limiting, sessions, audit, idempotency, SSE gateway, database writes and migrations |
-| Python     | Stateless RAG, product resolution, retrieval policy, refusal/citation validation, LLM synthesis/extraction, Assemble and White Paper logic |
-| Rust       | Pure PDF bytes -> ordered pages/chunks; no database credentials, no business rules |
+| Python     | Stateless RAG, product resolution, retrieval policy, citation validation, LLM synthesis and extraction, Assemble and White Paper logic |
+| Rust       | Pure PDF bytes into ordered pages and chunks. No database credentials, no business rules |
 
-Coarse write commands (target: <= 4): CompleteQuery, CommitIngest,
+Coarse write commands, target four or fewer: CompleteQuery, CommitIngest,
 CommitWhitepaperRun, CompleteWatchRun. Python keeps read-only DB access
-(read-only role; stable views where they stabilize a contract). Postgres
-outbox tables for delivery (Slack digest etc.); no Kafka/Redis/NATS.
+(read-only role, and stable views where they stabilize a contract). Postgres
+outbox tables handle delivery such as the Slack digest. No Kafka, Redis or NATS.
 
-## Verified facts the plan rests on (checked 2026-07-10)
+## Where the migration stands
 
-- ask() coupling is real: `grounded_qa.py:27` imports `log_query` (INV-6
-  audit), :34-42 imports ensure_session/get_session_filters/
-  update_session_filters, :318-341 writes session filters + messages,
-  :698-709 `_log_query_or_skip` implements audit-with-defined-failure.
-  `def ask(` is :1025; 1,604-line file.
-- Ingest dual-write gap is real but narrower than "no transaction":
-  `pipeline.py:199-239` `_commit_version_and_doc` puts version+doc in ONE
-  transaction; chunks (pgvector upsert), BE requirements, and alerts land
-  OUTSIDE it, and `psg_version` lacks a unique (psg_document_id,
-  content_hash) constraint (docstring calls the migration deferred).
-  Everything is in one Supabase Postgres now, so CommitIngest can be one
-  transaction.
-- Empty-page preservation is a hard parser invariant (`pdf_parser.py:88-91`):
-  pages append as "" rather than drop, so page indices stay 1:1 with the PDF
-  and later citations never shift. The Rust CLI must honor this.
-- LOC (verified): src Python 19,521; tests Python 20,036; frontend TS/TSX
-  10,353. pdf_parser 212 + chunker 105 = 317; embedder 252 (=569 with it).
-  main.py 1,845 + auth/ 283 = the core of the ~2.6k control-plane estimate.
-- Dual-mode is live: chroma refs in cli/pipeline/retriever/threshold_sweep/
-  main; sqlite branches in store/db.py. Dagster is dormant
-  (`INSTALL_ORCHESTRATION=false` in prod; orchestration/ + extra exist).
-  (Status as of Jul 10; R5, done: the SQLite/Chroma dual-mode described here
-  has since been deleted — Postgres + pgvector is the only datastore. See
-  `docs/DECISIONS.md`'s R5 entry.)
-- Migration head is 0013 (alembic; Fly release_command is the authority).
+Done, one line each:
 
-## Corrections to the proposal (mechanics, not shape)
+- **Step 0a. Contract freeze.** `response_model` on every route, wider codegen, a
+  committed `regwatch/frontend/openapi.json` snapshot, and a two-sided CI drift
+  gate.
+- **Step 0b. Ingest transaction.** A revision now lands atomically: the version
+  row, the document's content fields, the version's pgvector chunk rows and its
+  `be_requirement` row commit together, plus the deferred `psg_version` unique
+  constraint (migration 0014).
+- **Step 0c/0d.** PDF page-count bound in the parse child, and bounded
+  parallelism plus a request deadline in the White Paper populator.
+- **Step 1.** The public API contract is frozen (0a landed it).
+- **Step 2.** Python RAG returns `RagOutcome` + `AuditPayload` + `SessionPatch`;
+  a thin Python shell kept persisting them at the time.
+- **Step 3.** Go transparent proxy in front, second process group in the same Fly
+  app. See `docs/GO_PROXY_ROLLOUT.md`.
+- **Step 4.** Auth, sessions, feedback, settings and product CRUD moved to Go,
+  with sqlc for queries and a golangci-lint plus sqlc vet CI lane.
+- **Step 5.** Query orchestration and atomic audit persistence moved to Go
+  (CompleteQuery). Flipped live 2026-07-24. See
+  `docs/GO_NATIVE_QUERY_ROLLOUT.md`.
+- **R5, out of order but done.** SQLite and Chroma dual-mode deleted. Postgres
+  plus pgvector is the only datastore, and the suite runs against a real
+  Postgres via `TEST_DATABASE_URL`. Dagster went with it. See the R5 entry in
+  `docs/DECISIONS.md`.
 
-C1. "Bundle the Rust executable inside the Python worker image" - there is
-    NO worker image in prod. Parsing runs on a GitHub Actions ubuntu-latest
-    runner via `uv run regwatch watch` (watch-daily.yml:65,140); manual
-    `ingest-all` runs on a dev laptop (macOS arm64). The Fly image never
-    parses a PDF and should stay that way. Delivery instead: CI builds the
-    Rust CLI as pinned release artifacts (linux x86_64 musl static + macOS
-    arm64), sha256-pinned download in the watch workflow; cargo build cache
-    for the Rust CI lane.
+Left to do:
 
-C2. Shadow parity "across the existing corpus" requires the raw bytes, and
-    raw PDFs are NOT durably stored (parsed_text_path points at ephemeral
-    runner disk; durable parsed text was explicitly deferred). Shadow plan:
-    (a) run the Rust CLI side-by-side on every NEW download in the daily
-    watch and log parity, and (b) a one-off polite re-crawl of the ~1,795
-    catalog for full-corpus parity before cutover. Parity gates: page count,
-    empty-page positions, extracted citation quotes, chunk page mappings.
+6. **Coarse write commands for ingest and Watch**: CommitIngest and
+   CompleteWatchRun, porting the proven 0b semantics, plus an outbox for digest
+   delivery.
+7. **Python drops to a read-only DB role.** This is the open least-privilege
+   credentials item. White Paper and Assemble persistence stays Python until
+   steps 8 and 9.
+8. **Rust PDF CLI**: build and artifact pipeline (C1 below), shadow parity (C2),
+   cutover in the watch workflow, then delete the `_try_pdfplumber` and
+   `_try_pypdf` paths. Nothing has been built yet; there is no `rust/` directory.
+9. **CommitWhitepaperRun last** (the `whitepaper_runs.py` coupling). Delete the
+   public FastAPI surface and the superseded Python persistence, and only then
+   decide who owns the migration tool (C3).
 
-C3. "Go owns migrations" - not during the strangler. Alembic (0013, run by
-    Fly release_command) stays the single schema authority until the Python
-    persistence layer is deleted (step 9); Go consumes the schema via sqlc.
-    Moving migration ownership is the LAST move, not an early one.
+Two items sit between step 5 and step 6:
 
-## Risks to engineer around (accepted, with mitigations)
+- **The step-5 deletion PR.** Delete Python's buffered `POST /query` route and
+  its dead persistence branches, and de-flag Go. Details in
+  `docs/GO_NATIVE_QUERY_ROLLOUT.md`.
+- **R3, the stream terminal-frame move.** See R3 below.
 
-R1. INV-6 becomes cross-service. Audit-with-defined-failure (the 009cc41
-    pattern: pending operation -> finalize, failure-safe row) moves to Go's
-    transaction. The INV tests that prove "failure still leaves an audit
-    row" must be reborn as cross-service contract tests (compose: Go +
-    Python + Postgres in CI). This is the compliance surface - it gates the
-    step-5 cutover.
-    (DONE: the harness landed as tests_contract/ (the S1-S23 matrix) plus
-    the cross-service-contract CI lane - step-5 PR A.)
-R2. Three in-process ask() callers exist today: POST /query, the /assemble
-    dossier (nested ask(), bind_session=False), and the whitepaper
-    populator. The stateless core must serve all three; their audit
-    persistence routes diverge after Python loses write creds (CompleteQuery
-    for the API path; the WP/assemble paths ride CommitWhitepaperRun -
-    which is why WP persistence moves last).
-R3. SSE relay: pre-validation provisional token streaming was deliberately
-    reversed at commit 0a96f7e (the per-sentence gate that guarded it could
-    not survive the structured-turn contract). Provisional streaming returns
-    only as the flag-gated `draft` channel under the owner-amended INV-1
-    (2026-08-10) -- see
-    docs/superpowers/specs/2026-08-10-ask-sse-live-draft-design.md. The Go
-    gateway must relay `status`/`token`/`draft`/`draft_reset`/`result` frames
-    without reordering or buffering. Keep /query/stream a pass-through proxy
-    until CompleteQuery is proven, then move the terminal-frame persistence
-    only.
-R4. Auth split-brain must be resolved at step 4: custom cookie auth is live;
-    Supabase Auth is half-staged (2 dangling users). Decision folded in:
-    remove the Supabase Auth remnants; if IT's IdP timeline is real,
-    implement OIDC directly in Go (skip porting password auth twice) -
-    otherwise port cookie sessions as-is and add OIDC later. Also ports the
-    Fly-Client-IP (TRUST_PROXY_HEADERS) login-spray limiter semantics.
-R5. Deleting SQLite/Chroma dual-mode re-platforms the test suite (20k test
-    LOC currently runs largely in SQLite mode locally; CI already has a
-    pgvector service). Worth it, but it is its own workstream - schedule it
-    early since every later phase writes PG-only tests anyway.
-    (DONE: R5 shipped — tests now run against `TEST_DATABASE_URL`, a
-    disposable local Postgres, not SQLite/Chroma.)
-R6. Deploy topology: run Go as a second process group in the SAME Fly app -
-    Go takes the public :8000, uvicorn moves to an internal port. Vercel
-    keeps pointing at the same hostname; cookies/CORS unchanged. Watch the
-    Jun-18 incident class: release_command/boot-guard semantics stay with
-    alembic (C3).
-R7. D1 interplay: none of this closes D1. LLM/embedding calls stay in
-    Python behind the provider seam; the per-provider base_url override
-    (S4 of the assessment) remains the D1-readiness move and is unaffected
-    by Go.
+Gate for every remaining phase: the replaced Python path is deleted in the same
+phase (measured in handwritten behavior-bearing LOC, excluding generated OpenAPI
+and sqlc types), the full gate is green (pytest, mypy, ruff, black, tsc, eslint,
+vitest, and the go/rust lanes), and no INV test is lost. A moved test must land
+as a contract test before the Python original is deleted.
 
-## Migration order (approved order, refined)
+## Facts the remaining work still rests on
 
-Gate for EVERY phase: the replaced Python path is deleted in the same phase
-(measure handwritten behavior-bearing LOC, excluding generated OpenAPI/sqlc
-types), full gate green (pytest + mypy + ruff + black + tsc + eslint +
-vitest + new go/rust lanes), and no INV test lost - moved tests must land as
-contract tests before the Python original is deleted.
+- **Empty-page preservation is a hard parser invariant**
+  (`pdf_parser.py`): pages append as `""` rather than being dropped, so page
+  indices stay 1:1 with the PDF and citations never shift. The Rust CLI must
+  honor this.
+- **Three in-process `ask()` callers exist**: `POST /query`, the `/assemble`
+  dossier (a nested `ask()` with `bind_session=False`), and the White Paper
+  populator. The stateless core has to serve all three, and their audit
+  persistence routes diverge once Python loses write credentials: CompleteQuery
+  for the API path, CommitWhitepaperRun for the WP and assemble paths. That is
+  why WP persistence moves last.
+- **Everything is in one Postgres** (Databricks Lakebase in prod since
+  2026-07-28), so CommitIngest can be a single transaction.
 
-0. Interim correctness (pure Python, ships independently, this week's PRs):
-   a. Contract freeze prep = response_model on ALL routes + widen codegen
-      (assessment S1) + commit an openapi.json snapshot + two-sided CI drift
-      gate. This is step 1's substance and later generates BOTH the TS
-      client and Go server interfaces from one contract.
-   b. Widen `_commit_version_and_doc` to include chunks+BE in one
-      transaction + add the deferred psg_version unique constraint
-      (migration). Go's CommitIngest later ports PROVEN semantics instead
-      of inventing them.
-   c. PDF page-count bound in the parse child (assessment S3) - also
-      becomes part of the Rust CLI contract.
-   d. Populator bounded parallelism + request deadline (assessment S2) -
-      Python keeps WP logic, so this is not throwaway.
-1. Freeze the public API contract (0a lands it).
-2. Refactor Python RAG to return RagOutcome + AuditPayload + SessionPatch;
-   thin Python shell keeps persisting them for now (FastAPI still serves).
-   Every INV test stays green. This is the old review's ask() decomposition
-   with a Go-shaped return contract.
-3. Go transparent proxy in front (same Fly app, second process group);
-   /query/stream passes through untouched.
-4. Move auth, sessions, feedback, settings, product CRUD to Go (R4 decision
-   lands here). sqlc for queries; golangci-lint + sqlc vet CI lane.
-5. Move query orchestration + atomic audit/message persistence to Go
-   (CompleteQuery; R1 contract tests gate; R3 terminal-frame move).
-6. Coarse write commands for ingest, Watch (CommitIngest, CompleteWatchRun;
-   ports 0b semantics), outbox for digest delivery.
-7. Python drops to a read-only DB role (this IS the open least-privilege
-   creds item). WP/assemble persistence still Python until 8/9.
-8. Rust PDF CLI: build + artifact pipeline (C1), shadow parity (C2),
-   cutover in the watch workflow; delete _try_pdfplumber/_try_pypdf paths.
-9. CommitWhitepaperRun last (whitepaper_runs.py:1 coupling); delete the
-   public FastAPI surface + superseded Python persistence; THEN decide
-   migration-tool ownership (C3).
+## Corrections to the original proposal (mechanics, not shape)
 
-Offsets adopted verbatim: PG/pgvector everywhere then delete dual-mode
-(R5, DONE); remove Dagster if GH Actions stays the scheduler (it does; Dagster
-was removed as part of R5's cutover); one OpenAPI contract -> Go server
-interfaces + TS client; sqlc; Postgres outbox; OIDC directly in Go if SSO is
-imminent.
+**C1. There is no worker image in prod, so nothing can bundle the Rust
+executable "inside the Python worker image".** Parsing runs on a GitHub Actions
+ubuntu-latest runner via `uv run regwatch watch`; manual `ingest-all` runs on a
+dev laptop (macOS arm64). The Fly image never parses a PDF and should stay that
+way. Delivery instead: CI builds the Rust CLI as pinned release artifacts (Linux
+x86_64 musl static, macOS arm64), sha256-pinned download in the watch workflow,
+and a cargo build cache for the Rust CI lane.
 
-## LOC accounting (baseline, verified 2026-07-10)
+**C2. Shadow parity "across the existing corpus" needs the raw bytes, and raw
+PDFs are not durably stored.** `parsed_text_path` points at ephemeral runner
+disk, and durable parsed text was deferred. Shadow plan: run the Rust CLI side
+by side on every new download in the daily watch and log parity, then do a
+one-off polite re-crawl of the catalog for full-corpus parity before cutover.
+Parity gates: page count, empty-page positions, extracted citation quotes, chunk
+page mappings.
 
-src Python 19,521 / tests Python 20,036 / frontend TS+TSX 10,353.
-Expectation accepted: Python LOC down, total handwritten LOC roughly flat to
-+10-25% while Go owns every table's writes; temporarily +30-50% during the
-strangler. Metric: handwritten behavior-bearing LOC only.
+**C3. Go does not own migrations during the strangler.** Alembic, run by Fly's
+`release_command`, stays the single schema authority until the Python
+persistence layer is deleted at step 9. Go consumes the schema via sqlc. Moving
+migration ownership is the last move, not an early one. The live Alembic head is
+`0020_eval_run`.
+
+## Risks
+
+Still live:
+
+- **R2. Three `ask()` callers.** See the facts section above. Open until steps 8
+  and 9.
+- **R3. SSE.** Pre-validation provisional token streaming was deliberately
+  reversed at commit 0a96f7e, because the per-sentence gate that guarded it
+  could not survive the structured-turn contract. It came back on 2026-08-10 as
+  the flag-gated `draft` channel under the owner-amended INV-1, and that is live
+  in prod. See
+  [`superpowers/specs/2026-08-10-ask-sse-live-draft-design.md`](superpowers/specs/2026-08-10-ask-sse-live-draft-design.md).
+  The Go gateway must relay `status`, `token`, `draft`, `draft_reset` and
+  `result` frames without reordering or buffering. `/query/stream` is still a
+  pass-through proxy; the remaining R3 work is moving only the terminal-frame
+  persistence to Go.
+
+Closed:
+
+- **R1. INV-6 became cross-service, and the contract harness landed**:
+  `tests_contract/` (the S1-S23 matrix) plus the cross-service contract CI lane,
+  as step-5 PR A.
+- **R4. Auth split-brain resolved at step 4.** Go owns auth and sessions. Prod
+  has since moved off Supabase entirely, so the half-staged Supabase Auth
+  question is moot. The `Fly-Client-IP` / `TRUST_PROXY_HEADERS` login-spray
+  limiter semantics were ported with it. OIDC in Go is still not built, and SSO
+  remains an open prerequisite for exposing the app externally.
+- **R5. Dual-mode deleted.** See the step list above.
+- **R6. Deploy topology.** Go runs as a second process group in the same Fly
+  app, holding the public port, with uvicorn on an internal port. Vercel still
+  points at the same hostname, cookies and CORS unchanged. Alembic kept
+  `release_command` (C3).
+- **R7. D1.** This plan closed none of it, as predicted, and it did not have to:
+  D1 was closed on the provider seam instead. Generation, embeddings and the
+  database all sit inside the company's Databricks tenant as of 2026-08-11. See
+  `docs/DATABRICKS_ADOPTION_2026-07-28.md`.
+
+## LOC baseline (verified 2026-07-10, not re-measured since)
+
+src Python 19,521; tests Python 20,036; frontend TS+TSX 10,353. Expectation
+accepted at the time: Python LOC goes down, total handwritten LOC stays roughly
+flat to +10-25% while Go owns every table's writes, with a temporary +30-50%
+during the strangler. The metric is handwritten behavior-bearing LOC only.

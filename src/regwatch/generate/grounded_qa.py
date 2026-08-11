@@ -1,20 +1,28 @@
 """Grounded Q&A orchestration.
 
+Last updated: 2026-08-11.
+
 Flow:
   1. Resolve product/form and retrieve top-k passages when the turn is answerable.
   2. Every healthy Ask turn reaches one AI path: constrained query guidance for
      a pre-synthesis non-answer outcome, or grounded synthesis for evidence.
   3. The synthesis path sends only above-threshold evidence with the grounding
-     prompt and turn JSON Schema, in buffered json mode.
-  4. Hand a synthesis completion to ``turn_gate.admit_turn``, which parses it and admits
-     CLAIMS one at a time against the passages actually sent this turn.
-  5. Dispatch on the gate's verdict: render the admitted claims, decline, or --
-     when the payload did not parse -- serve the service-error copy.
+     prompt. Which prompt depends on two flags, read per turn:
+       v7 (prose + selective citation)  what prod serves today,
+       v6 (prose, cite or refuse)       prose flag on, selective flag off,
+       v5 (claims JSON + schema)        both off.
+  4. Hand the completion to the admission gate. Under v5 it goes straight to
+     ``turn_gate.admit_turn``; under v6/v7 ``prose_turn.parse`` first turns the
+     prose into claims and resolves each [n] marker to a passage POSITION, so
+     the gate still validates against the passages actually sent this turn.
+  5. Dispatch on the gate's verdict: render the admitted claims, decline, or,
+     when the payload did not parse, serve the service-error copy.
   6. Write an audit log row (INV-6) regardless of outcome and return.
 
-The synthesizer no longer writes prose or citation markers, so there is no
-per-sentence prose gate any more: every user-visible byte on an answer turn is
-either an admitted claim or renderer-authored (see generate/turn_gate.py).
+The model never writes a citation marker that reaches a user. Under v5 it
+declares (short_name, page) pairs; under v6/v7 it writes [n] and the parser
+resolves the number to a passage. Either way the renderer writes every
+canonical marker from a validated passage (see generate/turn_gate.py).
 
 Strangler Step 2: ``ask_core`` computes steps 1-5 and RETURNS what to persist
 (rag_contract dataclasses); the ``ask()`` shell owns step 6 and every other
@@ -165,13 +173,13 @@ class QAResult:
     # product but need direction (offer `clarify` options) rather than guess.
     status: QueryStatusLiteral = "answer"
     # The route reason behind the status (e.g. "multi_form", "no_product",
-    # "retrieval") — surfaced so callers/eval can tell WHY we clarified or
+    # "retrieval"). Surfaced so callers/eval can tell WHY we clarified or
     # refused, not just that we did. Mirrors route_json["reason"].
     reason: str | None = None
     interpretation: str | None = None
     clarify: list[ClarifyOption] = field(default_factory=list)
     # Sibling of `clarify` for the REFUSE family: when we decline (refused=true,
-    # citations=[]), `related` surfaces inert "related, not an answer" pointers —
+    # citations=[]), `related` surfaces inert "related, not an answer" pointers:
     # distinct product NAMES + their source link only, never passage text/score.
     # It NEVER changes the refusal contract (refused stays true, citations stay
     # []); it is purely additive context the UI renders as re-runnable pills.
@@ -336,8 +344,9 @@ _SCOPE_WARNING_PHRASES = (
 )
 # CLOSED set of "what does this system do" phrases. The bar is deliberately
 # high: every phrase must be unmistakably ABOUT the tool's scope, never about a
-# regulatory fact. False-negatives are SAFE — a missed meta phrase just falls
-# through to the grounded cite-or-refuse path. False-positives are the danger
+# regulatory fact. False-negatives are SAFE: a missed meta phrase just falls
+# through to the normal grounded path, where facts get cited. False-positives
+# are the danger
 # (a drug question routed to the uncited meta answer), so the gate also carries
 # a named-drug HARD VETO in ask(); these phrases stay tight as defense in depth.
 _META_PHRASES = (
@@ -391,7 +400,7 @@ def _is_scope_warning_request(question: str) -> bool:
 def _is_meta_request(question: str) -> bool:
     """True when the question is a closed-set "what does this system do" phrase.
 
-    Phrase-match ONLY — no LLM judges intent (an LLM mis-call would be the exact
+    Phrase-match ONLY. No LLM judges intent (an LLM mis-call would be the exact
     fabrication breach). A True here is necessary but NOT sufficient to route to
     the uncited meta path: ask() additionally vetoes any question that resolves
     to a named in-corpus drug, so "what BE study do you cover for atorvastatin?"
@@ -474,9 +483,9 @@ def _build_patch(
 def _apply_session_patch(patch: SessionPatch, *, audit_id: int) -> None:
     if patch.session_id and patch.turn_id:
         # Best-effort chat-history write: the audit row (INV-6) is already
-        # committed by this point, so a failure here — e.g. the degraded
-        # session_id=turn_id fallback has no chat_session row and the assistant
-        # FK insert fails on Postgres — must not 500 an already-audited turn.
+        # committed by this point, so a failure here must not 500 an
+        # already-audited turn. Example: the degraded session_id=turn_id
+        # fallback has no chat_session row, so the assistant FK insert fails.
         try:
             record_message(
                 session_id=patch.session_id,
@@ -603,8 +612,8 @@ def _interpretation_for(normalized_name: str) -> str:
 def build_options(normalized_name: str) -> list[ClarifyOption]:
     """Plain-language things we can actually answer for a resolved product.
 
-    These are QUESTION TEMPLATES that re-run retrieval — they do not read the
-    (possibly empty) BeRequirement table — so they work on the full catalog.
+    These are QUESTION TEMPLATES that re-run retrieval. They do not read the
+    (possibly empty) BeRequirement table, so they work on the full catalog.
     """
     nm = normalized_name
     flt = {"normalized_name": nm}
@@ -630,11 +639,11 @@ def build_options(normalized_name: str) -> list[ClarifyOption]:
 def _related_from_passages(passages: list[RetrievedPassage]) -> list[ClarifyOption]:
     """ "Related, not an answer" pointers from the sub-threshold passages in hand.
 
-    Surfaces DISTINCT product NAMES ONLY — never the passage text or score
+    Surfaces DISTINCT product NAMES ONLY, never the passage text or score
     (chunk text would read as quasi-evidence on a refusal). Deduped by product
     name, first occurrence wins (retrieval order = best match first). Each
     option re-runs as a name-scoped query, so it renders as an inert,
-    re-runnable pill — never a citation chip. Refused/citations are untouched.
+    re-runnable pill, never a citation chip. Refused/citations are untouched.
     Filters carry retrieval constraints only, so no display values (source_url)
     belong here; the API boundary would strip them from an echo anyway.
     """
@@ -673,8 +682,8 @@ def build_form_options(
 
     Each option re-runs the SAME question (so the user's intent survives the
     extra hop) but pins ``dosage_form`` + ``route`` alongside ``normalized_name``
-    so retrieval is constrained to a single form — the citation can no longer be
-    to the wrong-form PSG. Filters round-trip verbatim through the API/UI.
+    so retrieval is constrained to a single form, which is what stops a
+    wrong-form PSG being cited. Filters round-trip verbatim through the API/UI.
     """
     options: list[ClarifyOption] = []
     for dosage_form, route in combos:
@@ -710,7 +719,7 @@ def _combo_from_question(question: str, combos: list[tuple[str, str]]) -> tuple[
       * _FILLER is stripped from the question tokens first. Otherwise the 3-letter
         stopword "for" (which survives the len>2 cut in _form_match_tokens) collides
         with real catalog forms like "Tablet, For Suspension" / "For Solution" and
-        SILENTLY pins the wrong form — a wrong-form citation, the worst INV-1 outcome.
+        SILENTLY pins the wrong form: a wrong-form citation, the worst INV-1 outcome.
         "for"/"of"/"about" are already in _FILLER; no real form word is.
       * Ties on raw match count are broken toward the combo the question covers most
         COMPLETELY (fewest of the combo's own tokens left unmentioned), so a plain
@@ -743,9 +752,9 @@ def _combo_from_question(question: str, combos: list[tuple[str, str]]) -> tuple[
     )
     best_score, best_form_matched, best_combo = scored[0]
     if best_score[0] == 0:
-        return None  # the question named no form at all — clarify
+        return None  # the question named no form at all, so clarify
     if len(scored) > 1 and scored[1][0] == best_score:
-        return None  # two combos fit equally well (match AND completeness) — clarify
+        return None  # two combos fit equally well (match AND completeness)
     if best_form_matched == 0 and len(scored) > 1 and scored[1][0][0] == best_score[0]:
         # The win came ONLY from the completeness tie-break over shared route
         # tokens -- the question named no dosage form, so a pin here would be the
@@ -789,8 +798,9 @@ _NUMERIC_MARKER_RE = re.compile(r"\[\s*\d+\s*(?:,\s*\d+\s*)*\]")
 def _format_recent(turns: list[PriorTurn]) -> str:
     """Render prior turns as a compact, citation-free conversation context block.
 
-    Citations are stripped so the model cannot see — and therefore cannot parrot
-    — a stale ``[PSG, p.N]`` whose page may not be in THIS turn's passages, and
+    Citations are stripped so the model cannot see, and therefore cannot
+    parrot, a stale ``[PSG, p.N]`` whose page may not be in THIS turn's
+    passages, and
     each side is capped so the current passages stay dominant in the window.
     Reference-only, never evidence (INV-1): the system prompt forbids treating it
     as a source, and _validate_citations accepts only markers grounded in this
@@ -1095,7 +1105,7 @@ def _log_query_or_skip(**kwargs: Any) -> int:
 
 
 def _latency_ms(t0: float | None) -> int | None:
-    """Whole-millisecond turn wall time, or None — Go's ``latencyMs`` twin.
+    """Whole-millisecond turn wall time, or None. Go's ``latencyMs`` twin.
 
     ``perf_counter`` is monotonic, so only a missing start stamp yields None.
     None, never 0: a percentile over a column where "unknown" and "instant"
@@ -1121,7 +1131,7 @@ def _persist_turn(
 
     ``t0`` is the shell's turn clock. Latency is stamped HERE rather than
     supplied by the core because the core is stateless and cannot see transport
-    time — the same split Go's ``auditParams`` makes.
+    time. Go's ``auditParams`` makes the same split.
 
     ``on_token`` replays the RENDERED, gated answer AFTER the audit write
     succeeds, and only on an answer/summary turn. This is deliberately not where
@@ -1328,7 +1338,7 @@ def _scope_warning(
     nm = (filters or {}).get("normalized_name")
     if not nm:
         # Resolution hits the vector store, so it can raise/time out. A resolver
-        # failure must NOT break the refusal — fall back to the generic decline.
+        # failure must NOT break the refusal, so fall back to the generic decline.
         try:
             r = resolve_product(question)
             if r.status == "resolved" and r.normalized_name:
@@ -1386,13 +1396,13 @@ def _is_change_request(question: str) -> bool:
 
 
 def _meta_answer_text(question: str) -> str:
-    """Assemble a meta answer from VERIFIED SYSTEM STATE ONLY — never an LLM.
+    """Assemble a meta answer from VERIFIED SYSTEM STATE ONLY, never an LLM.
 
-    Three independent system facts, each read live and clearly labeled so the
-    two are NEVER conflated:
-      * corpus      — the askable PSGs (distinct normalized_name + doc count),
-      * watchlist   — the products Watch actively monitors (list_watchlist),
-      * what changed — the most recent durable alerts (latest_digest_records),
+    Three independent system facts, each read live and clearly labeled so they
+    are NEVER conflated:
+      * corpus: the askable PSGs (distinct normalized_name + doc count),
+      * watchlist: the products Watch actively monitors (list_watchlist),
+      * what changed: the most recent durable alerts (latest_digest_records),
         included only when the question is a "what changed / what's new" phrase.
     Carries no passage text and no citations; it cannot emit a regulatory claim.
     """
@@ -1411,7 +1421,7 @@ def _meta_answer_text(question: str) -> str:
     )
     corpus_line += f": {sample}{more}." if corpus_names else "."
 
-    # Watchlist: products Watch MONITORS — distinct from the askable corpus above.
+    # Watchlist: products Watch MONITORS. Distinct from the askable corpus above.
     watch_items = list_watchlist()
     watch_names = sorted(
         {
@@ -1438,9 +1448,9 @@ def _meta_answer_text(question: str) -> str:
         if records:
             # NON-PROSE system facts ONLY: product name + capture date. The
             # alert's `diff_summary`/`rationale` are LLM output or raw PSG passage
-            # text (see process/change_detector.summarize_change) — a regulatory
-            # claim, NOT a system fact — so they must NEVER reach this uncited
-            # meta answer (INV-1). Detail lives on the cited Watch feed.
+            # text (see process/change_detector.summarize_change). That is a
+            # regulatory claim, not a system fact, so it must NEVER reach this
+            # uncited meta answer (INV-1). Detail lives on the cited Watch feed.
             change_bits = []
             for r in records:
                 name = str(r.get("active_ingredient") or "").strip().title() or "a product"
@@ -1637,7 +1647,7 @@ def _resolve_and_carry_over(
             state.active_filters["normalized_name"] = resolution.normalized_name
             state.resolved_by_name = resolution.by_name
         elif resolution.status == "ambiguous":
-            # Several products match → ASK which, don't guess (cross-drug guard).
+            # Several products match, so ASK which; don't guess (cross-drug guard).
             return _decline(
                 _clarify,
                 reason="ambiguous_product",
@@ -1680,8 +1690,8 @@ def _resolve_and_carry_over(
                 state.resolved_by_name = False
             else:
                 # No product named. Offer a high-confidence "did you mean" for genuine
-                # typos, then a brand→generic lookup (Adderall → amphetamine); else
-                # refuse (e.g. romidepsin — absent, a deliberate must-refuse).
+                # typos, then a brand -> generic lookup (Adderall -> amphetamine);
+                # else refuse (e.g. romidepsin, absent, a deliberate must-refuse).
                 if suggestions:
                     return _decline(
                         _clarify,
@@ -1717,7 +1727,7 @@ def _resolve_and_carry_over(
 
     # Multi-form session carry-over: a follow-up that didn't itself pin a form
     # inherits the dosage_form/route the user already chose for THIS product (via
-    # a prior multi-form clarify). Done here — after resolution — so it also covers
+    # a prior multi-form clarify). Done here, after resolution, so it also covers
     # the single-product-corpus fallback, where the resolver re-pins the product
     # and the `none`-branch carry-over above never runs. Without it the next
     # "What about dissolution?" would re-trigger the multi-form clarify.
@@ -1761,14 +1771,14 @@ def _pre_retrieval_route(
             filters=state.active_filters,
         )
 
-    # Meta gate — "what does this system do" → answer from trusted system state,
-    # then one bounded guidance turn; no retrieval. This sits AFTER the
-    # scope-warning check and BEFORE entity
-    # resolution/retrieval ON PURPOSE. It is a HARD VETO: fire meta only when the
-    # phrase matches AND the question does NOT resolve to a named in-corpus drug.
-    # The ordering is load-bearing — a named-drug question that happens to carry a
-    # meta phrase ("what BE study do you cover for atorvastatin?") MUST skip meta
-    # and continue to the grounded cite-or-refuse path, never the uncited answer.
+    # Meta gate: "what does this system do" is answered from trusted system
+    # state, then one bounded guidance turn, and no retrieval. This sits AFTER
+    # the scope-warning check and BEFORE entity resolution/retrieval ON PURPOSE.
+    # It is a HARD VETO: fire meta only when the phrase matches AND the question
+    # does NOT resolve to a named in-corpus drug. The ordering is load-bearing.
+    # A named-drug question that happens to carry a meta phrase ("what BE study
+    # do you cover for atorvastatin?") MUST skip meta and continue to the normal
+    # grounded path, never the uncited meta answer.
     # A caller-pinned product (API/dossier filter) is likewise a resolved context,
     # so it also skips meta.
     if (
@@ -1788,9 +1798,9 @@ def _pre_retrieval_route(
     # settled for the remainder of the turn once resolution has run.
     resolved_name = state.active_filters.get("normalized_name")
 
-    # Bare drug name / no real question → guide with options instead of dumping a
-    # default BE answer. Fires however the product was pinned — named in the
-    # question, an API/UI filter, or session carry-over — so a no-topic input
+    # Bare drug name, or no real question: guide with options instead of dumping
+    # a default BE answer. Fires however the product was pinned, whether named in
+    # the question, set by an API/UI filter, or carried over, so a no-topic input
     # ("Hello" with an Active-ingredient filter) never reaches the synthesizer
     # and comes back as a cited greeting. This deterministic guard owns the
     # options and status before the bounded guidance planner sees the turn.
@@ -1820,7 +1830,7 @@ def _pre_retrieval_route(
     # Multi-form guard (pre-retrieval): the resolver pins only normalized_name, but
     # ~1 in 5 drugs span multiple dosage forms/routes (e.g. estradiol: transdermal
     # gel/spray vs. vaginal tablet/insert). Blending those into one LLM context lets
-    # a wrong-form PSG be cited as if it answered the question — and the blend is
+    # a wrong-form PSG be cited as if it answered the question, and the blend is
     # invisible because citation labels are appl-number-only. So once a product is
     # resolved (by name OR by an API/UI filter), enumerate its CURRENT documents'
     # distinct (dosage_form, route) combos, honoring any form/route already pinned;
@@ -1853,7 +1863,7 @@ def _pre_retrieval_route(
         if len(combos) > 1:
             # Before clarifying, honor a form the QUESTION already names: if exactly
             # one combo's dosage_form/route tokens uniquely match the question text,
-            # pin it and proceed — a form-explicit question shouldn't pay a clarify
+            # pin it and proceed. A form-explicit question shouldn't pay a clarify
             # hop (and on the full catalog it would otherwise flip answerable items
             # to clarify). Only a form-silent or ambiguous question clarifies.
             pinned = _combo_from_question(question, combos)
@@ -1946,8 +1956,8 @@ def _retrieve_and_group(
     # letting irrelevant evidence become citation cover. Gate on the
     # MAX cosine score, not passages[0]: the reranker (when enabled) reorders by
     # a cross-encoder score on a different scale, so passages[0].score may be a
-    # demoted-but-still-present passage's cosine value — the 0.30 threshold is
-    # calibrated against the cosine scale, so compare the true best cosine.
+    # demoted-but-still-present passage's cosine value. The 0.30 threshold sits
+    # on the cosine scale, so compare the true best cosine.
     if not passages or max(p.score for p in passages) < s.refusal_score_threshold:
         return _decline(
             _refuse,
@@ -1956,7 +1966,7 @@ def _retrieve_and_group(
             passages=passages,
             # Surface the sub-threshold matches as inert "related" pointers
             # (distinct product NAMES + source link only). refused/citations
-            # stay untouched — this never dresses the refusal as an answer.
+            # stay untouched, so this never dresses the refusal as an answer.
             related=_related_from_passages(passages),
         )
 
@@ -1969,9 +1979,9 @@ def _retrieve_and_group(
 
     # Post-retrieval guard (defense in depth): every passage must be the same
     # product. The filter guarantees this; this catches a caller that bypassed
-    # the resolver. Mixed products → CLARIFY which (offer the distinct products)
-    # rather than cite across them or bluntly refuse — the evidence is unclear,
-    # so ask. Zero citations either way (never fabricates).
+    # the resolver. Mixed products means CLARIFY which (offer the distinct
+    # products) rather than cite across them or bluntly refuse: the evidence is
+    # unclear, so ask. Zero citations either way (never fabricates).
     distinct_products = sorted({p.normalized_name for p in passages if p.normalized_name})
     if len(distinct_products) > 1:
         return _decline(
@@ -1990,7 +2000,7 @@ def _retrieve_and_group(
     # The pre-retrieval guard normally catches this; this backstops a caller that
     # bypassed it. Offer one option per combo, pinning form+route. Skipped when a
     # passage is missing form/route metadata (a half-known combo would split docs
-    # that are answerable together — e.g. same-combo beclomethasone docs).
+    # that are answerable together, e.g. same-combo beclomethasone docs).
     passage_combos = {
         (str(p.metadata.get("dosage_form")), str(p.metadata.get("route")))
         for p in passages
@@ -2042,7 +2052,7 @@ def _synthesize_and_admit(
 
     _emit(f"Reading {len(evidence_passages)} matching guidance passage(s)…")
     # Conversational memory: thread the last few ANSWERED turns so a follow-up
-    # ("what about the fed study?") resolves naturally. Context ONLY — citations
+    # ("what about the fed study?") resolves naturally. Context ONLY: citations
     # are stripped (_format_recent) and the system prompt forbids treating it as a
     # source; INV-1 still holds because _validate_citations accepts only THIS
     # turn's passages, so a fact that lived only in a prior turn cannot acquire a
@@ -2161,7 +2171,7 @@ def _synthesize_and_admit(
             )
     except Exception as exc:  # provider transport error (timeout / 429 / 5xx)
         # B2: a synthesizer failure must NOT return a naked 500 with no audit
-        # row — that would break INV-6 exactly when the system misbehaves. We
+        # row, which would break INV-6 exactly when the system misbehaves. We
         # degrade to a graceful, audited refusal (status="error") and surface
         # the cause to Sentry. The error never reaches the user verbatim.
         log.warning("qa_provider_error", error=str(exc), error_type=type(exc).__name__)
@@ -2178,7 +2188,7 @@ def _synthesize_and_admit(
         )
     answer = response.text.strip()
 
-    # INV-1/INV-2: a degenerate completion (empty after stripping — e.g. a
+    # INV-1/INV-2: a degenerate completion (empty after stripping, e.g. a
     # max_tokens truncation or a provider hiccup) is not an answer. Refuse
     # rather than fall through and emit a non-refused, zero-citation empty
     # "answer".
@@ -2260,9 +2270,10 @@ def _synthesize_and_admit(
                 prose_turn.gate_payload(parsed_prose, evidence_passages),
                 passages=evidence_passages,
                 question=question,
-                # Re-stamp correction is live (still refuse-or-cite: a corrected
-                # claim is a CITED claim); the uncited-downgrade path is not --
-                # serving gate-framed uncited prose is the v7 policy shift.
+                # v6 branch. Re-stamp correction is live (v6 is still cite or
+                # refuse, and a corrected claim is a CITED claim); the
+                # uncited-downgrade path is not. Serving uncited prose is v7's
+                # policy, and v7 gets there through selective=True above.
                 correct=True,
                 downgrade_uncited=False,
             )
@@ -2851,7 +2862,7 @@ def ask(
     on_draft: Callable[[str], None] | None = None,
     on_draft_reset: Callable[[], None] | None = None,
 ) -> QAResult:
-    """Grounded Q&A entry point — answer with citations, clarify, or refuse.
+    """Grounded Q&A entry point: answer with citations, clarify, or decline.
 
     The thin persistence SHELL around ``ask_core``: it owns the session ids and
     every write (user message, audit row, assistant message, filter carry-over)
@@ -2860,18 +2871,18 @@ def ask(
 
     ``bind_session=False`` keeps ``user_id`` as audit-only attribution (INV-6):
     the bookkeeping ChatSession stays unowned (user_id NULL) and so invisible
-    to /sessions — for internal callers like the dossier, whose synthetic Q&A
-    must not appear in the caller's chat history.
+    to /sessions. That is for internal callers like the dossier, whose synthetic
+    Q&A must not appear in the caller's chat history.
 
     ``on_progress`` (optional) receives short, cosmetic phase strings as the
     pipeline advances, for a live status ticker (POST /query/stream). It carries
-    NO answer text or citations — INV-1 lives entirely in the post-validation
-    answer path — and a failing sink can never break or slow the query.
+    NO answer text or citations (INV-1 lives entirely in the post-validation
+    answer path), and a failing sink can never break or slow the query.
 
     ``on_token`` (optional) receives the FINAL answer text in chunks, for a live
     "typing" effect. It fires only after the audit row is committed and only on
     an answer/summary turn, so every byte it emits is gated, rendered and
-    audited — a declined or retracted draft can never reach it. A missing sink
+    audited: a declined or retracted draft can never reach it. A missing sink
     changes nothing else about the turn.
 
     ``on_draft`` / ``on_draft_reset`` (optional) receive LIVE, un-gated,
@@ -2908,7 +2919,7 @@ def ask(
             filters=filters,
         )
     except SessionOwnershipError:
-        # Lost an ownership race after the API's pre-check — abort rather than
+        # Lost an ownership race after the API's pre-check. Abort rather than
         # write this caller's turns into another user's session (the API maps
         # this to its ownership 404).
         raise
