@@ -33,8 +33,9 @@ Verified against the live system on 2026-08-11.
 - Embeddings: **Databricks Qwen3** at `workspace.default.regwatch-embed`, 1024
   dimensions, active profile `ep_2e7368b354d911ea3a013c3125e276c2`. All 5,494
   chunks are embedded on that profile, so coverage is 100 percent.
-- OpenAI is the rollback path only. The provider still ships and is still
-  tested, but it serves nothing in production.
+- No normal analyst turn uses OpenAI. Its provider remains the tested interactive
+  LLM rollback; scheduled Watch has a separate scoped key for public-document
+  change summaries and extraction, never embeddings.
 
 Data residency is closed. Generation, embeddings, and the database all sit
 inside the company's Databricks tenant, so a normal analyst question never
@@ -469,12 +470,11 @@ cd regwatch/frontend && npm install && npm run dev
 - Not externally exposed yet. It needs an SSO plus TLS gateway.
 - Least-privilege database credentials.
 - A rehearsed restore drill.
-- The daily Watch cron does not have the embedding-profile secrets set
-  (`WATCH_ACTIVE_EMBEDDING_PROFILE`, `WATCH_QWEN_EMBEDDING_*`). If a real FDA
-  revision lands, that run would write chunk rows with no embedding on the live
-  profile, coverage would go incomplete, and the next Python boot would refuse
-  inside `assert_profile_ready_for_activation`. Setting those secrets is the
-  fix.
+- The daily Watch workflow is coded for Qwen/profile parity and fails before
+  crawl if any of its six profile settings is absent. Those repository secrets
+  are not provisioned yet; the owner must set them and verify one manual run.
+  Scheduled Qwen ingestion no longer refreshes the legacy OpenAI vector arm, so
+  backfill that arm before treating it as a current-corpus rollback.
 - The 0.30 refusal threshold was validated against the old OpenAI vector space.
   The space is now Qwen3 at 1024 dimensions, so that validation no longer
   carries over.

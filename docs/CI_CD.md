@@ -1,6 +1,6 @@
 # CI/CD Pipeline and Pre-Push Checklist
 
-Last updated: 2026-08-11
+Last updated: 2026-08-12
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) is the source of truth.
 This doc says what each job gates on and gives the local command that satisfies
@@ -313,13 +313,12 @@ only required secret is `FLY_API_TOKEN`. Net effect: every green `ci` run on
 
 - [`watch-daily.yml`](../.github/workflows/watch-daily.yml): the daily Watch run,
   cron `17 7 * * *` (07:17 UTC). It is the only production driver of the watch
-  pipeline. Open risk: `WATCH_ACTIVE_EMBEDDING_PROFILE` and the `WATCH_QWEN_*`
-  secrets are not set, and the workflow hardcodes `EMBEDDING_PROVIDER: openai`.
-  Production embeds on a named Qwen3 profile instead, so on the first day a real
-  FDA revision lands, this run would commit chunk rows with no embedding on the
-  live profile. Coverage goes incomplete and the next Python boot refuses inside
-  `assert_profile_ready_for_activation`. Setting those secrets is the owner's
-  action.
+  pipeline. It pins Qwen3 and requires the named profile plus base URL, token,
+  model, revision and dimension. A pre-crawl `init-db` gate validates the
+  registered profile; an `always()` post-ingest step asserts zero pending chunks.
+  Those six `WATCH_*` repository secrets were still absent on 2026-08-12, so the
+  workflow fails closed before crawl until the owner provisions them and
+  verifies a manual dispatch.
 - [`uptime-eval.yml`](../.github/workflows/uptime-eval.yml): curls
   `PROD_HEALTH_URL` every 30 minutes and asserts `"status": "ok"`. Skips cleanly
   while that secret is unset.

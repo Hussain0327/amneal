@@ -1,6 +1,6 @@
 # SECRETS_RUNBOOK - the GitHub Actions secret surface
 
-Last updated: 2026-08-11
+Last updated: 2026-08-12
 
 What this is: the inventory of every Actions secret the workflows read, what each
 one gates, and the exact commands to set them. Use it for rotation, a fork, or a
@@ -11,7 +11,7 @@ Five workflows read secrets: `ci.yml`, `deploy.yml`, `watch-daily.yml`,
 `uptime-eval.yml` and `databricks-eval.yml`. No workflow declares an
 `environment:`, so only **repository** secrets are in play.
 
-**Configured today (8 names, checked 2026-08-11):**
+**Configured today (8 names, checked 2026-08-12):**
 
 ```text
 DATABRICKS_LLM_BASE_URL   DATABRICKS_LLM_TOKEN   FLY_API_TOKEN
@@ -23,12 +23,12 @@ Everything else referenced in a workflow is unset. Section 1 says which, and wha
 that costs.
 
 Current state in one paragraph: CD is live, `deploy.yml` ships every green `ci`
-run on `main` to the Fly app (release v104, 2026-08-10). The daily watch is live
-and green. It failed every day from 2026-08-07 through the morning of 2026-08-10.
-The owner updated `WATCH_DATABASE_URL` at 18:19 UTC on 2026-08-10 and both runs
-since have passed, so if this cron starts failing again, the database this secret
-points at is the first thing to check (see 2.1 and 2.2). The live Databricks eval
-lane runs off `DATABRICKS_LLM_*` and `QWEN_EMBEDDING_*`.
+run on `main` to the Fly app (release v104, 2026-08-10). The owner fixed
+`WATCH_DATABASE_URL` on 2026-08-10 and the observed Watch runs since then were
+green. The workflow now intentionally fails before crawl until all six Watch
+profile secrets are provisioned; none existed when checked on 2026-08-12. The
+live Databricks eval lane runs off `DATABRICKS_LLM_*` and
+`QWEN_EMBEDDING_*`.
 
 > **This runbook provisions secrets. It does NOT print, echo, or commit any secret
 > VALUE.** Every command below sets a value from your local environment or a fresh
@@ -70,7 +70,7 @@ lane runs off `DATABRICKS_LLM_*` and `QWEN_EMBEDDING_*`.
 | Secret | What it gates | Value source | State |
 |---|---|---|---|
 | `WATCH_DATABASE_URL` | `watch-daily.yml` `env.DATABASE_URL`. Gates every real step: checkout, deps, `regwatch watch`, threshold sweep. Unset means the job skips cleanly. | `.env` key **`DATABASE_URL`**, the Lakebase DIRECT endpoint | **Set** |
-| `WATCH_OPENAI_API_KEY` | `watch-daily.yml`, mapped to the job's `OPENAI_API_KEY`. Ingest embeds every chunk through it, and the advisory sweep uses it. A preflight step hard-fails the run when it is empty. | `.env` key **`OPENAI_API_KEY`**, stored under the WATCH_ name | **Set** |
+| `WATCH_OPENAI_API_KEY` | `watch-daily.yml`, mapped to the job's `OPENAI_API_KEY`. Used for change summaries, optional BE extraction, and advisory-sweep synthesis; never for Watch embeddings. A preflight hard-fails when empty. | `.env` key **`OPENAI_API_KEY`**, stored under the WATCH_ name | **Set** |
 | `FLY_API_TOKEN` | `deploy.yml`, the whole release path: docker build, Trivy re-scan, `scripts/fly-deploy.sh`. Unset means the deploy step fails and nothing ships. | `fly tokens create deploy` (mint fresh, not in `.env`) | **Set** |
 | `DATABRICKS_LLM_BASE_URL` / `DATABRICKS_LLM_TOKEN` | `databricks-eval.yml`, the live eval lane called by `ci.yml` and dispatchable by hand. | the Databricks workspace serving host and a token | **Set** |
 | `QWEN_EMBEDDING_BASE_URL` / `QWEN_EMBEDDING_TOKEN` | `databricks-eval.yml`. Both must be present or the eval resolves to a non-Qwen arm. | the `regwatch-embed` serving endpoint and a token | **Set** |
@@ -79,8 +79,8 @@ lane runs off `DATABRICKS_LLM_*` and `QWEN_EMBEDDING_*`.
 | `SLACK_WEBHOOK_URL` | `watch-daily.yml`: failure alert AND the success digest. A quiet day posts nothing. Unset means both steps no-op. | Slack incoming webhook, no `.env` key | Not set |
 | `WATCH_HEALTHCHECK_URL` | `watch-daily.yml`: success ping plus `/fail` ping. This is the dead-man's-switch for a cron that never STARTS, which the in-job failure step cannot catch. | healthchecks.io-style ping URL | Not set |
 | `PROD_HEALTH_URL` | `uptime-eval.yml` probe. Unset means the 30-minute uptime probe skips. | `https://amneal.fly.dev/health` | Not set |
-| `WATCH_ACTIVE_EMBEDDING_PROFILE` | `watch-daily.yml` `env.ACTIVE_EMBEDDING_PROFILE`. Embedding-profile parity with prod. | prod's `ACTIVE_EMBEDDING_PROFILE` | **Not set, and this is the open hazard. See section 3.4.** |
-| `WATCH_QWEN_EMBEDDING_BASE_URL` / `_TOKEN` / `_MODEL` / `_REVISION` | `watch-daily.yml` profile provider credentials. A preflight hard-fails when the profile is set but BASE_URL/TOKEN/MODEL are missing. A post-ingest step asserts the active profile still covers every chunk. | mirror the Fly app's `QWEN_EMBEDDING_*` secrets | **Not set. Same hazard.** |
+| `WATCH_ACTIVE_EMBEDDING_PROFILE` | `watch-daily.yml` `env.ACTIVE_EMBEDDING_PROFILE`. Must be prod's named `ep_...` profile; empty and `legacy` fail before crawl. | prod's `ACTIVE_EMBEDDING_PROFILE` | **Not set; provisioning required. See section 3.4.** |
+| `WATCH_QWEN_EMBEDDING_BASE_URL` / `_TOKEN` / `_MODEL` / `_REVISION` / `_DIMENSION` | `watch-daily.yml` Qwen provider configuration. All five are mandatory. The registered-profile gate checks fingerprint/readiness before crawl; post-ingest coverage must remain 100%. | mirror the Fly app's `QWEN_EMBEDDING_*` values exactly | **Not set; provisioning required.** |
 
 Repository **variables** (not secrets, set under the same settings page) feed the
 eval lane: `DATABRICKS_LLM_MODEL`, `QWEN_EMBEDDING_MODEL`,
@@ -90,11 +90,13 @@ fingerprint and a per-run value would mint a new profile id every build.
 
 Other things worth knowing:
 
-- `watch-daily.yml` also hardcodes non-secret env: `REQUIRE_DATABASE_URL=true`,
-  `EMBEDDING_PROVIDER=openai`, `SENTRY_ENVIRONMENT=production`. Nothing to
-  provision. The `EMBEDDING_PROVIDER` line says it mirrors prod, which is no
-  longer true: prod embeds through the Qwen3 profile. Part of the same gap in
-  3.4.
+- `watch-daily.yml` also hardcodes non-secret env:
+  `REQUIRE_DATABASE_URL=true`, `EMBEDDING_PROVIDER=qwen3`,
+  `LLM_PROVIDER=openai`, and `SENTRY_ENVIRONMENT=production`.
+  `ACTIVE_EMBEDDING_PROFILE` chooses the named vector space; Qwen mode also
+  means scheduled revisions do not refresh the legacy OpenAI vector column.
+  The separate LLM setting keeps OpenAI limited to Watch change
+  summaries/extraction and the advisory sweep.
 - There is **no** `SENTRY_DSN` Actions secret. Sentry is a **Fly** secret on the
   app ([`DEPLOY.md`](DEPLOY.md) step 3.2). Do not add it here.
 - The Fly app carries a much larger secret surface: `LLM_PROVIDER`,
@@ -102,8 +104,10 @@ Other things worth knowing:
   `INTERNAL_RAG_TOKEN`, `METRICS_TOKEN`, `D1_ALLOWED_LLM_MODELS` and the three
   `REGWATCH_*` answer-policy flags. Those are set with `fly secrets set`, never
   in Actions. See [`DEPLOY.md`](DEPLOY.md) step 3.2.
-- "Not set" means the workflow no-ops cleanly, so forks stay green. But the three
-  alerting secrets are what make a silent failure visible. Provision
+- The optional alerting/uptime secrets no-op cleanly when unset. The six Watch
+  profile secrets are different: with `WATCH_DATABASE_URL` set, any missing
+  value fails preflight before crawl. The three alerting secrets are what make a
+  silent failure visible. Provision
   `SLACK_WEBHOOK_URL`, `WATCH_HEALTHCHECK_URL` and `PROD_HEALTH_URL` unless you
   have an equivalent external monitor.
 
@@ -234,48 +238,21 @@ gh secret set PROD_HEALTH_URL -R Hussain0327/amneal < /path/to/prod_health_url.t
 `uptime-eval.yml`'s "no invented URLs" contract intact and avoids hardcoding a
 host in the workflow.
 
-### 3.4 OPEN HAZARD: the watch cron has no embedding profile
+### 3.4 Required: provision the Watch embedding profile
 
-**This is the one item in this runbook that is currently wrong in production.**
+**The workflow code is fail-safe; the owner provisioning is still incomplete.**
 
 Prod promoted its Qwen3 embedding profile
-(`ep_2e7368b354d911ea3a013c3125e276c2`, 1024 dim) on 2026-07-30. The watch cron
-never followed. `WATCH_ACTIVE_EMBEDDING_PROFILE` and the four
-`WATCH_QWEN_EMBEDDING_*` secrets are still unset, so the profile block in
-`watch-daily.yml` is inert and the cron still embeds through
-`WATCH_OPENAI_API_KEY` into the old legacy vector space.
+(`ep_2e7368b354d911ea3a013c3125e276c2`, 1024 dim) on 2026-07-30. The workflow
+now pins Qwen3, rejects empty/legacy/malformed profile IDs, requires all six
+settings before checkout, validates profile fingerprint/coverage/index readiness
+before crawl, and checks zero pending chunks after every attempted Watch run.
+The base URL and token are presence-checked; validation does not spend an
+inference request to authenticate them on a no-change day.
 
-What that costs, in order:
-
-1. Today, on a no-change day, nothing. The failure only fires on the first day a
-   real FDA revision lands.
-2. On that day, ingest commits chunk rows carrying no embedding on the live
-   profile, because ingest builds its profile targets from its OWN process env.
-3. Profile coverage goes incomplete. The "verify embedding-profile coverage"
-   step cannot catch it either, because that step is also gated on
-   `ACTIVE_EMBEDDING_PROFILE` being set.
-4. The next Python boot refuses inside `assert_profile_ready_for_activation`.
-   It presents as edge 502s, weeks later, at an unrelated deploy: the Go proxy
-   skips init-db by design, so it keeps holding the public port and relaying into
-   a dead upstream.
-
-**Setting the five secrets is necessary but NOT sufficient.**
-`watch-daily.yml` maps `BASE_URL`, `TOKEN`, `MODEL` and `REVISION` but does
-**not** map a dimension, and its preflight does not require one.
-`config/settings.py` defaults `qwen_embedding_dimension` to 1536 while the
-endpoint is 1024. The profile fingerprint covers dimension, so
-`get_embedding_provider_for_profile` fails closed on the mismatch: the run fails
-loudly rather than writing wrong-space vectors. Good failure mode, still a failed
-run. Closing this properly means a workflow change that adds
-`QWEN_EMBEDDING_DIMENSION` to both the env block and the preflight required set,
-plus a `WATCH_QWEN_EMBEDDING_DIMENSION` secret. That change is tracked in
-[`ROADMAP.md`](ROADMAP.md).
-
-The workflow header was corrected on 2026-08-11 and now says the hazard is armed
-rather than inert, so read it as current.
-
-Setting the secrets is the owner's action. When the workflow gains its dimension
-mapping, all of them go in together:
+All six repository secrets were still unset on 2026-08-12. With
+`WATCH_DATABASE_URL` configured, that now causes an immediate preflight failure
+and no crawl. Set all six together:
 
 ```bash
 # The promoted profile id, matching prod's ACTIVE_EMBEDDING_PROFILE exactly:
@@ -291,12 +268,18 @@ grep -E '^QWEN_EMBEDDING_MODEL=' .env | head -1 | cut -d= -f2- \
   | gh secret set WATCH_QWEN_EMBEDDING_MODEL -R Hussain0327/amneal
 grep -E '^QWEN_EMBEDDING_REVISION=' .env | head -1 | cut -d= -f2- \
   | gh secret set WATCH_QWEN_EMBEDDING_REVISION -R Hussain0327/amneal
+grep -E '^QWEN_EMBEDDING_DIMENSION=' .env | head -1 | cut -d= -f2- \
+  | gh secret set WATCH_QWEN_EMBEDDING_DIMENSION -R Hussain0327/amneal
 ```
 
 Every value must match prod exactly. The profile fingerprint covers model,
 dimension, revision, instruction version, preprocessing version, dtype and
 normalization, so any drift fails closed rather than writing vectors from a
 different space into a profile that claims otherwise.
+
+Qwen mode intentionally stops refreshing the legacy `chunk.embedding` OpenAI
+column. Before an embedding rollback to `ACTIVE_EMBEDDING_PROFILE=legacy`,
+backfill that arm so it includes revisions ingested after this change.
 
 ### 3.5 Confirm what was set
 
@@ -328,9 +311,13 @@ What a good run looks like:
 - The **"skipped (secret not configured)"** step did NOT run. If you still see
   "WATCH_DATABASE_URL secret not set", the secret did not land (3.1).
 - **"preflight WATCH_OPENAI_API_KEY"** passed. It hard-fails on an empty key.
-- **"preflight embedding-profile credentials"** and **"verify embedding-profile
-  coverage"** passed. Both are currently inert because no profile is set (3.4).
-  Once the profile secrets exist they become real gates.
+- **"preflight Watch embedding profile"** passed, proving all six values were
+  present and the profile ID/dimension had valid shapes.
+- **"validate registered embedding profile"** passed before crawl. This checks
+  the immutable fingerprint and database readiness; it is not a live endpoint
+  request.
+- **"verify embedding-profile coverage"** passed after Watch and reported zero
+  pending chunks.
 - **"regwatch watch"** exited 0: crawl, match, ingest, durable alerts, digest. A
   stamp-mismatch refusal here means deploy the pending migration first (2.2). It
   is the guard working, not a secret problem.
@@ -396,9 +383,14 @@ gh secret delete OPENFDA_API_KEY -R Hussain0327/amneal
 
 ## 6. Expected steady state
 
+This state begins only after section 3.4's six secrets are provisioned and
+section 4's manual dispatch passes. Until then, the first run of this workflow
+revision is expected to fail safely at profile preflight.
+
 - `watch-daily` runs at 07:17 UTC, executes the real pipeline, writes durable
   alerts to the shared prod database, and pings healthchecks.io or Slack if those
-  are configured. Green since 2026-08-10 18:19 UTC.
+  are configured. The last observed pre-parity runs passed after the database
+  secret was corrected on 2026-08-10.
 - `deploy.yml` auto-deploys the exact CI-validated commit to the `amneal` Fly app
   on every green `main` push.
 - `databricks-eval` runs the live eval lane, serialized against the shared
@@ -406,8 +398,8 @@ gh secret delete OPENFDA_API_KEY -R Hussain0327/amneal
 - `uptime-eval` would probe prod `/health` every 30 minutes, but it is skipping:
   `PROD_HEALTH_URL` is unset.
 
-Open item carried from section 3.4: the watch cron still has no embedding
-profile.
+Open item carried from section 3.4: provision all six Watch profile secrets and
+record one successful manual dispatch before calling the operational fix done.
 
 Related: [`DEPLOY.md`](DEPLOY.md) for the full runbook and operations,
 [`CI_CD.md`](CI_CD.md) for the `ci` gate these secrets sit downstream of.

@@ -1,7 +1,7 @@
 # Databricks for regwatch: recommendation
 
-> **Update 2026-08-11: read this first.**
-> Last updated: 2026-08-11.
+> **Update 2026-08-12: read this first.**
+> Last updated: 2026-08-12.
 >
 > This is a dated decision record written on 2026-07-28. Most of the plan below
 > shipped. One of its central calls was later reversed. The reasoning is left
@@ -20,8 +20,9 @@
 >   `ACTIVE_EMBEDDING_PROFILE`, and only the `legacy` arm ever reads
 >   `EMBEDDING_PROVIDER`, so the `EMBEDDING_PROVIDER = "openai"` line in
 >   `fly.toml` is dead weight on the query path.
-> - **OpenAI is the rollback path only.** `OPENAI_API_KEY` is still set and the
->   provider still ships and is still tested. It serves nothing in production.
+> - **No normal analyst turn uses OpenAI.** The interactive provider still ships
+>   as a tested rollback. Scheduled Watch separately retains a scoped key for
+>   public-document change summaries and extraction, never embeddings.
 > - **The database moved to Databricks Lakebase.** Section 4 argued at length
 >   that Supabase stays and Lakebase is "NOT NOW". That call was reversed and
 >   the move happened.
@@ -45,14 +46,12 @@
 >   against an OpenAI baseline. Prod now runs a 120b model for every role and
 >   embeds on Databricks, so both sides of that comparison are wrong. Nobody has
 >   re-priced it.
-> - **Step 6 was never applied to the watch cron, and that is an open risk.**
->   `.github/workflows/watch-daily.yml` still has no `ACTIVE_EMBEDDING_PROFILE`
->   and no `QWEN_EMBEDDING_*` repo secrets, and still hardcodes
->   `EMBEDDING_PROVIDER: "openai"`. With the profile promoted in prod and absent
->   in the cron, the first day a real FDA revision lands the watch run commits
->   chunk rows with no embedding on the live profile. Coverage goes incomplete
->   and the next Python boot refuses inside `assert_profile_ready_for_activation`.
->   Setting those secrets is the owner's action.
+> - **Step 6 is coded; operator provisioning is pending.** The workflow now pins
+>   Qwen3, requires the active profile plus base URL, token, model, revision and
+>   dimension, validates the registered profile before crawling, and verifies
+>   complete coverage after an attempted ingest. None of those six repository
+>   secrets was set when checked on 2026-08-12, so it now fails closed before
+>   crawling until the owner provisions them and verifies a manual dispatch.
 
 ## 1. What Databricks can actually do for regwatch
 
@@ -190,7 +189,13 @@ The Q&A gold set is 12 items (6 ordinary must-answer, 5 must-refuse, 1 must-clar
 
 **Effort.** 3 days.
 
-### Step 6 - PR C: watch-cron parity (must land BEFORE step 7) *[NOT DONE, and step 7 went first. This is the open risk in the box at the top of the file.]*
+### Step 6 - PR C: watch-cron parity (must land BEFORE step 7) *[CODED 2026-08-12; OPERATOR PROVISIONING PENDING]*
+
+*[Outcome note: the code now uses Qwen/profile mode, requires all six settings,
+runs an explicit registered-profile gate, and retains the post-ingest coverage
+assertion. The historical problem statement and rollout reasoning below are
+preserved. Because step 7 went first, the six repository secrets and a successful
+manual dispatch remain required operator work.]*
 
 **Work.** .github/workflows/watch-daily.yml pins `EMBEDDING_PROVIDER: "openai"` (line 71, verified) and hard-fails preflight when `OPENAI_API_KEY` is empty (lines 97-101, verified: "Ingest embeds via OpenAI on change days"). It sets no `ACTIVE_EMBEDDING_PROFILE` and no `QWEN_EMBEDDING_*`. After promotion, a watch run that ingests a revised PSG builds profile targets from its **own** process env, so it commits chunk rows with no profile embedding. Coverage goes incomplete, and the next app boot refuses inside `assert_profile_ready_for_activation` during `regwatch init-db` (docker/entrypoint.sh:25-32), crash-looping every Python machine while the Go proxy - which deliberately skips init-db - keeps holding the public port and relaying into a dead upstream. The outage presents as edge 502/503, not as machines that fail to start.
 

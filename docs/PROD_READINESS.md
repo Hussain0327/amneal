@@ -1,7 +1,7 @@
 # Production readiness checklist
 
-Last updated: 2026-08-11, checked against `main` at `fa4f8bf`, the live app, the
-live database and the live secrets.
+Last updated: 2026-08-12 against `main` at `ae30489` and repository secret names.
+Live app, database and Fly values were last checked 2026-08-11.
 
 The system is deployed and running. The Fly app `amneal` (release v104) runs a Go
 edge (`go/internal/api`: auth, sessions, rate limiting, native `POST /query`) in
@@ -142,10 +142,11 @@ Two of these are now done. The numbers are kept because other docs cite them.
     covered since 2026-07-30.
   - the database: Lakebase, see #2.
   No analyst question leaves for a third-party model API on the normal path.
-  OpenAI still ships, is still tested and `OPENAI_API_KEY` is still set on Fly,
-  but it is the rollback path and serves nothing today. `EMBEDDING_PROVIDER` in
-  `fly.toml` is dead weight on the query path: only the `legacy` profile arm
-  reads it, and prod runs a real profile.
+  The interactive OpenAI provider still ships, is tested and remains a rollback,
+  but no normal analyst turn uses it. Scheduled Watch separately retains a
+  scoped OpenAI key for public-document change summaries and extraction, never
+  embeddings. `EMBEDDING_PROVIDER` in `fly.toml` is dead weight on the query
+  path: only the `legacy` profile arm reads it, and prod runs a real profile.
 - **Guardrails:** `D1_ALLOWED_LLM_MODELS` plus a runtime served-model check in
   `generate/llm.py` that rejects a reply served by a model outside the allowlist,
   and always rejects the partner-hosted families (`databricks-gpt*`,
@@ -154,10 +155,11 @@ Two of these are now done. The numbers are kept because other docs cite them.
   verified 2026-08-11, the variable is in neither the Fly secrets nor `fly.toml`
   and defaults to `false`, so the check is inert today. `D1_ALLOWED_LLM_MODELS`
   is already set, so arming it is a one-secret change.
-- **Residual:** the daily watch cron is not on the profile yet. It still sets
-  `EMBEDDING_PROVIDER: "openai"` and requires `WATCH_OPENAI_API_KEY`, so
-  change-day ingest embeddings still go through OpenAI and land off the live
-  profile. See #7 and [`ROADMAP.md`](ROADMAP.md).
+- **Residual:** serving is on the profile. Scheduled Watch is now coded to use
+  that same Qwen profile and fail closed, but its six repository secrets have
+  not been provisioned or verified in a manual run. `WATCH_OPENAI_API_KEY`
+  remains for change-summary/extraction LLM work, not embeddings. See #7 and
+  [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
@@ -194,13 +196,14 @@ Two of these are now done. The numbers are kept because other docs cite them.
   durable DB rows (`appl_nos_without_alert`).
 - **Recent history:** the cron failed every day from 2026-08-07 until the owner
   updated `WATCH_DATABASE_URL` on 2026-08-10. The manual run that evening and the
-  scheduled run on 2026-08-11 both passed. It is not currently broken.
-- **Gap, and this one has teeth:** the five `WATCH_*` embedding-profile secrets
-  are unset, and the workflow never maps `QWEN_EMBEDDING_DIMENSION` at all. The
-  first day a real FDA revision lands, the run commits chunk rows with no
-  embedding on the live profile, coverage stops being complete, and the next
-  Python boot refuses inside `assert_profile_ready_for_activation`. Full write-up
-  and the fix list are in [`ROADMAP.md`](ROADMAP.md). Also open: whether alert
+  scheduled run on 2026-08-11 both passed under the pre-parity workflow. The
+  first run of this workflow revision is expected to stop at profile preflight
+  until all six secrets are provisioned.
+- **Gap:** the workflow-side parity fix is complete: six required settings,
+  Qwen/profile mode, a registered-profile gate before crawl, and a zero-pending
+  coverage assertion after attempted ingest. All six repository secrets were
+  still absent on 2026-08-12, so the job fails before crawl until the owner
+  provisions them and verifies a manual dispatch. Also open: whether alert
   delivery moves beyond `/watch/latest` plus Slack into product-facing email or
   digests.
 - **Done when:** the cron runs on the same embedding profile as the app, run
@@ -310,8 +313,8 @@ Two of these are now done. The numbers are kept because other docs cite them.
 
 ## Suggested order
 
-1. **#7** get the watch cron onto the live embedding profile. It is the one open
-   item that can take prod down by itself.
+1. **#7** provision the six Watch profile secrets and verify a manual dispatch;
+   the workflow now fails closed until then.
 2. **#1** gateway, SSO and distributed rate limiting. That is the exposure
    boundary.
 3. **#2** restore drill and least-privilege credentials.

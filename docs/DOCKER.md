@@ -109,7 +109,8 @@ column deliberately carries no dimension typmod. The profile row's dimension is
 enforced by a database trigger plus a per-profile expression index, which is what
 lets several vector spaces coexist. Because prod runs a real profile,
 `EMBEDDING_PROVIDER=openai` in `fly.toml` no longer affects the query path.
-OpenAI is the rollback path, not the live setting.
+The legacy OpenAI arm is a rollback only after it is backfilled: scheduled
+Watch now writes Qwen/profile embeddings and no longer refreshes that column.
 
 To run the production-shaped vector space locally you need the Databricks
 embedding endpoint credentials, then three commands in the order
