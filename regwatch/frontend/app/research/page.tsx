@@ -5,7 +5,10 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 
 import { useAuth } from "@/components/AuthProvider";
 import { CurrentProductProvider } from "@/components/CurrentProductProvider";
+import { AssistantPanel } from "@/components/research/AssistantPanel";
+import { HistoryPanel } from "@/components/research/HistoryPanel";
 import { LegacyCenter } from "@/components/research/LegacyCenter";
+import { RecordPanel } from "@/components/research/RecordPanel";
 import { RecordRail } from "@/components/research/RecordRail";
 import { ResearchTopBar } from "@/components/research/ResearchTopBar";
 import { Sheet } from "@/components/research/Sheet";
@@ -25,6 +28,14 @@ import {
 } from "@/lib/api";
 import { citeKey } from "@/lib/citations";
 import { syncTextareaHeight } from "@/lib/composer";
+import {
+  countSources,
+  fileAuthorities,
+  fileHistory,
+  studioScope,
+  turnAnchorId,
+  turnKey,
+} from "@/lib/research-record";
 import {
   artifactTitle,
   authoritiesFrom,
@@ -60,12 +71,6 @@ import { assistantTurn, nonAnswerLabel, turnFromMessage, userTurn, type Turn } f
 // for a cancelled question, the in-thread Retry for a failed send, the
 // draft typewriter pacing, and the starter examples. They are missing, not
 // removed: the root route still serves the full Ask surface while this is staged.
-
-const PANEL_LABEL: Record<RecordPanelId, string> = {
-  record: "Record",
-  assistant: "Assistant",
-  history: "History",
-};
 
 function isAbortError(e: unknown): boolean {
   return e instanceof Error && e.name === "AbortError";
@@ -519,10 +524,13 @@ function ResearchShell(): React.ReactElement {
   // the margin must agree rather than resurrect grounding beside a refusal.
   const authorities = latestAuthorities(turns);
 
-  // Clicking a [n] stamp lights its authority. The margin IS this surface's
-  // evidence view -- there is no drawer here -- which is the whole thesis: in
-  // the Compliance Studio marks go ON the text because they are the analyst's
-  // own hand; here they go beside it because they are the record's.
+  // Clicking a [n] stamp lights its authority. The margin is the evidence view
+  // for what is ON THE SHEET, which is the whole thesis: in the Compliance
+  // Studio marks go ON the text because they are the analyst's own hand; here
+  // they go beside it because they are the record's. The record drawer behind
+  // the rail is a different question -- everything the artifact has ever stood
+  // on, rather than what this turn cites -- and the two are numbered by the
+  // same call so they cannot disagree about which source is [3].
   const onCite = useCallback(
     (c: Citation) => {
       const key = citeKey(c.short_name, c.page);
@@ -533,6 +541,37 @@ function ResearchShell(): React.ReactElement {
     },
     [authorities],
   );
+
+  // --- the record drawer ---------------------------------------------------
+
+  // Three views of one thing, all derived from the transcript and none of them
+  // fetched: what the artifact stands on, what was asked of it, and what
+  // product its own sources say it is about. Plain calls rather than useMemo --
+  // the React Compiler memoizes them at the site, and a hand-rolled memo here
+  // would be a second cache to keep honest.
+  const filings = fileAuthorities(turns);
+  const trail = fileHistory(turns);
+  const scope = studioScope(turns);
+
+  const closePanel = useCallback(() => setPanel(null), []);
+
+  /**
+   * Scroll the transcript to the turn a drawer row describes.
+   *
+   * Nothing to fall back to when the anchor is missing -- a rehydrated turn the
+   * transcript has since replaced -- so the click does nothing rather than
+   * scrolling somewhere arbitrary and claiming to have arrived.
+   *
+   * The reduced-motion check is read at click time, not cached: the setting can
+   * change while the studio is open, and a long transcript smooth-scrolled past
+   * twenty turns is exactly the motion the preference exists to stop.
+   */
+  const onJump = useCallback((key: string) => {
+    const target = document.getElementById(turnAnchorId(key));
+    if (target === null) return;
+    const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    target.scrollIntoView({ behavior: still ? "auto" : "smooth", block: "start" });
+  }, []);
 
   // --- the composer --------------------------------------------------------
 
@@ -643,20 +682,31 @@ function ResearchShell(): React.ReactElement {
       {turns.map((t, i) => {
         // A stable identity beats the index so a turn's child state tracks the
         // turn rather than its position: live turns carry meta.turn_id,
-        // rehydrated ones the server row id, and only then the index.
-        const key = `${t.role}-${t.meta?.turn_id ?? t.id ?? i}`;
-        return t.role === "user" ? (
-          <UserTurn key={key} content={t.content} live={t.live} />
-        ) : (
-          <AssistantTurn
-            key={key}
-            turn={t}
-            sessionId={sessionId}
-            onPick={onPick}
-            onCite={onCite}
-            busy={busy}
-            threshold={settings?.refusal_score_threshold ?? null}
-          />
+        // rehydrated ones the server row id, and only then the index. Read from
+        // lib/research-record rather than built here, because the record drawer
+        // points at these turns by the same string and two copies of it would
+        // drift by a hyphen and silently stop scrolling anywhere.
+        const key = turnKey(t, i);
+        return (
+          // The anchor the drawer scrolls to. A wrapper rather than an id on the
+          // turn itself: UserTurn and AssistantTurn are shared with the Ask
+          // surface, and this studio's navigation is no reason to widen their
+          // props. The wrapper is a plain block, so the column's flex gap and
+          // every .chat-row rule land exactly as before.
+          <div id={turnAnchorId(key)} key={key}>
+            {t.role === "user" ? (
+              <UserTurn content={t.content} live={t.live} />
+            ) : (
+              <AssistantTurn
+                turn={t}
+                sessionId={sessionId}
+                onPick={onPick}
+                onCite={onCite}
+                busy={busy}
+                threshold={settings?.refusal_score_threshold ?? null}
+              />
+            )}
+          </div>
         );
       })}
 
@@ -739,19 +789,27 @@ function ResearchShell(): React.ReactElement {
           )}
         </div>
 
-        {/* SEAM: the three record panels. The rail is real and its state is
-            held here; the panels themselves are not built. Rather than leave
-            three toggles that visibly do nothing, the open one states what it
-            will hold. Whoever builds them replaces this block and takes the
-            copy with it. */}
-        {panel && (
-          <aside className="rw-panel" aria-label={`${PANEL_LABEL[panel]} panel`}>
-            <p className="rw-eyebrow">{PANEL_LABEL[panel]}</p>
-            <p className="rw-panel__staged">
-              Not built yet. This studio ships with the thread sheet first; the record, the
-              assistant and the artifact history follow.
-            </p>
-          </aside>
+        {/* The record drawer. Three cards over one artifact: what it is made
+            of, a way to ask about it, and how it came to say what it says.
+            Closed by default -- the artifact is the work and the record is the
+            lookup -- and only one is ever mounted, because only one is ever
+            open and a hidden card holding an in-flight question is a request
+            nobody can see. */}
+        {panel === "record" && (
+          <RecordPanel kind={kind} filings={filings} onJump={onJump} onClose={closePanel} />
+        )}
+        {panel === "assistant" && (
+          <AssistantPanel
+            kindLabel={KIND_LABEL[kind]}
+            title={title}
+            scope={scope}
+            sourceCount={countSources(filings)}
+            questionCount={filings.length}
+            onClose={closePanel}
+          />
+        )}
+        {panel === "history" && (
+          <HistoryPanel kind={kind} entries={trail} onJump={onJump} onClose={closePanel} />
         )}
 
         <RecordRail
