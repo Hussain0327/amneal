@@ -113,6 +113,22 @@ describe("AuthProvider re-validation", () => {
 
     await waitFor(() => expect(screen.queryByTestId("who")).not.toBeInTheDocument());
     expect(screen.getByText("verifying session")).toBeInTheDocument();
+    // ?reason=expired, not a bare /login: this analyst HAD a session, so the
+    // sign-in form owes them an explanation for why they are looking at it.
+    await waitFor(() => expect(routerReplace).toHaveBeenCalledWith("/login?reason=expired"));
+  });
+
+  it("sends a never-authenticated visitor to a bare /login", async () => {
+    // No prior success: hadUser stays false, so nothing claims a session ended.
+    meMock.mockRejectedValueOnce(new ApiError(401, "authentication required"));
+
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    );
+
     await waitFor(() => expect(routerReplace).toHaveBeenCalledWith("/login"));
+    expect(routerReplace).not.toHaveBeenCalledWith("/login?reason=expired");
   });
 });
