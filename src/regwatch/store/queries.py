@@ -458,3 +458,48 @@ def load_route_shadow_rows(
         if isinstance(call, dict):
             out.append(call)
     return out
+
+
+@dataclass(frozen=True)
+class PriorCorpusScope:
+    """A session's most recent audited corpus scope, and the row that carries it."""
+
+    audit_id: int
+    compiled_scope: dict[str, Any]
+
+
+def load_prior_corpus_scope(session_id: str | None) -> PriorCorpusScope | None:
+    """The newest audited corpus scope in this session, or None.
+
+    The INHERIT branch of ``retrieve.scope.compile_scope`` may only inherit from
+    a scope that was actually audited, never from the route model proposing
+    inheritance. This supplies that audited record.
+
+    Best-effort, like the rest of session context: any DB error degrades to None
+    (logged), because a shadow observation must never be able to fail a turn.
+
+    Args:
+        session_id: The conversation to search. None returns None.
+
+    Returns:
+        The compiled_scope audit payload plus its query_log id, or None when the
+        session has no corpus-scoped turn yet.
+    """
+    if not session_id:
+        return None
+    try:
+        with session_scope() as s:
+            rows = s.execute(
+                sa_select(col(QueryLog.id), col(QueryLog.route_json))
+                .where(col(QueryLog.session_id) == session_id)
+                .order_by(col(QueryLog.ts).desc())
+                .limit(50)
+            ).all()
+    except Exception:
+        log.warning("load_prior_corpus_scope_failed", exc_info=True)
+        return None
+    for audit_id, route_json in rows:
+        compiled = ((route_json or {}).get("route_call") or {}).get("compiled_scope")
+        if isinstance(compiled, dict) and compiled.get("kind") == "corpus":
+            return PriorCorpusScope(audit_id=int(audit_id), compiled_scope=compiled)
+    return None

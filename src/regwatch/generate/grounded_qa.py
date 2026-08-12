@@ -129,7 +129,7 @@ from regwatch.retrieve.mode import RetrievalPlan, RetrievalScope, default_mode_f
 from regwatch.retrieve.reranker import rerank_passages
 from regwatch.retrieve.resolver import lookup_external_drug, resolve_product, suggest_products
 from regwatch.retrieve.retriever import RetrievedPassage, retrieve
-from regwatch.retrieve.scope import ProductScope
+from regwatch.retrieve.scope import ProductScope, compiled_scope_from_audit
 from regwatch.retrieve.scope_catalog import load_corpus_policy_snapshots
 from regwatch.store.db import session_scope
 from regwatch.store.models import PsgDocument
@@ -137,6 +137,7 @@ from regwatch.store.queries import (
     count_documents,
     current_dosage_form_routes,
     fetch_citation_recency,
+    load_prior_corpus_scope,
 )
 from regwatch.store.vector_store import distinct_metadata_values
 from regwatch.watch.alerts import latest_digest_records
@@ -2867,6 +2868,12 @@ def ask_core(
 
         if state.route_shadow is None or state.route_shadow_audit is not None:
             return
+        # The INHERIT leg is unobservable without an audited prior scope: every
+        # inherit hint would compile to CORPUS_INHERITANCE_UNAUDITED and the
+        # window would report that inheritance never works when it was never
+        # asked. Read independently of the authoritative memo, like the rest of
+        # the shadow's context, so a bad read cannot perturb this turn.
+        prior_corpus = load_prior_corpus_scope(session_id)
         finalized = finalize_route_observation(
             state.route_shadow,
             original_question=question,
@@ -2875,6 +2882,10 @@ def ask_core(
             ),
             session_product_filters=route_shadow_session_filters,
             load_corpus_policies=load_corpus_policy_snapshots,
+            prior_audited_scope=(
+                compiled_scope_from_audit(prior_corpus.compiled_scope) if prior_corpus else None
+            ),
+            prior_audit_id=prior_corpus.audit_id if prior_corpus else None,
             current_mode=_current_mode_for_shadow(
                 reason=reason,
                 response_mode=response_mode,
