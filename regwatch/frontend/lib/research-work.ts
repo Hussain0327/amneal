@@ -60,7 +60,8 @@ interface Unsettled {
   readonly ok: false;
 }
 
-type Outcome<T> = Settled<T> | Unsettled;
+/** A bounded wait's two outcomes. Read `ok` before reaching for `value`. */
+export type Outcome<T> = Settled<T> | Unsettled;
 
 /**
  * One kind's list, and how many exist behind it.
@@ -92,8 +93,8 @@ function atLeast(total: number, items: readonly WorkItem[]): number {
 }
 
 /**
- * Wait on one kind's fetch under the bound, and turn every way it can go wrong
- * into the same answer.
+ * Wait on one fetch under a bound, and turn every way it can go wrong into the
+ * same answer.
  *
  * Three things lose the race and all three mean "we have no list": the timer,
  * the caller's unmount signal, and a rejection from the call itself. Collapsing
@@ -103,15 +104,24 @@ function atLeast(total: number, items: readonly WorkItem[]): number {
  * Both the timer and the abort listener are released on every path, including
  * the successful one, so a rail that reloads on every visit does not accrete
  * listeners on a long-lived AbortSignal.
+ *
+ * Exported because the record drawer's corpus load owes the same guarantee on
+ * a different deadline (a catalog is one large body, not a short list). The
+ * bound is a parameter rather than a second copy of this function; nothing else
+ * about the contract changes.
  */
-async function bounded<T>(work: Promise<T>, signal: AbortSignal): Promise<Outcome<T>> {
+export async function bounded<T>(
+  work: Promise<T>,
+  signal: AbortSignal,
+  timeoutMs: number = KIND_TIMEOUT_MS,
+): Promise<Outcome<T>> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
   try {
     const value = await Promise.race([
       work,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("work list timed out")), KIND_TIMEOUT_MS);
+        timer = setTimeout(() => reject(new Error("work list timed out")), timeoutMs);
         onAbort = () => reject(new Error("work list abandoned"));
         if (signal.aborted) onAbort();
         else signal.addEventListener("abort", onAbort, { once: true });

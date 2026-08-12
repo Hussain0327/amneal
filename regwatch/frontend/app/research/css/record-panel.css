@@ -1,0 +1,823 @@
+/* ---------------------------------------------------------------------------
+   The record drawer: Record, Assistant, History
+   ----------------------------------------------------------------------------
+   The panel behind the record rail, and all three cards that open into it. One
+   file because they are one object -- three cards in one index, not three
+   tools -- and splitting them would be the first step toward three of them
+   drifting apart.
+
+   THE GUTTER IS THE WHOLE IDEA
+   ---------------------------
+   Every row in all three cards hangs off one fixed column on the left with a
+   hairline running down its edge. The gutter carries a stamp and nothing else:
+   a citation's [n] in the Record card, a filed time in History, a speaker in
+   the Assistant. The rule beside it is what makes a list of rows read as a
+   docket rather than as a stack of cards, and it is the reason switching cards
+   feels like turning pages instead of changing tools.
+
+   The stamps are not interchangeable, and the difference is load-bearing.
+   tokens.css licenses BOUNDED GOLD -- mono, hairline-edged, on a wash -- for
+   exactly one meaning, "grounded / sourced". So the citation stamp gets it and
+   nothing else in this file does: a filed time is not evidence, and a speaker
+   is not evidence, so both are set in quiet ink. If everything in the gutter
+   were gold the gutter would say nothing.
+
+   The drawer sits on --rw-chrome, the same ground as the two rails, because it
+   is chrome. Only the sheet is paper. The one thing here set in the document
+   face is a quoted snippet, because those words are the record's own -- the
+   same rule the authorities margin holds.
+
+   24rem is the Compliance Studio's --st-panel-w, so the panel that opens on the
+   right is literally the same object in both rooms.
+   ------------------------------------------------------------------------ */
+
+.rw-studio .rw-panel {
+  /* The gutter is exactly the width of the record rail beside it, which is a
+     structural rhyme and not a coincidence: the stamps line up with the icons
+     of the rail that opened the drawer.
+
+     It is also the narrowest it can be. 40px (the first attempt) held a
+     two-digit citation chip but clipped a "14:32" clock out through the left
+     edge of the panel -- five mono glyphs plus the rule gap do not fit. The
+     gutter has to clear the WIDEST stamp any of the three cards puts in it. */
+  --rw-gutter: var(--rw-act-w);
+
+  flex: none;
+  width: 24rem;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--rw-line);
+  background: var(--rw-chrome);
+}
+
+/* --- frame: head, context, scroller, foot --------------------------------- */
+
+/* 44px, the same height as the work rail's head, so the two sides of the
+   building line up across the desk between them. */
+.rw-studio .rw-panel__head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--rw-s2);
+  height: 44px;
+  padding: 0 var(--rw-s2) 0 var(--rw-s4);
+  border-bottom: 1px solid var(--rw-line);
+}
+
+.rw-studio .rw-panel__title {
+  flex: 1;
+  min-width: 0;
+  color: var(--rw-ink-2);
+}
+
+.rw-studio .rw-panel__close {
+  flex: none;
+}
+
+.rw-studio .rw-panel__context {
+  flex: none;
+  padding: var(--rw-s3) var(--rw-s4);
+  border-bottom: 1px solid var(--rw-line);
+}
+
+.rw-studio .rw-panel__ctx {
+  margin: 0;
+  font-size: var(--rw-t-small);
+  line-height: var(--rw-lh);
+  color: var(--rw-ink-faint);
+}
+
+.rw-studio .rw-panel__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--rw-s4) 0 var(--rw-s5);
+}
+
+/* The composer's dock. A hairline above it and the chrome ground below, so it
+   reads as attached to the frame rather than floating in the scroller. */
+.rw-studio .rw-panel__foot {
+  flex: none;
+  padding: var(--rw-s3) var(--rw-s4) var(--rw-s4);
+  border-top: 1px solid var(--rw-line);
+  background: var(--rw-chrome);
+}
+
+/* --- sections ------------------------------------------------------------- */
+
+.rw-studio .rw-sect + .rw-sect {
+  margin-top: var(--rw-s5);
+  padding-top: var(--rw-s4);
+  border-top: 1px solid var(--rw-line);
+}
+
+.rw-studio .rw-sect__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--rw-s2);
+  margin: 0 0 var(--rw-s3);
+  padding: 0 var(--rw-s4);
+}
+
+/* Composed by hand rather than by adding .rw-eyebrow to an <h3>: the eyebrow
+   primitive sets the whole element, and this one has a count beside it that
+   must not be tracked uppercase. */
+.rw-studio .rw-sect__label {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--rw-ink-faint);
+}
+
+.rw-studio .rw-sect__count {
+  flex: none;
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  color: var(--rw-ink-faint);
+}
+
+/* --- empty and note copy -------------------------------------------------- */
+
+.rw-studio .rw-empty {
+  padding: 0 var(--rw-s4);
+}
+
+.rw-studio .rw-empty__head {
+  margin: 0 0 var(--rw-s1);
+  font-size: var(--rw-t-base);
+  font-weight: 500;
+  line-height: var(--rw-lh);
+  color: var(--rw-ink-2);
+}
+
+.rw-studio .rw-empty__line,
+.rw-studio .rw-note {
+  margin: 0;
+  padding: 0 var(--rw-s4);
+  font-size: var(--rw-t-small);
+  line-height: var(--rw-lh);
+  color: var(--rw-ink-faint);
+}
+
+.rw-studio .rw-note {
+  margin-top: var(--rw-s3);
+}
+
+.rw-studio .rw-note--fail {
+  color: var(--rw-flag);
+}
+
+/* An inline control in a sentence, so it is underlined: colour alone would be
+   the only thing marking it as actionable (1.4.1). */
+.rw-studio .rw-note__retry {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* --- a filing: the question, then what it fetched ------------------------- */
+
+.rw-studio .rw-file + .rw-file {
+  margin-top: var(--rw-s4);
+}
+
+/* The question is the group's name AND the way back to the turn, so it is one
+   control rather than a heading with a link beside it. Full-bleed, because a
+   row that highlights to its own inset edge inside a 24rem column reads as a
+   card; this is a line in a ledger. */
+.rw-studio .rw-file__head {
+  display: grid;
+  grid-template-columns: var(--rw-gutter) 1fr;
+  align-items: baseline;
+  width: 100%;
+  padding: var(--rw-s1) var(--rw-s4) var(--rw-s1) 0;
+  border: 0;
+  background: transparent;
+  color: var(--rw-ink);
+  font-family: var(--rw-face-ui);
+  font-size: var(--rw-t-base);
+  line-height: var(--rw-lh);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--rw-dur) var(--rw-ease);
+}
+
+.rw-studio .rw-file__head:hover {
+  background: var(--rw-chrome-hover);
+}
+
+/* Inset, because the row is full-bleed: an outline at offset 0 on a row flush
+   with the drawer edge is clipped by the scroller on one side. */
+.rw-studio .rw-file__head:focus-visible,
+.rw-studio .rw-trail__row:focus-visible {
+  outline: 2px solid var(--rw-focus);
+  outline-offset: -2px;
+}
+
+.rw-studio .rw-file__at,
+.rw-studio .rw-trail__at {
+  justify-self: end;
+  padding-right: var(--rw-s3);
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  font-weight: 500;
+  color: var(--rw-ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.rw-studio .rw-file__q {
+  min-width: 0;
+  font-weight: 500;
+  color: var(--rw-ink);
+  /* Two lines, then stop. A pasted paragraph as a question is common and it
+     must not push the sources it fetched off the screen. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+/* THE RULE. Drawn on the list rather than on each row so it is one continuous
+   line down the filing, which is the thing that makes this read as a docket. */
+.rw-studio .rw-file__list,
+.rw-studio .rw-trail {
+  position: relative;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rw-studio .rw-file__list::before,
+.rw-studio .rw-trail::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--rw-gutter);
+  width: 1px;
+  background: var(--rw-line);
+  pointer-events: none;
+}
+
+/* The corpus results carry no question above them, so their rule starts at the
+   top of the section rather than under a head. */
+.rw-studio .rw-file__list--flush {
+  margin-top: var(--rw-s3);
+}
+
+/* --- one record row ------------------------------------------------------- */
+
+.rw-studio .rw-rec {
+  display: grid;
+  grid-template-columns: var(--rw-gutter) 1fr;
+  align-items: start;
+  padding: var(--rw-s2) var(--rw-s4) var(--rw-s2) 0;
+}
+
+.rw-studio .rw-rec + .rw-rec {
+  border-top: 1px solid var(--rw-line-soft);
+}
+
+/* BOUNDED GOLD: mono, on the wash, with a hairline edge. tokens.css licenses
+   this exact treatment for one meaning and one only -- grounded / sourced --
+   so it appears here and nowhere else in this file. --rw-gold is the ink-weight
+   gold (5.5:1); the saturated one would fail as text. */
+.rw-studio .rw-rec__n {
+  justify-self: end;
+  /* The SAME offset from the rule the clock stamp above it takes, so the two
+     kinds of stamp share one right edge down the gutter. They are different
+     objects -- one is a chip, one is bare text -- and nothing but a shared
+     edge would make them read as one column. */
+  margin-right: var(--rw-s3);
+  min-width: var(--rw-s5);
+  padding: 0 var(--rw-s1);
+  border: 1px solid var(--rw-gold);
+  border-radius: var(--rw-r-xs);
+  background: var(--rw-gold-wash);
+  color: var(--rw-gold);
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  font-weight: 500;
+  line-height: var(--rw-s4);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A corpus row is not evidence for anything -- nothing has cited it -- so its
+   stamp gives the gold back and states what the row is instead. */
+.rw-studio .rw-rec__n--quiet {
+  border-color: var(--rw-line);
+  background: transparent;
+  color: var(--rw-ink-faint);
+  letter-spacing: 0.06em;
+}
+
+.rw-studio .rw-rec__body {
+  min-width: 0;
+}
+
+.rw-studio .rw-rec__name {
+  margin: 0;
+  font-size: var(--rw-t-base);
+  font-weight: 500;
+  line-height: var(--rw-lh-tight);
+  color: var(--rw-ink);
+  overflow-wrap: anywhere;
+}
+
+.rw-studio .rw-rec__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--rw-s2);
+  flex-wrap: wrap;
+  margin: var(--rw-s1) 0 0;
+}
+
+.rw-studio .rw-rec__page {
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  color: var(--rw-ink-faint);
+}
+
+/* The record's own words, so the record's own face -- italic because they are
+   quoted. Same treatment as the authorities margin, deliberately: a snippet
+   should look the same wherever the record hands one over. */
+.rw-studio .rw-rec__snip {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+  margin: var(--rw-s2) 0 0;
+  font-family: var(--rw-face-doc);
+  font-size: var(--rw-t-micro);
+  font-style: italic;
+  line-height: var(--rw-lh);
+  color: var(--rw-ink-soft);
+}
+
+.rw-studio .rw-rec__out {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rw-s1);
+  margin-top: var(--rw-s2);
+  max-width: 100%;
+  font-size: var(--rw-t-small);
+  color: var(--rw-gold);
+  text-decoration: none;
+}
+
+.rw-studio .rw-rec__out span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rw-studio .rw-rec__out:hover span,
+.rw-studio .rw-rec__out:focus-visible span {
+  text-decoration: underline;
+}
+
+.rw-studio .rw-rec__out svg {
+  flex: none;
+}
+
+/* --- standing: FDA's own two words ---------------------------------------- */
+
+/* Not the severity vocabulary. A draft guidance is not a defect and must never
+   be marked in the flag hue; the difference between draft and final is
+   FILL, which reads in greyscale and carries no alarm. */
+.rw-studio .rw-standing {
+  flex: none;
+  padding: 0 var(--rw-s1);
+  border: 1px solid var(--rw-line-strong);
+  border-radius: var(--rw-r-xs);
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--rw-ink-2);
+}
+
+.rw-studio .rw-standing--final {
+  border-color: var(--rw-ink-2);
+  background: var(--rw-ink-2);
+  color: var(--rw-paper);
+}
+
+.rw-studio .rw-standing--draft {
+  background: transparent;
+}
+
+/* --- corpus search -------------------------------------------------------- */
+
+.rw-studio .rw-search {
+  display: flex;
+  align-items: center;
+  gap: var(--rw-s2);
+  padding: 0 var(--rw-s4);
+}
+
+.rw-studio .rw-search__field {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The native clear affordance draws its own dark cross over the parchment and
+   sits at a size nothing else here uses. The field is short enough to select
+   and delete. */
+.rw-studio .rw-search__field input::-webkit-search-cancel-button {
+  appearance: none;
+}
+
+.rw-studio .rw-search__go {
+  flex: none;
+}
+
+/* --- the trail ------------------------------------------------------------ */
+
+.rw-studio .rw-trail__row {
+  display: grid;
+  grid-template-columns: var(--rw-gutter) 1fr;
+  align-items: baseline;
+  width: 100%;
+  padding: var(--rw-s2) var(--rw-s4) var(--rw-s2) 0;
+  border: 0;
+  background: transparent;
+  color: var(--rw-ink);
+  font-family: var(--rw-face-ui);
+  font-size: var(--rw-t-base);
+  line-height: var(--rw-lh);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--rw-dur) var(--rw-ease);
+}
+
+.rw-studio .rw-trail__row:hover {
+  background: var(--rw-chrome-hover);
+}
+
+.rw-studio .rw-trail__item + .rw-trail__item .rw-trail__row {
+  border-top: 1px solid var(--rw-line-soft);
+}
+
+.rw-studio .rw-trail__body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--rw-s1);
+}
+
+.rw-studio .rw-trail__q {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  font-weight: 500;
+  line-height: var(--rw-lh-tight);
+}
+
+.rw-studio .rw-trail__marks {
+  display: flex;
+  align-items: center;
+  gap: var(--rw-s2);
+  flex-wrap: wrap;
+}
+
+.rw-studio .rw-trail__src {
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  color: var(--rw-ink-faint);
+}
+
+.rw-studio .rw-trail__src--none {
+  font-style: italic;
+}
+
+.rw-studio .rw-trail__prov {
+  display: flex;
+  gap: var(--rw-s2);
+  flex-wrap: wrap;
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  color: var(--rw-ink-faint);
+}
+
+.rw-studio .rw-trail__model {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rw-studio .rw-trail__flag {
+  font-size: var(--rw-t-micro);
+  line-height: var(--rw-lh);
+  color: var(--rw-flag);
+}
+
+/* --- outcome marks -------------------------------------------------------- */
+
+/* One problem hue, varied by fill and weight -- severity is never a rainbow
+   in this system. An answer is settled (clear), a decline is a defect in the
+   evidence (flag), a clarify is neither, and a conversational turn is neither
+   and makes no claim at all. All four carry their word, so none of them needs
+   the colour to be read. */
+.rw-studio .rw-out {
+  flex: none;
+  padding: 0 var(--rw-s1);
+  border: 1px solid transparent;
+  border-radius: var(--rw-r-xs);
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.rw-studio .rw-out--answer {
+  border-color: var(--rw-clear);
+  background: var(--rw-clear-wash);
+  color: var(--rw-clear);
+}
+
+.rw-studio .rw-out--declined {
+  border-color: var(--rw-flag);
+  background: var(--rw-flag-wash);
+  color: var(--rw-flag);
+}
+
+/* A clarify asked a question back. It is not settled and it is not a defect, so
+   it takes neither of the two hues above -- and NOT gold either, however
+   tempting: bounded gold is this system's word for "grounded", and wearing it
+   would say a turn that retrieved nothing was sourced. Soft ink is the
+   vocabulary's own word for a note, and clarify is separated from the register
+   below it by WEIGHT rather than by a third hue, which is the same rule that
+   keeps severity from becoming a rainbow. */
+.rw-studio .rw-out--clarify {
+  border-color: var(--rw-ink-2);
+  color: var(--rw-ink-2);
+}
+
+/* Conversational: makes no claim about the record at all, so it is the
+   quietest thing in the column. */
+.rw-studio .rw-out--plain {
+  border-color: var(--rw-line-strong);
+  color: var(--rw-ink-faint);
+}
+
+/* --- the assistant's manifest --------------------------------------------- */
+
+.rw-studio .rw-see {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rw-s2);
+}
+
+.rw-studio .rw-see__row {
+  display: grid;
+  grid-template-columns: 3.5rem 1fr;
+  align-items: baseline;
+  gap: var(--rw-s2);
+  margin: 0;
+}
+
+.rw-studio .rw-see__tag {
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--rw-ink-faint);
+}
+
+.rw-studio .rw-see__val {
+  min-width: 0;
+  font-size: var(--rw-t-small);
+  line-height: var(--rw-lh);
+  color: var(--rw-ink-2);
+  overflow-wrap: anywhere;
+}
+
+/* An absent fact is stated in the same place a present one would be, so the
+   manifest is never a shorter list when it knows less. */
+.rw-studio .rw-see__val--none {
+  font-style: italic;
+  color: var(--rw-ink-faint);
+}
+
+.rw-studio .rw-see__restore {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--rw-gold);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  text-align: left;
+}
+
+/* The scope chip. Bounded gold again, and legitimately: a scope IS the record
+   narrowed, so it is the one control in this file that carries the grounded
+   mark. */
+.rw-studio .rw-scope {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rw-s1);
+  max-width: 100%;
+  padding: 1px var(--rw-s1) 1px var(--rw-s2);
+  border: 1px solid var(--rw-gold);
+  border-radius: var(--rw-r-pill);
+  background: var(--rw-gold-wash);
+  color: var(--rw-gold);
+  font-size: var(--rw-t-small);
+}
+
+.rw-studio .rw-scope__off {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: var(--rw-s4);
+  height: var(--rw-s4);
+  padding: 0;
+  border: 0;
+  border-radius: var(--rw-r-pill);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.rw-studio .rw-scope__off:hover {
+  background: var(--rw-gold-fill);
+  color: var(--rw-ink);
+}
+
+/* --- the assistant's conversation ----------------------------------------- */
+
+.rw-studio .rw-chat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rw-s4);
+  padding: 0 var(--rw-s4);
+}
+
+.rw-studio .rw-chat__open {
+  margin: 0;
+  font-size: var(--rw-t-small);
+  line-height: var(--rw-lh);
+  color: var(--rw-ink-soft);
+}
+
+/* The artifact changed under the conversation. A rule with the fact set into
+   it, because it is a divider that happens to say something. */
+.rw-studio .rw-chat__ctx {
+  display: flex;
+  align-items: center;
+  gap: var(--rw-s2);
+  margin: 0;
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  letter-spacing: 0.06em;
+  color: var(--rw-ink-faint);
+}
+
+.rw-studio .rw-chat__ctx::before,
+.rw-studio .rw-chat__ctx::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--rw-line);
+}
+
+.rw-studio .rw-chat__turn {
+  display: grid;
+  grid-template-columns: var(--rw-gutter) 1fr;
+  align-items: start;
+}
+
+.rw-studio .rw-chat__who {
+  justify-self: end;
+  padding-right: var(--rw-s3);
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  color: var(--rw-ink-faint);
+}
+
+.rw-studio .rw-chat__body {
+  min-width: 0;
+}
+
+.rw-studio .rw-chat__text {
+  margin: 0;
+  font-size: var(--rw-t-base);
+  line-height: var(--rw-lh);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The question in the analyst's own hand, set against the ground so the two
+   voices are told apart without a bubble. */
+.rw-studio .rw-chat__turn--you .rw-chat__text {
+  padding: var(--rw-s2) var(--rw-s3);
+  border-radius: var(--rw-r-md);
+  background: var(--rw-raise);
+  border: 1px solid var(--rw-line);
+}
+
+.rw-studio .rw-chat__turn--rw .rw-out {
+  display: inline-block;
+  margin-bottom: var(--rw-s2);
+}
+
+.rw-studio .rw-chat__src {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rw-s1);
+  margin: var(--rw-s2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rw-studio .rw-chat__cite {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--rw-s1);
+  max-width: 100%;
+  padding: 0 var(--rw-s1);
+  border: 1px solid var(--rw-gold);
+  border-radius: var(--rw-r-xs);
+  background: var(--rw-gold-wash);
+  color: var(--rw-gold);
+  font-family: var(--rw-face-id);
+  font-size: var(--rw-t-micro);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rw-studio .rw-chat__pg {
+  opacity: 0.8;
+}
+
+.rw-studio .rw-chat__nosrc {
+  margin: var(--rw-s2) 0 0;
+  font-size: var(--rw-t-micro);
+  font-style: italic;
+  color: var(--rw-ink-faint);
+}
+
+.rw-studio .rw-ask {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rw-s2);
+}
+
+/* ---------------------------------------------------------------------------
+   Responsive
+   ---------------------------------------------------------------------------
+   Below the bench breakpoint the drawer stops being a fourth column and becomes
+   an overlay against the rail, which stays put -- the toggle that opened it has
+   to remain reachable to close it.
+   ------------------------------------------------------------------------ */
+
+@media (max-width: 960px) {
+  .rw-studio .rw-panel {
+    position: absolute;
+    right: var(--rw-act-w);
+    top: 0;
+    bottom: 0;
+    z-index: 30;
+    box-shadow: var(--rw-shadow-panel);
+    animation: rw-panel-in var(--rw-dur) var(--rw-ease);
+  }
+}
+
+/* Named for this block so the keyframe, which cannot be scoped under
+   .rw-studio, still says where it belongs. */
+@keyframes rw-panel-in {
+  from {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rw-studio .rw-panel {
+    animation: none;
+  }
+}

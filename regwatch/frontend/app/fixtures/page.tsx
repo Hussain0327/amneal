@@ -3,7 +3,17 @@
 import { notFound } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { AssistantPanel } from "@/components/research/AssistantPanel";
+import { HistoryPanel } from "@/components/research/HistoryPanel";
+import { RecordPanel } from "@/components/research/RecordPanel";
+import { fileAuthorities, fileHistory, studioScope } from "@/lib/research-record";
 import { StatusTicker } from "@/components/StatusTicker";
+
+// The Research Studio's own stylesheet, for the record-drawer fixture below.
+// Everything in it is scoped under .rw-shell / .rw-studio except the token
+// block, which only ADDS --rw-* custom properties, so the rest of this page is
+// unaffected by it.
+import "../research/research.css";
 import { AssistantTurn, ProvisionalDraft, UserTurn } from "@/components/Turns";
 import { DossierPlan } from "@/components/assemble/DossierPlan";
 import { DossierView } from "@/components/assemble/DossierView";
@@ -167,6 +177,53 @@ const SCOPE: Turn = {
   id: null,
   meta: { ...META, audit_id: 4221 },
 };
+
+// The transcript the F10 record drawer is derived from. One cited answer, one
+// refusal and one clarify, so all three outcome registers are on screen at once
+// and the drawer's INV-2 gate is exercised rather than described.
+function askTurn(content: string, createdAt: string): Turn {
+  return {
+    role: "user",
+    content,
+    status: null,
+    refused: false,
+    citations: [],
+    clarify: [],
+    related: [],
+    interpretation: null,
+    reason: null,
+    live: false,
+    meta: null,
+    createdAt,
+    id: null,
+    statusLog: [],
+    streamFellBack: false,
+    draftWithdrawn: null,
+  };
+}
+
+const DRAWER_TURNS: Turn[] = [
+  askTurn(
+    "What BE study design is recommended for albuterol sulfate inhalation aerosol?",
+    "2026-01-07T14:32:00Z",
+  ),
+  {
+    ...ANSWER,
+    citations: ANSWER.citations.map((c) => ({
+      ...c,
+      psg_type: "final",
+      product_name: "albuterol sulfate",
+      dosage_form: "Aerosol, Metered",
+    })),
+  },
+  askTurn(
+    "What BE study design is recommended for atorvastatin oral tablets?",
+    "2026-01-07T14:47:00Z",
+  ),
+  REFUSAL,
+  askTurn("propranolol", "2026-01-07T14:51:00Z"),
+  CLARIFY,
+];
 
 const TICKER_SCRIPT = [
   "Resolving product…",
@@ -411,6 +468,41 @@ export default function FixturesPage() {
         <Section no="F8" title="Assemble · the bound dossier">
           <div className="mt-4">
             <DossierView markdown={DOSSIER_MD} />
+          </div>
+        </Section>
+
+        <Section no="F10" title="Research Studio · the record drawer">
+          <p style={{ margin: "0 0 1rem", color: "var(--ink-soft)", fontSize: "0.9rem" }}>
+            The three cards behind the record rail, over one thread: what the artifact is made of,
+            a way to ask about it, and how it came to say what it says. Scroll sideways.
+          </p>
+          <div
+            className="rw-studio"
+            // flexDirection is explicit because .rw-studio is a column in the
+            // real shell; here the three cards are laid side by side to be
+            // compared, which is the only reason this fixture exists.
+            style={{ height: "40rem", display: "flex", flexDirection: "row", overflowX: "auto" }}
+          >
+            <RecordPanel
+              kind="thread"
+              filings={fileAuthorities(DRAWER_TURNS)}
+              onJump={noop}
+              onClose={noop}
+            />
+            <AssistantPanel
+              kindLabel="Threads"
+              title="Albuterol sulfate inhalation aerosol"
+              scope={studioScope(DRAWER_TURNS)}
+              sourceCount={2}
+              questionCount={1}
+              onClose={noop}
+            />
+            <HistoryPanel
+              kind="thread"
+              entries={fileHistory(DRAWER_TURNS)}
+              onJump={noop}
+              onClose={noop}
+            />
           </div>
         </Section>
 

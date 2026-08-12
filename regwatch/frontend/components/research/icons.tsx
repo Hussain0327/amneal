@@ -49,6 +49,21 @@ export function DossierIcon({ size = 14, className }: IconProps): React.ReactEle
   );
 }
 
+/** Leaving the building: a box with its top-right corner open and the arrow
+ * running out through the gap. Drawn small and used only beside a link that
+ * really does leave -- an out-arrow on an in-app link is a broken promise. */
+export function LinkOutIcon({ size = 11, className }: IconProps): React.ReactElement {
+  return svg(
+    size,
+    className,
+    <>
+      <path d="M12.5 9v3.25a.75.75 0 0 1-.75.75h-8a.75.75 0 0 1-.75-.75v-8a.75.75 0 0 1 .75-.75H7" />
+      <path d="M9.75 3.25h3v3" />
+      <path d="M12.75 3.25 7.5 8.5" />
+    </>,
+  );
+}
+
 /** Revision history: a clock whose face is open at the top left, with the arrow
  * running anticlockwise out of the gap. A closed clock reads as "scheduled". */
 export function HistoryIcon({ size = 15, className }: IconProps): React.ReactElement {

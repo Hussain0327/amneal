@@ -38,6 +38,7 @@
 @import "./css/work-rail.css";
 @import "./css/sheet.css";
 @import "./css/record-rail.css";
+@import "./css/record-panel.css";
 
 /* ---------------------------------------------------------------------------
    Shell
@@ -335,33 +336,8 @@
   line-height: var(--rw-lh);
 }
 
-/* ---------------------------------------------------------------------------
-   The record panel
-   ---------------------------------------------------------------------------
-   SEAM. The rail beside it is real; the three panels are not built. This is the
-   shell they will open into, and it currently holds one honest sentence saying
-   so -- three toggles that visibly do nothing would be worse. Whoever builds
-   the panels owns this block from then on.
-   ------------------------------------------------------------------------ */
-
-/* 24rem is the Compliance Studio's --st-panel-w, so the panel that opens on the
-   right is literally the same object in both rooms. It is not a token yet
-   because there is nothing behind it yet; promote it when there is. */
-.rw-panel {
-  flex: none;
-  width: 24rem;
-  max-width: 100%;
-  padding: var(--rw-s4);
-  border-left: 1px solid var(--rw-line);
-  background: var(--rw-chrome);
-  overflow-y: auto;
-}
-
-.rw-panel__staged {
-  margin: var(--rw-s3) 0 0;
-  color: var(--rw-ink-soft);
-  line-height: var(--rw-lh);
-}
+/* The record drawer that used to be staged here is real, and owns itself in
+   css/record-panel.css -- geometry, three cards and its own breakpoint. */
 
 /* ---------------------------------------------------------------------------
    Scrim: the narrow-viewport work rail, and nothing else
@@ -411,15 +387,6 @@
    ------------------------------------------------------------------------ */
 
 @media (max-width: 960px) {
-  .rw-panel {
-    position: absolute;
-    right: var(--rw-act-w);
-    top: 0;
-    bottom: 0;
-    z-index: 30;
-    box-shadow: var(--rw-shadow-panel);
-  }
-
   .rw-scrim {
     display: block;
     position: absolute;
