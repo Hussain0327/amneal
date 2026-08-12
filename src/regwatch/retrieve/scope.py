@@ -403,6 +403,114 @@ def _corpus_scope(
     )
 
 
+@dataclass(frozen=True)
+class CorpusIntentProbe:
+    """What the corpus branch would have concluded. Observation only.
+
+    ``compile_scope`` returns a deterministic product scope the moment one
+    resolves, even when the route model proposed CORPUS (see the precedence
+    rule below). That is the correct authorization -- a resolved product is
+    narrower and safer than a model's corpus guess -- but it means the audit row
+    records ``reason=resolved_product`` and says nothing about whether the
+    corpus intent was real. Every corpus-phrased question that also names a drug
+    therefore lands in the shadow window as a silent false negative.
+
+    This runs the corpus branch's PREDICATES without its authority, so the
+    window can show how often product precedence masked a genuine corpus
+    request. It never affects what compile_scope returns.
+    """
+
+    detected_policy: str | None
+    would_be_reason: str
+    #: True when compile_scope actually reached the corpus branch, so the probe
+    #: merely restates the decision rather than revealing a masked one.
+    reached_corpus_branch: bool
+
+    def as_audit_json(self) -> dict[str, object]:
+        return {
+            "detected_policy": self.detected_policy,
+            "would_be_reason": self.would_be_reason,
+            "reached_corpus_branch": self.reached_corpus_branch,
+        }
+
+
+def probe_corpus_intent(
+    decision: RouteDecision,
+    *,
+    original_question: str,
+    resolved_product_filters: Mapping[str, object] | None = None,
+) -> CorpusIntentProbe | None:
+    """Evaluate the corpus predicates for observation, authorizing nothing.
+
+    Mirrors ``compile_scope``'s corpus branch minus the catalog expansion, which
+    needs I/O and cannot change whether intent was explicit. Returns None when
+    the route did not propose a corpus scope, so the audit stays quiet on turns
+    this question does not apply to.
+    """
+    if decision.mode is TurnMode.CONVERSE or decision.scope_hint is not ScopeHint.CORPUS:
+        return None
+    detected = detect_explicit_corpus_policy(original_question)
+    if detected is None:
+        reason = ScopeReason.CORPUS_INTENT_NOT_EXPLICIT
+    elif detected is not decision.corpus_policy_hint:
+        reason = ScopeReason.CORPUS_POLICY_MISMATCH
+    else:
+        reason = ScopeReason.EXPLICIT_CORPUS
+    return CorpusIntentProbe(
+        detected_policy=detected.value if detected else None,
+        would_be_reason=reason.value,
+        reached_corpus_branch=_freeze_product_filters(resolved_product_filters) is None,
+    )
+
+
+def compiled_scope_from_audit(payload: Mapping[str, object] | None) -> CompiledScope | None:
+    """Rebuild a prior corpus scope from its audit JSON, or None if it is not one.
+
+    The INHERIT branch of ``compile_scope`` needs the previous turn's audited
+    corpus scope. Without it every INHERIT hint compiles to
+    CORPUS_INHERITANCE_UNAUDITED and the inheritance leg is unobservable -- the
+    window would report that inheritance never works, when in truth it was never
+    asked.
+
+    Strictly a reader: anything malformed, stale, or not a corpus scope returns
+    None, so a corrupt audit row degrades to "no prior scope" rather than
+    manufacturing an authorization out of stored text.
+    """
+    if not payload or str(payload.get("kind")) != CompiledScopeKind.CORPUS.value:
+        return None
+    try:
+        policy = CorpusPolicyHint(str(payload.get("corpus_policy")))
+        source = ScopeSource(str(payload.get("source")))
+        reason = ScopeReason(str(payload.get("reason")))
+        raw_documents = payload.get("corpus_documents")
+        if not isinstance(raw_documents, list) or not raw_documents:
+            return None
+        documents = tuple(
+            CorpusDocumentRef(
+                doc_id=int(document["doc_id"]),
+                version_id=int(document["version_id"]),
+                appl_no=str(document["appl_no"]),
+                short_name=str(document["short_name"]),
+            )
+            for document in raw_documents
+        )
+        inherited = payload.get("inherited_from_audit_id")
+        return CompiledScope(
+            kind=CompiledScopeKind.CORPUS,
+            source=source,
+            reason=reason,
+            corpus_policy=policy,
+            corpus_documents=tuple(sorted(documents)),
+            inherited_from_audit_id=(
+                int(inherited)
+                if isinstance(inherited, int) and not isinstance(inherited, bool)
+                else None
+            ),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def compile_scope(
     decision: RouteDecision,
     *,

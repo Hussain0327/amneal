@@ -34,6 +34,7 @@ from regwatch.retrieve.scope import (
     CompiledScope,
     CorpusPolicySnapshot,
     compile_scope,
+    probe_corpus_intent,
 )
 
 
@@ -212,6 +213,19 @@ def finalize_route_observation(
         "materiality_triggered": converse_trigger is not None,
         "trigger_token": converse_trigger,
     }
+
+    # Observation only, and recorded BEFORE compilation so it survives a
+    # compiler fault. Without this, a corpus-phrased question that also resolves
+    # a drug is authorized as a product scope (correctly) and leaves no trace
+    # that corpus intent was ever proposed, which would let the shadow window
+    # under-report exactly the false negatives Checkpoint 3 asks about.
+    probe = probe_corpus_intent(
+        decision,
+        original_question=original_question,
+        resolved_product_filters=resolved_product_filters,
+    )
+    if probe is not None:
+        audit["corpus_intent_probe"] = probe.as_audit_json()
 
     try:
         needs_corpus_catalog = decision.scope_hint is ScopeHint.CORPUS or (

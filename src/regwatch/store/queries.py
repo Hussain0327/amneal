@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
 
 from sqlalchemy import func, inspect
 from sqlalchemy import select as sa_select
@@ -16,7 +18,7 @@ from sqlmodel import col, select
 
 from regwatch.common.logging import get_logger
 from regwatch.store.db import get_engine, session_scope
-from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
+from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion, QueryLog
 
 log = get_logger(__name__)
 
@@ -424,3 +426,80 @@ def fetch_psg_pdf_source(doc_id: int) -> PsgPdfSource | None:
         pdf_path=row[3],
         content_hash=row[4],
     )
+
+
+def load_route_shadow_rows(
+    *, since: datetime | None = None, limit: int = 10_000
+) -> list[dict[str, Any]]:
+    """Every recorded ``route_json["route_call"]`` audit, newest first.
+
+    The read half of the Checkpoint 3 evidence bundle; the arithmetic lives in
+    ``regwatch.eval.route_shadow_report``. Rows without a route_call block are
+    skipped here rather than downstream, so a window that spans the flag being
+    switched on does not dilute the failure rate with route-off turns.
+
+    Args:
+        since: Only consider turns at or after this timestamp. None reads the
+            whole table, which is intended for a freshly-opened shadow window.
+        limit: Hard row cap, so an accidental unbounded read cannot pull the
+            whole audit log into memory.
+
+    Returns:
+        The route_call mappings, newest turn first.
+    """
+    with session_scope() as s:
+        stmt = sa_select(col(QueryLog.route_json)).order_by(col(QueryLog.ts).desc()).limit(limit)
+        if since is not None:
+            stmt = stmt.where(col(QueryLog.ts) >= since)
+        rows = s.execute(stmt).all()
+    out: list[dict[str, Any]] = []
+    for (route_json,) in rows:
+        call = (route_json or {}).get("route_call")
+        if isinstance(call, dict):
+            out.append(call)
+    return out
+
+
+@dataclass(frozen=True)
+class PriorCorpusScope:
+    """A session's most recent audited corpus scope, and the row that carries it."""
+
+    audit_id: int
+    compiled_scope: dict[str, Any]
+
+
+def load_prior_corpus_scope(session_id: str | None) -> PriorCorpusScope | None:
+    """The newest audited corpus scope in this session, or None.
+
+    The INHERIT branch of ``retrieve.scope.compile_scope`` may only inherit from
+    a scope that was actually audited, never from the route model proposing
+    inheritance. This supplies that audited record.
+
+    Best-effort, like the rest of session context: any DB error degrades to None
+    (logged), because a shadow observation must never be able to fail a turn.
+
+    Args:
+        session_id: The conversation to search. None returns None.
+
+    Returns:
+        The compiled_scope audit payload plus its query_log id, or None when the
+        session has no corpus-scoped turn yet.
+    """
+    if not session_id:
+        return None
+    try:
+        with session_scope() as s:
+            rows = s.execute(
+                sa_select(col(QueryLog.id), col(QueryLog.route_json))
+                .where(col(QueryLog.session_id) == session_id)
+                .order_by(col(QueryLog.ts).desc())
+                .limit(50)
+            ).all()
+    except Exception:
+        log.warning("load_prior_corpus_scope_failed", exc_info=True)
+        return None
+    for audit_id, route_json in rows:
+        compiled = ((route_json or {}).get("route_call") or {}).get("compiled_scope")
+        if isinstance(compiled, dict) and compiled.get("kind") == "corpus":
+            return PriorCorpusScope(audit_id=int(audit_id), compiled_scope=compiled)
+    return None
