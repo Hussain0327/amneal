@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
 
 from sqlalchemy import func, inspect
 from sqlalchemy import select as sa_select
@@ -16,7 +18,7 @@ from sqlmodel import col, select
 
 from regwatch.common.logging import get_logger
 from regwatch.store.db import get_engine, session_scope
-from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
+from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion, QueryLog
 
 log = get_logger(__name__)
 
@@ -424,3 +426,35 @@ def fetch_psg_pdf_source(doc_id: int) -> PsgPdfSource | None:
         pdf_path=row[3],
         content_hash=row[4],
     )
+
+
+def load_route_shadow_rows(
+    *, since: datetime | None = None, limit: int = 10_000
+) -> list[dict[str, Any]]:
+    """Every recorded ``route_json["route_call"]`` audit, newest first.
+
+    The read half of the Checkpoint 3 evidence bundle; the arithmetic lives in
+    ``regwatch.eval.route_shadow_report``. Rows without a route_call block are
+    skipped here rather than downstream, so a window that spans the flag being
+    switched on does not dilute the failure rate with route-off turns.
+
+    Args:
+        since: Only consider turns at or after this timestamp. None reads the
+            whole table, which is intended for a freshly-opened shadow window.
+        limit: Hard row cap, so an accidental unbounded read cannot pull the
+            whole audit log into memory.
+
+    Returns:
+        The route_call mappings, newest turn first.
+    """
+    with session_scope() as s:
+        stmt = sa_select(col(QueryLog.route_json)).order_by(col(QueryLog.ts).desc()).limit(limit)
+        if since is not None:
+            stmt = stmt.where(col(QueryLog.ts) >= since)
+        rows = s.execute(stmt).all()
+    out: list[dict[str, Any]] = []
+    for (route_json,) in rows:
+        call = (route_json or {}).get("route_call")
+        if isinstance(call, dict):
+            out.append(call)
+    return out

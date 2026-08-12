@@ -809,5 +809,74 @@ def cmd_watch(
     raise typer.Exit(code=0 if result.stats.errors == 0 else 2)
 
 
+@app.command("route-shadow-report")
+def cmd_route_shadow_report(
+    since_hours: int = typer.Option(
+        0, "--since-hours", help="Only read turns from the last N hours. 0 reads everything."
+    ),
+    limit: int = typer.Option(10_000, "--limit", help="Hard row cap on the audit read."),
+) -> None:
+    """Print the Checkpoint 3 evidence bundle from recorded route-shadow turns.
+
+    Read-only. Reports rather than decides: the promotion call is the owner's,
+    and this only supplies the arithmetic Checkpoint 3 asks for.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from regwatch.eval.route_shadow_report import summarize
+    from regwatch.store.queries import load_route_shadow_rows
+
+    # Deliberately no init_db(): this only reads an existing audit table, and
+    # bootstrapping would validate the embedding provider, which has nothing to
+    # do with reading route decisions and would refuse to run against a
+    # production DSN from a workstation with no embedding config.
+    since = datetime.now(UTC) - timedelta(hours=since_hours) if since_hours > 0 else None
+    report = summarize(load_route_shadow_rows(since=since, limit=limit))
+
+    if report.attempted == 0:
+        rprint(
+            {
+                "attempted": 0,
+                "note": (
+                    "No route call has been recorded. REGWATCH_ROUTE_CALL defaults to 'off'; "
+                    "set it to 'shadow' and let a window accumulate before reading this."
+                ),
+                "rows_scanned": report.total_rows,
+            }
+        )
+        raise typer.Exit(code=1)
+
+    rprint(
+        {
+            "rows_scanned": report.total_rows,
+            "attempted": report.attempted,
+            "outcomes": report.outcomes,
+            "failure_rate": report.failure_rate,
+            "parse_failure_rate": report.parse_failure_rate,
+            "meets_parse_ceiling": report.meets_parse_ceiling,
+            "latency_ms": {
+                "count": report.latency.count,
+                "p50": report.latency.p50,
+                "p95": report.latency.p95,
+                "max": report.latency.maximum,
+            },
+            "compile_statuses": report.compile_statuses,
+            "mode_matrix": {f"{a} -> {b}": n for (a, b), n in sorted(report.mode_matrix.items())},
+            "scope_matrix": {f"{a} -> {b}": n for (a, b), n in sorted(report.scope_matrix.items())},
+            "mode_agreement": report.mode_agreement,
+            "scope_agreement": report.scope_agreement,
+            "scope_reasons": report.scope_reasons,
+            "corpus_authorizations": report.corpus_authorizations,
+            "unsafe_corpus": [
+                {"reason": u.reason, "violation": u.violation, "documents": u.document_count}
+                for u in report.unsafe_corpus
+            ],
+            "configured_live": report.configured_live,
+            "route_cost_usd": round(report.total_cost_usd, 4),
+        }
+    )
+    raise typer.Exit(code=2 if report.has_unsafe_corpus else 0)
+
+
 if __name__ == "__main__":
     app()
