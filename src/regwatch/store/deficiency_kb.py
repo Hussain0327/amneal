@@ -17,8 +17,11 @@ backfill denominator and block activation.
 
 Expected scale is ~500 rows (the ANDA deficiency roadmap spreadsheet), so
 search is a plain exact scan -- no vector index, nothing to toggle. Rows are
-write-once via ``add_entries`` (the loader seam and the tests use it); there
-is no update path.
+write-once via ``add_entries``, the loader seam. That seam has no caller in
+``src/``, ``tests/`` or ``scripts/`` today, so the table stays empty and
+``precedents.py`` short-circuits at ``kb_count() == 0`` -- a tracked gap, not
+an oversight (docs/ROADMAP.md, "the precedent KB gap"). There is no update
+path.
 
 Registered in ``SQLModel.metadata`` (Core ``Table``, same as
 ``embedding_profiles``) so the fresh-Postgres ``create_all`` + stamp-head

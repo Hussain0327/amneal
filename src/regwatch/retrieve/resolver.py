@@ -404,7 +404,14 @@ def lookup_external_drug(
 def resolve_brand(question: str, *, products: set[str] | None = None, limit: int = 5) -> list[str]:
     """Map a brand name in the question to in-corpus generic ingredient(s).
 
-    Kept as the narrow, long-standing view over :func:`lookup_external_drug` so
-    existing callers and tests are unaffected.
+    The narrow view over :func:`lookup_external_drug`, with no in-repo caller.
+
+    Kept rather than deleted because the Ask outcomes/provenance design names it
+    (docs/superpowers/specs/2026-08-11-ask-outcomes-and-provenance-design.md).
+    Note that design's premise -- keep this wrapper "so no caller changes" -- is
+    already stale: `grounded_qa` was wired straight to
+    :func:`lookup_external_drug` (grounded_qa.py:1814) and reads
+    ``.corpus_products`` itself. Removing this needs that spec updated in the
+    same change, so it is out of scope for a behavior-preserving pass.
     """
     return lookup_external_drug(question, products=products, limit=limit).corpus_products

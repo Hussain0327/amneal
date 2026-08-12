@@ -223,14 +223,6 @@ def parse_products_text(text: str) -> list[dict[str, str]]:
     return _parse_tilde_text(text, PRODUCT_COLUMNS)
 
 
-def parse_patent_text(text: str) -> list[dict[str, str]]:
-    return _parse_tilde_text(text, PATENT_COLUMNS)
-
-
-def parse_exclusivity_text(text: str) -> list[dict[str, str]]:
-    return _parse_tilde_text(text, EXCLUSIVITY_COLUMNS)
-
-
 def _parse_tilde_text(text: str, columns: Mapping[str, str]) -> list[dict[str, str]]:
     # QUOTE_NONE: the FDA tilde format uses '~' purely as a column delimiter and
     # double-quotes appear as literal data (inch marks, abbreviations in

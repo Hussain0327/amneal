@@ -29,6 +29,7 @@ from tenacity import (
 
 from regwatch.common.logging import get_logger
 from regwatch.common.text_normalize import canonical_name, stripped_name
+from regwatch.sources._utils import openfda_params
 from regwatch.sources.drugsfda import DRUGSFDA_ENDPOINT as DRUGSFDA_URL
 from regwatch.store.db import session_scope
 from regwatch.store.models import Product
@@ -100,6 +101,11 @@ def fetch_drugsfda_for_company(
     Aliases default to Drugs@FDA-discovered variants (see
     `regwatch.watch.aliases.get_aliases`). The hardcoded env list is a
     fallback only.
+
+    Nothing calls this today. It is parked on purpose as the reuse foundation
+    for the planned multi-source watchlist rebuild; deleting it (with
+    `_fetch_page`, `_drugsfda_query` and `aliases.get_aliases`) needs a product
+    decision that drugsfda auto-import is abandoned.
     """
     from regwatch.watch.aliases import get_aliases
 
@@ -120,12 +126,7 @@ def fetch_drugsfda_for_company(
     out: dict[tuple[str, str | None, str | None, str], WatchlistEntry] = {}
     try:
         for alias in aliases:
-            params: dict[str, Any] = {
-                "search": _drugsfda_query(alias),
-                "limit": page_limit,
-            }
-            if s.openfda_api_key:
-                params["api_key"] = s.openfda_api_key
+            params = openfda_params(_drugsfda_query(alias), page_limit)
             for page in range(max_pages):
                 params["skip"] = page * page_limit
                 try:

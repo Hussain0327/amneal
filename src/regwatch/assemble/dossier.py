@@ -28,6 +28,7 @@ from regwatch.common.observability import capture_exception
 from regwatch.common.text_normalize import canonical_name, names_match, stripped_name
 from regwatch.generate.grounded_qa import ask
 from regwatch.generate.llm import current_model_name
+from regwatch.sources._utils import openfda_params
 from regwatch.store.db import session_scope
 from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
 
@@ -193,9 +194,7 @@ def _fetch_rld_label(active_ingredient: str, rld: str | None) -> dict[str, Any] 
         # Search by generic name (active ingredient). Escape the interpolated
         # value so a double-quote in the name can't break out of the phrase.
         query = f'openfda.generic_name:"{_escape_lucene_phrase(stripped_name(active_ingredient))}"'
-    params: dict[str, Any] = {"search": query, "limit": 1}
-    if s.openfda_api_key:
-        params["api_key"] = s.openfda_api_key
+    params = openfda_params(query, 1)
     try:
         with httpx.Client(timeout=s.http_timeout_s, headers={"User-Agent": s.user_agent}) as c:
             resp = c.get(OPENFDA_LABEL_URL, params=params)

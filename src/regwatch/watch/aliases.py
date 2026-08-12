@@ -24,6 +24,7 @@ from config.settings import get_settings
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from regwatch.common.logging import get_logger
+from regwatch.sources._utils import openfda_params
 from regwatch.sources.drugsfda import DRUGSFDA_ENDPOINT as DRUGSFDA_URL
 
 log = get_logger(__name__)
@@ -88,13 +89,8 @@ def discover_applicant_aliases(
         # use an upper-cased trailing wildcard, which openFDA accepts.
         page_limit = 100
         for page in range(50):
-            params: dict[str, Any] = {
-                "search": f"sponsor_name:{root_upper}*",
-                "limit": page_limit,
-                "skip": page * page_limit,
-            }
-            if s.openfda_api_key:
-                params["api_key"] = s.openfda_api_key
+            params = openfda_params(f"sponsor_name:{root_upper}*", page_limit)
+            params["skip"] = page * page_limit
             payload = _fetch(client, params)
             results = payload.get("results") or []
             if not results:
