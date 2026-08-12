@@ -1,6 +1,6 @@
 name: watch-daily
 
-# Last updated: 2026-08-11
+# Last updated: 2026-08-12
 #
 # Scheduled production run of `regwatch watch`: the daily FDA PSG crawl ->
 # watchlist match -> ingest -> alert -> digest pipeline. There is NO Dagster
@@ -26,16 +26,24 @@ name: watch-daily
 #                       database the API serves, or the run writes alerts
 #                       nobody reads. A stale value here is what broke this
 #                       cron from 2026-08-07 to 2026-08-10.
-#   WATCH_OPENAI_API_KEY  this job pins EMBEDDING_PROVIDER=openai and leaves
-#                       ACTIVE_EMBEDDING_PROFILE unset, so ingest still embeds
-#                       through OpenAI here even though PROD does not. That
-#                       makes the key REQUIRED. It is only exercised when a PSG
-#                       actually CHANGES (embed/extract), so a lost key would
-#                       stay green through every no-change day; the preflight
-#                       step below fails the run fast when the secret is empty.
-#                       Watch-scoped (NOT the repo-wide OPENAI_API_KEY) so
-#                       ci.yml's live-eval gate stays skipped. See the env
-#                       block below, which is where the real hazard lives.
+#   WATCH_OPENAI_API_KEY  required for change-summary generation, optional BE
+#                       extraction, and the advisory threshold sweep's
+#                       synthesizer. It is NOT used for embeddings: those run
+#                       through the named Qwen3 profile below. Watch-scoped (NOT
+#                       the repo-wide OPENAI_API_KEY) so ci.yml's live-eval gate
+#                       stays skipped.
+#   WATCH_ACTIVE_EMBEDDING_PROFILE
+#                       the exact named profile prod serves (never `legacy`).
+#   WATCH_QWEN_EMBEDDING_BASE_URL
+#   WATCH_QWEN_EMBEDDING_TOKEN
+#   WATCH_QWEN_EMBEDDING_MODEL
+#   WATCH_QWEN_EMBEDDING_REVISION
+#   WATCH_QWEN_EMBEDDING_DIMENSION
+#                       mirror prod's QWEN_EMBEDDING_* values exactly. The
+#                       preflight requires all six settings. `regwatch init-db`
+#                       then compares the named profile's fingerprint fields
+#                       (model, revision and dimension included) with its
+#                       immutable database registration before the crawl starts.
 #   OPENFDA_API_KEY     OPTIONAL: only raises the openFDA rate limit; the run
 #                       works without it. Leave unset to omit.
 # While WATCH_DATABASE_URL is unset, the job skips cleanly (no failures).
@@ -76,49 +84,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      # The Postgres-mode boot guard. EMBEDDING_PROVIDER below is this job's
-      # OWN setting, NOT a mirror of prod: prod no longer embeds through
-      # OpenAI (see the ARMED HAZARD note under it).
+      # The Postgres-mode boot guard. Watch embeds new FDA chunks in the same
+      # named Qwen3 profile the serving path reads; it does not maintain the
+      # unversioned OpenAI rollback column.
       DATABASE_URL: ${{ secrets.WATCH_DATABASE_URL }}
       REQUIRE_DATABASE_URL: "true"
-      EMBEDDING_PROVIDER: "openai"
-      # ARMED HAZARD, open as of 2026-08-11. Read this before touching the job.
-      #
-      # These five secrets are what give this job embedding-profile parity with
-      # prod, and NONE of them is set. Prod, meanwhile, promoted a real profile
-      # on 2026-07-30 and now serves a Databricks Qwen3 profile at 1024
-      # dimensions. So the two sides disagree today, and the failure below is
-      # live, not hypothetical.
-      #
-      # Ingest builds its profile shadow/backfill targets from ITS OWN process
-      # env. With the prod profile absent here, the first run on a day a real
-      # FDA revision lands commits chunk rows carrying no profile embedding.
-      # Coverage goes incomplete, and the next app boot refuses inside
-      # assert_profile_ready_for_activation (docker/entrypoint.sh runs
-      # init-db), crash-looping every Python machine while the Go proxy --
-      # which skips init-db by design -- keeps holding the public port and
-      # relaying into a dead upstream. It presents as edge 502s, not as
-      # machines that fail to start, and it fires weeks after the promotion, at
-      # whatever deploy happens to come next.
-      #
-      # The fix is the owner's: set the five WATCH_* secrets to the live prod
-      # values. Until then this job is one FDA revision away from breaking a
-      # future deploy.
-      #
-      # Any drift from the prod values is ALSO fatal, and deliberately so: the
-      # profile fingerprint is immutable and covers model, dimension, revision,
-      # instruction version, preprocessing version, dtype and normalization, so
-      # a mismatched value here fails closed rather than writing vectors from a
-      # different space into a profile that claims otherwise.
+      EMBEDDING_PROVIDER: "qwen3"
+      # Watch change summaries/extraction still use the OpenAI LLM. Keep that
+      # provider boundary explicit while embeddings use Qwen below.
+      LLM_PROVIDER: "openai"
+      # All six values are required when DATABASE_URL is configured. Missing
+      # provisioning fails before checkout/crawl. Registered fingerprint drift
+      # fails in the validation step before any ingest write.
       ACTIVE_EMBEDDING_PROFILE: ${{ secrets.WATCH_ACTIVE_EMBEDDING_PROFILE }}
       QWEN_EMBEDDING_BASE_URL: ${{ secrets.WATCH_QWEN_EMBEDDING_BASE_URL }}
       QWEN_EMBEDDING_TOKEN: ${{ secrets.WATCH_QWEN_EMBEDDING_TOKEN }}
       QWEN_EMBEDDING_MODEL: ${{ secrets.WATCH_QWEN_EMBEDDING_MODEL }}
       QWEN_EMBEDDING_REVISION: ${{ secrets.WATCH_QWEN_EMBEDDING_REVISION }}
+      QWEN_EMBEDDING_DIMENSION: ${{ secrets.WATCH_QWEN_EMBEDDING_DIMENSION }}
       # Watch-scoped OpenAI key, NOT the repo-wide OPENAI_API_KEY. ci.yml gates
-      # provider-backed seed/eval on the separately configured repo-wide name;
-      # without it that CI lane stays skipped. Its current pass/fail is
-      # unverified; see docs/EVAL_STATUS.md.
+      # provider-backed seed/eval on the separately configured repo-wide name.
+      # This key serves change summaries, extraction and the advisory sweep,
+      # never embeddings.
       OPENAI_API_KEY: ${{ secrets.WATCH_OPENAI_API_KEY }}
       OPENFDA_API_KEY: ${{ secrets.OPENFDA_API_KEY }}
       # entrypoint.sh runs init-db on boot; here we run alembic + watch directly,
@@ -135,33 +122,42 @@ jobs:
           echo "WATCH_DATABASE_URL secret not set - skipping the daily watch run."
           echo "Set it to the prod Databricks Lakebase DIRECT endpoint URL with ?sslmode=require (never a -pooler host)."
 
-      # Fail fast on a missing/empty OpenAI key. The key is only exercised at
-      # embed/extract time, i.e. on the day a PSG actually changes: without this
-      # check a revoked or mis-rotated key stays green through every no-change
-      # day and first errors on the one run that mattered. (The advisory sweep
-      # also uses the key, but it is continue-on-error and cannot surface the loss.)
+      # Fail fast on a missing/empty OpenAI key. Change summaries and BE
+      # extraction only exercise it on change days (the advisory sweep uses it
+      # later), so a lost key could otherwise stay green through quiet crawls.
       - name: preflight WATCH_OPENAI_API_KEY
         if: env.DATABASE_URL != ''
         run: |
           if [ -z "${OPENAI_API_KEY}" ]; then
-            echo "::error::WATCH_OPENAI_API_KEY secret is unset/empty. Ingest embeds via OpenAI on change days, so the run would first fail on the day a real FDA change lands. Restore the secret."
+            echo "::error::WATCH_OPENAI_API_KEY secret is unset/empty. Change summaries and extraction use OpenAI when an FDA change lands. Restore the secret."
             exit 1
           fi
 
-      # Same fail-fast reasoning as the OpenAI key, for the profile credentials:
-      # once a profile is active, ingest must write ITS vectors too, and a
-      # missing endpoint/token would first surface on the one run that mattered
-      # -- as an incomplete profile that then refuses the next app boot.
-      # Skipped entirely while ACTIVE_EMBEDDING_PROFILE is unset or legacy.
-      - name: preflight embedding-profile credentials
-        if: env.DATABASE_URL != '' && env.ACTIVE_EMBEDDING_PROFILE != '' && env.ACTIVE_EMBEDDING_PROFILE != 'legacy'
+      # A configured production DB must never run Watch without the exact
+      # named profile and every geometry-defining Qwen value. This presence and
+      # shape check runs before checkout; the DB-backed init-db gate below then
+      # compares the values with the registered immutable profile.
+      - name: preflight Watch embedding profile
+        if: env.DATABASE_URL != ''
         run: |
+          is_blank() { [[ -z "$1" || "$1" =~ ^[[:space:]]+$ ]]; }
           missing=""
-          [ -z "${QWEN_EMBEDDING_BASE_URL}" ] && missing="${missing} WATCH_QWEN_EMBEDDING_BASE_URL"
-          [ -z "${QWEN_EMBEDDING_TOKEN}" ] && missing="${missing} WATCH_QWEN_EMBEDDING_TOKEN"
-          [ -z "${QWEN_EMBEDDING_MODEL}" ] && missing="${missing} WATCH_QWEN_EMBEDDING_MODEL"
+          is_blank "${ACTIVE_EMBEDDING_PROFILE}" && missing="${missing} WATCH_ACTIVE_EMBEDDING_PROFILE"
+          is_blank "${QWEN_EMBEDDING_BASE_URL}" && missing="${missing} WATCH_QWEN_EMBEDDING_BASE_URL"
+          is_blank "${QWEN_EMBEDDING_TOKEN}" && missing="${missing} WATCH_QWEN_EMBEDDING_TOKEN"
+          is_blank "${QWEN_EMBEDDING_MODEL}" && missing="${missing} WATCH_QWEN_EMBEDDING_MODEL"
+          is_blank "${QWEN_EMBEDDING_REVISION}" && missing="${missing} WATCH_QWEN_EMBEDDING_REVISION"
+          is_blank "${QWEN_EMBEDDING_DIMENSION}" && missing="${missing} WATCH_QWEN_EMBEDDING_DIMENSION"
           if [ -n "${missing}" ]; then
-            echo "::error::ACTIVE_EMBEDDING_PROFILE is set but these secrets are unset/empty:${missing}. A change-day run would commit chunks with no profile embedding, leaving coverage incomplete and refusing the next app boot."
+            echo "::error::Watch embedding-profile secrets are unset/empty:${missing}. No crawl or ingest was attempted."
+            exit 1
+          fi
+          if [[ ! "${ACTIVE_EMBEDDING_PROFILE}" =~ ^ep_[0-9a-f]{32}$ ]]; then
+            echo "::error::WATCH_ACTIVE_EMBEDDING_PROFILE must be a named ep_<32 lowercase hex> profile, never legacy."
+            exit 1
+          fi
+          if [[ ! "${QWEN_EMBEDDING_DIMENSION}" =~ ^[0-9]+$ ]]; then
+            echo "::error::WATCH_QWEN_EMBEDDING_DIMENSION must be an integer; got a non-numeric value."
             exit 1
           fi
 
@@ -195,12 +191,25 @@ jobs:
       # which refuses (loudly) if the DB schema is behind this checkout's head;
       # the fix is to deploy the pending migration, not to migrate from the cron.
 
+      # Explicitly run the same boot/provider gate serving uses BEFORE crawling.
+      # init-db does not migrate an existing database. It verifies the schema
+      # stamp, requires complete profile coverage + a ready index, and calls
+      # get_embedding_provider_for_profile, which compares configured model,
+      # dimension, revision, instruction/preprocessing, dtype and normalization
+      # with the immutable profile row. Endpoint and token were presence-checked
+      # above; this is intentionally not a paid live-endpoint probe. Any profile
+      # drift stops before an ingest write.
+      - name: validate registered embedding profile
+        if: env.DATABASE_URL != ''
+        run: uv run regwatch init-db
+
       # The pipeline: crawl -> match watchlist -> ingest matches -> write
       # durable alerts -> digest. --extract is the default (paid per-PSG BE
       # extraction);
       # pass --no-extract here if you want change-detection + alerts without the
       # LLM extraction cost (chunks are still embedded either way).
       - name: regwatch watch
+        id: watch
         if: env.DATABASE_URL != ''
         run: uv run regwatch watch
 
@@ -211,7 +220,7 @@ jobs:
       # exactly when coverage is most likely to be broken. Queries the store
       # directly rather than parsing the CLI's rich-formatted dict.
       - name: verify embedding-profile coverage
-        if: always() && env.DATABASE_URL != '' && env.ACTIVE_EMBEDDING_PROFILE != '' && env.ACTIVE_EMBEDDING_PROFILE != 'legacy'
+        if: always() && env.DATABASE_URL != '' && steps.watch.outcome != 'skipped'
         run: |
           uv run python - <<'PY'
           import os
@@ -221,7 +230,10 @@ jobs:
           from regwatch.store.vector_store import profile_embedding_coverage
 
           profile_id = os.environ["ACTIVE_EMBEDDING_PROFILE"]
-          init_db()
+          # The Watch step already ran the full provider/readiness gate. Avoid
+          # having the boot-time coverage assertion hide the exact pending count
+          # this post-ingest diagnostic exists to report.
+          init_db(assert_provider=False)
           coverage = profile_embedding_coverage(profile_id)
           if coverage.pending_chunks:
               print(
@@ -278,12 +290,9 @@ jobs:
       # a refusal cutoff. See docs/DEPLOY.md section "Refusal-threshold
       # revalidation".
       #
-      # KNOWN LIMIT, same root cause as the ARMED HAZARD above: this job leaves
-      # ACTIVE_EMBEDDING_PROFILE unset, so retrieval here runs on the LEGACY
-      # OpenAI-1536 arm, not on the Qwen3 1024-dim profile prod actually serves.
-      # Its recommendation therefore does not transfer to prod, and the 0.30
-      # default remains unvalidated against the live vector space. Fixing the
-      # five WATCH_* secrets fixes this too.
+      # This now inherits the same active Qwen profile as serving and ingest, so
+      # once the six WATCH profile secrets are provisioned its score distribution
+      # is from the production geometry rather than the legacy OpenAI arm.
       #
       # It is calibration OBSERVABILITY, NOT a gate. The sweep is read-only with
       # respect to the safety path: it never changes REFUSAL_SCORE_THRESHOLD or

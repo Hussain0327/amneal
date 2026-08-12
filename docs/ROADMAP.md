@@ -3,8 +3,8 @@
 One list of everything that is NOT done yet. If another doc disagrees with this
 file or with [`PROD_READINESS.md`](PROD_READINESS.md), these two win.
 
-Last updated: 2026-08-11, checked against `main` at `fa4f8bf`, the live app, the
-live database and the live secrets.
+Last updated: 2026-08-12 against `main` at `ae30489` and the repository secret
+names. Live app, database and Fly values were last checked 2026-08-11.
 
 Labels: **BLOCKER** stops external exposure. **SHOULD-HAVE** before launch.
 **DECISION** needs a person to choose. **LATER** is optional.
@@ -16,9 +16,10 @@ Labels: **BLOCKER** stops external exposure. **SHOULD-HAVE** before launch.
   `gpt-oss-120b-080525`) behind `workspace.default.regwatch`. Query and corpus
   embeddings are Qwen3 behind `workspace.default.regwatch-embed`, 1024 dim,
   profile `ep_2e7368b354d911ea3a013c3125e276c2`, 5,494 of 5,494 chunks covered
-  since 2026-07-30. The database is Databricks Lakebase. OpenAI still ships and
-  is still tested, but it is the rollback path, not the live one. The D1 blocker
-  that used to head this file is gone. History lives in
+  since 2026-07-30. The database is Databricks Lakebase. No normal analyst turn
+  uses OpenAI; it remains the interactive LLM rollback, while scheduled Watch
+  retains a scoped key for public-document change summaries/extraction only.
+  The D1 blocker that used to head this file is gone. History lives in
   [`archive/DATA_RESIDENCY_D1.md`](archive/DATA_RESIDENCY_D1.md).
 - **The answer rule changed.** "Cite or refuse" is dead as the headline rule. v7
   selective citation is live in prod: cite the facts, talk like a person.
@@ -39,38 +40,26 @@ sections of [`PROD_READINESS.md`](PROD_READINESS.md).
 
 ---
 
-## Live hazard, fix this one first
+## Live operator action, complete this one first
 
-### The watch cron has no embedding-profile secrets  (SHOULD-HAVE)
+### Provision and validate the Watch embedding profile  (SHOULD-HAVE)
 
-Prod serves retrieval from the Qwen3 profile. The daily watch cron does not know
-that. These five repo secrets are unset today, checked 2026-08-11 through the
-GitHub API: `WATCH_ACTIVE_EMBEDDING_PROFILE`, `WATCH_QWEN_EMBEDDING_BASE_URL`,
+The code portion is done: the daily workflow pins Qwen3, requires a named active
+profile plus base URL, token, model, revision and dimension before checkout,
+validates the registered profile before crawl, and preserves the post-ingest
+100% coverage assertion. It fails closed instead of allowing an unprofiled
+change-day ingest.
+
+The owner portion is still open. These six repository secrets were all absent
+when checked through the GitHub API on 2026-08-12:
+`WATCH_ACTIVE_EMBEDDING_PROFILE`, `WATCH_QWEN_EMBEDDING_BASE_URL`,
 `WATCH_QWEN_EMBEDDING_TOKEN`, `WATCH_QWEN_EMBEDDING_MODEL`,
-`WATCH_QWEN_EMBEDDING_REVISION`.
+`WATCH_QWEN_EMBEDDING_REVISION`, and `WATCH_QWEN_EMBEDDING_DIMENSION`.
+Until they are provisioned, a configured production run stops at preflight and
+does not crawl. Provision all six together, dispatch the workflow manually, and
+verify its profile-validation and zero-pending coverage steps.
 
-What that costs: the first day a real FDA revision lands, the cron commits chunk
-rows with no embedding on the live profile. Coverage stops being complete, and
-the next Python boot refuses inside `assert_profile_ready_for_activation`. It
-shows up as edge 502s, weeks later, at a deploy that looks unrelated.
-
-Two things to fix in the same change:
-
-- `.github/workflows/watch-daily.yml` never maps `QWEN_EMBEDDING_DIMENSION` and
-  its preflight does not require it. `config/settings.py` still defaults
-  `qwen_embedding_dimension` to 1536 while the endpoint is 1024, and
-  `process/embedder.py` raises on that mismatch. So a change-day run passes
-  preflight and then fails. Add `WATCH_QWEN_EMBEDDING_DIMENSION` to the workflow
-  env block, to the preflight required set, and to
-  [`SECRETS_RUNBOOK.md`](SECRETS_RUNBOOK.md) section 3.4.
-- That workflow's header still says prod runs `ACTIVE_EMBEDDING_PROFILE=legacy`,
-  and its env block still hardcodes `EMBEDDING_PROVIDER: "openai"` with the
-  comment "Mirror prod (fly.toml)". Neither is true any more. Fix both when you
-  set the secrets.
-
-Setting the secrets is the owner's action, not a code change.
-
-- Where: `.github/workflows/watch-daily.yml`, `config/settings.py`.
+- Where: GitHub repository secrets and `.github/workflows/watch-daily.yml`.
 
 ---
 
@@ -383,8 +372,8 @@ There is no in-app way for an analyst to add or manage them.
 
 ## Suggested order
 
-1. Set the watch cron embedding secrets. It is the only open item that can take
-   prod down by itself.
+1. Provision the six Watch profile secrets and verify one manual dispatch. The
+   code now fails closed until that owner action is complete.
 2. Gateway and SSO, plus distributed rate limiting. That is the exposure
    boundary.
 3. Restore drill and least-privilege credentials. Fold least-privilege into

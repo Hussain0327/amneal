@@ -707,3 +707,25 @@ alone does not certify this residual.
   Every query still writes exactly one `query_log` row, answered or not.
 - **Battery results at merge (#182):** malformed structure 0, citation
   precision 0.779, refusal accuracy 0.903, uncited source facts 0.
+
+## Scheduled Watch uses the named Qwen profile and fails closed (Aug 12 2026)
+
+- **Watch embedding configuration now matches serving.** The daily workflow
+  pins `EMBEDDING_PROVIDER=qwen3` and requires the named active profile plus
+  Qwen base URL, token, model, revision and dimension whenever its production
+  database is configured. Empty, whitespace-only, `legacy` and malformed
+  profile configuration stops before checkout or crawl.
+- **The registered profile is checked before ingestion and coverage after it.**
+  A named `regwatch init-db` step runs the serving boot gate before crawl. After
+  any attempted Watch run, a separate diagnostic requires zero pending chunks;
+  it bypasses the boot-time coverage assertion only so it can report the exact
+  pending count and backfill command.
+- **OpenAI remains an LLM boundary, not an embedding boundary.** The scoped
+  Watch key still serves public-document change summaries, optional BE
+  extraction and advisory-sweep synthesis. Embeddings use Qwen exclusively.
+- **That choice changes rollback freshness.** Scheduled revisions no longer
+  refresh the unversioned OpenAI vector column. A future switch to the `legacy`
+  embedding arm requires a backfill first; it is not a one-secret rollback.
+- **Code safety and operational readiness are separate.** All six repository
+  secrets were absent when checked on 2026-08-12. The workflow therefore fails
+  before crawl until the owner provisions them and verifies a manual dispatch.

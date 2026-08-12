@@ -1,6 +1,6 @@
 # regwatch
 
-Last updated: 2026-08-11
+Last updated: 2026-08-12
 
 regwatch helps a generic-drug regulatory team answer FDA research questions in
 minutes instead of days. Every factual sentence comes back with the source and
@@ -159,8 +159,11 @@ The numbers below were checked against the live system on 2026-08-11.
   handles every LLM role (`LLM_PROVIDER=databricks`). Embeddings are Qwen3 on
   `workspace.default.regwatch-embed`, 1024-dim, profile
   `ep_2e7368b354d911ea3a013c3125e276c2`, with all 5,494 chunks embedded on it
-  since 2026-07-30. OpenAI is the tested rollback path and serves nothing in
-  production today. See
+  since 2026-07-30. The interactive app sends no model traffic to OpenAI; its
+  provider remains a tested LLM rollback. Scheduled Watch still uses its scoped
+  OpenAI key for public-document change summaries and extraction, never for
+  embeddings. The legacy OpenAI embedding arm is no longer refreshed by Watch
+  and needs a backfill before it can be treated as a current-corpus rollback. See
   [`docs/DATABRICKS_ADOPTION_2026-07-28.md`](docs/DATABRICKS_ADOPTION_2026-07-28.md).
 - **Data residency (D1) is closed.** Generation, query and corpus embeddings, and
   the database are all inside the company tenant, so an analyst question does not
@@ -172,7 +175,9 @@ The numbers below were checked against the live system on 2026-08-11.
   `regwatch watch` each day and is the only driver of the daily pipeline in prod.
   It failed from 2026-08-07 through the morning of 2026-08-10 because
   `WATCH_DATABASE_URL` pointed at the wrong database. That was fixed on
-  2026-08-10 and the runs since have been green.
+  2026-08-10 and the last observed pre-parity runs were green. The first run of
+  this workflow revision will intentionally fail before crawl until its six
+  profile secrets are provisioned, as described below.
 - **The polyglot migration**
   ([`docs/POLYGLOT_TARGET_2026-07-10.md`](docs/POLYGLOT_TARGET_2026-07-10.md))
   is through step 5. The Go proxy owns the public port and serves auth, sessions,
@@ -187,16 +192,14 @@ The numbers below were checked against the live system on 2026-08-11.
   restore drill. Tracked in [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md)
   and [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-**Two known open risks.**
+**Known open risks.**
 
-The Watch cron does not have the embedding-profile secrets
-(`WATCH_ACTIVE_EMBEDDING_PROFILE` and the `WATCH_QWEN_EMBEDDING_*` set), and it
-still hardcodes `EMBEDDING_PROVIDER: openai`. Production no longer embeds that
-way. The first day a real FDA revision lands, the watch run will write chunk rows
-with no embedding on the live profile. Coverage goes incomplete, and the next
-Python boot refuses inside `assert_profile_ready_for_activation`. It would show
-up as edge 502s at some later deploy, far from the cause. The fix is setting
-those repo secrets.
+The Watch workflow now runs in Qwen/profile mode, requires all six profile
+settings (including `WATCH_QWEN_EMBEDDING_DIMENSION`), validates the registered
+profile before crawling, and asserts 100% coverage after an attempted ingest.
+The six repository secrets are still unprovisioned as of 2026-08-12, so this
+change fails closed before crawling until the owner sets them and verifies one
+manual run. See [`docs/SECRETS_RUNBOOK.md`](docs/SECRETS_RUNBOOK.md) section 3.4.
 
 The 0.30 refusal threshold was validated against the old OpenAI vector space. The
 space is now Qwen3 at 1024 dimensions, so that validation no longer carries over.
@@ -275,7 +278,7 @@ flowchart LR
 | Backend (RAG core) | Python 3.11+ (managed by `uv`), FastAPI. The stateless retrieval, synthesis, and gating core behind the proxy: Ask, Assemble, White Paper, Watch, Deficiency, and query orchestration |
 | Frontend | Next.js 16 (App Router, TypeScript) plus React 18 in `regwatch/frontend/`. The five scoped surfaces render in one `(shell)` route group with one sidebar and one product-scope bar; the Compliance Studio (`/studio`) sits outside it and is fixture-backed. Talks to the API through a same-origin `/api` proxy |
 | LLM | **Databricks-hosted `gpt-oss-120b`** in prod (`LLM_PROVIDER=databricks`): served id `gpt-oss-120b-080525` on the Model Serving alias `workspace.default.regwatch`. One open-weight model serves ALL roles (router, synthesizer, extractor), which keeps analyst questions inside the company tenant (D1). A runtime served-model guard (`D1_ENFORCED` plus `D1_ALLOWED_LLM_MODELS`) rejects any response served by a model outside the allowlist once armed, and rejects partner-hosted families (`databricks-gpt*`, `databricks-claude*`, `databricks-gemini*`) even if someone allowlists them by hand. Pluggable behind `LLMProvider`: `openai` (Responses API; router `gpt-5-nano`, synthesizer and extractor `gpt-5.4-nano`) is the tested rollback path, and `anthropic` plus a test-only `echo` also ship |
-| Embeddings | Pluggable AND profile-versioned. Prod today: **Databricks-hosted Qwen3**, 1024-dim, endpoint `workspace.default.regwatch-embed`, profile `ep_2e7368b354d911ea3a013c3125e276c2`, with the whole corpus embedded on it. Retrieval picks its arm from `ACTIVE_EMBEDDING_PROFILE`; only the `legacy` arm reads `EMBEDDING_PROVIDER`, so the `EMBEDDING_PROVIDER=openai` line still sitting in `fly.toml` no longer affects the query path. Profile vectors live in the profile-keyed `chunk_embedding` table, written blue/green into a named profile and never in place; the older `legacy` arm is the `vector(1536)` column on `chunk` (OpenAI `text-embedding-3-small`). Local `BAAI/bge-small-en-v1.5` (384-dim) is for offline tooling only, and a dimension assert refuses it against the app datastore |
+| Embeddings | Pluggable AND profile-versioned. Prod today: **Databricks-hosted Qwen3**, 1024-dim, endpoint `workspace.default.regwatch-embed`, profile `ep_2e7368b354d911ea3a013c3125e276c2`, with the whole corpus embedded on it. Retrieval picks its arm from `ACTIVE_EMBEDDING_PROFILE`; only the `legacy` arm reads `EMBEDDING_PROVIDER`, so the `EMBEDDING_PROVIDER=openai` line still sitting in `fly.toml` no longer affects the query path. Profile vectors live in the profile-keyed `chunk_embedding` table, written blue/green into a named profile and never in place. The older `legacy` arm is the `vector(1536)` column on `chunk` (OpenAI `text-embedding-3-small`), but Qwen-only Watch runs no longer refresh it; backfill it before using it as a current-corpus rollback. Local `BAAI/bge-small-en-v1.5` (384-dim) is for offline tooling only, and a dimension assert refuses it against the app datastore |
 | Vector store | **pgvector** in the same Postgres, everywhere (Lakebase in prod, a disposable local/CI Postgres otherwise). No other vector backend since R5 |
 | Structured store | **Postgres** via SQLModel (Lakebase in prod). `DATABASE_URL` is mandatory and the app refuses to boot without it. Schema changes ship as Alembic migrations |
 | Retrieval | Two-stage. Stage 1: vector top-k 50 (`VECTOR_TOP_K`). Stage 2: rerank to top-k 8 (`RERANK_TOP_K`); reranker off by default |

@@ -1,6 +1,7 @@
 # DEPLOY - Lakebase + Fly.io + Vercel runbook
 
-Last updated: 2026-08-11
+Last updated: 2026-08-12 for Watch workflow parity; live production values were
+last checked 2026-08-11.
 
 This is the production runbook. Read it top to bottom the first time; after that
 jump to the section you need. Section numbers are stable, other files link to
@@ -30,10 +31,11 @@ Both models live in the company's own Databricks tenant:
   dimensions, active profile `ep_2e7368b354d911ea3a013c3125e276c2`. All 5,494
   chunks are embedded on that profile (measured 2026-08-11).
 
-Generation, embeddings and the database are all inside the tenant, so data
-residency item D1 is closed. OpenAI is the rollback path only. `OPENAI_API_KEY`
-is still set and the OpenAI provider still ships and is still tested, but it
-serves nothing in production today.
+Generation, query/corpus embeddings and the database are all inside the tenant,
+so data residency item D1 is closed for analyst traffic. The interactive app's
+OpenAI provider is a tested rollback and serves no normal analyst turn.
+Scheduled Watch separately uses a scoped OpenAI key for public-document change
+summaries and extraction, never embeddings.
 
 Auth is custom cookie sessions, minted by the Go proxy.
 
@@ -197,7 +199,7 @@ These are the names set on the app today:
 
 ```bash
 # DATABASE_URL              Lakebase DIRECT endpoint (see step 1.1)
-# OPENAI_API_KEY            rollback path only; serves nothing in prod today
+# OPENAI_API_KEY            interactive rollback; Watch uses a separate repo key
 # LLM_PROVIDER              databricks
 # DATABRICKS_LLM_MODEL      the serving alias that actually gets called
 # LLM_MODEL                 DISPLAY VALUE ONLY (GET /settings). Hand-sync it to
@@ -353,12 +355,12 @@ fly ssh console -s -C "regwatch create-user analyst@amneal.com --name 'CRA Analy
   cron at 07:17 UTC, the only scheduler. Its secrets are documented in
   [`SECRETS_RUNBOOK.md`](SECRETS_RUNBOOK.md).
 
-  > **Open hazard.** The cron does NOT carry the prod embedding profile. Prod
-  > promoted its Qwen3 profile on 2026-07-30, but
-  > `WATCH_ACTIVE_EMBEDDING_PROFILE` and the `WATCH_QWEN_EMBEDDING_*` secrets are
-  > still unset, so the first day a real FDA revision lands the watch run commits
-  > chunk rows with no embedding on the live profile. Coverage goes incomplete
-  > and the next Python boot refuses. Full write-up and the fix in
+  > **Provisioning required.** The cron now uses `EMBEDDING_PROVIDER=qwen3`,
+  > requires the named profile plus all five `QWEN_EMBEDDING_*` values, validates
+  > the registered profile before crawling, and asserts zero pending chunks after
+  > an attempted ingest. The six `WATCH_*` repository secrets remain unset as of
+  > 2026-08-12, so the job now fails closed before crawling until the owner sets
+  > them and verifies a manual dispatch. See
   > [`SECRETS_RUNBOOK.md`](SECRETS_RUNBOOK.md) section 3.4.
 
   Keep ad hoc `regwatch watch` runs for break-glass recovery, not as the normal
@@ -598,14 +600,13 @@ uses.** It was calibrated in the old bge-384 era, checked once in the OpenAI
 distributions differ between spaces, so neither earlier calibration transfers.
 Treat 0.30 as provisional.
 
-**The daily sweep does not close this today.** The `watch-daily` job runs an
-advisory, non-gating sweep after the crawl and uploads `threshold_sweep.json` as
-a workflow artifact (Actions run, then **Artifacts**, then `threshold-sweep`).
-But that job sets `EMBEDDING_PROVIDER=openai` and carries no
-`ACTIVE_EMBEDDING_PROFILE`, so it measures the legacy OpenAI space, not the live
-Qwen3 one. Pointing the sweep at the prod profile is the work that would make the
-number meaningful. It is blocked on the same missing cron secrets as the ingest
-path (`SECRETS_RUNBOOK.md` section 3.4).
+**The daily sweep is wired to the right space but cannot recalibrate by itself.**
+The `watch-daily` job runs an advisory, non-gating sweep after the crawl and
+uploads `threshold_sweep.json` as a workflow artifact (Actions run, then
+**Artifacts**, then `threshold-sweep`). It now inherits the named Qwen profile,
+so after the six Watch profile secrets are provisioned its scores use production
+geometry. The corpus labels and refusal cases still need the evaluation work
+below before 0.30 can be promoted as a validated threshold.
 
 The sweep is read-only with respect to the safety path. It never changes
 `REFUSAL_SCORE_THRESHOLD` and never fails the crawl (`continue-on-error: true`),

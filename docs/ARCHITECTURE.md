@@ -5,8 +5,9 @@
 > public FDA data. By design it never authors submission content and never
 > renders regulatory judgment.
 
-> Last updated: 2026-08-11 (checked against the live app, the live database, the
-> Fly secrets and GitHub Actions)
+> Last updated: 2026-08-12 for Watch workflow parity. Live app, database and Fly
+> values were last checked 2026-08-11; repository secret names were checked
+> 2026-08-12.
 
 This is the canonical description of how REGWATCH is built. Read it once, then
 use it as a reference. Companion docs: [`PROJECT_SPEC.md`](PROJECT_SPEC.md) (the
@@ -160,10 +161,11 @@ failed `::1` attempt on every request.
 | LLM | `echo` test provider | Databricks `gpt-oss-120b` at `workspace.default.regwatch`, one endpoint for every role |
 | `DATABASE_URL` | required, `TEST_DATABASE_URL` for tests | required |
 
-OpenAI is the rollback path, not current state. `OPENAI_API_KEY` is still set on
-Fly and the OpenAI provider still ships and is still tested, but it serves
-nothing in production. `EMBEDDING_PROVIDER=openai` is still in `fly.toml` and is
-now dead weight on the query path: retrieval picks its arm from
+The interactive app uses OpenAI only as a tested rollback; no analyst turn goes
+there in current state. Scheduled Watch separately retains a scoped OpenAI key
+for public-document change summaries and extraction, not embeddings.
+`EMBEDDING_PROVIDER=openai` is still in `fly.toml` and is now dead weight on the
+query path: retrieval picks its arm from
 `ACTIVE_EMBEDDING_PROFILE`, and only the `legacy` arm ever reads
 `EMBEDDING_PROVIDER` (section 9).
 
@@ -806,22 +808,24 @@ Scheduling: the GitHub Actions cron `.github/workflows/watch-daily.yml` is the
 only scheduler. It runs `regwatch watch` against the live database each day.
 There is no local scheduler daemon; the Dagster package was deleted in R5.
 
-> **Open risk, as of 2026-08-11.** The cron does not carry the embedding-profile
-> secrets that prod runs on. `WATCH_ACTIVE_EMBEDDING_PROFILE`,
-> `WATCH_QWEN_EMBEDDING_BASE_URL`, `WATCH_QWEN_EMBEDDING_TOKEN`,
-> `WATCH_QWEN_EMBEDDING_MODEL` and `WATCH_QWEN_EMBEDDING_REVISION` are not set as
-> repo secrets, and the workflow still hardcodes `EMBEDDING_PROVIDER: "openai"`
-> with a comment saying it mirrors prod. It no longer does. The workflow's own
-> preflight check does not catch this, because it only runs when
-> `ACTIVE_EMBEDDING_PROFILE` is set, and here it is empty. So the first day a real
-> FDA revision lands, the watch run commits chunk rows with no embedding on the
-> live profile. Coverage goes incomplete and the next Python boot refuses inside
-> `assert_profile_ready_for_activation`. It would surface as edge 502s weeks
-> later, at a random deploy. Setting the secrets is the owner's action.
+> **Operator action required, as of 2026-08-12.** The workflow is wired for the
+> named Qwen profile and fails before checkout/crawl unless all six settings are
+> present: `WATCH_ACTIVE_EMBEDDING_PROFILE`, base URL, token, model, revision and
+> `WATCH_QWEN_EMBEDDING_DIMENSION`. Before ingest it runs the serving boot gate,
+> which checks the registered immutable profile and its coverage/index readiness;
+> after any attempted Watch run it independently requires zero pending chunks.
+> Those six repository secrets are not provisioned yet. Until the owner sets
+> them and verifies a manual dispatch, scheduled runs with a production database
+> fail closed instead of silently writing outside the serving profile.
 >
-> The cron itself is healthy again: it failed daily from 2026-08-07 through the
-> morning of 2026-08-10, and has been green since `WATCH_DATABASE_URL` was
-> updated on 2026-08-10.
+> Scheduled Watch now writes only the named Qwen profile. It deliberately does
+> not refresh the legacy OpenAI vector column, so that arm needs a backfill before
+> it can serve as a current-corpus embedding rollback.
+>
+> Historical context: the cron failed daily from 2026-08-07 through the morning
+> of 2026-08-10, then its last observed pre-parity runs passed after
+> `WATCH_DATABASE_URL` was updated. The first run of this workflow revision is
+> expected to fail at profile preflight until the six secrets are provisioned.
 
 ---
 

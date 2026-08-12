@@ -89,8 +89,9 @@ anything else.**
   named embedding profile (`ACTIVE_EMBEDDING_PROFILE`, migration 0015): the
   Databricks-hosted Qwen3 endpoint, 1024-dim, vectors in the `chunk_embedding`
   table. The `legacy` arm is the only one that reads `EMBEDDING_PROVIDER` (OpenAI
-  `text-embedding-3-small`, 1536-dim, in `chunk.embedding`); it is the rollback
-  path, not current state. Code default is `local-bge-small`;
+  `text-embedding-3-small`, 1536-dim, in `chunk.embedding`); it is not current
+  state, and scheduled Watch no longer refreshes it. Backfill it before using it
+  as a current-corpus rollback. Code default is `local-bge-small`;
   `BAAI/bge-small-en-v1.5` is for offline and eval tooling only (384-dim, rejected
   against the app datastore by the dimension assert).
 - **LLM.** Pluggable, code default `openai` with the model from `LLM_MODEL`. An
