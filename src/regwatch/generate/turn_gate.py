@@ -304,6 +304,15 @@ PARTIAL_DROP_DISCLOSURE = (
 )
 MATERIAL_DROP_TEXT = "I could not produce a fully supported answer from the available evidence."
 
+# Said to the user when a completion breached the pathological-output bounds
+# and the one repair attempt did not recover it (issue #183). Deliberately
+# ordinary speech: the 2,000-char rule is plumbing, and a reason code, a
+# character count or the word "validation" would leak mechanism into a
+# regulatory conversation. It invites the next turn rather than closing the
+# thread, because nothing about the QUESTION was wrong -- only our answer to
+# it. The machine-readable reason travels separately, on the audit row.
+OVERSIZE_RECOVERY_TEXT = "I got too wordy there. Ask me again and I will keep it tighter."
+
 # Retrieval-sufficiency disclosure. Unchanged wording: the eval set, the prompt
 # eval and tests/test_grounded_qa_citations.py all pin this exact prefix.
 PARTIAL_EVIDENCE_PREFIX = "Evidence not found in the supplied passages for:"
@@ -450,7 +459,28 @@ def _citation_for(passage: RetrievedPassage) -> Citation:
         # citation it grounds. INV-1 unaffected -- this is the same passage that
         # validated the citation.
         score=passage.score,
+        # Human-identifying provenance, all already in hand: "PSG_020911" names
+        # an FDA application number and nothing a reader can act on. No new
+        # query -- normalized_name is a named field and the rest ride the chunk
+        # row's denormalized metadata (pgvector_store._TEXT_METADATA_COLUMNS).
+        product_name=passage.normalized_name or None,
+        dosage_form=_meta_text(passage, "dosage_form"),
+        route=_meta_text(passage, "route"),
+        psg_type=_meta_text(passage, "psg_type"),
     )
+
+
+def _meta_text(passage: RetrievedPassage, key: str) -> str | None:
+    """One passage metadata string, or None when absent or blank.
+
+    Ingest writes "" rather than NULL for an unknown dosage_form/route, so an
+    empty string has to collapse to None here: the UI distinguishes "not
+    recorded" from "not loaded", and "" would render as a stray separator.
+    """
+    value = passage.metadata.get(key)
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
 
 
 def _sanitize_claim_text(raw: str) -> str:

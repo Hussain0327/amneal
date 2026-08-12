@@ -124,14 +124,19 @@ from regwatch.generate.route_shadow import (
 )
 from regwatch.generate.turn_gate import AdmittedTurn, GateFailure, admit_claims, admit_turn
 from regwatch.generate.turn_schema import TURN_SCHEMA_MESSAGE
+from regwatch.generate.unresolved import classify_unresolved, is_social
 from regwatch.retrieve.mode import RetrievalPlan, RetrievalScope, default_mode_for_scope
 from regwatch.retrieve.reranker import rerank_passages
-from regwatch.retrieve.resolver import resolve_brand, resolve_product, suggest_products
+from regwatch.retrieve.resolver import lookup_external_drug, resolve_product, suggest_products
 from regwatch.retrieve.retriever import RetrievedPassage, retrieve
 from regwatch.retrieve.scope_catalog import load_corpus_policy_snapshots
 from regwatch.store.db import session_scope
 from regwatch.store.models import PsgDocument
-from regwatch.store.queries import count_documents, current_dosage_form_routes
+from regwatch.store.queries import (
+    count_documents,
+    current_dosage_form_routes,
+    fetch_citation_recency,
+)
 from regwatch.store.vector_store import distinct_metadata_values
 from regwatch.watch.alerts import latest_digest_records
 from regwatch.watch.watchlist import list_watchlist
@@ -423,6 +428,39 @@ def _audit_retrieved(passages: list[RetrievedPassage]) -> list[dict[str, Any]]:
         }
         for p in passages
     ]
+
+
+def _enrich_citation_recency(citations: list[Citation]) -> list[Citation]:
+    """Resolve each citation's revision date BEFORE the turn is persisted.
+
+    This join used to run only on the response path (api.main._wire_citations),
+    so ``recommended_date`` never reached ``citations_json`` and every reopened
+    conversation rendered "Revision date not recorded" forever. Running it here
+    puts the version-correct date on the domain citation, which is what
+    ``_build_patch`` serializes.
+
+    One batched lookup for the whole turn (no N+1), and ``fetch_citation_recency``
+    already swallows every exception to an empty index behind the connection's
+    statement_timeout -- so a failed or slow lookup yields null dates and an
+    answer that still ships.
+    """
+    if not citations:
+        return citations
+    recency = fetch_citation_recency(
+        sorted({c.version_id for c in citations}),
+        sorted({c.doc_id for c in citations}),
+    )
+    enriched: list[Citation] = []
+    for citation in citations:
+        resolved = recency.resolve(citation.version_id, citation.doc_id)
+        enriched.append(
+            replace(
+                citation,
+                recommended_date=resolved.recommended_date,
+                diff_summary=resolved.diff_summary,
+            )
+        )
+    return enriched
 
 
 def _route_json(
@@ -1081,10 +1119,56 @@ def _usage_fields(model_name: str, usage: LLMUsage | None) -> dict[str, Any]:
 # Fixed, non-LLM copy for the status="error" refusal family (provider transport
 # failure, catalog read failure, audit write failure). One literal so every
 # degrade path stays in sync with the tests that assert on it.
+# The corrective turn appended for the ONE bounds repair (issue #183). Phrased
+# as a normal follow-up rather than an error report: the model is being asked
+# to say the same thing more concisely, not told it violated a schema. No
+# character count is quoted -- a number invites the model to pad up to it.
+#
+# Appended AFTER the original messages, so attempt 1's prompt bytes (and its
+# prompt fingerprint) are untouched. Only a repaired turn carries the extra
+# pair, and synth_telemetry stamps that it happened.
+_BOUNDS_REPAIR_TURN: dict[str, tuple[LLMMessage, ...]] = {
+    "sentence_too_long": (
+        LLMMessage(
+            role="user",
+            content=(
+                "One of those sentences ran far too long. Say the same thing "
+                "again, keeping every fact and every [n] marker exactly as you "
+                "had them, but break it into ordinary-length sentences."
+            ),
+        ),
+    ),
+    "answer_too_long": (
+        LLMMessage(
+            role="user",
+            content=(
+                "That answer ran far too long overall. Give the same answer "
+                "again, keeping every fact and every [n] marker exactly as you "
+                "had them, but say it more concisely and without repeating "
+                "yourself."
+            ),
+        ),
+    ),
+}
+
+# Audit-only reason codes. Greppable, and deliberately distinct from
+# malformed_structure so the ~12% prod parse-failure baseline stays comparable
+# and a bounds breach never hides inside it.
+_BOUNDS_REASON = {
+    "sentence_too_long": "oversize_sentence",
+    "answer_too_long": "oversize_answer",
+}
+
 _SERVICE_UNAVAILABLE_TEXT = (
     "The answer service is temporarily unavailable. Your question was "
     "not answered — please try again in a moment."
 )
+
+# Fixed, non-LLM copy for the conversational outcomes. Server-owned like every
+# other non-answer string here: the model never writes display prose, and a
+# greeting must not cost a model call at all.
+CONVERSE_GREETING_TEXT = "Hey! What can I help you with today?"
+NEED_PRODUCT_GUIDANCE_TEXT = "Sure — which product are you asking about?"
 
 
 def _log_query_or_skip(**kwargs: Any) -> int:
@@ -1520,6 +1604,58 @@ def _meta(
     return outcome, audit
 
 
+def _converse(
+    *,
+    question: str,
+    reason: str,
+    model_name: str,
+    session_id: str,
+    turn_id: str,
+    user_id: str | None,
+    route_json: dict[str, Any],
+) -> tuple[RagOutcome, AuditPayload]:
+    """Answer a social turn as a person would, with no machinery behind it.
+
+    A greeting is not a failed product lookup. It reaches no resolver, no
+    retrieval and no model: the copy is fixed and server-owned, so this handler
+    is citation- and fabrication-incapable by construction, exactly like
+    ``_meta`` -- whose status it deliberately shares. ``status="meta"`` keeps
+    the seven-value ``QueryStatusLiteral`` (and the Go proxy, the SSE grammar,
+    the persisted rows and the frontend allowlist that mirror it) untouched,
+    and it is the status a promoted ``mode=converse`` turn will land on too.
+
+    ``refused`` is False, so the frontend renders plain prose with no declined
+    register, no diagnostic reason line and no "should this have been answered?"
+    prompt.
+    """
+    audit = AuditPayload(
+        mode="qa",
+        query_text=question,
+        retrieved=[],
+        answer_text=CONVERSE_GREETING_TEXT,
+        citations=[],
+        refused=False,
+        model_name=model_name,
+        session_id=session_id,
+        turn_id=turn_id,
+        user_id=user_id,
+        status="meta",
+        route_json=route_json,
+    )
+    outcome = RagOutcome(
+        answer=CONVERSE_GREETING_TEXT,
+        citations=[],
+        refused=False,
+        model_name=model_name,
+        retrieved=[],
+        status="meta",
+        reason=reason,
+        session_id=session_id,
+        turn_id=turn_id,
+    )
+    return outcome, audit
+
+
 @dataclass
 class TurnState:
     """Mid-flow mutable state of one ``ask_core`` turn, made explicit.
@@ -1672,7 +1808,11 @@ def _resolve_and_carry_over(
             # candidate, so a follow-up naming it still carries over. Closing
             # that needs a drug-name detector the resolver does not have.
             suggestions = suggest_products(question)
-            brand_matches = resolve_brand(question)
+            # One openFDA request, two answers: the in-corpus generics behind a
+            # brand name (the long-standing did-you-mean), and whether the name
+            # is a real drug this corpus simply does not carry.
+            external = lookup_external_drug(question)
+            brand_matches = external.corpus_products
             session_filters = _session_filters()
             if (
                 session_filters.get("normalized_name")
@@ -1712,15 +1852,45 @@ def _resolve_and_carry_over(
                         options=_options_from_names(brand_matches),
                         related=_options_from_names(brand_matches),
                     )
+                if not resolution.candidates:
+                    # The CORPUS is empty, not the question. Asking "which
+                    # product?" would be a lie -- no answer would name one that
+                    # works. A real evidence gap, so it keeps the refused
+                    # register (INV-2). Sits BELOW the session carry-over and
+                    # the did-you-mean/brand offers, which all have something
+                    # concrete to say and must keep saying it.
+                    return _decline(
+                        _refuse,
+                        reason="empty_corpus",
+                        response_mode="refused",
+                        passages=[],
+                    )
+                # Nothing named a product. This used to be ONE outcome
+                # (reason="no_product", status="refused"), which made a
+                # topic-less request and a real drug we do not carry
+                # indistinguishable -- both rendered as an "Evidence gap". They
+                # are separate outcomes now, and neither is a refusal.
+                outcome = classify_unresolved(question, external_drug_known=external.known_absent)
+                if outcome == "product_not_covered":
+                    return _decline(
+                        _clarify,
+                        reason="product_not_covered",
+                        response_mode="clarify",
+                        interpretation=(
+                            "I don't currently have FDA product-specific guidance for "
+                            "that product in this corpus."
+                        ),
+                        # Empty here by construction: known_absent means openFDA
+                        # matched nothing in the corpus. The catalog options the
+                        # copy promises are a follow-up, not a fabrication.
+                        options=_options_from_names(suggestions),
+                    )
                 return _decline(
-                    _refuse,
-                    reason="no_product",
-                    response_mode="refused",
-                    passages=[],
-                    # Resolver candidates already computed above. Both are []
-                    # on this branch (a genuinely-absent drug, e.g. romidepsin)
-                    # -- so `related` is [] and the path never crashes.
-                    related=_options_from_names(suggestions + brand_matches),
+                    _clarify,
+                    reason="need_product",
+                    response_mode="clarify",
+                    interpretation=NEED_PRODUCT_GUIDANCE_TEXT,
+                    options=_options_from_names(suggestions + brand_matches),
                 )
 
     resolved_name = state.active_filters.get("normalized_name")
@@ -1787,6 +1957,23 @@ def _pre_retrieval_route(
         and resolve_product(question).status != "resolved"
     ):
         return _decline(_meta, reason="meta", response_mode="meta")
+
+    # Social gate: a pleasantry is a conversation, not a failed product lookup.
+    # Sits here, BEFORE entity resolution, so a greeting costs no resolver work,
+    # no openFDA call and no model call -- and so it can never reach the
+    # no-product branch that used to serve it an "Evidence gap" card.
+    #
+    # Guarded on there being no pinned or session product ON PURPOSE: "Hello"
+    # with an active-ingredient filter already has a product to talk about and
+    # must keep reaching the vague-input clarify below, which offers that
+    # product's options. Only a greeting with nothing to anchor on converses.
+    if not state.active_filters.get("normalized_name") and is_social(question):
+        return _decline(
+            _converse,
+            reason="greeting",
+            response_mode="meta",
+            guide=False,
+        )
 
     resolved = _resolve_and_carry_over(
         state, question=question, _decline=_decline, _session_filters=_session_filters
@@ -2146,11 +2333,18 @@ def _synthesize_and_admit(
     # fills it in during the call, and every branch below reads it afterwards.
     synth_telemetry: dict[str, Any] = {"max_output_tokens": s.synthesizer_max_tokens}
     synth_route: dict[str, Any] = {"synthesis": synth_telemetry}
-    try:
+
+    def _run_synthesis(messages: list[LLMMessage]) -> Any:
+        """One synthesis completion over ``messages``.
+
+        Extracted so the bounds repair below can issue its second attempt
+        through the SAME branch logic (streamed vs buffered, prose vs JSON)
+        rather than a copy that could drift from it.
+        """
         if prose_mode and _emit_draft is not None:
-            response = _stream_structured(
+            return _stream_structured(
                 provider,
-                synth_messages,
+                messages,
                 max_tokens=s.synthesizer_max_tokens,
                 telemetry=synth_telemetry,
                 on_delta=_emit_draft,
@@ -2161,14 +2355,16 @@ def _synthesize_and_admit(
                 # failing sink as cosmetic.
                 on_reset=_emit_draft_reset or (lambda: None),
             )
-        else:
-            response = _complete_structured(
-                provider,
-                synth_messages,
-                max_tokens=s.synthesizer_max_tokens,
-                response_format=None if prose_mode else "json",
-                telemetry=synth_telemetry,
-            )
+        return _complete_structured(
+            provider,
+            messages,
+            max_tokens=s.synthesizer_max_tokens,
+            response_format=None if prose_mode else "json",
+            telemetry=synth_telemetry,
+        )
+
+    try:
+        response = _run_synthesis(synth_messages)
     except Exception as exc:  # provider transport error (timeout / 429 / 5xx)
         # B2: a synthesizer failure must NOT return a naked 500 with no audit
         # row, which would break INV-6 exactly when the system misbehaves. We
@@ -2202,6 +2398,62 @@ def _synthesize_and_admit(
             usage=response.usage,
             guide=False,
         )
+
+    # Pathological-output bounds (issue #183). The prose arms apply no length
+    # bound at admission by design, so a degenerate completion -- a repetition
+    # loop, a sentence that never terminates -- would otherwise render
+    # unbounded text. ONE repair attempt, then a conversational exit.
+    #
+    # One, not a loop: a model producing a runaway sentence is in a state a
+    # second identical nudge does not fix, and each attempt costs a full
+    # synthesis call on the user's latency budget.
+    if prose_mode:
+        breach = prose_turn.bounds_exceeded(answer)
+        if breach is not None:
+            log.warning("qa_prose_bounds_breach", breach=breach, chars=len(answer))
+            synth_telemetry["bounds_breach"] = breach
+            synth_telemetry["bounds_repair_attempted"] = True
+            # Whatever the client already rendered came from the breaching
+            # completion, so retract it before the second attempt streams over
+            # it. Same contract the truncation retry uses.
+            if _emit_draft_reset is not None:
+                try:
+                    _emit_draft_reset()
+                except Exception:  # cosmetic sink; never fail the turn on it
+                    log.debug("on_draft_reset_failed", exc_info=True)
+            try:
+                response = _run_synthesis([*synth_messages, *_BOUNDS_REPAIR_TURN[breach]])
+            except Exception as exc:
+                log.warning("qa_provider_error", error=str(exc), error_type=type(exc).__name__)
+                capture_exception(exc)
+                return _decline(
+                    _refuse,
+                    reason="provider_error",
+                    response_mode="refused",
+                    passages=passages,
+                    status="error",
+                    answer_text=_SERVICE_UNAVAILABLE_TEXT,
+                    route_extra=synth_route,
+                    guide=False,
+                )
+            answer = response.text.strip()
+            still = prose_turn.bounds_exceeded(answer) if answer else breach
+            synth_telemetry["bounds_repair_succeeded"] = still is None
+            if still is not None:
+                # The reason is machine-readable and stays out of the reply:
+                # nothing about the QUESTION was wrong, only our answer to it.
+                log.warning("qa_prose_bounds_repair_failed", breach=still)
+                return _decline(
+                    _refuse,
+                    reason=_BOUNDS_REASON[still],
+                    response_mode="refused",
+                    passages=passages,
+                    model_name=response.model,
+                    answer_text=tg.OVERSIZE_RECOVERY_TEXT,
+                    usage=response.usage,
+                    route_extra=synth_route,
+                    guide=False,
+                )
 
     _emit("Checking each claim against its source…")
     admitted: AdmittedTurn | GateFailure
@@ -2447,7 +2699,10 @@ def _synthesize_and_admit(
         )
 
     rendered_answer = tg.render_answer(admitted)
-    citations = tg.citations(admitted)
+    # Enrich once, here, so the SAME citations reach the audit row, the chat
+    # history and the wire. Doing it on the response path only was what made
+    # provenance decay on reload.
+    citations = _enrich_citation_recency(tg.citations(admitted))
     route_json["partial_evidence"] = bool(admitted.unsupported)
     route_json.update(turn_route)
 
@@ -2678,6 +2933,17 @@ def ask_core(
             **kw,
         )
 
+        # The planner earns its round trip only when it can change something.
+        # On these two reasons the rendered copy is fixed at the call site, so
+        # with no options to order the call is pure cost -- which is what every
+        # "Hello" used to pay. Deliberately NARROW: low_top_score, model_refusal,
+        # no_valid_citations and material_drop pick between two sentences via
+        # plan.next_step (guidance.render_guidance_message), so they keep calling
+        # even with no options.
+        if reason in {"need_product", "product_not_covered"} and not (
+            outcome.clarify or outcome.related
+        ):
+            guide = False
         if guide and outcome.status != "error":
             # Every healthy Ask turn reaches exactly one AI path. On a branch that
             # cannot safely synthesize a cited answer, the router model selects a

@@ -38,6 +38,21 @@ class Citation:
     # additive context; INV-1 is unaffected (the citation still traces to a
     # sent passage -- this just annotates it with that passage's score).
     score: float | None = None
+    # Human-identifying provenance. Every field is optional with a None default
+    # so a citation dict persisted before these existed still deserializes, and
+    # so the UI can tell "not recorded" from "not loaded" -- it falls back to
+    # short_name whenever product_name is None. All four ride the chunk row
+    # already; _citation_for used to drop them on the floor.
+    product_name: str | None = None
+    dosage_form: str | None = None
+    route: str | None = None
+    psg_type: str | None = None
+    # Version-correct recency, resolved BEFORE persistence (see
+    # grounded_qa._enrich_citation_recency). Previously the response path was
+    # the only place this was joined, so every rehydrated conversation
+    # degraded to "Revision date not recorded" forever.
+    recommended_date: str | None = None
+    diff_summary: str | None = None
 
 
 @dataclass

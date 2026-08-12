@@ -943,6 +943,14 @@ button.chip.composer__restore:hover:not(:disabled) {
   -webkit-text-fill-color: transparent;
   color: var(--gold);
   line-height: 0.9;
+  /* The script's ascenders overrun a 0.9 line box, and background-clip: text
+     paints no gradient outside the background box -- the looped "l" of Amneal
+     rendered with its top sliced flat. Pad the paint area out, then pull the
+     same amount back in margin so the mark still occupies its original space.
+     Vertical only: horizontal padding is not needed (the swashes measure clear)
+     and would eat the flex gap between the seal and the mark in <Wordmark>. */
+  padding: 0.7em 0;
+  margin: -0.7em 0;
   filter: drop-shadow(0 1px 1px rgba(201, 138, 12, 0.25));
 }
 
@@ -1078,6 +1086,16 @@ button.chip.composer__restore:hover:not(:disabled) {
   box-shadow: inset 0 0 0 1px var(--gold-deep);
   background: var(--gold-wash);
   filter: none;
+}
+/* Navy primary. Gold is the official accent -- rules, seals, markers -- so on a
+   surface where the wax seal carries it at full size, the button steps back to
+   the app's ink instead of competing for the same ink. */
+.btn--ink {
+  color: var(--paper);
+  background: linear-gradient(96deg, var(--ink-2) 0%, var(--ink) 100%);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.12) inset,
+    0 6px 16px -8px rgba(22, 33, 58, 0.7);
 }
 
 /* ---------- Clarify option (an "inquiry continued" card) ---------- */
@@ -2677,5 +2695,174 @@ button.chip:disabled {
 @media (prefers-reduced-motion: reduce) {
   .plan__dot {
     animation: none;
+  }
+}
+
+/* ---------- Sign-in: the page as the document ----------
+   The app's only ungated surface. Everywhere else a document sits ON the page;
+   here the page IS the document -- masthead, rules, colophon -- with the sign-in
+   set into it as a slip rather than a card floating in the middle of the
+   parchment. That lets the wax seal carry the identity at full size, which is
+   the one place this surface spends any boldness. Mobile-first: a single
+   column, seal above the slip; the two-column setting starts at 62rem. */
+.signin {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 2rem 1.5rem 2.5rem;
+}
+.signin__sheet {
+  width: 100%;
+  /* Sized so the span between the seal and the slip reads as air rather than a
+     hole: at 64rem the two ends drifted far enough apart to look unrelated. */
+  max-width: 58rem;
+}
+
+/* Masthead: nameplate left, standing line right, over the gold rule. */
+.signin__masthead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.35rem 1.2rem;
+  padding-bottom: 0.7rem;
+}
+.signin__nameplate {
+  display: flex;
+  align-items: baseline;
+  gap: 0.8rem;
+}
+.signin__series {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.signin__standing {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.62rem;
+  font-weight: 500;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.signin__rule {
+  height: 2px;
+  margin: 0;
+  border: 0;
+  background: linear-gradient(90deg, var(--gold) 0%, var(--gold-deep) 38%, var(--edge) 100%);
+}
+
+/* Body: seal and slip. */
+.signin__body {
+  display: grid;
+  justify-items: center;
+  gap: 2.4rem;
+  padding: 2.6rem 0 2.8rem;
+}
+.signin__emblem {
+  width: 8rem;
+  height: 8rem;
+  /* Tight and close: the seal rests on the sheet. A long soft shadow read as
+     a badge hovering above the page. */
+  filter: drop-shadow(0 3px 6px rgba(138, 91, 0, 0.3));
+}
+.signin__emblem-rim {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 2.1px;
+}
+.signin__emblem-mark {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 38px;
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+.signin__slip {
+  width: 100%;
+  max-width: 24rem;
+}
+.signin__heading {
+  margin: 0 0 1.3rem;
+  font-size: 2rem;
+}
+.signin__notice {
+  margin: 0 0 1.15rem;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.74rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+  background: var(--gold-wash);
+  border-left: 2px solid var(--gold-deep);
+  border-radius: 0 2px 2px 0;
+}
+.signin__group + .signin__group {
+  margin-top: 1.05rem;
+}
+.signin__label {
+  display: block;
+  margin-bottom: 0.4rem;
+  color: var(--ink-faint);
+}
+.signin__note {
+  margin: 0.4rem 0 0;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  color: var(--oxblood);
+}
+/* Always rendered with a reserved line so a failed attempt never shoves the
+   button out from under the pointer between the two clicks a retry takes. */
+.signin__alert {
+  display: flex;
+  align-items: center;
+  min-height: 1.15rem;
+  margin: 0.95rem 0 0;
+  font-size: 0.78rem;
+  line-height: 1.3;
+  color: var(--oxblood);
+}
+.signin__submit {
+  width: 100%;
+  margin-top: 0.75rem;
+}
+
+/* Colophon: the standing matter every visitor needs, under a hairline. */
+.signin__colophon {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.45rem 2rem;
+  padding-top: 0.8rem;
+  font-size: 0.74rem;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+.signin__colophon p {
+  max-width: 26rem;
+  margin: 0;
+}
+
+@media (min-width: 62rem) {
+  .signin__body {
+    /* Seal flush to the left end of the rule, slip flush to the right end, so
+       the masthead rule spans and ties the pair rather than floating over a
+       centred pile. */
+    grid-template-columns: auto minmax(0, 24rem);
+    align-items: center;
+    justify-content: space-between;
+    justify-items: start;
+    gap: 4rem;
+    padding: 3.6rem 0 3.9rem;
+  }
+  .signin__emblem {
+    width: 12rem;
+    height: 12rem;
+  }
+  .signin__heading {
+    font-size: 2.4rem;
   }
 }

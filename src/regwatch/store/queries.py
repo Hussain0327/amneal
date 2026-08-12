@@ -16,7 +16,7 @@ from sqlmodel import col, select
 
 from regwatch.common.logging import get_logger
 from regwatch.store.db import get_engine, session_scope
-from regwatch.store.models import PsgDocument, PsgVersion
+from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
 
 log = get_logger(__name__)
 
@@ -316,6 +316,80 @@ def fetch_psg_document_detail(doc_id: int) -> PsgDocumentDetail | None:
         source_url=row[8],
         current_version_id=int(version_id) if version_id is not None else None,
     )
+
+
+@dataclass(frozen=True)
+class PsgRequirement:
+    """One extracted requirement from a PSG, with the words it came from.
+
+    ``page`` and ``quote`` are the extractor's own citation. They are what
+    makes a requirement anchorable in the rendered document rather than a
+    free-floating claim, so a row missing either is dropped by the caller
+    instead of being shown without evidence.
+    """
+
+    key: str
+    label: str
+    value: str
+    page: int | None
+    quote: str | None
+
+
+# The extractor's field names, in the order a reviewer reads them, with the
+# labels the studio shows. Anything the extractor adds later that is not in
+# this map is skipped rather than displayed under a raw column name.
+_REQUIREMENT_LABELS: tuple[tuple[str, str], ...] = (
+    ("study_type", "Recommended study"),
+    ("study_design", "Study design"),
+    ("strengths", "Strengths"),
+    ("dissolution", "Dissolution test"),
+    ("waiver_conditions", "Waiver conditions"),
+    ("additional_notes", "Additional notes"),
+)
+
+
+def fetch_psg_requirements(doc_id: int, version_id: int) -> list[PsgRequirement]:
+    """The BE requirements ingest extracted from one PSG version.
+
+    Returns [] when nothing was extracted (the ``--no-extract`` ingest path
+    leaves no row), which the caller must render as "not extracted" rather
+    than as "this guidance requires nothing".
+    """
+    with session_scope() as s:
+        row = s.execute(
+            sa_select(
+                col(BeRequirement.fields_json),
+                col(BeRequirement.citations_json),
+            )
+            .where(col(BeRequirement.psg_document_id) == doc_id)
+            .where(col(BeRequirement.version_id) == version_id)
+            .order_by(col(BeRequirement.id).desc())
+            .limit(1)
+        ).first()
+    if row is None:
+        return []
+
+    fields = row[0] if isinstance(row[0], dict) else {}
+    citations = row[1] if isinstance(row[1], dict) else {}
+    out: list[PsgRequirement] = []
+    for key, label in _REQUIREMENT_LABELS:
+        value = fields.get(key)
+        if value is None or not str(value).strip():
+            continue
+        cite = citations.get(key)
+        cite = cite if isinstance(cite, dict) else {}
+        page = cite.get("page")
+        quote = cite.get("quote")
+        out.append(
+            PsgRequirement(
+                key=key,
+                label=label,
+                value=str(value).strip(),
+                page=int(page) if isinstance(page, int) else None,
+                quote=str(quote).strip() if isinstance(quote, str) and quote.strip() else None,
+            )
+        )
+    return out
 
 
 @dataclass(frozen=True)

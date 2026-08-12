@@ -157,3 +157,120 @@ export function citationIndex(citations: MatchableCitation[]): Map<string, numbe
   });
   return index;
 }
+
+// ---------------------------------------------------------------------------
+// Human-identifying labels
+// ---------------------------------------------------------------------------
+
+// What a citation needs to name itself to a person. short_name ("PSG_020911")
+// is an FDA application number and names nothing a reader can act on, so it
+// becomes the FALLBACK: what we show when a turn predates identity fields on
+// the wire. It stays visible in the reference row and drawer as the identifier
+// support conversations use.
+export interface LabelableCitation extends MatchableCitation {
+  readonly product_name?: string | null;
+  readonly dosage_form?: string | null;
+  readonly route?: string | null;
+  readonly psg_type?: string | null;
+  readonly recommended_date?: string | null;
+}
+
+const MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+
+/** Title-case an FDA listing string ("AEROSOL, METERED" -> "Aerosol, Metered"). */
+function titleCase(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/(^|[\s,/-])([a-z])/g, (_m, sep: string, ch: string) => sep + ch.toUpperCase());
+}
+
+/**
+ * The dosage form phrase: route then form, e.g. "Inhalation Aerosol, Metered".
+ *
+ * Collapses to one term when either string already contains the other, so a
+ * route of "ORAL" against a form of "TABLET, ORAL" does not stutter. Never
+ * drops a qualifier to shorten the label — "AEROSOL, METERED" is a different
+ * product from "AEROSOL", and provenance that rounds off is provenance that
+ * misidentifies.
+ */
+export function formPhrase(
+  route: string | null | undefined,
+  form: string | null | undefined,
+): string | null {
+  const r = route?.trim() ? titleCase(route.trim()) : null;
+  const f = form?.trim() ? titleCase(form.trim()) : null;
+  if (!r) return f;
+  if (!f) return r;
+  const rl = r.toLowerCase();
+  const fl = f.toLowerCase();
+  if (fl.includes(rl)) return f;
+  if (rl.includes(fl)) return r;
+  return `${r} ${f}`;
+}
+
+/** "2021-03-15" -> "Mar 2021". Null for anything unparseable or absent. */
+export function revisedMonth(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const m = /^(\d{4})-(\d{2})/.exec(value.trim());
+  if (!m) return null;
+  const month = Number(m[2]);
+  if (!Number.isInteger(month) || month < 1 || month > 12) return null;
+  return `${MONTHS[month - 1]} ${m[1]}`;
+}
+
+/** The product line alone: "Beclomethasone Dipropionate — Inhalation Aerosol". */
+export function citationProduct(c: LabelableCitation): string | null {
+  const product = c.product_name?.trim() ? titleCase(c.product_name.trim()) : null;
+  if (!product) return null;
+  const form = formPhrase(c.route, c.dosage_form);
+  return form ? `${product} — ${form}` : product;
+}
+
+/**
+ * The always-visible chip label:
+ * "Beclomethasone Dipropionate — Inhalation Aerosol PSG, revised Mar 2021 · p.1"
+ *
+ * Falls back whole to "PSG_020911 · p.1" when the citation carries no product
+ * name — the legacy case, where inventing an identity would be worse than
+ * showing the opaque one.
+ */
+export function citationLabel(c: LabelableCitation): string {
+  const product = citationProduct(c);
+  if (!product) return `${c.short_name} · p.${c.page}`;
+  const revised = revisedMonth(c.recommended_date);
+  const head = revised ? `${product} PSG, revised ${revised}` : `${product} PSG`;
+  return `${head} · p.${c.page}`;
+}
+
+/**
+ * Chip labels for a whole turn, disambiguated.
+ *
+ * Two PSGs for the same ingredient and form collapse to the same human label
+ * (audit #1716 cited PSG_020911 and PSG_207921 for one product), which would
+ * show the reader two identical chips pointing at different documents. When
+ * that happens BOTH gain their application number; a label that is already
+ * unique never carries one.
+ */
+export function citationLabels(citations: readonly LabelableCitation[]): string[] {
+  const labels = citations.map(citationLabel);
+  const counts = new Map<string, number>();
+  for (const label of labels) counts.set(label, (counts.get(label) ?? 0) + 1);
+  return labels.map((label, i) => {
+    if ((counts.get(label) ?? 0) < 2) return label;
+    const applNo = citations[i].short_name.replace(/^(PSG_|OB_)/i, "");
+    return `${label} · #${applNo}`;
+  });
+}

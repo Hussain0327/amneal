@@ -236,6 +236,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/psg/documents/{doc_id}/requirements": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Psg Document Requirements
+         * @description The BE requirements ingest extracted from this PSG's current version.
+         *
+         *     These are not compliance findings about the document: a PSG has no
+         *     defects to report. They are what the guidance asks an applicant to do,
+         *     each carrying the page and the verbatim quote it came from, so the studio
+         *     can anchor them in the rendered text instead of restating them loose.
+         */
+        get: operations["psg_document_requirements_psg_documents__doc_id__requirements_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/query": {
         parameters: {
             query?: never;
@@ -861,6 +886,39 @@ export interface components {
             /** Stripped Name */
             stripped_name: string;
         };
+        /**
+         * PsgRequirementOut
+         * @description One extracted requirement, with the FDA words it was taken from.
+         */
+        PsgRequirementOut: {
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /** Page */
+            page: number | null;
+            /** Quote */
+            quote: string | null;
+            /** Value */
+            value: string;
+        };
+        /**
+         * PsgRequirementsResponse
+         * @description What one PSG requires of an ANDA, as ingest extracted it.
+         *
+         *     ``extracted`` is False when no extraction row exists for this version
+         *     (the ``--no-extract`` ingest path). The client must say so rather than
+         *     render an empty list as "this guidance requires nothing" -- the two are
+         *     opposite claims.
+         */
+        PsgRequirementsResponse: {
+            /** Extracted */
+            extracted: boolean;
+            /** Id */
+            id: number;
+            /** Requirements */
+            requirements: components["schemas"]["PsgRequirementOut"][];
+        };
         /** QueryCitation */
         QueryCitation: {
             /** Chunk Id */
@@ -869,10 +927,18 @@ export interface components {
             diff_summary?: string | null;
             /** Doc Id */
             doc_id: number;
+            /** Dosage Form */
+            dosage_form?: string | null;
             /** Page */
             page: number;
+            /** Product Name */
+            product_name?: string | null;
+            /** Psg Type */
+            psg_type?: string | null;
             /** Recommended Date */
             recommended_date?: string | null;
+            /** Route */
+            route?: string | null;
             /** Score */
             score?: number | null;
             /** Short Name */
@@ -1653,6 +1719,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    psg_document_requirements_psg_documents__doc_id__requirements_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                doc_id: number;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PsgRequirementsResponse"];
                 };
             };
             /** @description Validation Error */

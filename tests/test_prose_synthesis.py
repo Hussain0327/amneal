@@ -477,3 +477,128 @@ def test_marker_resolves_to_the_passage_shown_under_that_number(
     assert f"[{short}, p.{page}]" in result.answer
     cites = _only_route_json()["turn"]["claims"][0]["cites"]
     assert cites == [f"{short},p.{page}"], "marker [2] stamped a passage other than the one shown"
+
+
+# ---------- pathological-output bounds and the one repair (issue #183) ------
+#
+# The bounds are a runaway-output guard, NOT a style rule: measured v7 output
+# tops out at 488 chars a sentence, so nothing a real answer does comes near
+# them. What these pin is the RECOVERY -- one repair attempt, then a
+# conversational exit that never shows the user a reason code.
+
+
+def _v7_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v6 prose FORMAT plus the v7 selective-citation POLICY."""
+    _prose_mode(monkeypatch)
+    monkeypatch.setenv("REGWATCH_SELECTIVE_CITATION", "1")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
+
+
+def _sequence_stub_llm(texts: list[str], calls: list[str]) -> Any:
+    """Return each text in turn, recording every call.
+
+    A list rather than one fixed string, because "exactly one repair" cannot be
+    tested against a provider that answers identically forever.
+    """
+
+    class _LLM:
+        name = "stub"
+
+        def complete(self, *a: object, **kw: object) -> LLMResponse:
+            calls.append("complete")
+            index = min(len(calls) - 1, len(texts) - 1)
+            return LLMResponse(text=texts[index], model="stub")
+
+    return _LLM()
+
+
+_OVERSIZE = "The guidance describes the study design " * 60 + "[1]."
+_CLEAN = "The guidance recommends a single-dose fasting study [1]."
+
+
+def _run_with(monkeypatch: pytest.MonkeyPatch, texts: list[str]) -> tuple[Any, list[str]]:
+    _seed_corpus(_CORPUS)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        qa_mod, "get_llm_provider", lambda *a, **k: _sequence_stub_llm(texts, calls)
+    )
+    return qa_mod.ask(_QUESTION), calls
+
+
+def test_the_oversize_fixture_actually_breaches_the_bound() -> None:
+    """Guards the other tests: a fixture under the cap would prove nothing."""
+    from regwatch.generate import prose_turn as pt
+
+    assert len(_OVERSIZE) > pt.PROSE_MAX_SENTENCE_CHARS
+    assert pt.bounds_exceeded(_CLEAN) is None
+
+
+def test_an_oversize_sentence_is_repaired_in_one_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prose_mode(monkeypatch)
+    result, calls = _run_with(monkeypatch, [_OVERSIZE, _CLEAN])
+    assert not result.refused, f"repair did not recover the turn: {result.reason}"
+    assert len(calls) == 2, f"expected one repair, saw {len(calls)} completions"
+
+
+def test_the_repair_is_attempted_exactly_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A retry LOOP on a degenerate model is the failure this must not become."""
+    _prose_mode(monkeypatch)
+    result, calls = _run_with(monkeypatch, [_OVERSIZE, _OVERSIZE, _CLEAN])
+    assert result.refused
+    assert len(calls) == 2, f"repair must not loop, saw {len(calls)} completions"
+
+
+def test_a_still_oversize_turn_declines_with_an_internal_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Greppable in the audit, so this stays separable from parse failures."""
+    _prose_mode(monkeypatch)
+    result, _ = _run_with(monkeypatch, [_OVERSIZE, _OVERSIZE])
+    assert result.refused
+    assert result.reason == "oversize_sentence"
+
+
+def test_the_user_never_sees_the_reason_code_or_any_validation_words(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 2,000-char rule is plumbing; the reply has to sound like a person."""
+    _prose_mode(monkeypatch)
+    result, _ = _run_with(monkeypatch, [_OVERSIZE, _OVERSIZE])
+    lowered = result.answer.lower()
+    for banned in ("oversize", "malformed", "structure", "validation", "2000", "character"):
+        assert banned not in lowered, f"user-facing text leaked {banned!r}: {result.answer}"
+    assert result.answer.strip(), "a decline still has to say something"
+
+
+def test_v7_repairs_an_oversize_sentence_in_one_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v7 is what production serves; #187 shipped its #183 tests v6-only."""
+    _v7_mode(monkeypatch)
+    result, calls = _run_with(monkeypatch, [_OVERSIZE, _CLEAN])
+    assert not result.refused, f"v7 repair did not recover the turn: {result.reason}"
+    assert len(calls) == 2
+
+
+def test_v7_declines_conversationally_when_the_repair_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _v7_mode(monkeypatch)
+    result, _ = _run_with(monkeypatch, [_OVERSIZE, _OVERSIZE])
+    assert result.refused
+    assert result.reason == "oversize_sentence"
+    assert "oversize" not in result.answer.lower()
+
+
+def test_a_normal_turn_still_takes_exactly_one_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bounds must cost nothing on the 62-of-62 rows that never breach."""
+    _prose_mode(monkeypatch)
+    result, calls = _run_with(monkeypatch, [_CLEAN])
+    assert not result.refused
+    assert len(calls) == 1

@@ -13,6 +13,7 @@
 export interface PsgWireDoc {
   id: number;
   active_ingredient: string;
+  normalized_name?: string | null;
   stripped_name?: string | null;
   dosage_form?: string | null;
   route?: string | null;
@@ -29,6 +30,12 @@ export interface LibraryDoc {
   psgId: number;
   /** active_ingredient verbatim, e.g. "Albuterol Sulfate". */
   ingredient: string;
+  /** The server's canonical drug key. Scopes an assistant question to this
+   * product, so an answer about a PSG is retrieved from that PSG's drug. */
+  normalizedName: string;
+  /** Raw dosage form and route, unjoined, for the same scoping. */
+  dosageForm: string | null;
+  route: string | null;
   /** Capitalized salt-stripped drug, repeated here so the TopBar crumb needs
    * no tree lookup. */
   drugLabel: string;
@@ -91,6 +98,9 @@ function toLibraryDoc(doc: PsgWireDoc, drugLabel: string): LibraryDoc {
     id: `psg-${doc.id}`,
     psgId: doc.id,
     ingredient: doc.active_ingredient,
+    normalizedName: (doc.normalized_name ?? "").trim(),
+    dosageForm: doc.dosage_form ?? null,
+    route: doc.route ?? null,
     drugLabel,
     label: docLabel(doc),
     psgType: narrowPsgType(doc.psg_type),

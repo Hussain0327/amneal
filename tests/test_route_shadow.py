@@ -12,7 +12,7 @@ from regwatch.generate import grounded_qa as qa_mod
 from regwatch.generate.llm import D1ResidencyError, LLMResponse, LLMUsage
 from regwatch.generate.route import CorpusPolicyHint, RouteHistoryTurn
 from regwatch.generate.route_shadow import finalize_route_observation, observe_route
-from regwatch.retrieve.resolver import Resolution
+from regwatch.retrieve.resolver import ExternalDrugMatch, Resolution
 from regwatch.retrieve.scope import CorpusDocumentRef, CorpusPolicySnapshot
 
 
@@ -313,7 +313,11 @@ def test_explicit_corpus_shadow_logs_exact_corpus_without_changing_the_turn(
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: provider)
     monkeypatch.setattr(qa_mod, "resolve_product", lambda _q: Resolution(status="none"))
     monkeypatch.setattr(qa_mod, "suggest_products", lambda _q: [])
-    monkeypatch.setattr(qa_mod, "resolve_brand", lambda _q: [])
+    monkeypatch.setattr(
+        qa_mod,
+        "lookup_external_drug",
+        lambda _q: ExternalDrugMatch(corpus_products=[], known_absent=False),
+    )
     monkeypatch.setattr(
         qa_mod,
         "load_corpus_policy_snapshots",
@@ -361,7 +365,10 @@ def test_explicit_corpus_shadow_logs_exact_corpus_without_changing_the_turn(
     route_call = shadow_audit.route_json["route_call"]
     assert route_call["compiled_scope"]["kind"] == "corpus"
     assert route_call["compiled_scope"]["retrieval_mode"] == "exact_corpus"
-    assert route_call["current_reason"] == "no_product"
+    # Unseeded corpus: the deterministic turn refuses with empty_corpus. What
+    # this test pins is that the shadow route call did not CHANGE the turn, not
+    # which reason the turn carried.
+    assert route_call["current_reason"] == "empty_corpus"
     assert route_call["agrees_with_scope"] is False
     assert "route_call" not in off_audit.route_json
 
@@ -437,7 +444,11 @@ def test_shadow_context_read_cannot_preload_authoritative_session_snapshot(
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: provider)
     monkeypatch.setattr(qa_mod, "resolve_product", lambda _q: Resolution(status="none"))
     monkeypatch.setattr(qa_mod, "suggest_products", lambda _q: [])
-    monkeypatch.setattr(qa_mod, "resolve_brand", lambda _q: [])
+    monkeypatch.setattr(
+        qa_mod,
+        "lookup_external_drug",
+        lambda _q: ExternalDrugMatch(corpus_products=[], known_absent=False),
+    )
     monkeypatch.setattr(qa_mod, "current_dosage_form_routes", lambda *a, **k: [])
 
     def _load_session_filters() -> dict[str, Any]:

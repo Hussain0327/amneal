@@ -319,20 +319,26 @@ def test_no_product_typo_populates_related_from_suggestions(
 def test_no_product_absent_drug_related_empty_no_crash(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A genuinely-absent drug (romidepsin) refuses with related == [] and no
-    exception — the empty-resolver path must not crash."""
+    """A genuinely-absent drug clarifies with no options and no exception.
+
+    The empty-resolver path must not crash. Since audit #1715 the outcome is a
+    conversational clarify rather than a refusal, and with no options to order
+    the bounded guidance planner is skipped entirely -- a greeting-shaped turn
+    must not pay a model round trip whose text is discarded anyway.
+    """
     _seed(["propranolol hydrochloride", "metformin hydrochloride"])
     counter = {"n": 0}
     monkeypatch.setattr(qa_mod, "get_llm_provider", _counting_llm(counter))
 
     result = qa_mod.ask("What bioequivalence study design is recommended for romidepsin?")
 
-    assert result.refused is True
-    assert result.status == "refused"
-    assert result.reason == "no_product"
+    assert result.refused is False
+    assert result.status == "clarify"
+    assert result.reason == "need_product"
     assert result.citations == []
     assert result.related == []
-    assert counter["n"] == 1
+    assert result.clarify == []
+    assert counter["n"] == 0
 
 
 # ---------- contract: QueryResponse round-trips related + reason ----------

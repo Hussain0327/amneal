@@ -22,9 +22,9 @@ import { ReferenceBar } from "@/components/studio/ReferenceBar";
 import { RepositoryTree } from "@/components/studio/RepositoryTree";
 import { SelectionToolbar, type StudioSelection } from "@/components/studio/SelectionToolbar";
 import { TopBar } from "@/components/studio/TopBar";
-import { fetchPsgContent, fetchPsgLibrary } from "@/lib/api";
+import { askQuery, fetchPsgContent, fetchPsgLibrary, fetchPsgRequirements } from "@/lib/api";
 import { buildLibraryTree, type LibraryDoc } from "@/lib/studio-library";
-import { toReferenceDoc } from "@/lib/studio-reference";
+import { toReferenceDoc, toReferenceFindings } from "@/lib/studio-reference";
 import {
   ASSISTANT_INTRO,
   CHECK_RESULTS,
@@ -141,6 +141,14 @@ function useReducedMotion(): boolean {
  * `LibraryState` (the catalog): the catalog can be listed while one
  * document's text fails, and an error must never render as an empty document.
  */
+/**
+ * The assistant's opening line over a reference PSG. Different from the
+ * working-document one because the answer comes from somewhere else: the
+ * retrieval service over the FDA corpus, scoped to this PSG's drug.
+ */
+const REFERENCE_ASSISTANT_INTRO =
+  "Ask me about this guidance. I answer from the FDA product-specific guidance corpus for this drug and cite the page every answer comes from.";
+
 type ReferenceState =
   | { phase: "loading" }
   | { phase: "ready"; truncated: boolean }
@@ -181,6 +189,9 @@ export default function StudioPage() {
   const [showPdf, setShowPdf] = useState(false);
   // The psgId of the most recent text request; see openLibraryDoc.
   const referenceRequest = useRef<number | null>(null);
+  // How many extracted requirements could not be anchored in the rendered
+  // text on the last check. Surfaced, never swallowed.
+  const [referenceUnanchored, setReferenceUnanchored] = useState(0);
   const libraryLoading = useRef(false);
   // Mirrored for delayed callbacks: a check that completes while a PSG is on
   // the canvas must not resurrect the findings panel (its scrim would sit
@@ -228,10 +239,20 @@ export default function StudioPage() {
   }, []);
 
   const doc = docs[activeId];
-  const checking = doc?.checkState === "checking";
+  // The document the chrome describes: the reference PSG when one is open,
+  // otherwise the working draft. Every counter, panel and rail reads this, so
+  // none of them can describe a document that is not on screen. (Not to be
+  // confused with openDoc(), which OPENS a working document.)
+  const canvasDoc = referenceDoc ?? doc;
+  const checking = canvasDoc?.checkState === "checking";
   const openFindings = useMemo(
-    () => (doc ? doc.findings.filter((f) => !isDisposed(f) && f.severity !== "info").length : 0),
-    [doc],
+    () =>
+      canvasDoc
+        ? canvasDoc.findings.filter(
+            (f) => !isDisposed(f) && (referenceDoc ? true : f.severity !== "info"),
+          ).length
+        : 0,
+    [canvasDoc, referenceDoc],
   );
 
   // One writer for both stores: handlers name the document they are acting on
@@ -288,6 +309,7 @@ export default function StudioPage() {
     setLibraryDoc(d);
     setReferenceDoc(null);
     setReferenceState({ phase: "loading" });
+    setReferenceUnanchored(0);
     setShowPdf(false);
     // Last-request-wins. Two quick clicks in the rail would otherwise land the
     // first document's text under the second document's header, and the slower
@@ -325,7 +347,7 @@ export default function StudioPage() {
   // A read-only canvas raises neither of these. They exist because the props
   // are required, and they are stable so the canvas is not remounted.
   const noEdit = useCallback(() => {}, []);
-  const noSelectFinding = useCallback(() => {}, []);
+  const noDispose = useCallback(() => {}, []);
 
   const editBlock = useCallback(
     (blockId: string, text: string) => {
@@ -336,6 +358,45 @@ export default function StudioPage() {
   );
 
   // --- compliance ----------------------------------------------------------
+
+  /**
+   * Check a reference PSG. Unlike the working documents' fixture check, this
+   * one is real: it reads the requirements ingest extracted from this exact
+   * PSG version and anchors each to the FDA words it was taken from. They are
+   * requirements the guidance places on an applicant, not defects in it --
+   * the panel header says which, and every one carries its page.
+   */
+  const runReferenceCheck = useCallback(
+    (psgId: number) => {
+      setReferenceDoc((prev) => (prev ? { ...prev, checkState: "checking" } : prev));
+      setPanel("findings");
+      fetchPsgRequirements(psgId)
+        .then((res) => {
+          setReferenceDoc((prev) => {
+            // The analyst may have moved on mid-request; findings from one
+            // document must never land on another.
+            if (!prev || prev.id !== `psg-${psgId}`) return prev;
+            const { findings, unanchored } = toReferenceFindings(res.requirements, prev.blocks);
+            setReferenceUnanchored(unanchored);
+            setLive(
+              res.extracted
+                ? `${findings.length} requirement${findings.length === 1 ? "" : "s"} found in this guidance.`
+                : "This guidance has not been through requirement extraction.",
+            );
+            return applyFindings({ ...prev, checkState: "checked" }, findings);
+          });
+        })
+        .catch((e: unknown) => {
+          setReferenceDoc((prev) =>
+            prev && prev.id === `psg-${psgId}` ? { ...prev, checkState: "unchecked" } : prev,
+          );
+          setLive(
+            `Could not read this guidance's requirements. ${e instanceof Error ? e.message : ""}`.trim(),
+          );
+        });
+    },
+    [],
+  );
 
   const runCheck = useCallback(
     (id: string) => {
@@ -526,9 +587,48 @@ export default function StudioPage() {
       const turn = seq.current;
 
       setMessages((prev) => [...prev, { id: `u${turn}`, role: "user", text }]);
+      const id = `a${turn}`;
+
+      // A reference PSG gets the REAL assistant. The canned replies below
+      // answer about the working repository; pointing them at FDA guidance
+      // would produce confident answers about a document they were never
+      // given. /query retrieves from this PSG's own drug and cites pages.
+      if (libraryDoc) {
+        setThinking(true);
+        askQuery(text, {
+          normalized_name: libraryDoc.normalizedName,
+          ...(libraryDoc.dosageForm ? { dosage_form: libraryDoc.dosageForm } : {}),
+          ...(libraryDoc.route ? { route: libraryDoc.route } : {}),
+        })
+          .then((res) => {
+            setThinking(false);
+            setMessages((prev) => [
+              ...prev,
+              {
+                id,
+                role: "assistant",
+                text: res.answer,
+                // Every citation the server validated, as page references
+                // into the guidance the analyst is reading.
+                sources: res.citations.map((c) => `${c.short_name} - page ${c.page}`),
+              },
+            ]);
+          })
+          .catch((e: unknown) => {
+            setThinking(false);
+            setMessages((prev) => [
+              ...prev,
+              {
+                id,
+                role: "assistant",
+                text: `I could not reach the guidance service. ${e instanceof Error ? e.message : ""}`.trim(),
+              },
+            ]);
+          });
+        return;
+      }
 
       const reply = assistantReply(text, doc.name);
-      const id = `a${turn}`;
 
       if (reduceMotion) {
         setMessages((prev) => [...prev, { id, role: "assistant", text: reply.text, sources: reply.sources }]);
@@ -560,7 +660,7 @@ export default function StudioPage() {
         });
       }, 420);
     },
-    [doc, later, reduceMotion],
+    [doc, later, libraryDoc, reduceMotion],
   );
 
   // --- selection -----------------------------------------------------------
@@ -581,16 +681,6 @@ export default function StudioPage() {
         return;
       }
 
-      // The toolbar hides the assistant actions over a reference document; this
-      // is the same refusal at the model, so a keyboard or test path cannot
-      // reach around the missing buttons and ask the working-repository
-      // assistant about FDA's guidance.
-      if (referenceDoc) {
-        setSelection(null);
-        window.getSelection()?.removeAllRanges();
-        setLive("The assistant answers about your working documents, not about a reference PSG.");
-        return;
-      }
 
       const prompt =
         action === "summarize"
@@ -696,7 +786,12 @@ export default function StudioPage() {
           onOpenDoc={openDoc}
           onOpenLibraryDoc={openLibraryDoc}
           onRetryLibrary={loadLibrary}
-          onCheck={() => runCheck(activeId)}
+          // On a reference PSG this reads what the guidance requires; on a
+          // working document it runs the compliance check. Same button, two
+          // documents, and the footer note says which is which.
+          onCheck={() =>
+            libraryDoc ? runReferenceCheck(libraryDoc.psgId) : runCheck(activeId)
+          }
           // The repository-wide run lives with the repository. It used to sit
           // rotated 90 degrees at the foot of the activity rail, which put the
           // widest-scope action in the least readable place in the studio.
@@ -704,60 +799,113 @@ export default function StudioPage() {
         />
 
         {libraryDoc ? (
-          // The compliance chrome is HIDDEN, not disabled, while a reference
-          // PSG is open: the spine, format bar, panels and rail all read or
-          // write the DRAFT's blocks and findings, and rendering them next to
-          // a document they do not describe would be a lie ("2 open findings"
-          // beside a document that has none). The reference bar takes their
-          // place with the three things a PSG actually supports.
-          <div className="st-main">
-            <ReferenceBar
-              doc={libraryDoc}
-              showingPdf={showPdf}
-              truncated={referenceState.phase === "ready" && referenceState.truncated}
-              onTogglePdf={() => setShowPdf((v) => !v)}
+          // A reference PSG gets the SAME chrome a working document gets --
+          // spine, panels, activity rail, selection toolbar. The only things
+          // that differ are the ones that would be false: the text is not
+          // editable (it is FDA's), and the reference bar replaces the format
+          // bar because there are no tracked changes to switch on.
+          <>
+            <ComplianceSpine
+              doc={canvasDoc}
+              scrollRef={scrollRef}
+              activeFindingId={activeFindingId}
+              onSelect={focusFinding}
             />
 
-            {showPdf ? (
-              <PdfPane key={libraryDoc.id} doc={libraryDoc} />
-            ) : referenceState.phase === "error" ? (
-              <div className="st-ref__fallback" role="alert">
-                <span>Couldn&apos;t load the text of this PSG.</span>
-                <button
-                  type="button"
-                  className="st-btn st-btn--quiet st-tree__retry"
-                  onClick={() => openLibraryDoc(libraryDoc)}
-                >
-                  Retry
-                </button>
-                <button
-                  type="button"
-                  className="st-btn st-btn--outline"
-                  onClick={() => setShowPdf(true)}
-                >
-                  View original PDF
-                </button>
-              </div>
-            ) : referenceDoc ? (
-              // The same canvas the working documents use, reading the same
-              // block model -- which is the whole point of rebuilding a PSG
-              // into one. Read-only: FDA's published text is not ours to edit.
-              <DocumentCanvas
-                key={referenceDoc.id}
-                doc={referenceDoc}
-                scrollRef={scrollRef}
-                activeFindingId={null}
-                tracked={false}
-                reduceMotion={reduceMotion}
-                readOnly
-                onEditBlock={noEdit}
-                onSelectFinding={noSelectFinding}
-                onSelectionChange={setSelection}
+            <div className="st-main">
+              <ReferenceBar
+                doc={libraryDoc}
+                showingPdf={showPdf}
+                truncated={referenceState.phase === "ready" && referenceState.truncated}
+                onTogglePdf={() => setShowPdf((v) => !v)}
               />
-            ) : (
-              <div className="st-ref__note">Loading document...</div>
-            )}
-          </div>
+
+              {showPdf ? (
+                <PdfPane key={libraryDoc.id} doc={libraryDoc} />
+              ) : referenceState.phase === "error" ? (
+                <div className="st-ref__fallback" role="alert">
+                  <span>Couldn&apos;t load the text of this PSG.</span>
+                  <button
+                    type="button"
+                    className="st-btn st-btn--quiet st-tree__retry"
+                    onClick={() => openLibraryDoc(libraryDoc)}
+                  >
+                    Retry
+                  </button>
+                  <button
+                    type="button"
+                    className="st-btn st-btn--outline"
+                    onClick={() => setShowPdf(true)}
+                  >
+                    View original PDF
+                  </button>
+                </div>
+              ) : referenceDoc ? (
+                <DocumentCanvas
+                  key={referenceDoc.id}
+                  doc={referenceDoc}
+                  scrollRef={scrollRef}
+                  activeFindingId={activeFindingId}
+                  tracked={false}
+                  reduceMotion={reduceMotion}
+                  readOnly
+                  onEditBlock={noEdit}
+                  onSelectFinding={focusFinding}
+                  onSelectionChange={setSelection}
+                />
+              ) : (
+                <div className="st-ref__note">Loading document...</div>
+              )}
+            </div>
+
+            <div className={`st-panel${panel ? " is-open" : ""}`} aria-hidden={panel === null}>
+              <div className="st-panel__inner">
+                {panel === "findings" && (
+                  <FindingsPanel
+                    doc={canvasDoc}
+                    activeFindingId={activeFindingId}
+                    pending={null}
+                    drafts={drafts}
+                    error={null}
+                    copyFallback={copyFallback}
+                    onSelect={focusFinding}
+                    onAsk={(f) => send(`What does "${f.title}" require of my application?`)}
+                    onClose={() => setPanel(null)}
+                    // A requirement of FDA's is not ours to dispose of, apply
+                    // a fix to, or revert. The panel keeps its shape; these
+                    // rungs simply have nothing to do on this document.
+                    onApplySuggestion={noDispose}
+                    onRevert={noDispose}
+                    onPickDisposition={noDispose}
+                    onDraftChange={(id, text) => setDrafts((prev) => ({ ...prev, [id]: text }))}
+                    onRecord={noDispose}
+                    onCancelPending={cancelPending}
+                    onCopyRecord={copyRecord}
+                    onStep={step}
+                  />
+                )}
+                {panel === "assistant" && (
+                  <AssistantPanel
+                    doc={canvasDoc}
+                    messages={messages}
+                    draft={draft}
+                    thinking={thinking}
+                    intro={REFERENCE_ASSISTANT_INTRO}
+                    onDraftChange={setDraft}
+                    onSend={send}
+                    onClose={() => setPanel(null)}
+                  />
+                )}
+              </div>
+            </div>
+
+            <ActivityRail
+              panel={panel}
+              findingCount={openFindings}
+              checking={checking}
+              onTogglePanel={(id) => setPanel((prev) => (prev === id ? null : id))}
+            />
+          </>
         ) : (
           <>
             <ComplianceSpine
@@ -852,11 +1000,7 @@ export default function StudioPage() {
         )}
       </div>
 
-      <SelectionToolbar
-        selection={selection}
-        assistant={referenceDoc === null}
-        onAction={onSelectionAction}
-      />
+      <SelectionToolbar selection={selection} onAction={onSelectionAction} />
     </div>
   );
 }

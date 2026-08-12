@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 
 import { RecencyBadge } from "@/components/RecencyBadge";
 import type { Citation } from "@/lib/api";
+import { citationProduct } from "@/lib/citations";
 import { safeHref } from "@/lib/url";
 
 // Slide-in panel showing ONE already-validated citation beside the answer, so an
@@ -90,6 +91,12 @@ export function EvidenceDrawer({
             ×
           </button>
         </header>
+        {/* Product identity first when we have it; the drawer is where the
+            internal identifiers belong, so short_name stays on the line below
+            rather than being replaced. */}
+        {citationProduct(citation) && (
+          <p className="evidence__product">{citationProduct(citation)}</p>
+        )}
         <p className="evidence__src code">
           {citation.short_name} · p.{citation.page}
           {/* Numeric retrieval score lives here only — the main view shows a

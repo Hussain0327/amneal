@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from regwatch.generate import grounded_qa as qa
-from regwatch.retrieve.resolver import Resolution
+from regwatch.retrieve.resolver import ExternalDrugMatch, Resolution
 
 
 def _no_decline(*args: Any, **kwargs: Any) -> Any:
@@ -58,7 +58,11 @@ def test_resolution_writes_into_the_turn_state(monkeypatch: pytest.MonkeyPatch) 
 def test_carry_over_flows_through_the_dataclass(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(qa, "resolve_product", lambda q: Resolution(status="none"))
     monkeypatch.setattr(qa, "suggest_products", lambda q: [])
-    monkeypatch.setattr(qa, "resolve_brand", lambda q: [])
+    monkeypatch.setattr(
+        qa,
+        "lookup_external_drug",
+        lambda q: ExternalDrugMatch(corpus_products=[], known_absent=False),
+    )
     state = qa.TurnState(active_filters={})
 
     result = qa._resolve_and_carry_over(
@@ -94,7 +98,11 @@ def test_clarify_decline_reads_the_mutated_turn_state(monkeypatch: pytest.Monkey
     """
     monkeypatch.setattr(qa, "resolve_product", lambda q: Resolution(status="none"))
     monkeypatch.setattr(qa, "suggest_products", lambda q: [])
-    monkeypatch.setattr(qa, "resolve_brand", lambda q: [])
+    monkeypatch.setattr(
+        qa,
+        "lookup_external_drug",
+        lambda q: ExternalDrugMatch(corpus_products=[], known_absent=False),
+    )
     monkeypatch.setattr(qa, "_doc_count", lambda name: 2)
     monkeypatch.setattr(qa, "get_llm_provider", lambda *a, **k: _FailingRouter())
 

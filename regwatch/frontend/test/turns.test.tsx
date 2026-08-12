@@ -70,9 +70,19 @@ describe("rise gate — the live flag", () => {
 
 describe("reasonCopy — plain-language decline/clarify reasons", () => {
   it("maps a known backend reason code to analyst copy", () => {
-    expect(reasonCopy("no_product")).toBe(
-      "The product could not be identified confidently from this query.",
+    expect(reasonCopy("low_top_score")).toBe(
+      "No passage scored high enough to answer this confidently — try naming the product or adding a specific detail.",
     );
+  });
+
+  it("stays silent for reasons whose reply already says the why", () => {
+    // Audit #1715: the card carried the backend's "I couldn't identify the
+    // product..." and then restated it underneath in the monospace diagnostic
+    // register. The conversational outcomes own their copy; no_product is here
+    // as read-only legacy for turns persisted before they existed.
+    expect(reasonCopy("need_product")).toBeNull();
+    expect(reasonCopy("product_not_covered")).toBeNull();
+    expect(reasonCopy("no_product")).toBeNull();
   });
 
   it("never exposes an unknown internal reason code", () => {

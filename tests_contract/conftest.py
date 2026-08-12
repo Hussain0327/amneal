@@ -93,10 +93,14 @@ REFUSAL_TEXT = (
     "I couldn't find this in the current FDA guidance corpus, "
     "and I won't guess on a regulatory question."
 )
+# Retired from the live vocabulary by the audit #1715 change: an unresolved
+# product now converses (need_product / product_not_covered) instead of
+# refusing. Kept because turns persisted before that still carry it.
 NO_PRODUCT_GUIDANCE_TEXT = (
     "I couldn't identify the product confidently enough to search the right FDA "
     "guidance. What generic ingredient should I use?"
 )
+NEED_PRODUCT_GUIDANCE_TEXT = "Sure — which product are you asking about?"
 LOW_SCORE_GUIDANCE_TEXT = (
     "I found Albuterol Sulfate, but I couldn't verify that answer from the current FDA "
     "passages. Can you narrow the question to study design, strengths, dissolution, "
@@ -148,6 +152,14 @@ CITATION_KEYS = frozenset(
         "score",
         "recommended_date",
         "diff_summary",
+        # Human-identifying provenance (audit #1716). Additive and optional:
+        # "PSG_020911" is an FDA application number and names nothing a reader
+        # can act on, so the client renders the product instead and falls back
+        # to short_name when these are absent on a legacy row.
+        "product_name",
+        "dosage_form",
+        "route",
+        "psg_type",
     }
 )
 RETRIEVED_ITEM_KEYS = frozenset(

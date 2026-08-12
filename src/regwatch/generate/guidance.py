@@ -76,7 +76,9 @@ def _allowed_steps(reason: str, status: str) -> tuple[NextStep, ...]:
         return ("choose_dosage_form",)
     if reason == "vague_input":
         return ("narrow_source_topic",)
-    if reason == "no_product":
+    # need_product and product_not_covered replace the old no_product refusal;
+    # no_product itself stays mapped for turns replayed from history.
+    if reason in {"no_product", "need_product", "product_not_covered"}:
         return ("name_product",)
     if reason in {"low_top_score", "model_refusal", "no_valid_citations", "material_drop"}:
         return ("narrow_source_topic", "choose_dosage_form")
@@ -166,6 +168,10 @@ def render_guidance_message(
             "I couldn't identify the product confidently enough to search the right FDA "
             "guidance. What generic ingredient should I use?"
         )
+    # need_product / product_not_covered own their copy at the call site (the
+    # clarify interpretation), so the planner only orders their options.
+    if reason in {"need_product", "product_not_covered"}:
+        return fallback
     if reason in {"low_top_score", "model_refusal", "no_valid_citations", "material_drop"}:
         if plan.next_step == "choose_dosage_form":
             return (

@@ -6,7 +6,13 @@ import { AnswerFeedback } from "@/components/AnswerFeedback";
 import { Markdown } from "@/components/Markdown";
 import { RecencyBadge } from "@/components/RecencyBadge";
 import type { Citation, Suggestion } from "@/lib/api";
-import { dedupeCitations, splitSourcesTrailer, trailerMarkerPairs } from "@/lib/citations";
+import {
+  citationLabels,
+  citationProduct,
+  dedupeCitations,
+  splitSourcesTrailer,
+  trailerMarkerPairs,
+} from "@/lib/citations";
 import { formatClock, formatFiled, parseApiDate } from "@/lib/time";
 import { confidenceBand, confidenceTitle, nonAnswerLabel, reasonCopy, type Turn } from "@/lib/turns";
 import { safeHref } from "@/lib/url";
@@ -119,13 +125,27 @@ function AuditLine({ turn }: { turn: Turn }) {
 // One citation, compact: opens the in-app evidence drawer instead of bouncing the
 // analyst out to the remote FDA PDF. The PDF link still lives inside the drawer and
 // in the <details> Sources list below (the no-JS fallback).
-function CiteChip({ c, onSelect }: { c: Citation; onSelect: (c: Citation) => void }) {
+function CiteChip({
+  c,
+  label,
+  onSelect,
+}: {
+  c: Citation;
+  label: string;
+  onSelect: (c: Citation) => void;
+}) {
   return (
-    <button type="button" className="cite" onClick={() => onSelect(c)} title={`${c.short_name} · p.${c.page}`}>
+    // title keeps the internal identifier one hover away: the label now names
+    // the product, but PSG_<appl_no> is still what a support conversation and
+    // the audit row are keyed on.
+    <button
+      type="button"
+      className="cite"
+      onClick={() => onSelect(c)}
+      title={`${c.short_name} · p.${c.page}`}
+    >
       <FileGlyph />
-      <span className="cite__label">
-        {c.short_name} · p.{c.page}
-      </span>
+      <span className="cite__label">{label}</span>
     </button>
   );
 }
@@ -348,6 +368,10 @@ export const AssistantTurn = memo(function AssistantTurn({
   // dedupe.
   const hasCitations = turn.citations.length > 0;
   const deduped = dedupeCitations(turn.citations);
+  // Computed over the whole turn, not per chip: two PSGs for one ingredient and
+  // form produce the same human label, and only a turn-wide view can tell that
+  // and add the application number to both.
+  const chipLabels = citationLabels(deduped);
   // The model-authored "Sources:" bibliography duplicates the UI's own
   // reference list (built from the VALIDATED citations), so on a cited turn the
   // prose ends where the trailer begins — and the trailer's numbering is what
@@ -405,7 +429,12 @@ export const AssistantTurn = memo(function AssistantTurn({
           )}
           <div className="cites">
             {deduped.map((c, i) => (
-              <CiteChip key={`${c.short_name}-${c.page}-${i}`} c={c} onSelect={onCite} />
+              <CiteChip
+                key={`${c.short_name}-${c.page}-${i}`}
+                c={c}
+                label={chipLabels[i]}
+                onSelect={onCite}
+              />
             ))}
           </div>
           <details className="sources">
@@ -500,8 +529,16 @@ function Reference({ n, c }: { n: number; c: Citation }) {
     <div className="ref">
       <span className="ref__no">[{n}]</span>
       <div>
-        <span className="ref__src">{c.short_name}</span>
+        {/* Product identity leads; the application number stays on its own
+            line as the internal identifier, never as the only thing shown. */}
+        <span className="ref__src">{citationProduct(c) ?? c.short_name}</span>
         <span className="ref__page"> · p.{c.page}</span>
+        {citationProduct(c) && (
+          <div className="ref__kind code">
+            FDA product-specific guidance
+            {c.psg_type ? ` (${c.psg_type})` : ""} · {c.short_name}
+          </div>
+        )}
       </div>
       {/* explicitEmpty: in a reference row, a missing revision date is itself
           provenance -- state it rather than render nothing. */}

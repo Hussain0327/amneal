@@ -18,6 +18,7 @@ from sqlmodel import select
 from regwatch.generate import grounded_qa as qa_mod
 from regwatch.generate.llm import LLMResponse
 from regwatch.process.embedder import get_embedding_provider
+from regwatch.retrieve.resolver import ExternalDrugMatch
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import QueryLog
 from regwatch.store.vector_store import add_chunks
@@ -128,16 +129,27 @@ def test_typo_offers_did_you_mean() -> None:
     )
 
 
-def test_romidepsin_stays_refused_with_no_suggestion() -> None:
-    """A drug genuinely absent from the corpus must refuse — never silently
-    point at a different drug (INV-2 must-refuse asset)."""
+def test_romidepsin_never_points_at_a_different_drug() -> None:
+    """A drug absent from the corpus must never be answered from another one.
+
+    The OUTCOME changed deliberately (audit #1715): an unresolved product is no
+    longer a red "Evidence gap" refusal, because that was indistinguishable
+    from a greeting. It is a conversational clarify now. What must not change is
+    the safety property -- no answer, no citations, and no silent substitution
+    of a drug the user did not ask about (INV-2).
+    """
     _seed(_TWO)
     r = qa_mod.ask("What bioequivalence study design is recommended for romidepsin?")
-    assert r.refused
-    assert r.status == "refused"
-    assert not r.clarify
-    assert "couldn't identify the product" in r.answer.lower()
-    assert "generic ingredient" in r.answer.lower()
+    assert r.refused is False
+    assert r.status == "clarify"
+    # Without a configured openFDA key there is no positive evidence that
+    # romidepsin is a real drug, so it must fall to need_product rather than
+    # claim the corpus does not cover it.
+    assert r.reason == "need_product"
+    assert r.citations == []
+    # The substitution guard: neither seeded product may be offered as if it
+    # answered the question.
+    assert all(seeded not in r.answer.lower() for seeded in _TWO)
 
 
 def test_clarify_logs_exactly_one_audit_row() -> None:
@@ -152,7 +164,11 @@ def test_brand_name_clarifies_via_generic_lookup(monkeypatch: pytest.MonkeyPatch
     """A brand name (no in-corpus product, no typo match) → clarify with the
     generic(s) the brand maps to. openFDA is stubbed so the test stays offline."""
     _seed(["amphetamine", "propranolol hydrochloride"])
-    monkeypatch.setattr(qa_mod, "resolve_brand", lambda *a, **k: ["amphetamine"])
+    monkeypatch.setattr(
+        qa_mod,
+        "lookup_external_drug",
+        lambda *a, **k: ExternalDrugMatch(corpus_products=["amphetamine"], known_absent=False),
+    )
     r = qa_mod.ask("adderall")
     assert r.status == "clarify"
     assert not r.refused

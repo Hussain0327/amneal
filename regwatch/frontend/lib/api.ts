@@ -938,6 +938,14 @@ export function psgDocxPath(psgId: number): string {
   return `/api/psg/documents/${psgId}/docx`;
 }
 
+export type PsgRequirementsResponse = Schemas["PsgRequirementsResponse"];
+export type PsgRequirement = Schemas["PsgRequirementOut"];
+
+/** What one PSG requires of an ANDA, as ingest extracted it (page + quote). */
+export function fetchPsgRequirements(psgId: number): Promise<PsgRequirementsResponse> {
+  return getJSON<PsgRequirementsResponse>(`/psg/documents/${psgId}/requirements`);
+}
+
 export function listProducts(): Promise<ProductsResponse> {
   return getJSON<ProductsResponse>("/products");
 }

@@ -119,6 +119,48 @@ class ParsedProseTurn(BaseModel):
     leftover_brackets: list[str] = Field(default_factory=list)
 
 
+# Pathological-output bounds (issue #183).
+#
+# Since #183 the prose arms carry NO length bound: turn_gate.admit_claims never
+# inspects length, and the v5 claims-JSON caps (text 400 / cites 4 / claims 20)
+# are unreachable from this path by design -- re-imposing them is what killed
+# valid long sentences in production. These two bounds exist ONLY to stop a
+# degenerate completion (a repetition loop, a sentence that never terminates)
+# from rendering unbounded text to an analyst. They are not a style rule.
+#
+# Sized against measurement, not taste. The 62-row v7 gold run (2026-08-11)
+# produced a longest sentence of 488 chars and a longest answer of 1,823, so
+# both bounds sit roughly 4x above real output and neither fired on any row.
+# The total ceiling also lands near 20 sentences x 400 chars, which matches the
+# 21-claim production answer recorded in #183 -- two independent routes to the
+# same number.
+PROSE_MAX_SENTENCE_CHARS = 2000
+PROSE_MAX_ANSWER_CHARS = 8000
+
+
+def bounds_exceeded(text: str) -> str | None:
+    """Which pathological-output bound this completion breached, if any.
+
+    Args:
+        text: The raw synthesizer completion.
+
+    Returns:
+        ``"sentence_too_long"``, ``"answer_too_long"``, or None when the
+        completion is within both bounds. The sentence fault is reported first:
+        a repair instruction has to name ONE concrete fault, and "this sentence
+        ran too long" is actionable in a way that "your answer was long" is not.
+
+    Pure: no I/O, no settings. Splitting uses the same splitter ``parse`` uses,
+    so a sentence measured here is the sentence the parser will emit.
+    """
+    body = text or ""
+    if any(len(s) > PROSE_MAX_SENTENCE_CHARS for s in split_sentences(body)):
+        return "sentence_too_long"
+    if len(body) > PROSE_MAX_ANSWER_CHARS:
+        return "answer_too_long"
+    return None
+
+
 def to_claims(parsed: ParsedProseTurn, passages: list[RetrievedPassage]) -> tuple[ParsedClaim, ...]:
     """Bridge a parsed prose turn into the gate's admission input.
 
