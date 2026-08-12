@@ -118,6 +118,12 @@
   --rw-flag-wash: #f3e3df;
   --rw-clear: #35704a; /* 5.5:1, safe as text and as fill */
   --rw-clear-wash: rgba(53, 112, 74, 0.1);
+  /* A flag tint at HAIRLINE weight: the wash lifted just far enough to read as
+     an edge against itself, which no other member of this palette does -- the
+     same gap --rw-line-strong fills on the parchment side. Held here because
+     both studios' minor-severity chip draws it, and two copies of one value is
+     how the two rooms start to drift. */
+  --rw-flag-edge: rgba(226, 133, 124, 0.55);
 
   /* --- focus --------------------------------------------------------------- */
   /* Navy, on both grounds. Chrome and page are the same material in this
@@ -180,6 +186,25 @@
   --rw-shadow-page:
     0 0 0 1px var(--rw-paper-edge), 0 2px 3px -1px rgba(22, 33, 58, 0.16),
     0 10px 20px -8px rgba(22, 33, 58, 0.18), 0 34px 60px -30px rgba(22, 33, 58, 0.38);
+
+  /* --- overlay ------------------------------------------------------------- */
+  /* The scrim behind a narrow-viewport drawer. Navy, at the weight that dims the
+     bench without hiding what you are coming back to. */
+  --rw-scrim: rgba(22, 33, 58, 0.32);
+
+  /* THE BLOTTER EDGE -- the third of the three mechanisms above, and the only
+     one that was not already a token. All three desks draw it (the Compliance
+     Studio's .st-main, this studio's .rw-desk, and the sheet's own .rs-desk),
+     and a mechanism the page's objecthood depends on cannot live in three
+     copies: change two and the third goes flat with nothing to say so.
+     It darkens the OUTER edges ONLY. Lighten toward the middle instead and the
+     ground rises to meet the page, cancelling the separation it exists to make;
+     that is where the first attempt went. */
+  --rw-blotter: radial-gradient(
+    125% 95% at 50% 42%,
+    rgba(22, 33, 58, 0) 52%,
+    rgba(22, 33, 58, 0.055) 100%
+  );
 
   /* --- motion -------------------------------------------------------------- */
   --rw-ease: cubic-bezier(0.2, 0.7, 0.2, 1);

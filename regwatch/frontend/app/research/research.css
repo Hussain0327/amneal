@@ -46,8 +46,17 @@
 /* The app shell, pinned to the viewport for this route only. globals.css gives
    .shell min-height:100vh so a page can grow past the fold; a workbench must
    not, or the rails scroll away from the work. Pinning here rather than on
-   .shell keeps every other surface unchanged. */
+   .shell keeps every other surface unchanged.
+
+   min-height:0 is what makes the pin real, and it is not tidying. Used height is
+   max(min-height, height), so .shell's inherited 100vh WINS wherever 100vh is
+   the larger of the two -- which is every mobile browser with a retracted
+   toolbar. The shell then stands taller than the visible viewport and the docked
+   composer sits below the fold with nothing able to scroll to it, because the
+   rule below hides the overflow. Releasing the floor leaves 100dvh as the whole
+   rule, which is what this block always claimed to say. */
 .rw-shell {
+  min-height: 0;
   height: 100dvh;
   overflow: hidden;
 }
@@ -137,11 +146,7 @@
   inset: 0;
   z-index: 0;
   pointer-events: none;
-  background: radial-gradient(
-    125% 95% at 50% 42%,
-    rgba(22, 33, 58, 0) 52%,
-    rgba(22, 33, 58, 0.055) 100%
-  );
+  background: var(--rw-blotter);
 }
 
 /* Above the blotter. Without this the gradient paints over the sheet's own
@@ -160,12 +165,21 @@
    here rather than by editing four pages that are all being replaced.
    ------------------------------------------------------------------------ */
 
+/* THE APP'S OWN GROUND, not the desk. These three surfaces were written against
+   #faf6ec and every ratio globals.css records was measured there; dropped onto
+   the desk's #efe7d3 they lose about half a step everywhere, and --ink-soft --
+   which globals.css darkened specifically to clear AA, and which carries every
+   caption on all three -- falls from 4.76:1 to 4.17:1. tokens.css documents that
+   exact pair as the reason --rw-ink-faint had to exist. Re-grounding here fixes
+   all three at once for one line; the desk is for the sheet, and there is no
+   sheet in this region yet. It goes when they get one. */
 .rw-legacy {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   padding: var(--rw-s6) var(--rw-s5) var(--rw-s7);
+  background: var(--rw-chrome);
 }
 
 /* The old reading column, re-measured. Its 56rem came from globals.css --maxw,
@@ -282,11 +296,14 @@
   cursor: not-allowed;
 }
 
-/* Transport failures and load notices. Mono because they are machine-register
-   lines about the plumbing, not the studio's own voice. */
+/* Transport failures and load notices. The UI face, not mono: tokens.css
+   licenses mono for IDENTIFIERS ONLY -- PSG ids, CFR cites, page numbers -- and
+   "Not sent - ... Send it again." is a sentence the studio says to an analyst.
+   Being about the plumbing does not make prose an identifier, and when every
+   small thing is set in mono nothing is emphasised. */
 .rw-composer__note {
   margin: 0;
-  font-family: var(--rw-face-id);
+  font-family: var(--rw-face-ui);
   font-size: var(--rw-t-small);
   line-height: var(--rw-lh);
   color: var(--rw-ink-faint);
@@ -409,7 +426,7 @@
     inset: 0;
     z-index: 20;
     border: 0;
-    background: rgba(22, 33, 58, 0.32);
+    background: var(--rw-scrim);
   }
 }
 

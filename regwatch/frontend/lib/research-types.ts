@@ -67,8 +67,40 @@ export interface KindGroup {
    * a ready group's emptiness means "none". Read `state` first.
    */
   readonly items: readonly WorkItem[];
+  /**
+   * How many of this kind exist, which is NOT `items.length`: two of the four
+   * lists are paged (lib/research-work.ts takes a page of white-paper runs, and
+   * /watch/latest bounds its own). Without this the rail would state the size of
+   * the page it was handed with the same authority as a true count. 0 whenever
+   * `state` is not "ready", for the same reason `items` is -- read `state`
+   * first.
+   */
+  readonly total: number;
   readonly state: KindState;
 }
+
+/** The name a kind gets before there is an artifact to name. */
+const NEW_TITLE: Record<ArtifactKind, string> = {
+  thread: "New thread",
+  dossier: "New dossier",
+  // You do not author a bulletin, so there is no "new" one to name.
+  bulletin: "Latest bulletins",
+  paper: "New paper",
+};
+
+/**
+ * The name an artifact gets when it exists but has not resolved one.
+ *
+ * Deliberately not NEW_TITLE. "Untitled" is what lib/research-work.ts already
+ * calls a session the server has not named yet, so the crumb and the rail agree
+ * on the one thing they can both honestly say.
+ */
+const UNNAMED_TITLE: Record<ArtifactKind, string> = {
+  thread: "Untitled thread",
+  dossier: "Untitled dossier",
+  bulletin: "Bulletin",
+  paper: "Untitled paper",
+};
 
 /** The three panels behind the record rail. */
 export type RecordPanelId = "record" | "assistant" | "history";
@@ -103,4 +135,33 @@ export function authoritiesFrom(citations: readonly Citation[]): readonly Author
     snippet: c.snippet,
     chunkId: c.chunk_id,
   }));
+}
+
+/**
+ * What to call the artifact on the sheet and in the crumb.
+ *
+ * "New thread" is a claim that nothing is open yet, so it can only be true when
+ * there is no id. With an id in hand and no title resolved -- the work rail
+ * still loading, or unreachable, or the thread's own fetch not back -- the
+ * honest name is that the artifact is untitled, never that it is new: an
+ * analyst who deep-links to a colleague's paper must not be told they are
+ * looking at a blank they just made.
+ *
+ * Only a thread carries a title of its own; every other kind reads its name off
+ * the work rail's row, which is why `threadTitle` is ignored for the other
+ * three rather than trusted for whatever kind happens to be on the sheet.
+ *
+ * Pure and exported so the states can be asserted without a DOM, the same way
+ * kindHeadLabel is.
+ */
+export function artifactTitle(
+  kind: ArtifactKind,
+  activeId: string | null,
+  threadTitle: string | null,
+  activeItem: WorkItem | null,
+): string {
+  const own = kind === "thread" ? (threadTitle?.trim() ?? "") : "";
+  const resolved = own || (activeItem?.title.trim() ?? "");
+  if (resolved !== "") return resolved;
+  return activeId === null ? NEW_TITLE[kind] : UNNAMED_TITLE[kind];
 }

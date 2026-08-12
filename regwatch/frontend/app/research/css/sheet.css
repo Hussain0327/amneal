@@ -60,11 +60,7 @@
   inset: 0;
   z-index: 0;
   pointer-events: none;
-  background: radial-gradient(
-    125% 95% at 50% 42%,
-    rgba(22, 33, 58, 0) 52%,
-    rgba(22, 33, 58, 0.055) 100%
-  );
+  background: var(--rw-blotter);
 }
 
 /* The shell owns a desk of its own (.rw-desk in research.css), and inside the
@@ -293,7 +289,12 @@
   min-height: 18px;
   margin-left: var(--rw-s1);
   padding: 0 var(--rw-s1);
-  border: 1px solid var(--rw-gold-deep);
+  /* The stamp's ONLY boundary: gold wash on paper is ~1.1:1, so nothing else
+     says where the control starts, and 1.4.11 owes that edge 3:1. --rw-gold-deep
+     is 2.90:1 against the page; --rw-gold is 5.77:1 and is the ink the [n] is
+     already set in, so the mark reads as one thing. Sheet.tsx's lit rule leaves
+     this alone for the same reason. */
+  border: 1px solid var(--rw-gold);
   border-radius: var(--rw-r-xs);
   background: var(--rw-gold-wash);
   color: var(--rw-gold);
@@ -355,12 +356,14 @@
   transition: border-color var(--rw-dur) var(--rw-ease);
 }
 
-/* Lit. --rw-gold-fill is 1.5:1 on paper and could not carry a state on its own,
-   which is why it is not asked to: the entry is already identified by its
-   number, the keyboard state is the navy focus ring from the primitives, and
-   this bar is emphasis on a relationship the reader can also simply read. */
+/* Lit. --rw-gold-fill is 1.81:1 on paper, and the argument that the bar was only
+   emphasis does not survive the interaction it exists for: pointing at a [n]
+   stamp lights the margin entry and NOTHING else changes -- no focus ring, no
+   number, no text. The bar is the entire answer to "which source is that", so it
+   is a state indicator and owes 1.4.11 its 3:1. --rw-gold is 5.77:1 there, and
+   tokens.css already says which gold to reach for: marking, not painting. */
 .rs-margin__item.is-lit {
-  border-left-color: var(--rw-gold-fill);
+  border-left-color: var(--rw-gold);
 }
 
 .rs-margin__n {

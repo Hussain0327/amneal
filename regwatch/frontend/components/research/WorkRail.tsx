@@ -6,15 +6,6 @@ import { DossierIcon } from "@/components/research/icons";
 import { CaretIcon, ChatIcon, FileIcon } from "@/components/studio/icons";
 import type { ArtifactKind, KindGroup, WorkItem } from "@/lib/research-types";
 
-/** Singular nouns, for the one place a count can be 1. The plurals come off
- * KindGroup.label instead of a second table, so the two can never disagree. */
-const KIND_NOUN: Record<ArtifactKind, string> = {
-  thread: "thread",
-  dossier: "dossier",
-  bulletin: "bulletin",
-  paper: "paper",
-};
-
 /** An empty group is an invitation, not a mood. Bulletins get the one line that
  * is not an invitation, because there is nothing to invite: they arrive. */
 const EMPTY_COPY: Record<ArtifactKind, string> = {
@@ -45,6 +36,12 @@ const MAKE_ACTIONS: readonly MakeAction[] = [
  * is the whole point of the component: a screen reader that hears "Dossiers, 0"
  * when the request failed has been told something false.
  *
+ * The plural leads in every state, and that is WCAG 2.5.3 rather than style:
+ * the visible label is "Threads", speech input says what it sees, and a header
+ * whose only spoken name was "1 thread" shared no word with the control on
+ * screen. What follows is the count the row actually shows -- the TOTAL, plus
+ * how much of it is on the rail when the list is a page.
+ *
  * Pure and exported so the three states can be asserted without a DOM.
  */
 export function kindHeadLabel(group: KindGroup): string {
@@ -52,8 +49,8 @@ export function kindHeadLabel(group: KindGroup): string {
   if (group.state === "unreachable") {
     return `${group.label}, unavailable. We could not reach the server, so this is not a count of zero.`;
   }
-  const count = group.items.length;
-  return `${count} ${count === 1 ? KIND_NOUN[group.kind] : group.label.toLowerCase()}`;
+  const paged = group.items.length < group.total ? `, showing ${group.items.length}` : "";
+  return `${group.label}, ${group.total}${paged}`;
 }
 
 interface WorkRailProps {
@@ -85,14 +82,31 @@ export function WorkRail({
   // One group open at a time: the rail's job is to show what you are working
   // on, and four open accordions is a list of everything again.
   const [openKind, setOpenKind] = useState<ArtifactKind | null>(activeKind);
-  const [seenActiveId, setSeenActiveId] = useState<string | null>(activeId);
+  // The id whose group `openKind` above already answers. Seeded with the active
+  // id ONLY when its kind was known at mount: when it was not -- a deep link
+  // that paints before the fetch lands -- `openKind` started null and the id has
+  // not been answered at all, so seeding it here would mark the question closed
+  // before anything opened. That was the whole bug on the first paint.
+  const [seenActiveId, setSeenActiveId] = useState<string | null>(
+    activeKind !== null ? activeId : null,
+  );
 
   // Adjusted during render rather than in an effect. When the page opens an
   // artifact from somewhere other than this rail -- onMake, a deep link, a
   // bulletin notification -- the rail has to be showing that artifact's group
-  // on the first paint. An effect would paint the wrong group first and correct
-  // it, which reads as a flicker in the one element that says where you are.
-  if (activeId !== seenActiveId) {
+  // on the first paint it CAN know which group that is. An effect would paint
+  // the wrong group first and correct it, which reads as a flicker in the one
+  // element that says where you are.
+  //
+  // The id is only counted as seen once its kind resolves, and that is the
+  // whole fix rather than a refinement: the id arrives before the list does on
+  // every path that matters -- a deep link that lands ahead of the fetch, the
+  // first send, which sets the id off the response while the rail is still
+  // reloading -- and at that render `activeKind` is null. Marking the id seen
+  // there would open nothing, and the later render that finally knows the kind
+  // sees no id change to react to. So an unresolved id is left unseen and
+  // re-examined; it sets no state, so it cannot loop.
+  if (activeId !== seenActiveId && (activeKind !== null || activeId === null)) {
     setSeenActiveId(activeId);
     if (activeKind !== null) setOpenKind(activeKind);
   }
@@ -126,10 +140,15 @@ export function WorkRail({
                 {/* Zero and "we could not ask" are different facts, and an
                     analyst who reads one as the other stops looking. So the
                     count renders only when there really is a count: loading
-                    shows the pulsing dot alone, unreachable shows a word. */}
+                    shows the pulsing dot alone, unreachable shows a word.
+
+                    The TOTAL, not the number of rows below it. Two of the four
+                    lists are paged, and a rail that answers "how many papers do
+                    I have" with the size of the page it fetched states a false
+                    number in the same type as a true one. */}
                 {group.state === "ready" ? (
                   <span className="rw-work__count" aria-hidden="true">
-                    {group.items.length}
+                    {group.total}
                   </span>
                 ) : null}
                 {group.state === "unreachable" ? (
@@ -181,6 +200,14 @@ export function WorkRail({
                 })}
                 {group.state === "ready" && group.items.length === 0 ? (
                   <p className="rw-work__empty">{EMPTY_COPY[group.kind]}</p>
+                ) : null}
+                {/* The count above is the truth; this says which part of it is
+                    reachable from here, so a short list under a large number
+                    reads as a page rather than a bug. */}
+                {group.state === "ready" && group.items.length < group.total ? (
+                  <p className="rw-work__more">
+                    Showing {group.items.length} of {group.total}, newest first.
+                  </p>
                 ) : null}
               </div>
             </div>
