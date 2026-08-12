@@ -12,7 +12,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from regwatch.generate.route import CorpusPolicyHint, RouteDecision, ScopeHint, TurnMode
 from regwatch.retrieve.mode import RetrievalMode
@@ -25,6 +25,61 @@ _PRODUCT_FILTER_KEYS = frozenset(
 
 FilterScalar: TypeAlias = str | int | float
 FrozenFilter: TypeAlias = tuple[str, FilterScalar]
+
+
+@dataclass(frozen=True)
+class ProductScope:
+    """The product filters one turn executes under, as a value not a bare dict.
+
+    A LOSSLESS carrier. It never drops, merges, renames, or infers a key, and it
+    applies no type or key whitelist -- whatever the turn resolved is what
+    retrieval sees. Its only normalization is dropping ``None``/``""``/``[]``,
+    which ``retriever._build_where`` and ``conversation._safe_filters`` already
+    do identically, so a scope built from a turn's filters yields the same WHERE
+    clause as the dict it replaced. That equivalence is the whole point: it is
+    what lets this type sit on the retrieval boundary without moving behaviour.
+
+    Casing is deliberately NOT normalized here. ``retriever._fold_filter_casing``
+    owns the mapping from a user's casing to the corpus's stored casing, and
+    folding early would defeat it -- a title-cased value would find no stored
+    match, filter to nothing, and read as an INV-2 refusal on an answerable
+    question.
+
+    Distinct from ``CompiledScope``, which is the ROUTE lane's authorized result
+    and carries route vocabulary (``ScopeSource``/``ScopeReason``). Ordinary
+    product turns run with the route call off, so they have no such vocabulary
+    to report and must not borrow one.
+    """
+
+    filters: tuple[tuple[str, Any], ...] = ()
+
+    @classmethod
+    def from_filters(cls, filters: Mapping[str, Any] | None) -> ProductScope:
+        """Build a scope from a turn's filter mapping, dropping empty values.
+
+        Source order is preserved, NOT sorted. ``retriever._build_where`` emits
+        a multi-key filter as an ordered ``{"$and": [...]}`` list, so sorting
+        here would reorder that list and change the generated SQL for turns that
+        pin more than one filter. Semantically equivalent, but this refactor
+        promised byte-identical behaviour, and a reordered clause is not that.
+        """
+        active = {k: v for k, v in (filters or {}).items() if v not in (None, "", [])}
+        return cls(filters=tuple(active.items()))
+
+    def as_filters(self) -> dict[str, Any]:
+        """The filter mapping to hand to the store. A fresh dict every call."""
+        return dict(self.filters)
+
+    @property
+    def normalized_name(self) -> str | None:
+        """The pinned product, or ``None`` when the turn resolved no product."""
+        value = dict(self.filters).get("normalized_name")
+        return str(value) if value else None
+
+    @property
+    def is_resolved(self) -> bool:
+        """Whether a product is pinned. Mirrors the truthiness test it replaces."""
+        return self.normalized_name is not None
 
 
 class CompiledScopeKind(StrEnum):

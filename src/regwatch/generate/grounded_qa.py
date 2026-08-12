@@ -129,6 +129,7 @@ from regwatch.retrieve.mode import RetrievalPlan, RetrievalScope, default_mode_f
 from regwatch.retrieve.reranker import rerank_passages
 from regwatch.retrieve.resolver import lookup_external_drug, resolve_product, suggest_products
 from regwatch.retrieve.retriever import RetrievedPassage, retrieve
+from regwatch.retrieve.scope import ProductScope
 from regwatch.retrieve.scope_catalog import load_corpus_policy_snapshots
 from regwatch.store.db import session_scope
 from regwatch.store.models import PsgDocument
@@ -2087,7 +2088,13 @@ def _retrieve_and_group(
     ``state.evidence_passages`` (the only passages synthesis may see) and
     ``state.route_json`` (the retrieval route) for ``_synthesize_and_admit``.
     """
-    resolved_name = state.active_filters.get("normalized_name")
+    # The retrieval boundary runs on a typed scope rather than the raw dict. It
+    # is a lossless view of state.active_filters (empty values dropped, exactly
+    # as _build_where would), so the WHERE clause and the mode decision are
+    # unchanged -- see tests/test_product_scope.py. The dict itself still owns
+    # the persistence boundaries below; only what retrieval reads moves here.
+    scope = ProductScope.from_filters(state.active_filters)
+    resolved_name = scope.normalized_name
 
     # Stage 1: wide-net vector search (up to VECTOR_TOP_K), constrained to the product.
     route_json = _route_json(
@@ -2104,7 +2111,7 @@ def _retrieve_and_group(
     # auditable: the mode determines the SQL and the session settings outright
     # (store.embedding_profiles.build_search_sql), so recording it records what
     # ran rather than what we hope ran.
-    retrieval_scope = RetrievalScope.from_filters(state.active_filters)
+    retrieval_scope = RetrievalScope.from_filters(scope.as_filters())
     retrieval_mode = default_mode_for_scope(retrieval_scope)
     # Embed the RE-ANCHORED query, not necessarily the user's words: a
     # contentless drill-down has no topical signal of its own. Identity for
@@ -2128,7 +2135,7 @@ def _retrieve_and_group(
             k=k if k is not None else s.vector_top_k,
         ).as_route_json()
     )
-    passages = retrieve(search_query, k=k, filters=state.active_filters, mode=retrieval_mode)
+    passages = retrieve(search_query, k=k, filters=scope.as_filters(), mode=retrieval_mode)
     state.retrieval_block["returned"] = len(passages)
     route_json["retrieval"] = dict(state.retrieval_block)
     # Stage 2: optional rerank, then trim to RERANK_TOP_K. Same rewritten query
