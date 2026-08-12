@@ -55,12 +55,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // can't clobber a newer result. lastValidated gates the focus re-check.
   const refreshSeq = useRef(0);
   const lastValidated = useRef(0);
+  // Distinguishes "your session ended" from a cold, never-authenticated visit.
+  // Only a user we HAD and then lost earns the explanation on /login; an
+  // intentional logout clears it below so signing out never reads as expiry.
+  const hadUser = useRef(false);
 
   const refresh = useCallback(async () => {
     const seq = ++refreshSeq.current;
     try {
       const u = await me();
-      if (seq === refreshSeq.current) setUser(u);
+      if (seq === refreshSeq.current) {
+        setUser(u);
+        hadUser.current = true;
+      }
     } catch (e) {
       // Only a real 401 means the session is gone -- and handle() has already
       // cleared it via the 401 hook below, so this branch is belt-and-braces.
@@ -112,7 +119,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [refresh]);
 
   useEffect(() => {
-    if (!loading && !user && !BARE_PATHS.has(pathname)) router.replace("/login");
+    if (!loading && !user && !BARE_PATHS.has(pathname)) {
+      // An analyst dropped mid-task lands on a form that says why, instead of a
+      // blank sign-in page that looks identical to a cold visit.
+      router.replace(hadUser.current ? "/login?reason=expired" : "/login");
+    }
   }, [loading, user, pathname, router]);
 
   const logout = useCallback(async () => {
@@ -121,6 +132,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // The cookie may already be dead; we are leaving regardless.
     }
+    // Cleared BEFORE setUser so the redirect effect above cannot race us and
+    // label a deliberate sign-out as an expired session.
+    hadUser.current = false;
     setUser(null);
     broadcastAuthChange();
     router.replace("/login");
