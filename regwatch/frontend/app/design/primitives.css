@@ -3,14 +3,32 @@
    ----------------------------------------------------------------------------
    A button is a button everywhere. These are the pieces that appeared
    identically in every region of the first studio, lifted out so the second one
-   inherits them rather than re-deciding them. Every value here comes from
-   tokens.css; there is not a single literal colour, step or radius below except
-   the control heights, which are their own small scale (26 / 28 / 30 / 32 / 36).
+   inherits them rather than re-deciding them. Every colour and radius below
+   comes from tokens.css, and so does every spacing step.
+
+   The literals that remain are named here so the claim stays checkable: the
+   control heights (26 / 28 / 30 / 32 / 36), which are their own small scale;
+   the icon boxes (10 / 14 / 15px), which are drawn sizes and not spacing; the
+   1px hairline; and the 2px/6px inset on .rw-chip and .rw-sev, which sits BELOW
+   --rw-s1 and has no token because the scale deliberately starts at 4px.
+   Nothing else joins that list without a token to replace it.
 
    Regions own their own namespace and may COMPOSE these, never redefine them.
    If a region needs a variant, it adds a modifier class in its own file rather
    than reaching in here -- that is how the two studios stay one system while
    still being two rooms.
+
+   WHY EVERY RULE BELOW CARRIES TWO CLASS NAMES
+   --------------------------------------------
+   .rw-* is the Research Studio's name for a control and .st-* is the Compliance
+   Studio's. They were two byte-identical implementations, one in this file and
+   one in app/studio/css/foundation.css, differing only in which alias of the
+   same token each read. That is not a shared foundation -- it is a copy, and a
+   copy drifts the first time somebody fixes a button in the room they happen to
+   be standing in. The two names now resolve to ONE rule, so a change to a
+   control is a change in both rooms by construction and cannot be half-made.
+   The names stay two because the markup in each studio does, and renaming live
+   class names is a different change from removing the duplication.
    ========================================================================== */
 
 /* ---------------------------------------------------------------------------
@@ -38,8 +56,8 @@
 /* ---------------------------------------------------------------------------
    Buttons
    ------------------------------------------------------------------------ */
-
-.rw-btn {
+.rw-btn,
+.st-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -62,18 +80,21 @@
     border-color var(--rw-dur) var(--rw-ease);
 }
 
-.rw-btn svg {
+.rw-btn svg,
+.st-btn svg {
   width: 14px;
   height: 14px;
   flex: none;
 }
 
-.rw-btn:hover:not(:disabled) {
+.rw-btn:hover:not(:disabled),
+.st-btn:hover:not(:disabled) {
   background: var(--rw-chrome-hover);
   color: var(--rw-ink);
 }
 
-.rw-btn:disabled {
+.rw-btn:disabled,
+.st-btn:disabled {
   opacity: 0.42;
   cursor: not-allowed;
 }
@@ -81,14 +102,16 @@
 /* The one saturated control in any given view. Ink on gold-fill is 8.7:1, so it
    can carry the primary action honestly -- but only ONE of these per view, or
    the emphasis it is spending stops meaning anything. */
-.rw-btn--primary {
+.rw-btn--primary,
+.st-btn--primary {
   background: var(--rw-gold-fill);
   border-color: var(--rw-gold-fill);
   color: var(--rw-ink);
   font-weight: 600;
 }
 
-.rw-btn--primary:hover:not(:disabled) {
+.rw-btn--primary:hover:not(:disabled),
+.st-btn--primary:hover:not(:disabled) {
   background: var(--rw-gold-deep);
   border-color: var(--rw-gold-deep);
   color: var(--rw-ink);
@@ -97,12 +120,14 @@
 /* --rw-line-strong, not --rw-line: the edge IS what identifies an outlined
    control, so it owes 3:1 under WCAG 1.4.11 and the decorative hairline
    does not clear it. */
-.rw-btn--outline {
+.rw-btn--outline,
+.st-btn--outline {
   border-color: var(--rw-line-strong);
   color: var(--rw-ink-2);
 }
 
-.rw-btn--outline:hover:not(:disabled) {
+.rw-btn--outline:hover:not(:disabled),
+.st-btn--outline:hover:not(:disabled) {
   border-color: var(--rw-ink-dim);
   background: var(--rw-chrome-hover);
   color: var(--rw-ink);
@@ -110,28 +135,33 @@
 
 /* A text button. For the actions that are not the expected one, so the expected
    one can be the only filled control in its card. */
-.rw-btn--quiet {
+.rw-btn--quiet,
+.st-btn--quiet {
   height: 26px;
   padding: 0 var(--rw-s2);
   color: var(--rw-ink-faint);
 }
 
-.rw-btn--quiet:hover:not(:disabled) {
+.rw-btn--quiet:hover:not(:disabled),
+.st-btn--quiet:hover:not(:disabled) {
   background: var(--rw-chrome-hover);
   color: var(--rw-ink);
 }
 
-.rw-btn--lg {
+.rw-btn--lg,
+.st-btn--lg {
   height: 36px;
   padding: 0 var(--rw-s4);
   font-size: var(--rw-t-base);
 }
 
-.rw-btn--block {
+.rw-btn--block,
+.st-btn--block {
   width: 100%;
 }
 
-.rw-icon-btn {
+.rw-icon-btn,
+.st-icon-btn {
   display: grid;
   place-items: center;
   width: 28px;
@@ -148,17 +178,20 @@
     color var(--rw-dur) var(--rw-ease);
 }
 
-.rw-icon-btn svg {
+.rw-icon-btn svg,
+.st-icon-btn svg {
   width: 15px;
   height: 15px;
 }
 
-.rw-icon-btn:hover:not(:disabled) {
+.rw-icon-btn:hover:not(:disabled),
+.st-icon-btn:hover:not(:disabled) {
   background: var(--rw-chrome-hover);
   color: var(--rw-ink);
 }
 
-.rw-icon-btn:disabled {
+.rw-icon-btn:disabled,
+.st-icon-btn:disabled {
   opacity: 0.38;
   cursor: not-allowed;
 }
@@ -169,10 +202,11 @@
 
 /* Mono, tracked -- the ONE place that treatment is licensed, because these
    really are codes: PSG-0214, 21 CFR 314.94, v5.0, 2026-08-11. */
-.rw-chip {
+.rw-chip,
+.st-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--rw-s1);
   padding: 2px 6px;
   border: 1px solid var(--rw-line);
   border-radius: var(--rw-r-xs);
@@ -186,7 +220,8 @@
   white-space: nowrap;
 }
 
-.rw-chip svg {
+.rw-chip svg,
+.st-chip svg {
   width: 10px;
   height: 10px;
   opacity: 0.8;
@@ -194,7 +229,8 @@
 
 /* Severity: one problem hue varied by fill and weight, never a rainbow.
    major = solid flag, minor = hairline flag, info = quiet ink. */
-.rw-sev {
+.rw-sev,
+.st-sev {
   display: inline-flex;
   align-items: center;
   padding: 2px 6px;
@@ -209,23 +245,22 @@
   white-space: nowrap;
 }
 
-.rw-sev--major {
+.rw-sev--major,
+.st-sev--major {
   background: var(--rw-flag);
   border-color: var(--rw-flag);
   color: var(--rw-paper);
 }
 
-/* The one literal left in this file: a flag tint at hairline weight. It is the
-   wash lifted just far enough to read as an edge against itself, which no
-   member of the token palette does -- the same gap --rw-line-strong exists to
-   fill on the parchment side. */
-.rw-sev--minor {
+.rw-sev--minor,
+.st-sev--minor {
   background: var(--rw-flag-wash);
-  border-color: rgba(226, 133, 124, 0.55);
+  border-color: var(--rw-flag-edge);
   color: var(--rw-flag);
 }
 
-.rw-sev--info {
+.rw-sev--info,
+.st-sev--info {
   background: transparent;
   border-color: var(--rw-line);
   color: var(--rw-ink-faint);
@@ -233,7 +268,8 @@
 
 /* Section eyebrow. Micro, tracked, faint -- it names a region and then gets out
    of the way. */
-.rw-eyebrow {
+.rw-eyebrow,
+.st-eyebrow {
   margin: 0;
   font-family: var(--rw-face-id);
   font-size: var(--rw-t-micro);
@@ -249,7 +285,8 @@
 
 /* Fields are the brightest fill on a mid surface, so they read as a well cut
    into the chrome rather than a card sitting on it. */
-.rw-field {
+.rw-field,
+.st-field {
   display: flex;
   align-items: center;
   gap: var(--rw-s2);
@@ -262,11 +299,23 @@
   transition: border-color var(--rw-dur) var(--rw-ease);
 }
 
-.rw-field:focus-within {
-  border-color: var(--rw-ink-dim);
+/* THE RING MOVES OUT, it is not removed. The inner input suppresses its own
+   outline below, and suppressing without replacing is exactly what 2.4.7
+   forbids -- so the wrapper draws the same navy ring every other control gets,
+   around the whole field rather than around a borderless inner box.
+   The border swap that used to stand in here changed nothing at all:
+   --rw-ink-dim and --rw-line-strong are the same hex, so the "darken on focus"
+   painted the resting colour over itself. The border now goes to the focus
+   navy, which differs, and the ring carries the rest. */
+.rw-field:focus-within,
+.st-field:focus-within {
+  border-color: var(--rw-focus);
+  outline: 2px solid var(--rw-focus);
+  outline-offset: 2px;
 }
 
-.rw-field svg {
+.rw-field svg,
+.st-field svg {
   width: 14px;
   height: 14px;
   flex: none;
@@ -274,7 +323,9 @@
 }
 
 .rw-field input,
-.rw-field textarea {
+.rw-field textarea,
+.st-field input,
+.st-field textarea {
   flex: 1;
   min-width: 0;
   border: 0;
@@ -285,15 +336,21 @@
   line-height: var(--rw-lh);
 }
 
+/* Legitimate only because .rw-field:focus-within draws the ring this gives up.
+   On its own this wins outright -- (0,2,1) beats the shared focus-visible rule's
+   (0,2,0) -- so a keyboard user got no indicator at all. */
 .rw-field input:focus,
-.rw-field textarea:focus {
+.rw-field textarea:focus,
+.st-field input:focus,
+.st-field textarea:focus {
   outline: none;
 }
 
 /* A placeholder is TEXT, so 1.4.3 applies and --rw-ink-dim (3.3:1, non-text
    only) cannot carry it. This is the visible label of an empty search box, so
    it is not decorative either. */
-.rw-field ::placeholder {
+.rw-field ::placeholder,
+.st-field ::placeholder {
   color: var(--rw-ink-faint);
   opacity: 1;
 }
@@ -306,7 +363,8 @@
    owes screen readers the same state in words. Solid = something to act on,
    ring = settled or not yet begun. Regions add their own state modifiers,
    because the states belong to the region, not to the shape. */
-.rw-glyph {
+.rw-glyph,
+.st-glyph {
   flex: none;
   width: 7px;
   height: 7px;
@@ -318,7 +376,6 @@
 /* ---------------------------------------------------------------------------
    Screen-reader-only text
    ------------------------------------------------------------------------ */
-
 .rw-sr {
   position: absolute;
   width: 1px;

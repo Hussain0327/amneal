@@ -179,7 +179,7 @@ main:focus {
   font-size: 0.7rem;
   color: var(--gold-ink);
   background: var(--gold-wash);
-  border: 1px solid var(--gold-deep);
+  border: 1px solid var(--gold-ink);
   border-radius: 2px;
   padding: 0.05rem 0.42rem;
 }
@@ -613,6 +613,10 @@ main:focus {
 /* The signature: an inline, claim-anchored citation stamp. SQUARE corners +
    mono [n] set it apart from the rounded .pill / .chip; gold marks it as the
    one sourced element in the prose. Opens the cited passage in the drawer. */
+/* The border is the stamp's ONLY boundary: the gold wash is ~1.1:1 against the
+   page, so nothing else marks where the control starts. --gold-deep is 2.90:1
+   there and misses 1.4.11's 3:1; --gold-ink is 5.4:1 and is the same ink the
+   [n] is already set in. */
 .cite-stamp {
   appearance: none;
   cursor: pointer;
@@ -1744,10 +1748,23 @@ button.chip:disabled {
   background: var(--paper-bright);
   color: var(--ink);
 }
+/* THE ROOM YOU ARE IN. The bar is drawn in --gold-ink (5.8:1 on the row it sits
+   on) and not --gold, which is 1.8:1 there: this is the only mark separating the
+   studio you are in from the one under your pointer, and hover already takes the
+   same bright ground, so an indicator below 3:1 left the two states all but
+   identical. */
 .rail__stop--active {
   background: var(--paper-bright);
   color: var(--gold-ink);
-  box-shadow: inset 3px 0 0 var(--gold);
+  box-shadow: inset 3px 0 0 var(--gold-ink);
+}
+/* Said twice on purpose, because the rail restacks: the inset bar reads down the
+   left edge of a vertical spine, and the ring reads wherever the stop is. */
+.rail__stop--active .rail__mark {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.35),
+    0 0 0 2px var(--paper-bright),
+    0 0 0 3px var(--gold-ink);
 }
 /* Each studio wears a lettered gold mark: a place, not a step in a sequence.
    The letter is decorative (aria-hidden); the flyout and the aria-label carry
@@ -1764,17 +1781,12 @@ button.chip:disabled {
   color: #3a2600;
   background: linear-gradient(150deg, var(--gold), var(--gold-deep));
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
-  /* Two gold chips of equal weight would leave the inset bar doing all the
-     work of saying which room you are in; the room you are not in sits back a
-     step and comes forward on hover, focus or arrival. */
-  opacity: 0.82;
-  transition: opacity 0.15s ease;
 }
-.rail__stop:hover .rail__mark,
-.rail__stop:focus-visible .rail__mark,
-.rail__stop--active .rail__mark {
-  opacity: 1;
-}
+/* BOTH MARKS ARE STRUCK AT FULL WEIGHT. Dimming the one you are not in bought
+   1.09:1 of state cue -- the two chips were all but the same colour -- and cost
+   the letter its contrast: 4.99:1 at the light end of the gradient and 3.44:1
+   at the dark end, against 7.83:1 and 4.89:1 undimmed. The state moved onto the
+   stop above, where there is room to say it at 5.8:1 instead. */
 /* The volume's title, lettered down the free run of the spine. */
 .rail__wordmark {
   flex: 1;

@@ -32,23 +32,34 @@ const nextConfig = {
     return [{ source: "/api/:path*", destination: `${API_PROXY_TARGET}/:path*` }];
   },
   // Assemble, Watch and White Paper are now artifact kinds inside the Research
-  // Studio, so their old paths are gone from the app and must not 404: bookmarks
-  // and pasted links outlive a rebuild. 308 (permanent: true) because the move is
-  // permanent and the method must be preserved.
+  // Studio, so their old paths send you there: bookmarks and pasted links outlive
+  // a rebuild.
+  //
+  // WHY THREE OF THESE ARE 307 AND NOT 308. Those three pages still EXIST -- see
+  // components/research/LegacyCenter.tsx, which mounts them as the studio's
+  // centre for their kinds, and depends on them continuing to work. A redirect
+  // here shadows the route it names, so this is a routing choice about live
+  // pages, not the cleanup of dead ones it used to claim to be; and 308 is
+  // cached by the browser indefinitely, which would make the choice unreversible
+  // in the field long after the staging that motivated it is gone. 307 is the
+  // same behaviour for the analyst with the same method preserved, and it can be
+  // taken back. Promote to permanent: true when each surface becomes a real
+  // sheet and its route is actually deleted.
   //
   // Next passes the original query through to the destination automatically, so
   // an old /watch?rp=albuterol%20sulfate&appl=020503 keeps its product scope and
   // only picks up kind=bulletin on top. "/" is deliberately absent: Ask still
   // lives at the root and moves on its own schedule.
   //
-  // Deficiency is a UI removal only. The FastAPI routes behind /api/deficiency/*
-  // are untouched and still reachable through the rewrite above; this entry only
-  // stops the deleted page from 404ing.
+  // Deficiency IS gone -- app/(shell)/deficiency/page.tsx was deleted -- so that
+  // one is permanent and shadows nothing. Its FastAPI routes behind
+  // /api/deficiency/* are untouched and still reachable through the rewrite
+  // above; this entry only stops the deleted page from 404ing.
   async redirects() {
     return [
-      { source: "/assemble", destination: "/research?kind=dossier", permanent: true },
-      { source: "/watch", destination: "/research?kind=bulletin", permanent: true },
-      { source: "/whitepaper", destination: "/research?kind=paper", permanent: true },
+      { source: "/assemble", destination: "/research?kind=dossier", permanent: false },
+      { source: "/watch", destination: "/research?kind=bulletin", permanent: false },
+      { source: "/whitepaper", destination: "/research?kind=paper", permanent: false },
       { source: "/deficiency", destination: "/research", permanent: true },
     ];
   },

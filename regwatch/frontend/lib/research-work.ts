@@ -63,6 +63,35 @@ interface Unsettled {
 type Outcome<T> = Settled<T> | Unsettled;
 
 /**
+ * One kind's list, and how many exist behind it.
+ *
+ * The two are not the same number and the rail must not conflate them: a page
+ * of 50 white-paper runs out of 214 is not "50 papers". Where an endpoint pages
+ * (/whitepaper/runs, /watch/latest) `total` is the server's own count; where it
+ * does not, `total` is the length, because then the length IS the total.
+ */
+interface KindPage {
+  readonly items: readonly WorkItem[];
+  readonly total: number;
+}
+
+/**
+ * The server's count, floored at the page it actually sent.
+ *
+ * `total` and the rows come from two queries, so a count racing an insert can
+ * come back SMALLER than the list beside it -- and a malformed payload can omit
+ * it entirely, which the compile-time type does not catch (getJSON casts). Left
+ * alone, the rail would head a visibly non-empty group with a smaller number, or
+ * with 0, or with "undefined": a false number set in the same type as a true
+ * one, which is the exact failure the count exists to prevent. The one thing
+ * always true is "at least this many", so the page is the floor. Validated here,
+ * at the boundary, rather than defended again at every reader.
+ */
+function atLeast(total: number, items: readonly WorkItem[]): number {
+  return Number.isFinite(total) ? Math.max(total, items.length) : items.length;
+}
+
+/**
  * Wait on one kind's fetch under the bound, and turn every way it can go wrong
  * into the same answer.
  *
@@ -97,9 +126,9 @@ async function bounded<T>(work: Promise<T>, signal: AbortSignal): Promise<Outcom
   }
 }
 
-async function threadItems(): Promise<readonly WorkItem[]> {
+async function threadItems(): Promise<KindPage> {
   const data = await listSessions();
-  return data.sessions.map((s) => ({
+  const items = data.sessions.map((s) => ({
     id: s.id,
     kind: "thread" as const,
     // The server names a session asynchronously, so an untitled row is a real
@@ -107,11 +136,14 @@ async function threadItems(): Promise<readonly WorkItem[]> {
     title: s.title.trim() || "Untitled thread",
     updatedAt: relTime(s.updated_at),
   }));
+  // /sessions takes no limit and returns the caller's own threads whole, so
+  // there is no page to be short of. Recompute this the day it paginates.
+  return { items, total: items.length };
 }
 
-async function bulletinItems(): Promise<readonly WorkItem[]> {
+async function bulletinItems(): Promise<KindPage> {
   const data = await watchLatest();
-  return data.alerts.map((a) => ({
+  const items = data.alerts.map((a) => ({
     // A bulletin is a document AT a version -- the same PSG revised twice is
     // two bulletins -- so the identity is the pair, not the document.
     id: `${a.psg_document_id}:${a.psg_version_id}`,
@@ -119,11 +151,13 @@ async function bulletinItems(): Promise<readonly WorkItem[]> {
     title: a.active_ingredient.trim() || `Application ${a.listing_appl_no}`,
     updatedAt: relTime(a.captured_at),
   }));
+  // /watch/latest bounds its own page and reports the count behind it.
+  return { items, total: atLeast(data.total, items) };
 }
 
-async function paperItems(): Promise<readonly WorkItem[]> {
+async function paperItems(): Promise<KindPage> {
   const data = await listWhitepaperRuns({ limit: PAPER_PAGE_LIMIT });
-  return data.runs.map((r) => ({
+  const items = data.runs.map((r) => ({
     id: String(r.id),
     kind: "paper" as const,
     // Ingredient first, because that is what an analyst calls the paper. The
@@ -131,9 +165,10 @@ async function paperItems(): Promise<readonly WorkItem[]> {
     title: r.ingredient.trim() || r.rld_name_input.trim() || `Application ${r.application_number}`,
     updatedAt: relTime(r.updated_at),
   }));
+  return { items, total: atLeast(data.total, items) };
 }
 
-function itemsFor(kind: Exclude<ArtifactKind, "dossier">): Promise<readonly WorkItem[]> {
+function itemsFor(kind: Exclude<ArtifactKind, "dossier">): Promise<KindPage> {
   switch (kind) {
     case "thread":
       return threadItems();
@@ -152,7 +187,13 @@ export function isArtifactKind(value: string | null): value is ArtifactKind {
 /** Every kind in "loading", for the first paint before any fetch settles. */
 export function loadingGroups(): readonly KindGroup[] {
   return KIND_ORDER.map(
-    (kind): KindGroup => ({ kind, label: KIND_LABEL[kind], items: [], state: "loading" }),
+    (kind): KindGroup => ({
+      kind,
+      label: KIND_LABEL[kind],
+      items: [],
+      total: 0,
+      state: "loading",
+    }),
   );
 }
 
@@ -175,14 +216,15 @@ export async function fetchKindGroup(
     // no saved dossiers" -- and pointedly not "unreachable", which would claim
     // a request failed when none was made. The day /assemble persists, this
     // becomes a fetch like the other three and nothing else here changes.
-    return { kind, label, items: [], state: "ready" };
+    return { kind, label, items: [], total: 0, state: "ready" };
   }
   const outcome = await bounded(itemsFor(kind), signal);
-  // items stays [] on the failure path because the type needs an array, NOT
-  // because the list is empty. Consumers read `state` first (WorkRail does).
+  // items stays [] and total 0 on the failure path because the type needs both,
+  // NOT because the list is empty or the count is zero. Consumers read `state`
+  // first (WorkRail does).
   return outcome.ok
-    ? { kind, label, items: outcome.value, state: "ready" }
-    : { kind, label, items: [], state: "unreachable" };
+    ? { kind, label, items: outcome.value.items, total: outcome.value.total, state: "ready" }
+    : { kind, label, items: [], total: 0, state: "unreachable" };
 }
 
 /**

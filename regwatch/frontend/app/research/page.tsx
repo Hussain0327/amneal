@@ -26,6 +26,7 @@ import {
 import { citeKey } from "@/lib/citations";
 import { syncTextareaHeight } from "@/lib/composer";
 import {
+  artifactTitle,
   authoritiesFrom,
   type ArtifactKind,
   type Authority,
@@ -59,14 +60,6 @@ import { assistantTurn, nonAnswerLabel, turnFromMessage, userTurn, type Turn } f
 // for a cancelled question, the in-thread Retry for a failed send, the
 // draft typewriter pacing, and the starter examples. They are missing, not
 // removed: the root route still serves the full Ask surface while this is staged.
-
-const NEW_TITLE: Record<ArtifactKind, string> = {
-  thread: "New thread",
-  dossier: "New dossier",
-  // You do not author a bulletin, so there is no "new" one to name.
-  bulletin: "Latest bulletins",
-  paper: "New paper",
-};
 
 const PANEL_LABEL: Record<RecordPanelId, string> = {
   record: "Record",
@@ -255,7 +248,10 @@ function ResearchShell(): React.ReactElement {
     (target: ArtifactKind) => {
       const controller = trackWork();
       setGroups((prev) =>
-        prev.map((g): KindGroup => (g.kind === target ? { ...g, state: "loading", items: [] } : g)),
+        prev.map(
+          (g): KindGroup =>
+            g.kind === target ? { ...g, state: "loading", items: [], total: 0 } : g,
+        ),
       );
       void fetchKindGroup(target, controller.signal)
         .then((group) => {
@@ -684,13 +680,20 @@ function ResearchShell(): React.ReactElement {
 
   // --- the shell -----------------------------------------------------------
 
+  // Scoped to the kind on the sheet, not searched across all four. The param
+  // sync above sets kind and id independently, so a stale or hand-edited
+  // /research?kind=thread&id=<a-paper-id> arrives with the two disagreeing --
+  // and an unscoped lookup would then title a Thread sheet with a paper's name.
+  // No match is the honest answer there, and artifactTitle says "Untitled".
   const activeItem = useMemo(
-    () => groups.flatMap((g) => g.items).find((item) => item.id === activeId) ?? null,
-    [groups, activeId],
+    () => groups.find((g) => g.kind === kind)?.items.find((item) => item.id === activeId) ?? null,
+    [groups, kind, activeId],
   );
 
-  const title =
-    (kind === "thread" ? threadTitle?.trim() : "") || activeItem?.title || NEW_TITLE[kind];
+  // "New thread" is only true with no id in hand; see artifactTitle. The rail
+  // may still be loading or unreachable, and neither is a reason to tell the
+  // analyst the artifact they just opened is a blank they made.
+  const title = artifactTitle(kind, activeId, threadTitle, activeItem);
 
   // The work rail takes no `open` prop, so its narrow-viewport slide-over state
   // is the shell's: css/work-rail.css answers .is-work-open on this root.
@@ -722,6 +725,9 @@ function ResearchShell(): React.ReactElement {
               kicker="Thread"
               title={title}
               authorities={authorities}
+              // A verdict needs a settled turn. Nothing has landed on a new
+              // thread, and a streaming or opening one has not finished.
+              settled={!busy && turns.some((t) => t.role === "assistant")}
               litN={litN}
               onLit={setLitN}
               footer={composer}

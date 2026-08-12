@@ -75,6 +75,7 @@
   --st-gold-wash: var(--rw-gold-wash);
   --st-flag: var(--rw-flag);
   --st-flag-wash: var(--rw-flag-wash);
+  --st-flag-edge: var(--rw-flag-edge);
   --st-clear: var(--rw-clear);
   --st-clear-wash: var(--rw-clear-wash);
 
@@ -168,6 +169,9 @@
   --st-shadow-panel: var(--rw-shadow-panel);
   --st-shadow-pop: var(--rw-shadow-pop);
   --st-shadow-page: var(--rw-shadow-page);
+  /* The blotter edge, one of the three mechanisms that make the sheet an object.
+     Held in tokens.css because all three desks in the two studios draw it. */
+  --st-blotter: var(--rw-blotter);
 
   --st-ease: var(--rw-ease);
   --st-dur: var(--rw-dur);
@@ -230,6 +234,11 @@
    construction. Selection is emphasis anyway, so the promotion costs nothing. */
 .studio :where(.is-active, [aria-current="true"], [aria-selected="true"]) {
   --st-on-chrome-faint: var(--st-on-chrome-soft);
+  /* The same promotion, said in the shared vocabulary. The primitives now read
+     --rw-ink-faint directly (they are one rule with their .rw-* twins), so the
+     rebind has to reach that name too, or a quiet button on a selected row would
+     drop back to 4.49:1 in this studio only. */
+  --rw-ink-faint: var(--rw-ink-2);
 }
 
 .studio__sr {
@@ -286,11 +295,7 @@
   inset: 0;
   z-index: 0;
   pointer-events: none;
-  background: radial-gradient(
-    125% 95% at 50% 42%,
-    rgba(22, 33, 58, 0) 52%,
-    rgba(22, 33, 58, 0.055) 100%
-  );
+  background: var(--st-blotter);
 }
 
 .st-scroll {
@@ -313,268 +318,18 @@
    their own namespace and may compose these, never redefine them.
    ------------------------------------------------------------------------ */
 
-/* --- buttons -------------------------------------------------------------- */
+/* THE SHARED CONTROLS LIVE IN app/design/primitives.css, ONE RULE PER CONTROL.
+   .st-btn, .st-icon-btn, .st-chip, .st-sev, .st-eyebrow, .st-field and .st-glyph
+   are declared there alongside their .rw-* twins, on the same rule, reading the
+   tokens the aliases above resolve to. They used to be declared here as well --
+   a byte-identical second copy that differed only in which alias of one value it
+   read -- and two copies of a button is how the two studios drift apart, one fix
+   made in whichever room the author happened to be standing in. What stays below
+   is what is genuinely this studio's: the glyph's own STATE modifiers, because
+   the states belong to the region and not to the shape.
+   ------------------------------------------------------------------------ */
 
-.st-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--st-s2);
-  height: 30px;
-  padding: 0 var(--st-s3);
-  border: 1px solid transparent;
-  border-radius: var(--st-r-sm);
-  background: transparent;
-  color: var(--st-on-chrome-soft);
-  font-family: var(--st-face-ui);
-  font-size: var(--st-t-base);
-  font-weight: 500;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-  transition:
-    background var(--st-dur) var(--st-ease),
-    color var(--st-dur) var(--st-ease),
-    border-color var(--st-dur) var(--st-ease);
-}
-
-.st-btn svg {
-  width: 14px;
-  height: 14px;
-  flex: none;
-}
-
-.st-btn:hover:not(:disabled) {
-  background: var(--st-chrome-2);
-  color: var(--st-on-chrome);
-}
-
-.st-btn:disabled {
-  opacity: 0.42;
-  cursor: not-allowed;
-}
-
-/* The one saturated control in any given view. Gold on navy is 9.1:1, and the
-   ink text on gold is 8.7:1 -- it can carry the primary action honestly. */
-.st-btn--primary {
-  background: var(--st-gold-fill);
-  border-color: var(--st-gold-fill);
-  color: var(--st-ink);
-  font-weight: 600;
-}
-
-.st-btn--primary:hover:not(:disabled) {
-  background: var(--st-gold-deep);
-  border-color: var(--st-gold-deep);
-  color: var(--st-ink);
-}
-
-.st-btn--outline {
-  border-color: var(--st-line-strong);
-  color: var(--st-on-chrome-soft);
-}
-
-.st-btn--outline:hover:not(:disabled) {
-  border-color: var(--st-on-chrome-dim);
-  background: var(--st-chrome-2);
-  color: var(--st-on-chrome);
-}
-
-/* A text button. Used for the three dispositions that are not the expected one,
-   so the expected one can be the only filled control in the card. */
-.st-btn--quiet {
-  height: 26px;
-  padding: 0 var(--st-s2);
-  color: var(--st-on-chrome-faint);
-}
-
-.st-btn--quiet:hover:not(:disabled) {
-  background: var(--st-chrome-2);
-  color: var(--st-on-chrome);
-}
-
-.st-btn--lg {
-  height: 36px;
-  padding: 0 var(--st-s4);
-  font-size: var(--st-t-base);
-}
-
-.st-btn--block {
-  width: 100%;
-}
-
-.st-icon-btn {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  flex: none;
-  padding: 0;
-  border: 0;
-  border-radius: var(--st-r-sm);
-  background: transparent;
-  color: var(--st-on-chrome-faint);
-  cursor: pointer;
-  transition:
-    background var(--st-dur) var(--st-ease),
-    color var(--st-dur) var(--st-ease);
-}
-
-.st-icon-btn svg {
-  width: 15px;
-  height: 15px;
-}
-
-.st-icon-btn:hover:not(:disabled) {
-  background: var(--st-chrome-2);
-  color: var(--st-on-chrome);
-}
-
-.st-icon-btn:disabled {
-  opacity: 0.38;
-  cursor: not-allowed;
-}
-
-/* --- identifiers and labels ---------------------------------------------- */
-
-/* Mono, uppercase and tracked -- the ONE place that treatment is licensed,
-   because these really are codes: ICH Q3D(R2), CMC-DS-SPEC-0007, v5.0, CTD. */
-.st-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
-  border: 1px solid var(--st-line);
-  border-radius: var(--st-r-xs);
-  background: var(--st-raise);
-  color: var(--st-on-chrome-faint);
-  font-family: var(--st-face-id);
-  font-size: var(--st-t-micro);
-  font-weight: 500;
-  letter-spacing: 0.06em;
-  line-height: 1.5;
-  white-space: nowrap;
-}
-
-.st-chip svg {
-  width: 10px;
-  height: 10px;
-  opacity: 0.8;
-}
-
-/* Severity: one problem hue varied by fill and weight, never a rainbow.
-   major = solid flag, minor = hairline flag, info = quiet ink. */
-.st-sev {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 6px;
-  border: 1px solid transparent;
-  border-radius: var(--st-r-xs);
-  font-family: var(--st-face-id);
-  font-size: var(--st-t-micro);
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  line-height: 1.5;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
-.st-sev--major {
-  background: var(--st-flag);
-  border-color: var(--st-flag);
-  color: var(--st-paper);
-}
-
-.st-sev--minor {
-  background: var(--st-flag-wash);
-  border-color: rgba(226, 133, 124, 0.55);
-  color: var(--st-flag);
-}
-
-.st-sev--info {
-  background: transparent;
-  border-color: var(--st-line);
-  color: var(--st-on-chrome-faint);
-}
-
-/* Section eyebrow. Micro, tracked, faint -- it names a region and then gets
-   out of the way. */
-.st-eyebrow {
-  margin: 0;
-  font-family: var(--st-face-id);
-  font-size: var(--st-t-micro);
-  font-weight: 500;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--st-on-chrome-faint);
-}
-
-/* --- fields --------------------------------------------------------------- */
-
-/* Inputs recess into the surface rather than sitting on it: on a dark ground
-   the well is darker, which is also how the parchment shell reads its fields
-   (brightest fill on a mid surface) -- same idea, inverted ground. */
-.st-field {
-  display: flex;
-  align-items: center;
-  gap: var(--st-s2);
-  height: 32px;
-  padding: 0 var(--st-s2);
-  border: 1px solid var(--st-line-strong);
-  border-radius: var(--st-r-sm);
-  background: var(--st-raise);
-  color: var(--st-on-chrome);
-  transition: border-color var(--st-dur) var(--st-ease);
-}
-
-.st-field:focus-within {
-  border-color: var(--st-on-chrome-dim);
-}
-
-.st-field svg {
-  width: 14px;
-  height: 14px;
-  flex: none;
-  color: var(--st-on-chrome-dim);
-}
-
-.st-field input,
-.st-field textarea {
-  flex: 1;
-  min-width: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font-family: var(--st-face-ui);
-  font-size: var(--st-t-base);
-  line-height: var(--st-lh);
-}
-
-.st-field input:focus,
-.st-field textarea:focus {
-  outline: none;
-}
-
-/* A placeholder is TEXT, so 1.4.3 applies and --st-on-chrome-dim (3.3:1, non-text
-   only) cannot carry it. This is the field label for an empty search box and for
-   the justification textarea, which is a required input on three dispositions. */
-.st-field ::placeholder {
-  color: var(--st-on-chrome-faint);
-  opacity: 1;
-}
-
-/* --- document status glyph ------------------------------------------------ */
-
-/* A shape and a colour; RepositoryTree gives screen readers the same state in
-   words. Solid = something to act on, ring = settled or not yet begun. */
-.st-glyph {
-  flex: none;
-  width: 7px;
-  height: 7px;
-  border-radius: var(--st-r-pill);
-  box-shadow: inset 0 0 0 1.5px currentcolor;
-  color: var(--st-on-chrome-dim);
-}
+/* --- document status glyph: this studio's states -------------------------- */
 
 .st-glyph--findings {
   background: var(--st-flag);
@@ -698,7 +453,7 @@
     position: absolute;
     inset: 0;
     z-index: 20;
-    background: rgba(22, 33, 58, 0.32);
+    background: var(--rw-scrim);
     border: 0;
   }
 }

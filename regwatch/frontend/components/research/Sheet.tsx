@@ -53,10 +53,14 @@ function stampNumber(target: EventTarget | null): number | null {
  * after being matched, as an integer, against this turn's own authorities.
  */
 function litStampRule(scope: string, n: number): string {
+  // Fill and ink only. The border is the stamp's ONLY boundary against the
+  // paper and css/sheet.css sets it to --rw-gold for the 3:1 that 1.4.11 owes
+  // a control edge; --rw-gold-deep is 2.90:1 there, so lighting a stamp must
+  // not quietly hand that back. The lit state is carried by the fill going from
+  // wash to gold, which is a far larger change than an edge.
   return (
     `[data-rs-sheet="${scope}"] [data-authority-n="${n}"] {` +
     "background: var(--rw-gold-fill);" +
-    "border-color: var(--rw-gold-deep);" +
     "color: var(--rw-ink);" +
     "}"
   );
@@ -67,6 +71,18 @@ interface SheetProps {
   readonly kicker: string;
   readonly title: string;
   readonly authorities: readonly Authority[];
+  /**
+   * Whether the sheet is showing a turn that has finished arriving.
+   *
+   * "Not sourced" is a VERDICT about a turn, so it can only be stated once
+   * there is one and it has stopped moving. An empty margin over a streaming
+   * answer, an opening thread, or a sheet nobody has asked anything means "not
+   * yet", and saying "nothing here is drawn from the record" about prose that
+   * has not arrived is the same class of lie the margin's own empty case exists
+   * to prevent. Required rather than defaulted: the sheet cannot know, and a
+   * caller that has not thought about it should not compile.
+   */
+  readonly settled: boolean;
   /** The authority the reader is pointing at, in either column. The sheet is
       the single owner of this fact; neither column keeps its own copy. */
   readonly litN: number | null;
@@ -81,6 +97,7 @@ export function Sheet({
   kicker,
   title,
   authorities,
+  settled,
   litN,
   onLit,
   footer,
@@ -174,8 +191,13 @@ export function Sheet({
                   the sheet stopped there, the absence would read as a layout
                   that happens to have nothing in it. It says the thing instead,
                   in the app's own face because this is the app speaking and not
-                  the record, and it names what to do next. */}
-              {!sourced && (
+                  the record, and it names what to do next.
+
+                  Gated on `settled` as well as on the array: an empty margin
+                  before the turn lands means "not yet", and this sentence is a
+                  verdict. Unsourced and unfinished look identical from here,
+                  which is exactly why the sheet is told rather than guessing. */}
+              {!sourced && settled && (
                 <div className="rs-sheet__unsourced">
                   <span className="rs-sheet__unsourced-label">Not sourced</span>
                   <p className="rs-sheet__unsourced-line">

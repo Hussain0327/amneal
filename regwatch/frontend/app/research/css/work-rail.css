@@ -255,6 +255,17 @@
   color: var(--rw-ink-faint);
 }
 
+/* The count in the header is the total; this says how much of it is on the rail.
+   Set exactly like the empty line, because both are the rail speaking about a
+   list rather than a row in one. */
+.rw-studio .rw-work__more {
+  margin: 0;
+  padding: var(--rw-s2) var(--rw-s2) var(--rw-s2) var(--rw-s5);
+  font-size: var(--rw-t-small);
+  line-height: var(--rw-lh);
+  color: var(--rw-ink-faint);
+}
+
 /* --- make ----------------------------------------------------------------- */
 
 .rw-studio .rw-work__make {
@@ -341,10 +352,15 @@
 
 /* Cannot be scoped -- a keyframe is global by definition -- so it carries the
    block name instead, and no other region may reuse it. */
+/* The trough is 0.75 and that is a contrast floor, not a taste call. This dot is
+   the ONLY visual sign that a list is still loading, so it is a status indicator
+   and owes 1.4.11 its 3:1 for every frame it is shown, not just at the top of
+   the cycle. --rw-gold composited onto the rail at 0.35 is 1.65:1; at 0.75 it is
+   3.31:1. The pulse is quieter than it was, and legible throughout. */
 @keyframes rw-work-pulse {
   0%,
   100% {
-    opacity: 0.35;
+    opacity: 0.75;
   }
 
   50% {
