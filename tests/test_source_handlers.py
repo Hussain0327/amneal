@@ -92,6 +92,20 @@ def test_search_sources_continues_when_one_handler_fails(
     assert [r.source for r in records] == [SourceKind.PSG]
 
 
+def test_dead_orange_book_parsers_stay_removed() -> None:
+    """`parse_patent_text` / `parse_exclusivity_text` were unreachable.
+
+    Neither was exported nor called anywhere; patent and exclusivity rows
+    reach callers through `patent_rows` / `exclusivity_rows`, which still
+    use the column maps. Asserting their absence stops a later edit from
+    quietly reviving a dead public name.
+    """
+    from regwatch.sources import orange_book
+
+    assert not hasattr(orange_book, "parse_patent_text")
+    assert not hasattr(orange_book, "parse_exclusivity_text")
+
+
 def test_parse_orange_book_products_text() -> None:
     rows = parse_products_text(ORANGE_PRODUCTS)
     assert rows[0]["appl_no"] == "020503"
