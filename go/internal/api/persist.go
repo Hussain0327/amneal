@@ -43,10 +43,13 @@ var errSessionOwnershipLost = errors.New("chat session owned by another user")
 // raises SessionOwnershipError in exactly this case. On any OTHER failure the
 // session_id degrades to the fresh turn_id (never the requested id), exactly
 // as ask() does -- so later writes never target a foreign session. Returns
-// the (possibly degraded) session_id the turn proceeds with.
+// the (possibly degraded) session_id the turn proceeds with. origin is
+// create-only there too (issue #208): UpsertChatSession's ON CONFLICT never
+// sets it, so a second turn on an existing session cannot flip its
+// Threads-list kind.
 func (s *Server) persistUserTurn(
 	ctx context.Context,
-	sessionID, turnID, userID, question string,
+	sessionID, turnID, userID, question, origin string,
 	filtersObj []byte,
 	t0 time.Time,
 ) (string, error) {
@@ -56,6 +59,7 @@ func (s *Server) persistUserTurn(
 		ActiveFiltersJson: []byte("{}"),
 		CreatedAt:         ts(t0),
 		UpdatedAt:         ts(t0),
+		Origin:            origin,
 	}); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", errSessionOwnershipLost

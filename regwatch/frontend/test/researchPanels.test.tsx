@@ -12,19 +12,32 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AssistantPanel } from "@/components/research/AssistantPanel";
 import { HistoryPanel } from "@/components/research/HistoryPanel";
 import { RecordPanel } from "@/components/research/RecordPanel";
-import type { Citation, PsgLibraryDoc, QueryResponse } from "@/lib/api";
+import type {
+  Citation,
+  PsgLibraryDoc,
+  QueryOrigin,
+  QueryResponse,
+  StreamCallbacks,
+} from "@/lib/api";
 import { fileAuthorities, fileHistory, type RecordFiling } from "@/lib/research-record";
 import type { Turn } from "@/lib/turns";
 
 // The factories only CALL these at runtime (after vi.mock hoists) -- the same
 // partial-mock pattern askPage.test.tsx and historyPanel.test.tsx use.
 const fetchPsgLibraryMock = vi.fn<() => Promise<PsgLibraryDoc[]>>();
+// Full arity, through origin, so a test can pin what this panel sends on the
+// last positional argument -- the whole surface of issue #208 from the
+// frontend's side.
 const askQueryStreamMock =
   vi.fn<
     (
       question: string,
       filters: Record<string, string> | null,
       sessionId: string | null,
+      callbacks?: StreamCallbacks,
+      liveDraft?: boolean,
+      signal?: AbortSignal,
+      origin?: QueryOrigin,
     ) => Promise<QueryResponse>
   >();
 
@@ -33,11 +46,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
   return {
     ...actual,
     fetchPsgLibrary: () => fetchPsgLibraryMock(),
-    askQueryStream: (
-      question: string,
-      filters: Record<string, string> | null,
-      sessionId: string | null,
-    ) => askQueryStreamMock(question, filters, sessionId),
+    askQueryStream: (...args: Parameters<typeof askQueryStreamMock>) => askQueryStreamMock(...args),
   };
 });
 
@@ -343,6 +352,19 @@ describe("AssistantPanel", () => {
 
     expect(askQueryStreamMock.mock.calls[0][2]).toBeNull();
     expect(askQueryStreamMock.mock.calls[1][2]).toBe("sess-7");
+  });
+
+  // Issue #208: /query has one place to put a conversation, so this panel's
+  // session must be marked "assistant" or it files as a visible thread
+  // beside the analyst's own work in the work rail.
+  it("marks its session origin so it never files a thread", async () => {
+    askQueryStreamMock.mockResolvedValue(answer());
+    mount();
+    await userEvent.type(screen.getByRole("textbox", { name: /ask the assistant/i }), "q");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(askQueryStreamMock).toHaveBeenCalledTimes(1));
+    expect(askQueryStreamMock.mock.calls[0][6]).toBe("assistant");
   });
 
   it("shows the sources an answer stands on", async () => {

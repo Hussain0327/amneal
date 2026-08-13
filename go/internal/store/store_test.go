@@ -328,6 +328,40 @@ func TestChatSessionListOwnershipAndDelete(t *testing.T) {
 	}
 }
 
+// TestChatSessionOriginFilterAsymmetry pins issue #208's read-side contract:
+// ListChatSessionsForUser (the Threads list) excludes an Assistant-panel
+// session, but GetChatSessionOwned stays origin-blind ON PURPOSE (an
+// explicit owner decision, see chat.sql) so that session remains reachable
+// by id -- the asymmetry a "just filter everywhere" fix would collapse.
+func TestChatSessionOriginFilterAsymmetry(t *testing.T) {
+	pool, q := testQueries(t)
+	ctx := t.Context()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	mkSession := func(id, user, origin string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO public.chat_session (id, user_id, origin, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, $5)`, id, user, origin, now, now); err != nil {
+			t.Fatalf("seed session %s: %v", id, err)
+		}
+	}
+	mkSession("t1", "u1", "thread")
+	mkSession("a1", "u1", "assistant")
+
+	rows, err := q.ListChatSessionsForUser(ctx, text("u1"))
+	if err != nil {
+		t.Fatalf("ListChatSessionsForUser: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "t1" {
+		t.Fatalf("Threads list must hold only the thread-origin session, got %+v", rows)
+	}
+
+	if _, err := q.GetChatSessionOwned(ctx, GetChatSessionOwnedParams{ID: "a1", UserID: text("u1")}); err != nil {
+		t.Fatalf("GetChatSessionOwned must still return the assistant-origin row (origin-blind by design): %v", err)
+	}
+}
+
 func TestProductWatchlistSoftDelete(t *testing.T) {
 	_, q := testQueries(t)
 	ctx := t.Context()

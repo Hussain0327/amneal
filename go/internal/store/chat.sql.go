@@ -97,7 +97,7 @@ func (q *Queries) DeleteChatSession(ctx context.Context, id string) (int64, erro
 
 const getChatSessionByID = `-- name: GetChatSessionByID :one
 
-SELECT id, user_id, title, active_filters_json, created_at, updated_at FROM public.chat_session
+SELECT id, user_id, title, active_filters_json, origin, created_at, updated_at FROM public.chat_session
 WHERE id = $1
 `
 
@@ -118,6 +118,7 @@ func (q *Queries) GetChatSessionByID(ctx context.Context, id string) (ChatSessio
 		&i.UserID,
 		&i.Title,
 		&i.ActiveFiltersJson,
+		&i.Origin,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -125,7 +126,7 @@ func (q *Queries) GetChatSessionByID(ctx context.Context, id string) (ChatSessio
 }
 
 const getChatSessionOwned = `-- name: GetChatSessionOwned :one
-SELECT id, user_id, title, active_filters_json, created_at, updated_at FROM public.chat_session
+SELECT id, user_id, title, active_filters_json, origin, created_at, updated_at FROM public.chat_session
 WHERE id = $1 AND user_id = $2
 `
 
@@ -142,6 +143,7 @@ func (q *Queries) GetChatSessionOwned(ctx context.Context, arg GetChatSessionOwn
 		&i.UserID,
 		&i.Title,
 		&i.ActiveFiltersJson,
+		&i.Origin,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -281,7 +283,7 @@ SELECT cs.id,
          LIMIT 1
        )) AS display_title
 FROM public.chat_session cs
-WHERE cs.user_id = $1
+WHERE cs.user_id = $1 AND cs.origin = 'thread'
 ORDER BY cs.updated_at DESC
 `
 
@@ -307,6 +309,14 @@ type ListChatSessionsForUserRow struct {
 // what to render then. COALESCE vs Python truthiness: an EMPTY-STRING title
 // would coalesce here but fall through in Python; unreachable today (nothing
 // in src/ ever writes title), revisit if a rename/title feature lands.
+//
+// origin = 'thread' is a LITERAL, not a parameter: this query IS the work
+// rail's Threads list (issue #208), so an Assistant-panel conversation
+// (chat_session.origin = 'assistant') must never surface here. This is
+// deliberately the ONLY place that filters on origin -- GetChatSessionOwned
+// below stays origin-blind on purpose, so an assistant conversation stays
+// readable and deletable by id (GET/DELETE /sessions/{id}) instead of
+// becoming an unreachable orphan once this list excludes it.
 func (q *Queries) ListChatSessionsForUser(ctx context.Context, userID pgtype.Text) ([]ListChatSessionsForUserRow, error) {
 	rows, err := q.db.Query(ctx, listChatSessionsForUser, userID)
 	if err != nil {
@@ -356,8 +366,8 @@ func (q *Queries) UpdateChatSessionFilters(ctx context.Context, arg UpdateChatSe
 }
 
 const upsertChatSession = `-- name: UpsertChatSession :one
-INSERT INTO public.chat_session (id, user_id, active_filters_json, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO public.chat_session (id, user_id, active_filters_json, created_at, updated_at, origin)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (id) DO UPDATE
 SET user_id = EXCLUDED.user_id,
     updated_at = EXCLUDED.updated_at
@@ -371,6 +381,7 @@ type UpsertChatSessionParams struct {
 	ActiveFiltersJson []byte
 	CreatedAt         pgtype.Timestamp
 	UpdatedAt         pgtype.Timestamp
+	Origin            string
 }
 
 // UpsertChatSession ports conversation.ensure_session INCLUDING its last-line
@@ -382,6 +393,10 @@ type UpsertChatSessionParams struct {
 // Python's SessionOwnershipError (a lost create race after the API-level
 // ownership pre-check). active_filters_json is NEVER overwritten on conflict
 // (only the shell's explicit filter carry-over, below, mutates filters).
+// origin follows the identical create-only rule, for the identical reason:
+// an established conversation does not change kind (thread vs assistant)
+// because a later caller on the same session_id asked differently, so the ON
+// CONFLICT SET list omits it exactly like active_filters_json (issue #208).
 func (q *Queries) UpsertChatSession(ctx context.Context, arg UpsertChatSessionParams) (string, error) {
 	row := q.db.QueryRow(ctx, upsertChatSession,
 		arg.ID,
@@ -389,6 +404,7 @@ func (q *Queries) UpsertChatSession(ctx context.Context, arg UpsertChatSessionPa
 		arg.ActiveFiltersJson,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+		arg.Origin,
 	)
 	var id string
 	err := row.Scan(&id)

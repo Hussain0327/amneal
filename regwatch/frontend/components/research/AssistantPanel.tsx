@@ -19,12 +19,17 @@
 // everything here is.
 //
 // WHERE ITS CONVERSATION LIVES, SAID OUT LOUD
-// /query has one place to put a conversation, so this one is a session like any
-// other and will appear in your threads. The foot of the panel says so. The
-// alternative -- a fresh session per question -- would file a new thread every
-// time anybody asked anything, and the alternative to THAT (borrowing the
-// artifact's own session) would grow the audit record of a filing with
-// questions nobody meant to file.
+// /query has one place to put a conversation, so this one is a session like
+// any other -- it persists, and it is readable and deletable by id exactly
+// like a thread. The foot of the panel says so, in short. What it does not
+// do is show up in the work rail's Threads list: this panel writes its
+// session with origin "assistant", and ListChatSessionsForUser filters that
+// origin out. A lookup you make to understand an artifact is not the
+// analyst's own work, so it does not belong on a list built to show that
+// work. It is still one persistent session, not either alternative: a fresh
+// one per question would leave an unreachable orphan behind every question
+// anybody asked, and reusing the artifact's own session would grow the
+// audit record of a filing with questions nobody meant to file.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -223,6 +228,9 @@ export function AssistantPanel({
         // can be withdrawn needs the whole withdrawal surface to go with it.
         false,
         controller.signal,
+        // See the file-head comment: this session is real, but it is not the
+        // analyst's own work, so it must not land in the Threads list.
+        "assistant",
       );
       if (seqRef.current !== seq || controller.signal.aborted) return;
       // The conversation's identity, adopted from the first answer and reused
@@ -350,7 +358,8 @@ export function AssistantPanel({
             </p>
           )}
           <p className="rw-composer__note">
-            Cited like everything here. Kept as its own thread, not in this artifact&apos;s record.
+            Cited like everything here. Kept on its own, not in Threads or in this artifact&apos;s
+            record.
           </p>
         </form>
       }

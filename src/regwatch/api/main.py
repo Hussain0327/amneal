@@ -700,6 +700,13 @@ class QueryRequest(BaseModel):
     # Per-request opt-in for the provisional draft SSE channel. Ignored by the
     # blocking /query route and whenever the server-side dual gate is off.
     live_draft: bool = False
+    # Which surface this turn's session bookkeeping belongs to (issue #208):
+    # "thread" (default) is the analyst's real work, listed in the work rail's
+    # Threads list; "assistant" is the Research Studio panel's own scratch
+    # conversation, kept but filtered out of that list. Declared LAST so a
+    # multi-field validation failure reports errors in this declared order
+    # (pydantic parity note: Go's validationItem mirrors this field order too).
+    origin: Literal["thread", "assistant"] = "thread"
 
     @field_validator("filters")
     @classmethod
@@ -967,6 +974,7 @@ async def query(req: QueryRequest, user: User = Depends(require_user)) -> QueryR
             k=req.k,
             session_id=req.session_id,
             user_id=user_id,
+            origin=req.origin,
         )
     except SessionOwnershipError as exc:
         # An ownership race lost after the pre-check above — same 404 as any
@@ -1045,6 +1053,7 @@ async def _query_event_stream(req: QueryRequest, user_id: str) -> AsyncIterator[
                 k=req.k,
                 session_id=req.session_id,
                 user_id=user_id,
+                origin=req.origin,
                 on_progress=on_progress,
                 on_token=on_token,
                 on_draft=on_draft if draft_on else None,

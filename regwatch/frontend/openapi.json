@@ -1099,6 +1099,15 @@
             "title": "Live Draft",
             "type": "boolean"
           },
+          "origin": {
+            "default": "thread",
+            "enum": [
+              "thread",
+              "assistant"
+            ],
+            "title": "Origin",
+            "type": "string"
+          },
           "question": {
             "maxLength": 4000,
             "minLength": 2,

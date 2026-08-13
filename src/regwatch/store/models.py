@@ -201,12 +201,25 @@ class ChatSession(SQLModel, table=True):
     # composite index keeps that page a single index scan. Declared in metadata
     # (not ad-hoc DDL) so create_all, alembic autogenerate, and migration
     # 0007 all agree on the schema.
-    __table_args__ = (Index("ix_chat_session_user_id_updated_at", "user_id", "updated_at"),)
+    __table_args__ = (
+        Index("ix_chat_session_user_id_updated_at", "user_id", "updated_at"),
+        # Declared in metadata (matching answer_feedback's ck_answer_feedback_rating
+        # above) so create_all and migration 0021 produce the identical constraint.
+        CheckConstraint("origin IN ('thread', 'assistant')", name="ck_chat_session_origin"),
+    )
 
     id: str = Field(primary_key=True)
     user_id: str | None = Field(default=None, index=True)
     title: str | None = None
     active_filters_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
+    # Which surface owns this thread: "thread" is the analyst's real work
+    # (shows up in the work rail's Threads list); "assistant" is the Research
+    # Studio panel's own scratch conversation (kept, but never listed there --
+    # issue #208). Set once, on session CREATE, by ensure_session; never
+    # rewritten on an existing row (same rule active_filters_json follows).
+    # server_default matches the Field default so create_all (bootstrap) and
+    # migration 0021 (existing rows) agree on the same column shape.
+    origin: str = Field(default="thread", sa_column_kwargs={"server_default": "thread"})
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
 
