@@ -3,46 +3,18 @@
 Ported from upstream tests/unit/test_section_splitter.py (DefPredict). Import rewritten
 onto the vendored modules; logic and assertions otherwise unchanged.
 
-Deviations beyond the import-rewrite map:
-  * The sample-PDF test reads REGWATCH_DEFICIENCY_SAMPLE_PDF instead of the upstream
-    SAMPLE_DATA_DIR-relative path, and skips when unset (no PDF fixtures are vendored).
-  * The `offline` fixture patches parse.ocr.get_settings the same way upstream did, but
-    forces the regwatch OCR seam's fields (deficiency_ocr_invocations_url /
-    deficiency_ocr_token) empty instead of upstream's databricks_host / databricks_token
-    -- parse/ocr.py now wires OCR via a full invocations URL + bearer token (see its
-    module docstring), not a Databricks host + endpoint name.
+Deviation beyond the import-rewrite map: upstream's end-to-end sample-PDF test (and the
+`offline` OCR fixture that existed only to serve it) is dropped. No PDF fixtures are
+vendored here, so it was gated on REGWATCH_DEFICIENCY_SAMPLE_PDF, which nothing in CI
+sets -- it never executed a single assertion. The block/table-level tests below cover
+the same splitter logic without needing a fixture PDF.
 """
-
-import os
-import re
-
-import pytest
 
 from regwatch.deficiency.parse.section_splitter import (
     _geometry_headings,
     _stitch_cross_page_tables,
     split_document,
 )
-
-SAMPLE_PDF = os.environ.get("REGWATCH_DEFICIENCY_SAMPLE_PDF", "")
-skip_if_no_sample = pytest.mark.skipif(
-    not SAMPLE_PDF or not os.path.exists(SAMPLE_PDF),
-    reason="REGWATCH_DEFICIENCY_SAMPLE_PDF not set",
-)
-
-
-@pytest.fixture
-def offline(monkeypatch):
-    """Force the no-Databricks OCR fallback so the test is fast and deterministic."""
-    from config.settings import Settings
-
-    import regwatch.deficiency.parse.ocr as ocrmod
-
-    monkeypatch.setattr(
-        ocrmod,
-        "get_settings",
-        lambda: Settings(deficiency_ocr_invocations_url="", deficiency_ocr_token=""),
-    )
 
 
 def _block(text):
@@ -64,21 +36,6 @@ def _grid(page, y0, y1, headers, rows, title=""):
         "continues_from": False,
         "continues_to": False,
     }
-
-
-@skip_if_no_sample
-def test_split_matches_toc_not_data_rows(offline):
-    from regwatch.deficiency.parse.pdf import extract_pdf
-
-    sections = split_document(extract_pdf(SAMPLE_PDF))
-    assert 12 <= len(sections) <= 30  # the flat-text splitter produced 95
-    headings = [s["heading"] for s in sections]
-    assert any("Linearity" in h for h in headings)
-    assert any("Conclusions" in h for h in headings)
-    for h in headings:  # no data-row false headings
-        match = re.match(r"^(\d+(?:\.\d+)*)\s", h)
-        if match:
-            assert all(int(p) <= 50 for p in match.group(1).split("."))
 
 
 def test_geometry_headings_reject_data_rows():

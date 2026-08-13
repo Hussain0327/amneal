@@ -230,7 +230,6 @@ disable_error_code = ["assignment", "index", "union-attr", "operator"]
 module = [
     "tests.test_deficiency_layout",
     "tests.test_deficiency_section_splitter",
-    "tests.test_deficiency_parse",
     "tests.test_deficiency_schemas",
     "tests.test_deficiency_detection",
     "tests.test_deficiency_structured",

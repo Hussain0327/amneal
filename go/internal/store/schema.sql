@@ -65,8 +65,10 @@ CREATE TABLE public.chat_session (
     user_id character varying,
     title character varying,
     active_filters_json jsonb,
+    origin character varying DEFAULT 'thread'::character varying NOT NULL,
     created_at timestamp without time zone NOT NULL,
-    updated_at timestamp without time zone NOT NULL
+    updated_at timestamp without time zone NOT NULL,
+    CONSTRAINT ck_chat_session_origin CHECK (((origin)::text = ANY ((ARRAY['thread'::character varying, 'assistant'::character varying])::text[])))
 );
 
 CREATE TABLE public.product (

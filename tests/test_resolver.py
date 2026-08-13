@@ -33,6 +33,9 @@ def test_albuterol_does_not_resolve_to_levalbuterol() -> None:
 
 
 def test_combo_wins_over_single_ingredient() -> None:
+    # Also the negative control for the comparison-marker rule in
+    # test_resolution_hardening.py: "and" is NOT a marker, so a plain combo
+    # question still resolves to the combo rather than clarifying.
     r = resolve_product("What does the albuterol sulfate and budesonide PSG say?", products=CORPUS)
     assert r.status == "resolved"
     assert r.normalized_name == "albuterol sulfate; budesonide"

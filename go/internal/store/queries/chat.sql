@@ -11,6 +11,14 @@
 -- what to render then. COALESCE vs Python truthiness: an EMPTY-STRING title
 -- would coalesce here but fall through in Python; unreachable today (nothing
 -- in src/ ever writes title), revisit if a rename/title feature lands.
+--
+-- origin = 'thread' is a LITERAL, not a parameter: this query IS the work
+-- rail's Threads list (issue #208), so an Assistant-panel conversation
+-- (chat_session.origin = 'assistant') must never surface here. This is
+-- deliberately the ONLY place that filters on origin -- GetChatSessionOwned
+-- below stays origin-blind on purpose, so an assistant conversation stays
+-- readable and deletable by id (GET/DELETE /sessions/{id}) instead of
+-- becoming an unreachable orphan once this list excludes it.
 -- name: ListChatSessionsForUser :many
 SELECT cs.id,
        cs.user_id,
@@ -26,7 +34,7 @@ SELECT cs.id,
          LIMIT 1
        )) AS display_title
 FROM public.chat_session cs
-WHERE cs.user_id = $1
+WHERE cs.user_id = $1 AND cs.origin = 'thread'
 ORDER BY cs.updated_at DESC;
 
 -- name: CountChatMessagesForUser :many
@@ -94,9 +102,13 @@ WHERE id = $1 AND user_id IS NULL;
 -- Python's SessionOwnershipError (a lost create race after the API-level
 -- ownership pre-check). active_filters_json is NEVER overwritten on conflict
 -- (only the shell's explicit filter carry-over, below, mutates filters).
+-- origin follows the identical create-only rule, for the identical reason:
+-- an established conversation does not change kind (thread vs assistant)
+-- because a later caller on the same session_id asked differently, so the ON
+-- CONFLICT SET list omits it exactly like active_filters_json (issue #208).
 -- name: UpsertChatSession :one
-INSERT INTO public.chat_session (id, user_id, active_filters_json, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO public.chat_session (id, user_id, active_filters_json, created_at, updated_at, origin)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (id) DO UPDATE
 SET user_id = EXCLUDED.user_id,
     updated_at = EXCLUDED.updated_at

@@ -421,6 +421,15 @@ export function deleteSession(sessionId: string): Promise<void> {
   return deleteJSON(`/sessions/${encodeURIComponent(sessionId)}`);
 }
 
+// Derived from the generated snapshot rather than hand-written, so the union
+// cannot drift from the pydantic Literal it mirrors: widening the backend enum
+// without regenerating would fail CI's frontend-contract job, and regenerating
+// widens this type in the same commit. Absent or null on the wire means
+// "thread"; every caller below still sends it explicitly so the default is a
+// fact in the request, not an assumption about what the server does with
+// silence.
+export type QueryOrigin = Schemas["QueryRequest"]["origin"];
+
 export async function askQuery(
   question: string,
   filters: Record<string, string> | null = null,
@@ -431,9 +440,20 @@ export async function askQuery(
   // LONG bound the stream attempt got — otherwise the client aborts while the
   // server completes and persists the turn invisibly.
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  // Which surface is asking. The Assistant panel sends "assistant" so its
+  // lookups land outside ListChatSessionsForUser's thread filter -- a
+  // question asked to understand an artifact is not the analyst's own work.
+  // Every other caller wants the default it always had.
+  origin: QueryOrigin = "thread",
 ): Promise<QueryResponse> {
   return normalizeQuery(
-    await postJSON<QueryResponse>("/query", { question, filters, session_id }, true, signal, timeoutMs),
+    await postJSON<QueryResponse>(
+      "/query",
+      { question, filters, session_id, origin },
+      true,
+      signal,
+      timeoutMs,
+    ),
   );
 }
 
@@ -607,6 +627,10 @@ export async function askQueryStream(
   // on. Defaulted false so every existing caller stays byte-identical.
   liveDraft: boolean = false,
   signal?: AbortSignal,
+  // Same meaning and default as askQuery's. Forwarded to every askQuery(...)
+  // fallback below too -- a stream that has to retry as plain POST /query
+  // must not silently revert to "thread" just because it retried.
+  origin: QueryOrigin = "thread",
 ): Promise<QueryResponse> {
   const path = "/query/stream";
   if (signal?.aborted) throw new DOMException("aborted", "AbortError");
@@ -636,8 +660,8 @@ export async function askQueryStream(
         headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
         body: JSON.stringify(
           liveDraft
-            ? { question, filters, session_id, live_draft: true }
-            : { question, filters, session_id },
+            ? { question, filters, session_id, origin, live_draft: true }
+            : { question, filters, session_id, origin },
         ),
         credentials: "include",
         signal: ctl.signal,
@@ -652,7 +676,7 @@ export async function askQueryStream(
       }
       if (isAbortError(e)) throw e;
       callbacks?.onStatus?.(STREAM_FALLBACK_STATUS);
-      return askQuery(question, filters, session_id, signal, LONG_TIMEOUT_MS);
+      return askQuery(question, filters, session_id, signal, LONG_TIMEOUT_MS, origin);
     } finally {
       // Headers are in (or the fetch failed): disarm the TTFB timer. The
       // caller-abort forwarding stays wired so the body read can still cancel.
@@ -671,7 +695,7 @@ export async function askQueryStream(
       // the body so a stray non-SSE stream can't run alongside the fallback.
       void res.body?.cancel().catch(() => {});
       callbacks?.onStatus?.(STREAM_FALLBACK_STATUS);
-      return askQuery(question, filters, session_id, signal, LONG_TIMEOUT_MS);
+      return askQuery(question, filters, session_id, signal, LONG_TIMEOUT_MS, origin);
     }
     try {
       const result = await consumeSse(res.body, callbacks);
@@ -682,7 +706,7 @@ export async function askQueryStream(
     }
     if (signal?.aborted) throw new DOMException("aborted", "AbortError");
     callbacks?.onStatus?.(STREAM_FALLBACK_STATUS);
-    return askQuery(question, filters, session_id, signal, LONG_TIMEOUT_MS);
+    return askQuery(question, filters, session_id, signal, LONG_TIMEOUT_MS, origin);
   } finally {
     // Always release the timer (if the fetch path above didn't reach its own
     // finally) and the caller-abort listener — no leak on any path.

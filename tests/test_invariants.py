@@ -440,14 +440,21 @@ def test_inv3_no_authoring_endpoints() -> None:
 def test_inv5_product_source_is_verified_only() -> None:
     """Watchlist products must declare a verified `source` ∈ {drugsfda, anda_letter, manual}.
 
-    This test is structural: it inspects the model definition to ensure no
-    'guess' / 'model_memory' source is accepted by the schema layer.
+    This test is structural: it pins the allowed set itself, so widening INV-5 to
+    admit an unverified origin fails here. `Product.source` is typed as a bare str
+    with no enum, validator, or CHECK constraint, so the model definition alone
+    cannot carry this guarantee -- ALLOWED_SOURCES is the only place it lives.
+    Rejection behaviour at the loader seam is in tests/test_watchlist.py.
     """
     from regwatch.store.models import Product
+    from regwatch.watch.watchlist import ALLOWED_SOURCES
 
-    # Just confirms the model is reachable and the field exists; full source-set
-    # enforcement is in the Phase-3 watchlist loader tests.
     assert hasattr(Product, "source")
+    # Set equality rather than a list of known-bad names: it entails that NO
+    # other origin is accepted, including one nobody thought to enumerate. A
+    # `"guess" not in ALLOWED_SOURCES` loop would pass the moment someone adds a
+    # differently-named unverified source, and cannot fail while this line holds.
+    assert {"drugsfda", "anda_letter", "manual"} == ALLOWED_SOURCES
 
 
 def test_inv4_alerts_only_for_real_versions() -> None:

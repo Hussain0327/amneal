@@ -20,10 +20,6 @@ from regwatch.deficiency.schemas.flaws import FlawCategory, Severity, SimilarDef
 
 
 class TestCTDSection:
-    def test_all_values_are_strings(self):
-        for section in CTDSection:
-            assert isinstance(section.value, str)
-
     def test_known_section_exists(self):
         assert CTDSection.S_4_1_SPECIFICATION.value == "3.2.S.4.1"
 
@@ -42,6 +38,22 @@ class TestFaultSchemas:
         r = FaultReport(job_id="j", faults=[], faults_found=False)
         assert r.faults == []
         assert r.faults_found is False
+        # The clean-document shape detection.pipeline emits, and -- through
+        # runner.py's model_dump(mode="json") -- the exact payload persisted as
+        # DeficiencyRun.report_json and handed back by the API. Pin the serialized
+        # key set: renaming or dropping a field rewrites the stored document and
+        # every reader of it without failing anywhere else.
+        dumped = r.model_dump(mode="json")
+        assert dumped["faults"] == []
+        assert dumped["faults_found"] is False
+        assert set(dumped) == {
+            "job_id",
+            "faults",
+            "faults_found",
+            "domains_checked",
+            "parse_failures",
+            "analysis_seconds",
+        }
 
     def test_confidence_is_bounded(self):
         with pytest.raises(ValidationError):

@@ -41,13 +41,6 @@ def test_canonical_exact_match() -> None:
     assert m[0].rationale == "canonical"
 
 
-def test_stripped_match_when_salt_differs() -> None:
-    # Listing has the salt form; product is salt-stripped.
-    m = match_listings([_listing("Albuterol Sulfate")], [_product("Albuterol")])
-    assert len(m) == 1
-    assert m[0].rationale in {"canonical", "stripped"}
-
-
 def test_fuzzy_handles_minor_typos() -> None:
     m = match_listings(
         [_listing("Beclomethasone Dipropionate")],

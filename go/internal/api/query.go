@@ -34,6 +34,16 @@ var sessionFilterKeys = map[string]bool{
 	"appl_no":         true,
 }
 
+// originThread and originAssistant are QueryRequest.origin's only two valid
+// values (issue #208) -- a value both runtimes must agree on, the same
+// reason sessionFilterKeys above is a shared constant and not a magic
+// string. Absent/null on the wire defaults to originThread; only the
+// Assistant panel's own conversation ever sends originAssistant.
+const (
+	originThread    = "thread"
+	originAssistant = "assistant"
+)
+
 // handleCompleteQuery is the native POST /query (step-5 cutover): gates + T1,
 // the internal RAG compute call, then the audit-first T2/T3 writes. Behavior-
 // identical to the relayed Python /query; every decline/error is a 200 with
@@ -46,12 +56,19 @@ func (s *Server) handleCompleteQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := chatUserID(u)
 
-	// Decode + validate, reproducing pydantic QueryRequest.
+	// Decode + validate, reproducing pydantic QueryRequest. origin is declared
+	// LAST: pydantic emits validation errors in model field declaration
+	// order, so this ordering is load-bearing for 422 parity (issue #208).
 	var body struct {
 		Question  *string                    `json:"question"`
 		Filters   map[string]json.RawMessage `json:"filters"`
 		K         *int                       `json:"k"`
 		SessionID *string                    `json:"session_id"`
+		// RawMessage, not *string: pydantic's Literal is NOT Optional, so an
+		// explicit {"origin": null} is a 422 there while an ABSENT key takes
+		// the default. A *string collapses those two into nil and would
+		// silently accept the null Python rejects.
+		Origin json.RawMessage `json:"origin"`
 	}
 	if !decodeStrictJSON(w, r, &body) {
 		return
@@ -70,6 +87,12 @@ func (s *Server) handleCompleteQuery(w http.ResponseWriter, r *http.Request) {
 		} else if *body.K > 50 {
 			problems = append(problems, validationItem{Type: "less_than_equal", Loc: []string{"body", "k"}, Msg: "Input should be less than or equal to 50"})
 		}
+	}
+	// origin's check runs LAST, appending after question/k above, to match
+	// its LAST position in the struct (see the field-order comment there).
+	origin, originProblem := resolveOrigin(body.Origin)
+	if originProblem != nil {
+		problems = append(problems, *originProblem)
 	}
 	if len(problems) > 0 {
 		writeValidationError(w, problems...)
@@ -123,7 +146,7 @@ func (s *Server) handleCompleteQuery(w http.ResponseWriter, r *http.Request) {
 	// RAG call with the exact 404 authorizeSession produces (the pre-check
 	// cannot see a row created after it ran; ensure_session parity).
 	t0 := s.now().Truncate(time.Microsecond)
-	sessionID, t1err := s.persistUserTurn(baseCtx, sessionID, turnID, userID, *body.Question, filtersObj, t0)
+	sessionID, t1err := s.persistUserTurn(baseCtx, sessionID, turnID, userID, *body.Question, origin, filtersObj, t0)
 	if errors.Is(t1err, errSessionOwnershipLost) {
 		writeDetail(w, http.StatusNotFound, detailSessionNotFound)
 		return
@@ -312,6 +335,27 @@ func whitelistFilters(raw map[string]json.RawMessage) map[string]json.RawMessage
 		}
 	}
 	return kept
+}
+
+// resolveOrigin validates QueryRequest.origin against the two allowed values
+// (originThread, originAssistant), returning pydantic's Literal[...] 422 item
+// verbatim on a miss. A pure helper, like isScalarJSON/whitelistFilters below,
+// so query_unit_test.go can pin the exact 422 shape without booting the
+// DB-backed harness handleCompleteQuery itself needs (issue #208).
+//
+// Only an ABSENT key takes the default. Every present-but-wrong value --
+// null, a number, an object, an unknown string -- is the same literal_error,
+// which is exactly how pydantic renders a non-Optional Literal miss: the
+// message never varies with the offending type.
+func resolveOrigin(raw json.RawMessage) (string, *validationItem) {
+	if len(raw) == 0 {
+		return originThread, nil
+	}
+	var v string
+	if err := json.Unmarshal(raw, &v); err != nil || (v != originThread && v != originAssistant) {
+		return "", &validationItem{Type: "literal_error", Loc: []string{"body", "origin"}, Msg: "Input should be 'thread' or 'assistant'"}
+	}
+	return v, nil
 }
 
 // isScalarJSON reports whether v is a JSON string, number, or bool -- the

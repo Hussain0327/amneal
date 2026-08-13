@@ -51,11 +51,11 @@ def test_versus_marker_clarifies() -> None:
     assert set(r.candidates) >= {"albuterol sulfate", "beclomethasone dipropionate"}
 
 
-def test_plain_combo_question_still_resolves_to_combo() -> None:
-    # No comparison marker ("and" is NOT a marker) → combo wins, unchanged.
-    r = resolve_product("What does the albuterol sulfate and budesonide PSG say?", products=CORPUS)
-    assert r.status == "resolved"
-    assert r.normalized_name == "albuterol sulfate; budesonide"
+# The negative control for the rule above -- "and" is NOT a comparison marker, so
+# a plain combo question must still resolve rather than clarify -- lives in
+# tests/test_resolver.py::test_combo_wins_over_single_ingredient. It used to be
+# duplicated here verbatim; if you widen _COMPARISON_TOKENS, that is the test
+# that fails.
 
 
 # ---------- 2a. product/document keys ----------

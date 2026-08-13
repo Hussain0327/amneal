@@ -19,6 +19,7 @@ from uuid import uuid4
 
 import pytest
 from config.settings import get_settings
+from sqlalchemy.exc import IntegrityError
 
 from regwatch.common import conversation as conv
 from regwatch.common.citations import has_citation
@@ -26,7 +27,7 @@ from regwatch.common.conversation import PriorTurn, get_recent_turns
 from regwatch.generate import grounded_qa as qa_mod
 from regwatch.generate.llm import LLMResponse
 from regwatch.store.db import init_db, session_scope
-from regwatch.store.models import ChatMessage
+from regwatch.store.models import ChatMessage, ChatSession
 from tests.conftest import synth_turn_json
 from tests.test_invariants import _meta, _seed_corpus, _stub_llm
 
@@ -93,6 +94,75 @@ class _CapturingLLM:
     def complete(self, messages: list, *a: object, **kw: object) -> LLMResponse:
         self.user_prompts.append(next((m.content for m in messages if m.role == "user"), ""))
         return LLMResponse(text=self.text, model="capture")
+
+
+# ---------- ensure_session origin (issue #208) ----------
+
+
+def test_ensure_session_defaults_to_thread_origin() -> None:
+    init_db()
+    sid = conv.ensure_session()
+    with session_scope() as s:
+        row = s.get(ChatSession, sid)
+        assert row is not None and row.origin == "thread"
+
+
+def test_ensure_session_persists_assistant_origin_on_create() -> None:
+    init_db()
+    sid = conv.ensure_session(origin="assistant")
+    with session_scope() as s:
+        row = s.get(ChatSession, sid)
+        assert row is not None and row.origin == "assistant"
+
+
+def test_ensure_session_does_not_overwrite_origin_on_existing_row() -> None:
+    """origin is a create-only decision, same rule active_filters_json follows:
+    an established conversation does not change kind because a later caller
+    (e.g. the Assistant panel replaying onto an id it does not own) asks with
+    a different origin."""
+    init_db()
+    sid = "sess-origin-sticky"
+    conv.ensure_session(sid, origin="assistant")
+    conv.ensure_session(sid, origin="thread")
+    with session_scope() as s:
+        row = s.get(ChatSession, sid)
+        assert row is not None and row.origin == "assistant"
+
+
+def test_ensure_session_rejects_unknown_origin() -> None:
+    """The API boundary (QueryRequest) already validates origin; reaching here
+    with junk is a programming error and must fail loudly, before any write.
+
+    Pins the SPECIFIC type, not just ValueError: ask()'s session block catches
+    SessionOriginError by that type so the record_message write it also wraps
+    keeps its generic degrade path. Widening this back to a bare ValueError
+    would silently re-narrow that degrade.
+    """
+    init_db()
+    with pytest.raises(conv.SessionOriginError):
+        conv.ensure_session("sess-bad-origin", origin="bogus")
+    # Still a ValueError, so callers written against the broader type work.
+    assert issubclass(conv.SessionOriginError, ValueError)
+    with session_scope() as s:
+        assert s.get(ChatSession, "sess-bad-origin") is None  # nothing was written
+
+
+def test_ask_propagates_a_bad_origin_instead_of_degrading() -> None:
+    """ask() degrades to a fresh session id when session bookkeeping fails, but
+    a bad origin is a caller bug, not a DB hiccup -- it must surface."""
+    from regwatch.generate.grounded_qa import ask
+
+    init_db()
+    with pytest.raises(conv.SessionOriginError):
+        ask("Does this reach the pipeline?", origin="bogus")
+
+
+def test_chat_session_db_check_rejects_unknown_origin() -> None:
+    """The CHECK constraint is real, not just an application-level guard: a raw
+    row that bypasses ensure_session's validation is still rejected by the DB."""
+    init_db()
+    with pytest.raises(IntegrityError), session_scope() as s:
+        s.add(ChatSession(id="sess-db-check-origin", origin="bogus"))
 
 
 # ---------- get_recent_turns unit behavior ----------

@@ -963,6 +963,12 @@ export interface components {
              * @default false
              */
             live_draft: boolean;
+            /**
+             * Origin
+             * @default thread
+             * @enum {string}
+             */
+            origin: "thread" | "assistant";
             /** Question */
             question: string;
             /** Session Id */

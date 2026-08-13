@@ -11,7 +11,11 @@ boilerplate genuinely pulls unrelated drugs close together -- the space the
 NOTE (2026-08-11): this is no longer the production space. Prod moved to the
 Databricks Qwen3 profile (1024 dims) on 2026-07-30, so this test now proves the
 cross-drug guard in the OpenAI-1536 ROLLBACK space only. Nothing re-proves INV-1
-geometry in the live 1024-dim space yet. That gap is tracked in docs/ROADMAP.md.
+geometry in the live 1024-dim space yet, and nothing else in the repo records
+that gap: docs/ROADMAP.md tracks only the related 0.30 refusal-threshold
+revalidation, not this cross-drug guard. This docstring is the record -- an
+audit on 2026-08-13 nearly deleted the file as dead because that pointer was
+stale and the skip made it read as coverage nobody had.
 
 It is an EXTRA, opt-in test, gated on a DEDICATED flag so it never conscripts
 the standard CI pytest step into live OpenAI spend. The repo's blocking CI job

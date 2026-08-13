@@ -114,17 +114,25 @@ kill_timeout = 30
   # before the next is touched.
   min_machines_running = 2
 
-  # GET /health is END-TO-END through the proxy (edge -> proxy -> 6PN ->
-  # uvicorn -> DB) so a proxy with a dead upstream falls out of rotation
-  # instead of serving 502s "healthily"; /healthz stays a proxy-local
-  # liveness debug endpoint only. Byte-identical to the pre-flip check --
-  # only what it traverses changed.
+  # /healthz is answered by the proxy itself (go/internal/proxy/proxy.go:61)
+  # and touches no dependency. It replaced the END-TO-END /health check
+  # (edge -> proxy -> 6PN -> uvicorn -> DB), which fired every 30s per
+  # machine and was a standing source of Lakebase activity: the Autoscaling
+  # instance never reached its scale-to-zero window, measured at 94 of 94
+  # non-zero hourly billing buckets over four days.
+  #
+  # TRADEOFF: a proxy whose upstream is dead now stays in rotation and serves
+  # 502s "healthily" -- exactly what the end-to-end check was for. The app
+  # group's own [checks.app_health] below still gates deploys against uvicorn
+  # directly, so a broken upstream still fails the roll; what is lost is
+  # continuous rotation gating between deploys. Revert this path to "/health"
+  # if that gap ever matters more than the idle burn.
   [[http_service.checks]]
     interval = "30s"
     timeout = "10s"
     grace_period = "30s"
     method = "GET"
-    path = "/health"
+    path = "/healthz"
 
 # The app group loses its public service with the flip, and with it the only
 # health check gating its rolling replacement -- an unchecked group rolls on

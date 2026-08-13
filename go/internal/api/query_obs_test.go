@@ -99,7 +99,7 @@ func TestQueryPathLogLinesCarryTurnID(t *testing.T) {
 			// ownership guard, so the turn degrades instead of aborting.
 			name: "t1_session_setup_failed",
 			run: func(t *testing.T, s *Server) {
-				sid, err := s.persistUserTurn(context.Background(), obsSessionID, obsTurnID, "7", "q?", []byte("{}"), t0)
+				sid, err := s.persistUserTurn(context.Background(), obsSessionID, obsTurnID, "7", "q?", originThread, []byte("{}"), t0)
 				if err != nil {
 					t.Fatalf("a non-ownership T1 failure must degrade, not error: %v", err)
 				}
