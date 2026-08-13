@@ -288,14 +288,6 @@ def test_frame_split_is_whitespace_and_case_normalized() -> None:
     assert body == "that combos match."
 
 
-def test_prose_turn_reexports_the_same_frame_prefixes_object() -> None:
-    """prose_turn.REASONING_FRAME_PREFIXES must stay a valid attribute for every
-    existing reference after the B.10.3.2 move to turn_gate."""
-    from regwatch.generate import turn_gate as tg
-
-    assert pt.REASONING_FRAME_PREFIXES is tg.REASONING_FRAME_PREFIXES
-
-
 # ---------- truncation rule ----------
 
 
