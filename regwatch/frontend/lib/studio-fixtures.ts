@@ -473,7 +473,7 @@ export const TREE: TreeNode[] = [
 // ---------------------------------------------------------------------------
 
 export const ASSISTANT_INTRO =
-  "I can answer questions about any document in this repository and the guidelines it has to satisfy. I cite where every answer comes from, and I never change your text.";
+  "I can answer questions about any document in this repository and the guidelines it has to satisfy. I never change your text.";
 
 export interface CannedReply {
   text: string;
@@ -481,9 +481,15 @@ export interface CannedReply {
 }
 
 /**
- * Stand-in for the cited Q&A stream. Keyed loosely on what the analyst asked so
- * the surface demonstrates real behaviour -- an answer that cites, and a
- * refusal when the corpus cannot support one.
+ * Stand-in for the Q&A stream, keyed loosely on what the analyst asked.
+ *
+ * Every reply returns an empty `sources` list deliberately. These answers are
+ * written, not retrieved: the standards they discuss (USP, ICH, 21 CFR, the
+ * internal SOPs) are in no corpus this system ingests, so naming them as
+ * citations would put an invented provenance in the same panel that shows
+ * server-validated page references whenever a reference PSG is open. An empty
+ * list renders as "No source in this repository.", which is the honest reading
+ * of a canned answer.
  */
 export function assistantReply(prompt: string, docName: string, selection?: string): CannedReply {
   const q = prompt.toLowerCase();
@@ -493,35 +499,35 @@ export function assistantReply(prompt: string, docName: string, selection?: stri
       text: selection
         ? `That passage sets one acceptance criterion and the conditions it is measured under. It states the value and the method but not how an out-of-limit result is escalated, which is usually carried in the linked SOP rather than the specification itself.`
         : `${docName} defines the quality attributes, the analytical procedures used to measure them, and the acceptance criteria applied at release and through shelf life. The controlling sections are the acceptance criteria table and the reference standard qualification.`,
-      sources: [`${docName} - Section 2`, "ICH Q6A", "ICH M4Q(R1)"],
+      sources: [],
     };
   }
 
   if (q.startsWith("explain")) {
     return {
       text: `USP <711> defines dissolution acceptance as a staged evaluation: six units at S1, six more at S2 if S1 fails, and twelve more at S3. Stating only the S1 value leaves a reviewer unable to confirm how an out-of-stage result is handled, which is why the staged table is normally reproduced or cross-referenced directly beneath the criterion.`,
-      sources: ["USP <711> Dissolution", "ICH Q6A Decision Tree #7"],
+      sources: [],
     };
   }
 
   if (q.startsWith("check")) {
     return {
       text: `Against USP <711> this passage is incomplete: the criterion names one stage where the standard expects three. Against ICH Q6A it is consistent -- a single-point criterion is acceptable for an extended-release product only when the staged evaluation is referenced, and that reference is missing here.`,
-      sources: ["USP <711> Dissolution", "ICH Q6A Decision Tree #7", `${docName} - Section 2`],
+      sources: [],
     };
   }
 
   if (q.includes("shelf life") || q.includes("stability")) {
     return {
       text: `The stability summary proposes 24 months from 12 months of long-term and 6 months of accelerated data. ICH Q1E permits extrapolation to twice the long-term period, capped at long-term plus 12 months, but only where the accelerated data shows no significant change and the extrapolation is justified in the submission. That justification is not present.`,
-      sources: ["ICH Q1E", "3.2.P.8.1 Stability Summary.docx - Section 2"],
+      sources: [],
     };
   }
 
   if (q.includes("approver") || q.includes("header") || q.includes("version control")) {
     return {
       text: `Internal SOP QA-018 requires a document ID, version, effective date, author and approver in the header block of every controlled document, and states that a document without an approver is not released. This header carries the ID and version only.`,
-      sources: ["QA-018 Document Control.docx - Section 1", "ICH Q10", "21 CFR 211.100"],
+      sources: [],
     };
   }
 

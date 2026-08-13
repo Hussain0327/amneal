@@ -500,7 +500,7 @@ describe("Compliance Studio", () => {
     ).toBeInTheDocument();
   });
 
-  it("answers in the assistant with its sources, and says it does not write", async () => {
+  it("answers in the assistant, marks the answer unsourced, and says it does not write", async () => {
     render(<StudioPage />);
     await openPanel(/Ask about this document/);
 
@@ -512,7 +512,11 @@ describe("Compliance Studio", () => {
 
     expect(screen.getByText("Who is the approver on this header?")).toBeInTheDocument();
     expect(screen.getByText(/Internal SOP QA-018 requires a document ID/)).toBeInTheDocument();
-    expect(screen.getByText("QA-018 Document Control.docx - Section 1")).toBeInTheDocument();
+    // The canned replies discuss standards this system has never ingested, so
+    // the panel must not dress them as citations: no source chip, and the
+    // unsourced label instead.
+    expect(screen.queryByText("QA-018 Document Control.docx - Section 1")).not.toBeInTheDocument();
+    expect(screen.getByText("No source in this repository.")).toBeInTheDocument();
   });
 
   it("declines rather than guessing when the corpus cannot answer", async () => {

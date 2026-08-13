@@ -81,7 +81,7 @@ from regwatch.common.logging import configure_logging, get_logger
 from regwatch.common.observability import capture_exception, init_sentry
 from regwatch.common.ratelimit import query_limiter
 from regwatch.common.text_normalize import stripped_name
-from regwatch.deficiency.runner import run_deficiency_analysis
+from regwatch.deficiency.runner import run_deficiency_analysis, run_studio_check
 from regwatch.generate.grounded_qa import QAResult, QueryStatusLiteral, ask, compute_turn
 from regwatch.generate.rag_contract import AuditPayload, RagOutcome, SessionPatch
 from regwatch.ingest.psg_crawler import (
@@ -2626,10 +2626,149 @@ def deficiency_runs_list(
 
 @protected.get("/deficiency/runs/{run_id}", response_model=DeficiencyRunDetailResponse)
 def deficiency_run_detail(run_id: int) -> DeficiencyRunDetailResponse:
-    """One run + its verbatim stored fault report (null until complete)."""
+    """One run + its verbatim stored fault report (null until complete).
+
+    Uploads only. Studio checks share this table but are private to their
+    creator, so serving one here would let any analyst read a colleague's
+    draft by asking the org-shared route for the same id.
+    """
     run = deficiency_run_store.get_run(run_id)
-    if run is None:
+    if run is None or run.source is not None:
         raise HTTPException(status_code=404, detail=_DEFICIENCY_RUN_NOT_FOUND)
+    fields = _deficiency_summary_fields(run)
+    report = run.report_json if fields["status"] == "complete" else None
+    return DeficiencyRunDetailResponse(**fields, report=report)
+
+
+# ---------- /studio/check (the Compliance Studio check) ----------
+# Same engine, same table and same background machinery as /deficiency, over a
+# document assembled from editor blocks instead of a parsed PDF. Two things are
+# deliberately different: the document arrives as JSON in the request rather
+# than as an upload (so there is no temp file to own), and a run is PRIVATE to
+# the analyst who made it, because its report quotes an unfinished draft.
+
+_STUDIO_SOURCE = "studio"
+_STUDIO_RUN_NOT_FOUND = "studio check not found"
+# Bounds on a JSON body that becomes an in-memory document and then an LLM
+# fan-out. Both are refusals at the boundary, not truncations: silently
+# checking part of a document would report a clean result for text nobody read.
+_STUDIO_MAX_BLOCKS = 5000
+_STUDIO_MAX_CHARS = 1_000_000
+
+
+class StudioRowIn(BaseModel):
+    """One row of a Studio table block."""
+
+    cells: list[str] = Field(default_factory=list)
+    head: bool = False
+
+
+class StudioBlockIn(BaseModel):
+    """One editable block of a Studio document, as the canvas holds it."""
+
+    id: str
+    type: str
+    text: str
+    # Carried through because the deterministic oracles read table cells, never
+    # block prose: a table sent as text alone is invisible to them.
+    rows: list[StudioRowIn] | None = None
+
+
+class StudioCheckRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    blocks: list[StudioBlockIn]
+
+
+async def _studio_check_background(run_id: int, name: str, blocks: list[dict[str, Any]]) -> None:
+    """Background wrapper: limiter slot -> deadline -> worker thread.
+
+    Shares _DEFICIENCY_LIMITER with the upload path on purpose -- both fan out
+    LLM specialist calls to the same serving endpoint, so one budget is the
+    honest one. The timeout semantics are identical to _deficiency_background
+    (the await is cancelled, the thread is abandoned, and its complete_run
+    loses the compare-and-set), minus the temp-file lifecycle: this document
+    lives in the request, so there is nothing to unlink.
+    """
+    s = get_settings()
+    try:
+        async with _DEFICIENCY_LIMITER:
+            try:
+                with anyio.fail_after(s.deficiency_analyze_timeout_s):
+                    await anyio.to_thread.run_sync(
+                        partial(run_studio_check, run_id, name, blocks),
+                        abandon_on_cancel=True,
+                    )
+            except TimeoutError:
+                log.error(
+                    "studio_check_timeout",
+                    run_id=run_id,
+                    timeout_s=s.deficiency_analyze_timeout_s,
+                )
+                deficiency_run_store.fail_run(
+                    run_id,
+                    error=(f"analysis timed out after {int(s.deficiency_analyze_timeout_s)}s"),
+                )
+    except Exception as exc:
+        # run_studio_check records its own failures; this catches the wrapper
+        # machinery so the row never strands in pending on an infra fault.
+        log.error("studio_check_background_failed", run_id=run_id, error_type=type(exc).__name__)
+        capture_exception(exc)
+        deficiency_run_store.fail_run(run_id, error=f"{type(exc).__name__}: {exc}")
+
+
+def _studio_run_for(run_id: int, user: User) -> Any:
+    """The caller's own Studio run, or 404. Same status for a missing id, an
+    upload run and another analyst's check: the response must not reveal that
+    an id it may not read exists."""
+    run = deficiency_run_store.get_run(run_id)
+    if run is None or run.source != _STUDIO_SOURCE or run.created_by_user_id != _user_pk(user):
+        raise HTTPException(status_code=404, detail=_STUDIO_RUN_NOT_FOUND)
+    return run
+
+
+@protected.post("/studio/check", response_model=DeficiencyAnalyzeResponse, status_code=202)
+def studio_check(
+    body: StudioCheckRequest,
+    background: BackgroundTasks,
+    user: User = Depends(require_user),
+) -> DeficiencyAnalyzeResponse:
+    """Check one Studio document for candidate deficiencies.
+
+    202 + run_id; the UI polls GET /studio/check/{id}. The document is hashed
+    from the text that will actually be checked, so two checks of an unedited
+    draft are comparable and an edit is visibly a different document.
+    """
+    _enforce_query_rate_limit(user)
+    if len(body.blocks) > _STUDIO_MAX_BLOCKS:
+        raise HTTPException(status_code=400, detail=f"document exceeds {_STUDIO_MAX_BLOCKS} blocks")
+
+    blocks = [b.model_dump(exclude_none=True) for b in body.blocks]
+    text = "\n".join(b["text"] for b in blocks)
+    if len(text) > _STUDIO_MAX_CHARS:
+        raise HTTPException(
+            status_code=400, detail=f"document is too large ({_STUDIO_MAX_CHARS} character limit)"
+        )
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="document carries no text to check")
+
+    run = deficiency_run_store.create_run(
+        user_id=_user_pk(user),
+        filename=body.name[:200],
+        sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        source=_STUDIO_SOURCE,
+    )
+    if run.id is None:  # pragma: no cover - flush always assigns the PK
+        raise RuntimeError("studio check insert returned no id")
+    background.add_task(_studio_check_background, run.id, body.name, blocks)
+    return DeficiencyAnalyzeResponse(run_id=run.id, status="pending")
+
+
+@protected.get("/studio/check/{run_id}", response_model=DeficiencyRunDetailResponse)
+def studio_check_detail(
+    run_id: int, user: User = Depends(require_user)
+) -> DeficiencyRunDetailResponse:
+    """One of the caller's own checks + its verbatim stored report."""
+    run = _studio_run_for(run_id, user)
     fields = _deficiency_summary_fields(run)
     report = run.report_json if fields["status"] == "complete" else None
     return DeficiencyRunDetailResponse(**fields, report=report)

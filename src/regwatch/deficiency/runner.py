@@ -18,11 +18,13 @@ a completed row, so an unaudited answer cannot reach the UI.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 from regwatch.common.audit import log_query
 from regwatch.common.logging import get_logger
 from regwatch.common.observability import capture_exception
+from regwatch.deficiency.blocks import doc_from_blocks
 from regwatch.deficiency.detection import run_detection
 from regwatch.deficiency.events import emit_sync
 from regwatch.deficiency.parse.pdf import extract_pdf
@@ -43,6 +45,22 @@ def _tier_counts(report: Any) -> dict[str, int]:
 
 
 def run_deficiency_analysis(run_id: int, pdf_path: str) -> None:
+    """Analyse one uploaded submission PDF. See _run for the guarantees."""
+    _run(run_id, lambda: extract_pdf(pdf_path), kind="upload")
+
+
+def run_studio_check(run_id: int, name: str, blocks: list[dict[str, Any]]) -> None:
+    """Analyse one Compliance Studio document. See _run for the guarantees.
+
+    Identical to the upload path from the section split onward: only the way
+    the structured document is obtained differs, which is the whole point of
+    deficiency.blocks. Parsing stays inside the worker thread for both, so a
+    slow document never occupies the event loop.
+    """
+    _run(run_id, lambda: doc_from_blocks(name, blocks), kind="studio")
+
+
+def _run(run_id: int, load_doc: Callable[[], dict[str, Any]], kind: str) -> None:
     """Execute one analysis job end to end. Never raises: every failure path
     records a terminal run state instead (this runs as a background task with
     nobody left to catch)."""
@@ -57,9 +75,12 @@ def run_deficiency_analysis(run_id: int, pdf_path: str) -> None:
 
     job_id = str(run_id)
     start = time.time()
+    # Names the surface in the audit trail. Two runs over the same content
+    # from different surfaces are different events and must read as such.
+    audit_query = f"deficiency {kind} filename={run.filename!r} sha256={run.sha256}"
     emit_sync(job_id, "detection", "pipeline_start", "Runner", "Starting analysis pipeline")
     try:
-        doc = extract_pdf(pdf_path)
+        doc = load_doc()
         sections = split_document(doc)
         groups = group_sections(sections)
         log.info(
@@ -83,7 +104,7 @@ def run_deficiency_analysis(run_id: int, pdf_path: str) -> None:
         # run and the report never becomes servable (INV-6).
         audit_id = log_query(
             mode="defpredict",
-            query_text=f"deficiency analyze filename={run.filename!r} sha256={run.sha256}",
+            query_text=audit_query,
             retrieved=[],
             answer_text=summary,
             citations=[],
@@ -93,6 +114,7 @@ def run_deficiency_analysis(run_id: int, pdf_path: str) -> None:
             status="complete",
             route_json={
                 "route": "defpredict",
+                "source": kind,
                 "run_id": run_id,
                 "fault_count": len(report.faults),
                 "tier_counts": counts,
@@ -129,7 +151,7 @@ def run_deficiency_analysis(run_id: int, pdf_path: str) -> None:
         try:
             audit_id = log_query(
                 mode="defpredict",
-                query_text=f"deficiency analyze filename={run.filename!r} sha256={run.sha256}",
+                query_text=audit_query,
                 retrieved=[],
                 answer_text="",
                 citations=[],
@@ -139,6 +161,7 @@ def run_deficiency_analysis(run_id: int, pdf_path: str) -> None:
                 status="error",
                 route_json={
                     "route": "defpredict",
+                    "source": kind,
                     "run_id": run_id,
                     "error_type": type(exc).__name__,
                 },
