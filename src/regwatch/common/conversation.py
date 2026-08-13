@@ -21,7 +21,9 @@ from regwatch.store.models import ChatMessage, ChatSession
 
 log = get_logger(__name__)
 
-SESSION_FILTER_KEYS = frozenset({"normalized_name", "dosage_form", "route", "psg_type", "doc_id"})
+SESSION_FILTER_KEYS = frozenset(
+    {"normalized_name", "dosage_form", "route", "psg_type", "doc_id", "appl_no"}
+)
 
 # Which surface a chat_session belongs to (issue #208). "thread" is the
 # analyst's real work, listed in the work rail's Threads list. "assistant" is

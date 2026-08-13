@@ -53,6 +53,18 @@ class _LeakyLLM:
         return LLMResponse(text=_LEAKY_TURN, model="stub")
 
 
+_APPLICATION_SCOPED_TURN = synth_turn_json(
+    [("The selected application recommends a fasting study", [("PSG_020911", 5)])]
+)
+
+
+class _ApplicationScopedLLM:
+    name = "stub"
+
+    def complete(self, *args: object, **kwargs: object) -> LLMResponse:
+        return LLMResponse(text=_APPLICATION_SCOPED_TURN, model="stub")
+
+
 def _seed_two_inhalation_drugs() -> None:
     init_db()
     rows = [
@@ -88,6 +100,36 @@ def _seed_two_inhalation_drugs() -> None:
                 "psg_type": "draft",
             }
             for idx, (_, appl, name, page) in enumerate(rows)
+        ],
+    )
+
+
+def _seed_same_product_applications() -> None:
+    """Two current PSGs with the same ingredient/form but different RLDs."""
+    init_db()
+    rows = [
+        ("The selected RLD recommends a fasting study and dissolution testing.", "020911"),
+        ("The other RLD recommends a fed study and dissolution testing.", "207921"),
+    ]
+    texts = [text for text, _ in rows]
+    add_chunks(
+        ids=[f"chunk-{appl}" for _, appl in rows],
+        embeddings=get_embedding_provider().embed(texts),
+        documents=texts,
+        metadatas=[
+            {
+                "doc_id": idx + 1,
+                "version_id": idx + 10,
+                "page": 5,
+                "normalized_name": "beclomethasone dipropionate",
+                "appl_no": appl,
+                "source_url": f"https://example.invalid/PSG_{appl}.pdf",
+                "section_path": "",
+                "dosage_form": "Aerosol, Metered",
+                "route": "Inhalation",
+                "psg_type": "draft",
+            }
+            for idx, (_, appl) in enumerate(rows)
         ],
     )
 
@@ -171,6 +213,50 @@ def test_follow_up_uses_session_product_context_without_cross_drug_leak(
         )
         for led in ledgers
     )
+
+
+def test_follow_up_preserves_application_scope_in_session_and_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-ingredient follow-up must not widen from one RLD to both PSGs."""
+    _seed_same_product_applications()
+    monkeypatch.setenv("REFUSAL_SCORE_THRESHOLD", "0.0")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _ApplicationScopedLLM())
+    filters = {
+        "normalized_name": "beclomethasone dipropionate",
+        "appl_no": "020911",
+    }
+
+    first = qa_mod.ask("What fasting study does FDA recommend?", filters=filters)
+    assert first.status == "answer"
+    assert {row["short_name"] for row in first.retrieved} == {"PSG_020911"}
+
+    follow_up = qa_mod.ask("What about dissolution?", session_id=first.session_id)
+
+    assert follow_up.status == "answer"
+    assert {row["short_name"] for row in follow_up.retrieved} == {"PSG_020911"}
+    with session_scope() as s:
+        session = s.get(ChatSession, first.session_id)
+        assert session is not None
+        assert dict(session.active_filters_json) == filters
+        audit_filters = [
+            dict(row.route_json)["filters"]
+            for row in s.scalars(select(QueryLog).order_by(col(QueryLog.id)))
+        ]
+        assistant_filters = [
+            dict(row.filters_json)
+            for row in s.scalars(
+                select(ChatMessage)
+                .where(ChatMessage.role == "assistant")
+                .order_by(col(ChatMessage.created_at))
+            )
+        ]
+
+    assert audit_filters == [filters, filters]
+    assert assistant_filters == [filters, filters]
 
 
 def test_update_session_filters_never_resurrects_deleted_sessions() -> None:

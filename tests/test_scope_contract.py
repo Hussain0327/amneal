@@ -382,12 +382,19 @@ def test_product_follow_up_may_inherit_deterministic_session_scope() -> None:
     scope = compile_scope(
         decision,
         original_question="What about smoking history?",
-        session_product_filters={"normalized_name": "beclomethasone dipropionate"},
+        session_product_filters={
+            "normalized_name": "beclomethasone dipropionate",
+            "appl_no": "020911",
+        },
     )
 
     assert scope.kind is CompiledScopeKind.PRODUCT
     assert scope.source is ScopeSource.SESSION_PRODUCT
     assert scope.retrieval_mode is RetrievalMode.EXACT_SCOPED
+    assert scope.product_filter_dict() == {
+        "appl_no": "020911",
+        "normalized_name": "beclomethasone dipropionate",
+    }
 
 
 def test_converse_has_no_executable_scope_even_with_a_product_session() -> None:

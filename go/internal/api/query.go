@@ -31,6 +31,7 @@ var sessionFilterKeys = map[string]bool{
 	"route":           true,
 	"psg_type":        true,
 	"doc_id":          true,
+	"appl_no":         true,
 }
 
 // originThread and originAssistant are QueryRequest.origin's only two valid
