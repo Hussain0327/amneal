@@ -350,7 +350,13 @@ describe("askQueryStream request body -- live_draft opt-in", () => {
 
     await askQueryStream("q", null, null, undefined, true);
     const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
-    expect(body).toEqual({ question: "q", filters: null, session_id: null, live_draft: true });
+    expect(body).toEqual({
+      question: "q",
+      filters: null,
+      session_id: null,
+      origin: "thread",
+      live_draft: true,
+    });
   });
 
   it("omits live_draft entirely when not requested (default false)", async () => {
@@ -360,8 +366,60 @@ describe("askQueryStream request body -- live_draft opt-in", () => {
 
     await askQueryStream("q", null, null);
     const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
-    expect(body).toEqual({ question: "q", filters: null, session_id: null });
+    expect(body).toEqual({ question: "q", filters: null, session_id: null, origin: "thread" });
     expect(body.live_draft).toBeUndefined();
+  });
+});
+
+// Issue #208: /query has exactly one place to put a conversation, so this
+// field is how the Assistant panel's lookups stay out of
+// ListChatSessionsForUser's thread filter. origin defaults to "thread" for
+// every existing caller; a non-default value has to survive a stream retry
+// too, since a missed fallback call site would silently re-file a lookup as
+// a visible thread the moment its stream had to retry.
+describe("askQueryStream request body -- origin", () => {
+  it("defaults origin to thread and carries a non-default value onto the wire", async () => {
+    const payload = JSON.stringify(resultFrameData("a"));
+    fetchMock.mockResolvedValueOnce(sseResponse([`event: result\ndata: ${payload}\n\n`]));
+    failOnFallback();
+
+    await askQueryStream("q", null, null, undefined, false, undefined, "assistant");
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body.origin).toBe("assistant");
+  });
+
+  it("carries a non-default origin through the pre-headers fallback to plain /query", async () => {
+    // The first fetch (the stream) fails before headers arrive; askQueryStream
+    // must retry with plain POST /query and forward origin onto that retry too.
+    fetchMock.mockRejectedValueOnce(new TypeError("network down"));
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(resultFrameData("from-fallback")), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const res = await askQueryStream("q", null, null, undefined, false, undefined, "assistant");
+    expect(res.answer).toBe("from-fallback");
+    const fallbackBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+    expect(fallbackBody.origin).toBe("assistant");
+  });
+
+  it("carries a non-default origin through the no-result-frame fallback to plain /query", async () => {
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([`event: status\ndata: ${JSON.stringify({ text: "working" })}\n\n`]),
+    );
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(resultFrameData("from-fallback")), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const res = await askQueryStream("q", null, null, undefined, false, undefined, "assistant");
+    expect(res.answer).toBe("from-fallback");
+    const fallbackBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+    expect(fallbackBody.origin).toBe("assistant");
   });
 });
 

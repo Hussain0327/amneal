@@ -498,4 +498,71 @@ def test_query_request_filters_validator_unit() -> None:
         },
     )
     assert req.filters == {"normalized_name": "albuterol sulfate", "doc_id": 4}
+
+
+# ---------- origin forwarding + validation (issue #208) ----------
+
+
+def test_query_forwards_origin_to_ask(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An omitted origin defaults to "thread" and an explicit "assistant"
+    survives unchanged to ask() -- the VALUE ask() receives, not just that a
+    call happened."""
+    seen: dict[str, Any] = {}
+
+    def capture_ask(**kwargs: Any) -> qa_mod.QAResult:
+        seen.update(kwargs)
+        return _fake_result()
+
+    monkeypatch.setattr(api_main, "ask", capture_ask)
+    client = session_client(create_user())
+    try:
+        r = client.post("/query", json={"question": "Default origin?"})
+        assert r.status_code == 200
+        assert seen["origin"] == "thread"
+
+        r = client.post("/query", json={"question": "Assistant origin?", "origin": "assistant"})
+        assert r.status_code == 200
+        assert seen["origin"] == "assistant"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_query_stream_forwards_origin_to_ask(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same contract as blocking /query, exercised on the panel's PRIMARY path:
+    the Assistant panel calls askQueryStream, which hits /query/stream first."""
+    seen: dict[str, Any] = {}
+
+    def capture_ask(**kwargs: Any) -> qa_mod.QAResult:
+        seen.update(kwargs)
+        return _fake_result()
+
+    monkeypatch.setattr(api_main, "ask", capture_ask)
+    client = session_client(create_user())
+    try:
+        assert _stream(client, "Default origin?").status_code == 200
+        assert seen["origin"] == "thread"
+
+        assert _stream(client, "Assistant origin?", origin="assistant").status_code == 200
+        assert seen["origin"] == "assistant"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_query_invalid_origin_is_422_with_pydantic_literal_error() -> None:
+    """Pins the EXACT wire shape on both routes (main.py's QueryRequest.origin
+    comment): Go's validationItem mirrors this msg text verbatim, so a pydantic
+    upgrade that rewords it must fail here, not surface as silent cross-runtime
+    drift caught only in production."""
+    client = session_client(create_user())
+    try:
+        for path in ("/query", "/query/stream"):
+            r = client.post(path, json={"question": "Bad origin?", "origin": "bogus"})
+            assert r.status_code == 422, r.text
+            detail = r.json()["detail"]
+            assert len(detail) == 1
+            assert detail[0]["type"] == "literal_error"
+            assert detail[0]["loc"] == ["body", "origin"]
+            assert detail[0]["msg"] == "Input should be 'thread' or 'assistant'"
+    finally:
+        client.__exit__(None, None, None)
     assert api_main.QueryRequest(question="q?", k=None).filters is None

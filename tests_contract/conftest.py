@@ -14,8 +14,10 @@ Scenario matrix (SNN test names):
   S6-S13, S30      test_query_outcomes.py         outcome golden rows; S30 = INV-5
                                                   filters whitelist at the edge
   S14-S16, S24-S27 test_query_failure_audit.py    failure -> defined audit trail
-  S17-S18, S29     test_sessions_cross_runtime.py session contract; S29 = NULL-owner
-                                                  legacy-session adoption via /query
+  S17-S18, S29,    test_sessions_cross_runtime.py session contract; S29 = NULL-owner
+  S32                                             legacy-session adoption via /query;
+                                                  S32 = chat_session.origin written by
+                                                  both writers, filtered on the list
   S19-S21a, S23    test_query_stream.py           /query/stream frame grammar
   S31, S31b        test_query_stream.py           live-draft frame grammar
   (relay parity)   test_query_relay_parity.py     GO_NATIVE_QUERY=false smoke

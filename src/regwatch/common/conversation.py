@@ -23,9 +23,30 @@ log = get_logger(__name__)
 
 SESSION_FILTER_KEYS = frozenset({"normalized_name", "dosage_form", "route", "psg_type", "doc_id"})
 
+# Which surface a chat_session belongs to (issue #208). "thread" is the
+# analyst's real work, listed in the work rail's Threads list. "assistant" is
+# the Research Studio panel's own scratch conversation: kept (readable and
+# deletable by id), but filtered out of that list so it never buries real work.
+SESSION_ORIGIN_THREAD = "thread"
+SESSION_ORIGIN_ASSISTANT = "assistant"
+SESSION_ORIGINS = frozenset({SESSION_ORIGIN_THREAD, SESSION_ORIGIN_ASSISTANT})
+
 
 class SessionOwnershipError(RuntimeError):
     """A caller tried to bind a chat session owned by a different user."""
+
+
+class SessionOriginError(ValueError):
+    """An origin outside SESSION_ORIGINS reached ensure_session.
+
+    Its own type, for the same reason SessionOwnershipError has one: ask()'s
+    session block degrades to a fresh id on a generic Exception, and this must
+    NOT degrade -- it is a programming error in an internal caller, not the DB
+    hiccup that degrade path exists for. A bare ValueError would force ask()
+    to re-raise every ValueError from that block, including unrelated ones
+    raised by the record_message write it also wraps. Subclasses ValueError so
+    existing `except ValueError` callers keep working.
+    """
 
 
 def new_turn_id() -> str:
@@ -41,20 +62,38 @@ def _safe_filters(filters: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
-def ensure_session(session_id: str | None = None, *, user_id: str | None = None) -> str:
+def ensure_session(
+    session_id: str | None = None,
+    *,
+    user_id: str | None = None,
+    origin: str = SESSION_ORIGIN_THREAD,
+) -> str:
     """Return an existing or newly-created session id.
 
     Raises SessionOwnershipError when the row already belongs to a different
     user — the last line of defense when an API-level ownership check loses a
     race to a concurrent adopter, so a lost race aborts instead of writing
     this caller's turns into another user's session.
+
+    ``origin`` is applied ONLY when the row is created; an existing row's
+    origin is never touched here, the same rule active_filters_json already
+    follows -- a session already established as one kind does not change kind
+    because a later call against the same id passes a different origin.
+    Raises SessionOriginError (a ValueError) for an origin outside
+    SESSION_ORIGINS, BEFORE the write: the API boundary (QueryRequest) already
+    validates this, so reaching here with junk is a programming error in an
+    internal caller and must fail loudly rather than hit the DB CHECK.
     """
+    if origin not in SESSION_ORIGINS:
+        raise SessionOriginError(f"unknown session origin: {origin!r}")
     sid = session_id or str(uuid4())
     now = datetime.now(UTC)
     with session_scope() as s:
         row = s.get(ChatSession, sid)
         if row is None:
-            row = ChatSession(id=sid, user_id=user_id, created_at=now, updated_at=now)
+            row = ChatSession(
+                id=sid, user_id=user_id, origin=origin, created_at=now, updated_at=now
+            )
         else:
             if user_id and row.user_id and row.user_id != user_id:
                 raise SessionOwnershipError(sid)

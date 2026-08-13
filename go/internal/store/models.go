@@ -50,6 +50,7 @@ type ChatSession struct {
 	UserID            pgtype.Text
 	Title             pgtype.Text
 	ActiveFiltersJson []byte
+	Origin            string
 	CreatedAt         pgtype.Timestamp
 	UpdatedAt         pgtype.Timestamp
 }

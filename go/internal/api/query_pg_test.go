@@ -68,6 +68,16 @@ func (h *harness) sessionOwner(t *testing.T, sid string) any {
 	return owner
 }
 
+func (h *harness) sessionOrigin(t *testing.T, sid string) string {
+	t.Helper()
+	var origin string
+	if err := h.pool.QueryRow(t.Context(),
+		`SELECT origin FROM public.chat_session WHERE id = $1`, sid).Scan(&origin); err != nil {
+		t.Fatalf("read session origin: %v", err)
+	}
+	return origin
+}
+
 // --- fix 1: persistUserTurn's write-time ownership contract ---
 
 func TestPersistUserTurnForeignSessionAbortsWithZeroWrites(t *testing.T) {
@@ -75,7 +85,7 @@ func TestPersistUserTurnForeignSessionAbortsWithZeroWrites(t *testing.T) {
 	t0 := time.Now().UTC().Truncate(time.Microsecond)
 
 	h.seedChat(t, "raced", "999", 0)
-	sid, err := h.srv.persistUserTurn(t.Context(), "raced", "turn-a", "1", "q?", []byte("{}"), t0)
+	sid, err := h.srv.persistUserTurn(t.Context(), "raced", "turn-a", "1", "q?", originThread, []byte("{}"), t0)
 	if !errors.Is(err, errSessionOwnershipLost) {
 		t.Fatalf("err = %v, want errSessionOwnershipLost", err)
 	}
@@ -97,7 +107,7 @@ func TestPersistUserTurnAdoptsNullOwner(t *testing.T) {
 	t0 := time.Now().UTC().Truncate(time.Microsecond)
 
 	h.seedChat(t, "legacy", nil, 0)
-	sid, err := h.srv.persistUserTurn(t.Context(), "legacy", "turn-b", "1", "q?", []byte("{}"), t0)
+	sid, err := h.srv.persistUserTurn(t.Context(), "legacy", "turn-b", "1", "q?", originThread, []byte("{}"), t0)
 	if err != nil || sid != "legacy" {
 		t.Fatalf("adopt: sid=%q err=%v", sid, err)
 	}
@@ -114,7 +124,7 @@ func TestPersistUserTurnFreshAndSelfOwnedSucceed(t *testing.T) {
 	t0 := time.Now().UTC().Truncate(time.Microsecond)
 
 	// Fresh create binds the session to the caller.
-	sid, err := h.srv.persistUserTurn(t.Context(), "fresh", "turn-c", "1", "q?", []byte("{}"), t0)
+	sid, err := h.srv.persistUserTurn(t.Context(), "fresh", "turn-c", "1", "q?", originThread, []byte("{}"), t0)
 	if err != nil || sid != "fresh" {
 		t.Fatalf("fresh create: sid=%q err=%v", sid, err)
 	}
@@ -122,7 +132,7 @@ func TestPersistUserTurnFreshAndSelfOwnedSucceed(t *testing.T) {
 		t.Fatalf("fresh session owner: %v", owner)
 	}
 	// A second turn on the caller's OWN session still succeeds.
-	sid, err = h.srv.persistUserTurn(t.Context(), "fresh", "turn-d", "1", "again?", []byte("{}"), t0.Add(time.Second))
+	sid, err = h.srv.persistUserTurn(t.Context(), "fresh", "turn-d", "1", "again?", originThread, []byte("{}"), t0.Add(time.Second))
 	if err != nil || sid != "fresh" {
 		t.Fatalf("self-owned upsert: sid=%q err=%v", sid, err)
 	}
@@ -415,5 +425,51 @@ func TestCompleteQueryComputeErrorStatusIsAuditedUpstreamError(t *testing.T) {
 			}
 			assertSingleErrorAudit(t, h)
 		})
+	}
+}
+
+// --- origin (issue #208): the create-only write, proven end to end through
+// the real POST /query wiring (query.go's resolveOrigin -> persist.go's
+// UpsertChatSession), not just by calling persistUserTurn directly ---
+
+func TestCompleteQueryOriginIsCreateOnly(t *testing.T) {
+	// Any non-200, non-shed-503 compute status routes the turn onto
+	// synthesizeUpstreamError, which threads the REQUEST's own session_id/
+	// turn_id (see query.go) rather than a canned one -- the simplest stub
+	// that keeps T1/T2/T3 self-consistent across two separate turns on the
+	// SAME session.
+	h := nativeQueryHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"detail":"Internal Server Error"}`)
+	})
+	h.seedUser(t, testEmail, testPassword, true)
+	token := h.login(t, testEmail, testPassword)
+
+	// First turn creates the session with origin="assistant".
+	resp := h.do(t, "POST", "/query", token, map[string]any{
+		"question": "What study design is recommended?", "session_id": "origin-sess", "origin": "assistant",
+	})
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("first turn: %d %s", resp.StatusCode, body)
+	}
+	if got := h.sessionOrigin(t, "origin-sess"); got != "assistant" {
+		t.Fatalf("origin after create = %q, want assistant", got)
+	}
+
+	// Second turn on the SAME session, origin absent (resolves to "thread"
+	// internally). The create-only rule means the stored value must NOT
+	// flip -- a plain "always SET origin" upsert is the regression this
+	// pins.
+	resp = h.do(t, "POST", "/query", token, map[string]any{
+		"question": "A follow-up question?", "session_id": "origin-sess",
+	})
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("second turn: %d %s", resp.StatusCode, body)
+	}
+	if got := h.sessionOrigin(t, "origin-sess"); got != "assistant" {
+		t.Fatalf("origin after second turn = %q, want assistant unchanged (create-only)", got)
 	}
 }

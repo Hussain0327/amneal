@@ -45,7 +45,9 @@ from sqlmodel import select
 from regwatch.common.audit import log_query
 from regwatch.common.citations import strip_all_citations, strip_sources_trailer
 from regwatch.common.conversation import (
+    SESSION_ORIGIN_THREAD,
     PriorTurn,
+    SessionOriginError,
     SessionOwnershipError,
     ensure_session,
     get_recent_turns,
@@ -3143,6 +3145,7 @@ def ask(
     user_id: str | None = None,
     turn_id: str | None = None,
     bind_session: bool = True,
+    origin: str = SESSION_ORIGIN_THREAD,
     on_progress: Callable[[str], None] | None = None,
     on_token: Callable[[str], None] | None = None,
     on_draft: Callable[[str], None] | None = None,
@@ -3159,6 +3162,13 @@ def ask(
     the bookkeeping ChatSession stays unowned (user_id NULL) and so invisible
     to /sessions. That is for internal callers like the dossier, whose synthetic
     Q&A must not appear in the caller's chat history.
+
+    ``origin`` (default ``"thread"``) forwards to ``ensure_session`` and lands
+    ONLY when the session row is newly CREATED this call -- an existing
+    session's origin never changes underneath it (issue #208). Passing
+    ``"assistant"`` means this conversation is kept (readable, deletable) but
+    stays out of the work rail's Threads list -- the Research Studio panel's
+    own scratch conversation, as opposed to the analyst's real work.
 
     ``on_progress`` (optional) receives short, cosmetic phase strings as the
     pipeline advances, for a live status ticker (POST /query/stream). It carries
@@ -3195,7 +3205,9 @@ def ask(
     # The user-message write stays HERE, before compute, so a core exception still
     # leaves the question in the chat history exactly as before the split.
     try:
-        session_id = ensure_session(session_id, user_id=user_id if bind_session else None)
+        session_id = ensure_session(
+            session_id, user_id=user_id if bind_session else None, origin=origin
+        )
         turn_id = turn_id or new_turn_id()
         record_message(
             session_id=session_id,
@@ -3208,6 +3220,15 @@ def ask(
         # Lost an ownership race after the API's pre-check. Abort rather than
         # write this caller's turns into another user's session (the API maps
         # this to its ownership 404).
+        raise
+    except SessionOriginError:
+        # An origin outside SESSION_ORIGINS: a programming error in the caller
+        # (the API boundary already validates), not the transient DB hiccup the
+        # generic degrade below exists for. Propagate -- folding it into a
+        # fresh-id degrade would hide the bad call instead of surfacing it.
+        # Caught by its own type, not by ValueError: the try also wraps the
+        # record_message write, and re-raising every ValueError from there
+        # would narrow that degrade path for reasons unrelated to origin.
         raise
     except Exception:
         log.warning("session_setup_failed", exc_info=True)

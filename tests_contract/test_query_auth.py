@@ -123,6 +123,26 @@ def test_s28_native_query_422_matches_pydantic_shape_and_is_unaudited(
             {"k": 3},
             {"type": "missing", "loc": ["body", "question"], "msg": "Field required"},
         ),
+        (
+            {"question": "q?", "origin": "bogus"},
+            {
+                "type": "literal_error",
+                "loc": ["body", "origin"],
+                "msg": "Input should be 'thread' or 'assistant'",
+            },
+        ),
+        # An EXPLICIT null is a 422, not the default. QueryRequest.origin is a
+        # Literal, NOT Optional, so pydantic rejects null while taking the
+        # default only for an ABSENT key -- and Go's decoder must draw that
+        # same line (a *string would collapse both to nil and accept this).
+        (
+            {"question": "q?", "origin": None},
+            {
+                "type": "literal_error",
+                "loc": ["body", "origin"],
+                "msg": "Input should be 'thread' or 'assistant'",
+            },
+        ),
     ]
     for body, item in cases:
         response = client.http.post("/query", json=body)

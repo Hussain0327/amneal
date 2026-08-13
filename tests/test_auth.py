@@ -200,6 +200,32 @@ def test_query_log_records_user_id_for_query() -> None:
     assert attributions == [str(user_id)]
 
 
+# ---------- session origin (issue #208) ----------
+
+
+def test_ask_persists_assistant_origin_on_session_create() -> None:
+    """Direct-call proof that ask(origin=...) reaches ensure_session and lands
+    on the row it creates -- the seam test_query_stream.py's mocked-ask
+    forwarding tests assume holds underneath them."""
+    init_db()
+    result = ask("Scratch question?", origin="assistant")
+    with session_scope() as s:
+        row = s.get(ChatSession, result.session_id)
+        assert row is not None and row.origin == "assistant"
+
+
+def test_query_records_assistant_origin_on_new_session() -> None:
+    """origin travels the full /query -> ask() -> ensure_session chain onto the
+    created row, not just as far as ask()'s kwargs."""
+    client = session_client(create_user())
+    r = client.post("/query", json={"question": "Scratch question?", "origin": "assistant"})
+    assert r.status_code == 200
+    sid = r.json()["session_id"]
+    with session_scope() as s:
+        row = s.get(ChatSession, sid)
+        assert row is not None and row.origin == "assistant"
+
+
 def test_query_log_records_user_id_for_assemble() -> None:
     user_id = create_user()
     client = session_client(user_id)

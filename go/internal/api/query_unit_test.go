@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"reflect"
 	"regexp"
 	"testing"
 )
@@ -89,6 +90,41 @@ func TestWhitelistFilters(t *testing.T) {
 	nonScalar := map[string]json.RawMessage{"normalized_name": json.RawMessage(`["a"]`)}
 	if len(whitelistFilters(nonScalar)) != 0 {
 		t.Error("a non-scalar whitelisted value must be dropped")
+	}
+}
+
+// TestResolveOrigin pins the QueryRequest.origin contract (issue #208):
+// absent defaults to "thread", both declared values are accepted verbatim,
+// and an invalid value produces pydantic's Literal[...] 422 item byte-for-
+// byte -- the msg text was MEASURED against pydantic 2.13 and must not be
+// paraphrased (see resolveOrigin/query.go).
+func TestResolveOrigin(t *testing.T) {
+	// Only an ABSENT key takes the default.
+	if origin, problem := resolveOrigin(nil); origin != originThread || problem != nil {
+		t.Fatalf("resolveOrigin(absent) = (%q, %v), want (%q, nil)", origin, problem, originThread)
+	}
+
+	for _, valid := range []string{originThread, originAssistant} {
+		raw := json.RawMessage(`"` + valid + `"`)
+		if origin, problem := resolveOrigin(raw); origin != valid || problem != nil {
+			t.Fatalf("resolveOrigin(%s) = (%q, %v), want (%q, nil)", raw, origin, problem, valid)
+		}
+	}
+
+	// Every PRESENT-but-wrong value is the same literal_error pydantic emits
+	// for a non-Optional Literal miss. `null` is in this list on purpose: the
+	// Python field is Literal[...], not Optional, so an explicit null is a 422
+	// there -- treating it as "absent" here would be a silent 422 divergence
+	// between the native and relayed /query routes.
+	want := validationItem{Type: "literal_error", Loc: []string{"body", "origin"}, Msg: "Input should be 'thread' or 'assistant'"}
+	for _, bad := range []string{`"bogus"`, `null`, `5`, `{}`, `["thread"]`, `""`, `"Thread"`} {
+		origin, problem := resolveOrigin(json.RawMessage(bad))
+		if origin != "" || problem == nil {
+			t.Fatalf("resolveOrigin(%s) = (%q, %v), want (\"\", non-nil)", bad, origin, problem)
+		}
+		if !reflect.DeepEqual(*problem, want) {
+			t.Fatalf("resolveOrigin(%s) problem = %+v, want %+v", bad, *problem, want)
+		}
 	}
 }
 

@@ -10,6 +10,11 @@ query routes, and (GAP-5) that a second user gets its own fresh budget.
 
 S29 (GAP-2) proves a NULL-owner legacy session is adopted by the first
 authenticated /query caller through the edge.
+
+S32 proves chat_session.origin holds across the split: both writers stamp it
+(Go's UpsertChatSession on /query, Python's ensure_session on /query/stream),
+the Threads list serves only origin='thread', and an assistant conversation
+stays readable by id.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from tests_contract.conftest import (
     EdgeClient,
     Stack,
     latest_query_log_row,
+    parse_sse,
     pg_conn,
     query_log_count,
     seed_answerable_corpus,
@@ -166,3 +172,88 @@ def test_s29_null_owner_legacy_session_adopted_via_query(
     detail = client.http.get(f"/sessions/{legacy_sid}")
     assert detail.status_code == 200
     assert detail.json()["session"]["id"] == legacy_sid
+
+
+def _session_origins() -> dict[str, str]:
+    """Every chat_session row's origin, straight from the shared Postgres."""
+    with pg_conn() as conn:
+        rows = conn.execute("SELECT id, origin FROM public.chat_session").fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
+def test_s32_assistant_origin_is_written_by_both_runtimes_and_hidden_from_the_list(
+    base_stack: Stack, edge_login: Callable[..., EdgeClient]
+) -> None:
+    """S32: chat_session.origin, across the runtime split.
+
+    The Research Studio's Assistant panel holds its own conversation, and
+    /query has exactly one place to put a conversation -- so without this
+    column that conversation lands in the work rail's Threads list beside the
+    analyst's real work. The fix is one column written on create and filtered
+    on read, and it has to hold on BOTH writers, because the panel's two code
+    paths do not share one:
+
+      POST /query        -> Go-native persistUserTurn -> UpsertChatSession
+      POST /query/stream -> relayed to Python -> ask() -> ensure_session
+
+    The panel calls the stream and falls back to the blocking route, so a fix
+    that landed on only one of these would hide the clutter until the first
+    stream failure and then quietly stop. Same reason S17 exists: two parallel
+    implementations of one write are held identical HERE or not at all.
+    """
+    seed_answerable_corpus()
+    client = edge_login(base_stack)
+
+    # An ordinary turn: the default origin, and the analyst's real work.
+    thread_sid = client.http.post("/query", json={"question": ANSWERABLE_QUESTION}).json()[
+        "session_id"
+    ]
+
+    # The Go-native writer, asked the way the panel asks.
+    go_sid = client.http.post(
+        "/query", json={"question": ANSWERABLE_QUESTION, "origin": "assistant"}
+    ).json()["session_id"]
+
+    # The PYTHON writer, over the panel's primary path. Read to EOF so the turn
+    # is fully persisted before the assertions below read the table.
+    with client.http.stream(
+        "POST",
+        "/query/stream",
+        json={"question": ANSWERABLE_QUESTION, "origin": "assistant"},
+        headers={"Accept": "text/event-stream"},
+    ) as response:
+        assert response.status_code == 200
+        body = "".join(response.iter_text())
+    py_sid = parse_sse(body).single_result()["session_id"]
+
+    assert len({thread_sid, go_sid, py_sid}) == 3, "three turns, three distinct sessions"
+
+    # Both runtimes wrote the column, and neither stamped the ordinary turn.
+    origins = _session_origins()
+    assert origins[thread_sid] == "thread", "an unmarked turn is still a thread"
+    assert origins[go_sid] == "assistant", "the Go native writer stamps origin"
+    assert origins[py_sid] == "assistant", "the Python stream writer stamps origin"
+
+    # The read side: the Threads list serves the analyst's work and nothing else.
+    listed = {s["id"] for s in client.http.get("/sessions").json()["sessions"]}
+    assert thread_sid in listed
+    assert go_sid not in listed, "an assistant conversation never joins the Threads list"
+    assert py_sid not in listed
+
+    # The DELIBERATE asymmetry: hidden from the list is not unreachable. Both
+    # stay readable by id, so the panel can reload its own conversation and a
+    # stray row can still be deleted rather than accumulating forever.
+    for sid in (go_sid, py_sid):
+        detail = client.http.get(f"/sessions/{sid}")
+        assert detail.status_code == 200, "an assistant conversation is still readable by id"
+        assert detail.json()["session"]["id"] == sid
+
+    # Create-only, on the writer that owns the ON CONFLICT path: a later turn
+    # on the same session that does NOT ask for "assistant" must not promote
+    # that conversation into the Threads list.
+    follow_up = client.http.post(
+        "/query", json={"question": "What about dissolution?", "session_id": go_sid}
+    )
+    assert follow_up.status_code == 200
+    assert _session_origins()[go_sid] == "assistant", "origin is set on create, never on conflict"
+    assert go_sid not in {s["id"] for s in client.http.get("/sessions").json()["sessions"]}
