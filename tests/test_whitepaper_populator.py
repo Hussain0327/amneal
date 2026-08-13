@@ -25,6 +25,7 @@ from regwatch.whitepaper.populator import (
     _rems_record_matches_application,
     build_whitepaper,
 )
+from regwatch.whitepaper.template import CELL_SPECS, CellMode
 from tests._whitepaper_stub import APPL_NO, RLD_NAME, _qa_result, install_fake_sources
 
 
@@ -455,6 +456,13 @@ def test_requirements_collapse_note_empty_qa_falls_back(
 def test_manual_cells_never_carry_value(monkeypatch: pytest.MonkeyPatch) -> None:
     install_fake_sources(monkeypatch)
     cells = _cells(build_whitepaper(RLD_NAME, APPL_NO))
+    # Pin the registry MODE alongside the rendered cell. INV-3 enforcement
+    # (populator._cell) and the registry walk in test_whitepaper_invariants both
+    # gate on `spec.mode is CellMode.MANUAL`, so flipping a spec to AUTO drops the
+    # cell from that walk silently -- it stops being checked rather than failing.
+    # `patents` already carries Orange Book evidence rows, so that flip is one
+    # token away. This list is the backstop that fails loudly when it happens.
+    modes = {spec.id: spec.mode for spec in CELL_SPECS}
     for cell_id in (
         "rd_center",
         "priority_status",
@@ -471,6 +479,7 @@ def test_manual_cells_never_carry_value(monkeypatch: pytest.MonkeyPatch) -> None
         "in_vivo_be_studies",
         "prepared_by",
     ):
+        assert modes[cell_id] is CellMode.MANUAL, cell_id
         cell = cells[cell_id]
         assert cell["status"] == "analyst_input_required", cell_id
         assert cell["value"] is None, cell_id

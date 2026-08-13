@@ -263,6 +263,12 @@ def test_deadline_breach_raises_promptly_and_audits(
 def test_zero_timeout_disables_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
     install_fake_sources(monkeypatch)
     _set_build_timeout(monkeypatch, "0")
+    # Pin the contract directly: 0 means "no bound", not "a zero-length bound".
+    # cli.py tells operators to set WHITEPAPER_BUILD_TIMEOUT_S=0 to disable the
+    # deadline, so the None is the advertised behaviour, not an implementation
+    # detail. Inferring it from a successful build alone would also pass if 0
+    # started producing a large-but-finite deadline.
+    assert populator._build_deadline() is None
     result = build_whitepaper(RLD_NAME, APPL_NO)
     assert _cells(result)["product_name"]["status"] == "populated"
 
