@@ -206,7 +206,10 @@ def test_successful_complete_manifest_retires_missing_documents() -> None:
         searchable = conn.execute(
             text("SELECT count(*) FROM chunk WHERE fda_document_id IS NOT NULL")
         ).scalar_one()
-    assert rows == [(keep.canonical_id, True), (retire.canonical_id, False)]
+    assert [(row[0], row[1]) for row in rows] == [
+        (keep.canonical_id, True),
+        (retire.canonical_id, False),
+    ]
     assert searchable > 0
 
 

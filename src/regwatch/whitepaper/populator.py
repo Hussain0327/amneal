@@ -2580,5 +2580,6 @@ __all__ = [
     "SpineResolutionError",
     "WhitepaperBuildTimeoutError",
     "build_whitepaper",
+    "load_latest_approved_label",
     "resolve_spine",
 ]
