@@ -1897,12 +1897,13 @@ def _resolve_and_carry_over(
 
     resolved_name = state.active_filters.get("normalized_name")
 
-    # Multi-form session carry-over: a follow-up that didn't itself pin a form
-    # inherits the dosage_form/route the user already chose for THIS product (via
-    # a prior multi-form clarify). Done here, after resolution, so it also covers
-    # the single-product-corpus fallback, where the resolver re-pins the product
-    # and the `none`-branch carry-over above never runs. Without it the next
-    # "What about dissolution?" would re-trigger the multi-form clarify.
+    # Product-scope session carry-over: a follow-up that didn't itself pin a form
+    # inherits the application identity plus dosage_form/route the user already
+    # chose for THIS product. Done here, after resolution, so it also covers the
+    # single-product-corpus fallback, where the resolver re-pins the product and
+    # the `none`-branch carry-over above never runs. Dropping appl_no here would
+    # widen a same-ingredient follow-up even if persistence retained the key;
+    # dropping the form pair would re-trigger the multi-form clarify.
     if (
         resolved_name
         and not state.active_filters.get("dosage_form")
@@ -1911,7 +1912,7 @@ def _resolve_and_carry_over(
     ):
         session_filters = _session_filters()
         if session_filters.get("normalized_name") == resolved_name:
-            for key in ("dosage_form", "route"):
+            for key in ("appl_no", "dosage_form", "route"):
                 if session_filters.get(key):
                     state.active_filters[key] = session_filters[key]
                     state.context_applied = True

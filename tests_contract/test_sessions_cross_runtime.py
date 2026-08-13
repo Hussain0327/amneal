@@ -40,7 +40,10 @@ def test_s17_go_serves_the_session_python_wrote(
     seed_answerable_corpus()
     client = edge_login(base_stack)
 
-    turn1 = client.http.post("/query", json={"question": ANSWERABLE_QUESTION}).json()
+    filters = {"normalized_name": "albuterol sulfate", "appl_no": "020503"}
+    turn1 = client.http.post(
+        "/query", json={"question": ANSWERABLE_QUESTION, "filters": filters}
+    ).json()
     assert turn1["status"] == "answer"
     session_id = turn1["session_id"]
 
@@ -53,15 +56,23 @@ def test_s17_go_serves_the_session_python_wrote(
     assert query_log_count() == 2
     with pg_conn() as conn:
         rows = conn.execute(
-            "SELECT role, audit_id, citations_json FROM public.chat_message "
+            "SELECT role, audit_id, citations_json, filters_json FROM public.chat_message "
             "WHERE session_id = %s ORDER BY created_at",
             (session_id,),
         ).fetchall()
+        active_filters = conn.execute(
+            "SELECT active_filters_json FROM public.chat_session WHERE id = %s",
+            (session_id,),
+        ).fetchone()[0]
     assert [r[0] for r in rows] == ["user", "assistant", "user", "assistant"]
     # Distinct audit rows per turn: an id reused across turns would collapse
     # the dict below and pass the old set-equality check vacuously.
     assert turn1["audit_id"] != turn2["audit_id"]
     persisted_by_turn = {turn1["audit_id"]: rows[1], turn2["audit_id"]: rows[3]}
+    assert rows[1][3] == filters
+    assert rows[3][3] == filters, "the assistant follow-up keeps the application identity"
+    assert active_filters == filters
+    assert latest_query_log_row()["route_json"]["filters"] == filters
 
     # The cross-runtime read: Go serves the rows Python persisted.
     detail = client.http.get(f"/sessions/{session_id}")

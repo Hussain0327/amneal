@@ -469,6 +469,7 @@ def test_query_filters_are_whitelisted_at_the_boundary(
                 "question": "What dissolution method is recommended?",
                 "filters": {
                     "normalized_name": "albuterol sulfate",
+                    "appl_no": "020503",  # application identity is a session-safe scope key
                     "version_id": 17,  # internal-only: never honored from callers
                     "source_url": "http://example/psg.pdf",  # legacy clarify echo
                     "page": 3,  # unknown-to-session junk
@@ -477,7 +478,10 @@ def test_query_filters_are_whitelisted_at_the_boundary(
             },
         )
         assert res.status_code == 200
-        assert seen["filters"] == {"normalized_name": "albuterol sulfate"}
+        assert seen["filters"] == {
+            "normalized_name": "albuterol sulfate",
+            "appl_no": "020503",
+        }
     finally:
         client.__exit__(None, None, None)
 
@@ -492,10 +496,15 @@ def test_query_request_filters_validator_unit() -> None:
         filters={
             "normalized_name": "albuterol sulfate",
             "doc_id": 4,
+            "appl_no": "020503",
             "version_id": 17,
             "source_url": "http://example/psg.pdf",
             "route": ["Inhalation"],
         },
     )
-    assert req.filters == {"normalized_name": "albuterol sulfate", "doc_id": 4}
+    assert req.filters == {
+        "normalized_name": "albuterol sulfate",
+        "doc_id": 4,
+        "appl_no": "020503",
+    }
     assert api_main.QueryRequest(question="q?", k=None).filters is None

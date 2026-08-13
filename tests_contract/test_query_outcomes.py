@@ -387,6 +387,7 @@ def test_s30_filters_whitelist_holds_at_the_edge(
             "question": ANSWERABLE_QUESTION,
             "filters": {
                 "normalized_name": "albuterol sulfate",  # whitelisted scalar: kept
+                "appl_no": "020503",  # application identity: kept and auditable
                 "version_id": 17,  # not whitelisted: dropped
                 "source_url": "http://x",  # legacy key: dropped
                 "page": 3,  # unknown key: dropped
@@ -399,4 +400,7 @@ def test_s30_filters_whitelist_holds_at_the_edge(
     assert payload["status"] == "answer", "the surviving filter still scopes to the seed"
 
     row = _one_new_row(payload, client)
-    assert row["route_json"]["filters"] == {"normalized_name": "albuterol sulfate"}
+    assert row["route_json"]["filters"] == {
+        "normalized_name": "albuterol sulfate",
+        "appl_no": "020503",
+    }
