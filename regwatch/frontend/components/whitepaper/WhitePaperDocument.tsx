@@ -156,7 +156,12 @@ function Masthead({ meta }: { meta: DocMeta }) {
           v={spine.product_numbers.length > 0 ? spine.product_numbers.join(", ") : "\u2014"}
           mono
         />
-        <Fact k="DailyMed SPL" v={spine.setid || "\u2014"} mono break />
+        <Fact
+          k="Drugs@FDA label"
+          v={spine.approved_label_document_id || "\u2014"}
+          mono
+          break
+        />
         <Fact k="Prepared by" v={meta.preparedBy || "\u2014"} />
       </dl>
 

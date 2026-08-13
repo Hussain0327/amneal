@@ -32,10 +32,11 @@ const OB: WhitepaperEvidence = {
   section: null,
   snippet: "ALBUTEROL SULFATE; AEROSOL, METERED; INHALATION; 0.09MG/INH; N020503; PROVENTIL HFA",
 };
-const SPL: WhitepaperEvidence = {
-  source: "DailyMed SPL",
-  locator: "setid=8d24bacb-feff-4c6a-b8df-625e1435387a",
-  source_url: "https://dailymed.nlm.nih.gov/dailymed/",
+const LABEL: WhitepaperEvidence = {
+  source: "Drugs@FDA approved labeling",
+  locator: "NDA020503 approved label, page 3",
+  source_url:
+    "https://www.accessdata.fda.gov/drugsatfda_docs/label/2019/020503s052lbl.pdf",
   fetched_at: "2026-08-09T04:12:31Z",
   page: null,
   section: "INDICATIONS AND USAGE",
@@ -70,11 +71,11 @@ const VALUES: Record<string, [string, WhitepaperEvidence[]]> = {
   nda_holder: ["Merck Sharp & Dohme Corp.", [OB]],
   indication: [
     "Treatment or prevention of bronchospasm in patients 4 years of age and older with reversible obstructive airway disease, and prevention of exercise-induced bronchospasm.",
-    [SPL],
+    [LABEL],
   ],
-  epc: ["beta2-Adrenergic Agonist [EPC]", [SPL]],
-  labeling_images: ["3 carton and container images on the current SPL", [SPL]],
-  packaging: ["NDC 0085-1132-01: 6.7 g canister, 200 metered actuations", [SPL]],
+  epc: ["beta2-Adrenergic Agonist [EPC]", [LABEL]],
+  labeling_images: ["Labeling image review requires analyst confirmation", [LABEL]],
+  packaging: ["6.7 g canister, 200 metered actuations", [LABEL]],
   be_guidance_available: ["Yes - PSG for albuterol sulfate inhalation aerosol, Rev. Mar 2023", [PSG]],
   requirements: [
     "In vitro option: single actuation content, aerodynamic particle size distribution, spray pattern, plume geometry, priming and repriming. In vivo option: PK BE study with the in vitro battery above.",
@@ -113,7 +114,7 @@ function makeSections(): WhitepaperSectionData[] {
           mode: "auto",
           status: "verified_absent",
           value: null,
-          evidence: [slot.id === "rems" ? SPL : OB],
+          evidence: [slot.id === "rems" ? LABEL : OB],
           note: null,
         };
       }
@@ -139,9 +140,13 @@ const META: DocMeta = {
     ingredient: "ALBUTEROL SULFATE",
     normalized_name: "albuterol sulfate hfa",
     product_numbers: ["001"],
-    setid: "8d24bacb-feff-4c6a-b8df-625e1435387a",
+    setid: null,
     spl_candidates: [],
-    warnings: ["Two SPL candidates matched; the sponsor label was preferred over a repackager."],
+    approved_label_document_id: "drugs_at_fda:NDA020503:approved_label:2019-02-15",
+    approved_label_source_url:
+      "https://www.accessdata.fda.gov/drugsatfda_docs/label/2019/020503s052lbl.pdf",
+    approved_label_updated_at: "2019-02-15",
+    warnings: [],
   },
   warnings: [],
   auditId: 4217,

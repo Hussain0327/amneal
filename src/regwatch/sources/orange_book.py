@@ -16,6 +16,7 @@ eligibility are regulatory judgment and never happen here (INV-3).
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import time
 import zipfile
@@ -33,10 +34,9 @@ from regwatch.sources._utils import (
     bare_application_number,
     clean_application_number,
     clean_text,
-    get_openfda_client,
-    get_with_retry,
-    owned_client,
 )
+from regwatch.sources.http import get_authoritative_bytes, owned_fda_client
+from regwatch.sources.policy import FdaSourceFamily
 from regwatch.sources.types import SourceKind, SourceQuery, SourceRecord
 
 log = get_logger(__name__)
@@ -112,6 +112,18 @@ class OrangeBookRows:
 
 
 @dataclass(frozen=True)
+class OrangeBookSnapshot:
+    """All three official Orange Book files from one ZIP download."""
+
+    products: tuple[dict[str, str], ...]
+    patents: tuple[dict[str, str], ...]
+    exclusivities: tuple[dict[str, str], ...]
+    fetched_at: datetime
+    snapshot_sha256: str
+    missing_members: frozenset[str]
+
+
+@dataclass(frozen=True)
 class _ZipCache:
     """Cached Orange Book file texts plus the wall-clock fetch time.
 
@@ -125,6 +137,7 @@ class _ZipCache:
     files: Mapping[str, str]
     fetched_at: datetime
     monotonic_at: float
+    snapshot_sha256: str
     missing_members: frozenset[str] = frozenset()
 
 
@@ -143,6 +156,19 @@ def reset_products_cache() -> None:
     global _ZIP_CACHE
     _ZIP_CACHE = None
     _PARSED_CACHE.clear()
+
+
+def get_orange_book_snapshot(*, client: httpx.Client | None = None) -> OrangeBookSnapshot:
+    """Return an internally consistent, parsed Orange Book snapshot."""
+    cache = _cached_zip(client)
+    return OrangeBookSnapshot(
+        products=tuple(_cached_parsed(PRODUCTS_MEMBER, PRODUCT_COLUMNS, client)),
+        patents=tuple(_cached_parsed(PATENT_MEMBER, PATENT_COLUMNS, client)),
+        exclusivities=tuple(_cached_parsed(EXCLUSIVITY_MEMBER, EXCLUSIVITY_COLUMNS, client)),
+        fetched_at=cache.fetched_at,
+        snapshot_sha256=cache.snapshot_sha256,
+        missing_members=cache.missing_members,
+    )
 
 
 class OrangeBookHandler:
@@ -310,11 +336,12 @@ def _cached_zip(client: httpx.Client | None) -> _ZipCache:
     cached = _ZIP_CACHE
     if cached is not None and ttl > 0 and (time.monotonic() - cached.monotonic_at) < ttl:
         return cached
-    files, missing = _fetch_zip_files(client)
+    files, missing, snapshot_sha256 = _fetch_zip_files(client)
     fresh = _ZipCache(
         files=files,
         fetched_at=datetime.now(UTC),
         monotonic_at=time.monotonic(),
+        snapshot_sha256=snapshot_sha256,
         missing_members=missing,
     )
     _ZIP_CACHE = fresh
@@ -322,11 +349,18 @@ def _cached_zip(client: httpx.Client | None) -> _ZipCache:
     return fresh
 
 
-def _fetch_zip_files(client: httpx.Client | None) -> tuple[dict[str, str], frozenset[str]]:
-    with owned_client(client, get_openfda_client) as active_client:
-        resp = get_with_retry(active_client, ORANGE_BOOK_ZIP_URL)
-        resp.raise_for_status()
-        return _file_texts_from_zip(resp.content)
+def _fetch_zip_files(
+    client: httpx.Client | None,
+) -> tuple[dict[str, str], frozenset[str], str]:
+    with owned_fda_client(client) as active_client:
+        _, body, _ = get_authoritative_bytes(
+            active_client,
+            ORANGE_BOOK_ZIP_URL,
+            FdaSourceFamily.ORANGE_BOOK,
+            max_bytes=get_settings().orange_book_zip_max_bytes,
+        )
+        files, missing = _file_texts_from_zip(body)
+        return files, missing, hashlib.sha256(body).hexdigest()
 
 
 def _file_texts_from_zip(content: bytes) -> tuple[dict[str, str], frozenset[str]]:

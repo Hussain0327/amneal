@@ -126,11 +126,11 @@ for the system as it runs today.
 ```
 PUBLIC FDA DATA                 BACKBONE
 ---------------                 --------
-PSG DB (scrape)     -->  ingest -> parse -> chunk+tag -> embed -> vector store
-Guidance PDFs       -->                  |
-Drugs@FDA (API)     -->  watchlist build |-> extract BE fields -> structured DB
-Drug labels (API)   -->                  |
-Orange Book (files) -->                  |-> version diff -> change log
+PSGs + FDA BE guidance --> ingest -> parse -> chunk+tag -> embed -> vector store
+Drugs@FDA data files   -->         |      |
+FDA labels/letters     -->         |      |-> extract BE fields -> structured DB
+SBOA/action packages   -->         |      |
+Orange Book files      -->         |------|-> version diff -> change log
 
                             |                          |
                             v                          v
@@ -147,18 +147,16 @@ cross-cutting: AUDIT LOG, EVAL HARNESS
 
 | Source                       | Use                                                          | Access                    | Endpoint / location                                         |
 | ---------------------------- | ------------------------------------------------------------ | ------------------------- | ----------------------------------------------------------- |
-| Product-Specific Guidances   | Core corpus; BE requirements                                 | **Scrape** (no API)       | accessdata.fda.gov/scripts/cder/psg/index.cfm + linked PDFs |
-| Guidance documents (broader) | Phase 2 corpus expansion                                     | Scrape / download         | fda.gov guidance database                                   |
-| Drugs@FDA                    | Build verified watchlist (sponsor = company), product status | **API**                   | api.fda.gov/drug/drugsfda.json                              |
-| Drug labeling (SPL)          | RLD label for Assemble                                       | **API**                   | api.fda.gov/drug/label.json                                 |
-| Drug shortages               | Competitive intel (later)                                    | **API**                   | api.fda.gov/drug/shortages.json                             |
-| Complete Response Letters    | Deficiency-prep (v2, later)                                  | **API/dataset**           | openFDA CRL dataset                                         |
-| Dissolution Methods DB       | Dissolution method for Assemble                              | **Scrape**                | accessdata.fda.gov/scripts/cder/dissolution                 |
-| Orange Book                  | RLD / therapeutic-equivalence status                         | **Download** (data files) | FDA Orange Book data files                                  |
+| Product-Specific Guidances | Product-specific BE recommendations | FDA catalog + linked PDFs | accessdata.fda.gov Drugs@FDA PSG paths |
+| FDA BE guidance | General bioequivalence guidance | Reviewed manifest + FDA PDFs | fda.gov guidance documents and reviewed media paths |
+| Drugs@FDA | Applications, products, labels, letters, actions/history | Official 12-table ZIP + FDA documents | FDA Drugs@FDA data files |
+| SBOA / action packages | Clinical, statistical, clinical-pharmacology, quality and integrated reviews | Documents linked by Drugs@FDA | accessdata.fda.gov Drugs@FDA document paths |
+| Orange Book | RLD, RS, TE codes, patents, exclusivities | Official ZIP | FDA Orange Book data files |
 
 Notes:
 
-- openFDA is free; set `OPENFDA_API_KEY` for higher rate limits, but the system must work without one (handle 429s with backoff).
+- This five-family list is closed. The retired public drug API is not a source,
+  fallback, runtime endpoint, or credential path.
 - The PSG page is a script-driven (ColdFusion) app. Before writing the scraper, **inspect the live page's network traffic to find the backing data endpoint** (these DataTables-style pages usually have one returning JSON or HTML); prefer that over headless browsing. Fall back to Playwright only if the table is rendered client-side with no fetchable endpoint.
 - Be a polite crawler: cache aggressively, rate-limit, set a descriptive User-Agent, respect robots.txt, never hammer.
 
@@ -343,7 +341,7 @@ For each matched change, emit a cited summary (drug, what changed, source link, 
 
 ### 10.15 Assemble / dossier (`assemble/dossier.py`)
 
-Input: a product (active ingredient + dosage form + RLD). Gather and assemble into one cited brief: (a) matched PSG(s) and the extracted BE requirements with citations; (b) the RLD label via openFDA `drug/label`; (c) applicable guidances via retrieval; (d) dissolution method via the Dissolution DB scrape; (e) a requirements checklist scaffold derived from the PSG fields. Output: a structured Markdown brief (optionally rendered to PDF), every line source-linked. The checklist is a scaffold of what the PSG calls for; it does not assert what the company has done. Acceptance: for a seed product, produces a brief where every item links to a source and no field is fabricated.
+Input: a product (active ingredient + dosage form + RLD). Gather and assemble into one cited brief: (a) matched PSG(s) and extracted BE requirements with citations; (b) the indexed approved Drugs@FDA label; (c) applicable FDA BE guidance and action-package evidence via retrieval; (d) Orange Book product/patent/exclusivity facts; and (e) a requirements checklist scaffold derived from cited FDA fields. Output: a structured Markdown brief, every factual line source-linked. The checklist is a scaffold of what the FDA source material says; it does not assert what the company has done. Acceptance: for a seed product, produces a brief where every item links to an approved source and no field is fabricated.
 
 ### 10.16 API (`api/main.py`, FastAPI)
 

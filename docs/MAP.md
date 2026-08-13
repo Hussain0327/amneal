@@ -1,6 +1,6 @@
 # REGWATCH - Map of Content
 
-Last updated: 2026-08-11.
+Last updated: 2026-08-13.
 
 **Start here.** This is the hub: how the system fits together, plus a link to
 every living doc in `docs/`, grouped by purpose.
@@ -36,7 +36,7 @@ flowchart TB
   EDGE -->|"6PN relay"| API["FastAPI, src/regwatch/api<br/>stateless RAG core, INV-1..9"]
   API --> Router["Router -> Handlers -> Synthesizer"]
   API --> Resolve["POST /resolve<br/>deterministic, no audit row"]
-  Router --> Sources["FDA sources<br/>PSG, Orange Book, Drugs@FDA<br/>NDC, DailyMed, Shortages, REMS"]
+  Router --> Sources["Authoritative FDA sources only<br/>Drugs@FDA + action packages<br/>PSGs + FDA BE guidance + Orange Book"]
   Router --> Stores[("Postgres + pgvector (Databricks Lakebase)<br/>the ONLY datastore since R5:<br/>rows + vectors + audit log")]
   EDGE --> Stores
   Sources --> Stores
@@ -95,6 +95,9 @@ This is the only index of `docs/`. Every living doc appears exactly once below.
 
 **Models and data**
 
+- [Authoritative FDA corpus](AUTHORITATIVE_FDA_CORPUS.md) - exact five-family
+  boundary, 140,339-record discovery, fingerprints, atomic ingest, embedding
+  coverage, activation, rollback, and Google engineering alignment
 - [Databricks adoption](DATABRICKS_ADOPTION_2026-07-28.md) - the inference-plane decision, cost model, incident log, and rollout state
 - [Evaluation status](EVAL_STATUS.md) - current gold-set counts, CI and live evidence, and the 0.917 correction
 

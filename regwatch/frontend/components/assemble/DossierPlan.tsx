@@ -21,7 +21,7 @@ const SECTIONS = [
     letter: "C",
     title: "Reference Listed Drug (RLD) Label",
     desc: "Brand, application number, and indications for the reference product.",
-    src: "openFDA",
+    src: "Drugs@FDA corpus",
   },
   {
     letter: "D",
@@ -32,8 +32,8 @@ const SECTIONS = [
   {
     letter: "E",
     title: "Dissolution Method",
-    desc: "A pointer into the FDA dissolution methods database.",
-    src: "FDA database",
+    desc: "Dissolution requirements cited from the PSG and FDA BE guidance.",
+    src: "FDA corpus",
   },
   {
     letter: "F",

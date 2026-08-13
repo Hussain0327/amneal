@@ -309,23 +309,25 @@ The daily run is a GitHub Actions schedule, `.github/workflows/watch-daily.yml`.
 
 **Dossier** (`assemble/dossier.py`) builds a Markdown research brief for a
 product: matched PSGs, BE fields, citations and source links, RLD label info
-from openFDA when available, a PSG Q&A summary, and a checklist scaffold. It is
-a research scaffold, not submission content.
+from indexed Drugs@FDA approved labeling, a cited Q&A summary, and a checklist
+scaffold. It is a research scaffold, not submission content.
 
 **White Paper** (`whitepaper/`) is the shipped instance of multi-source
-synthesis. It fuses Orange Book, Drugs@FDA, NDC, DailyMed, Shortages, REMS, and
-PSG into a cited cell graph with tri-state cells (`populated`,
-`verified_absent` rendered as "No", `analyst_input_required`), records OB/SPL
-provenance with `last_fetched_at` freshness (migration `0005`), and exports a
+synthesis. It fuses approved Drugs@FDA metadata and labeling, Orange Book, PSG,
+action-package evidence, and FDA BE guidance into a cited cell graph with
+tri-state cells (`populated`,
+`verified_absent` rendered as "No", `analyst_input_required`), records source
+provenance with freshness timestamps, and exports a
 `.docx` rendered from the exact reviewed result.
 
 ## Multi-Source Routing
 
 Handlers live in `src/regwatch/sources/` behind a rules-first router
-(`sources/router.py`) and are reachable via `POST /sources/search`: PSG (scoped
-RAG over PDF chunks), Orange Book, Drugs@FDA, Drug Shortages, NDC, DailyMed
-(SPL), REMS. The idea is that only PSG needs RAG. The rest are structured
-lookups.
+(`sources/router.py`) and are reachable via `POST /sources/search`: Drugs@FDA,
+SBOA/action packages, PSG, FDA BE guidance, and Orange Book. The policy is exact:
+requests for any legacy source are rejected, not silently routed to a fallback.
+The replacement corpus parses both structured snapshot records and FDA
+documents into citable, versioned chunks.
 
 Still open: the main `POST /query` path runs PSG-scoped RAG only. It does not
 yet synthesize the structured handlers, and the persist-and-cite plus freshness

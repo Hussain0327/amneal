@@ -101,8 +101,8 @@ export interface WhitepaperSectionData {
   cells: WhitepaperCell[];
 }
 
-// The full DailyMed candidate set behind the setid pick, so the
-// repackager-vs-sponsor selection is auditable -- never a silent pick.
+// Deprecated compatibility shape retained while saved pre-FDA-corpus runs
+// remain readable. New resolutions return no external SPL candidates.
 export type WhitepaperSplCandidate = Schemas["WhitepaperSplCandidate"];
 
 // The canonical spine (also the whole POST /resolve response body).

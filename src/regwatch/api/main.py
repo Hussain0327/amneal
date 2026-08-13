@@ -45,6 +45,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from datetime import UTC, date, datetime
+from enum import StrEnum
 from functools import partial
 from pathlib import Path
 from typing import Any, Literal
@@ -105,7 +106,8 @@ from regwatch.process.psg_docx import (
     write_psg_docx,
 )
 from regwatch.sources.router import search_sources
-from regwatch.sources.types import SourceKind, SourceQuery
+from regwatch.sources.types import SourceKind as InternalSourceKind
+from regwatch.sources.types import SourceQuery
 from regwatch.store import deficiency_runs as deficiency_run_store
 from regwatch.store import whitepaper_runs as run_store
 from regwatch.store.db import engine_dialect, get_engine, init_db, session_scope
@@ -199,6 +201,10 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
         assert_embedding_provider_dim()
     _guard_test_providers(s)
+    if s.retrieval_corpus == "authoritative_fda":
+        from regwatch.corpus.status import assert_authoritative_corpus_ready_for_activation
+
+        assert_authoritative_corpus_ready_for_activation()
     # A provider whose runtime deps are missing (slim image + local-bge-small)
     # must refuse to boot, not 500 on the first embed call.
     assert_embedding_runtime_available(s.embedding_provider)
@@ -1260,6 +1266,16 @@ async def internal_query_compute(
 
 
 # ---------- /sources/search ----------
+class SourceKind(StrEnum):
+    """The exact source universe exposed by the public API."""
+
+    PSG = "psg"
+    ORANGE_BOOK = "orange_book"
+    DRUGSFDA = "drugsfda"
+    ACTION_PACKAGE = "action_package"
+    FDA_BE_GUIDANCE = "fda_be_guidance"
+
+
 class SourceSearchRequest(BaseModel):
     # These fields are interpolated into outbound FDA query params; cap them so a
     # single authed caller can't push a multi-megabyte value into the request.
@@ -1267,7 +1283,6 @@ class SourceSearchRequest(BaseModel):
     active_ingredient: str | None = Field(None, max_length=200)
     brand_name: str | None = Field(None, max_length=200)
     application_number: str | None = Field(None, max_length=40)
-    ndc: str | None = Field(None, max_length=40)
     dosage_form: str | None = Field(None, max_length=200)
     route: str | None = Field(None, max_length=200)
     limit: int = Field(10, ge=1, le=50)
@@ -1291,7 +1306,7 @@ class SourceSearchResponse(BaseModel):
 def sources_search(
     req: SourceSearchRequest, user: User = Depends(require_user)
 ) -> SourceSearchResponse:
-    # Fans out to live FDA endpoints (openFDA, DailyMed, Orange Book ZIP), so
+    # Fans out to authoritative FDA sources (Drugs@FDA and Orange Book), so
     # rate-limit it like the other outbound/expensive routes — an authed caller
     # must not be able to hammer FDA unthrottled (amplification / FDA-side block).
     _enforce_query_rate_limit(user)
@@ -1301,18 +1316,21 @@ def sources_search(
             active_ingredient=req.active_ingredient,
             brand_name=req.brand_name,
             application_number=req.application_number,
-            ndc=req.ndc,
             dosage_form=req.dosage_form,
             route=req.route,
             limit=req.limit,
         ),
-        sources=req.sources,
+        sources=(
+            [InternalSourceKind(source.value) for source in req.sources]
+            if req.sources is not None
+            else None
+        ),
     )
     return SourceSearchResponse(
-        routed_sources=routed,
+        routed_sources=[SourceKind(source.value) for source in routed],
         records=[
             SourceRecordResponse(
-                source=r.source,
+                source=SourceKind(r.source.value),
                 title=r.title,
                 source_url=r.source_url,
                 identifiers=r.identifiers,
@@ -1468,6 +1486,9 @@ class WhitepaperSpine(BaseModel):
     product_numbers: list[str]
     setid: str | None
     spl_candidates: list[WhitepaperSplCandidate]
+    approved_label_document_id: str | None
+    approved_label_source_url: str | None
+    approved_label_updated_at: str | None
     warnings: list[str]
 
 

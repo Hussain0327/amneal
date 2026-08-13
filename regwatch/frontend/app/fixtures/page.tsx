@@ -262,7 +262,7 @@ const DOSSIER_MD = `# albuterol sulfate dossier
 ## C. Reference Listed Drug (RLD) Label
 - Brand: PROVENTIL HFA  /  Generic: albuterol sulfate
 - Application: NDA020503
-- Source: https://api.fda.gov/drug/label.json
+- Source: https://www.accessdata.fda.gov/drugsatfda_docs/label/2026/020503s000lbl.pdf
   - **Indications**: Treatment or prevention of bronchospasm in adults and children 4 years of age and older with reversible obstructive airway disease…
 
 ## D. Applicable Guidance — Q&A Summary

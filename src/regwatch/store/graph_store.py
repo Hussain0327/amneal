@@ -203,7 +203,7 @@ def derive_document_graph(
     # in the LIKE pattern keeps doc 12 from matching doc 123's keys.
     conn.execute(
         sa_text(
-            "DELETE FROM graph_node " "WHERE node_type = 'psg_section' AND natural_key LIKE :prefix"
+            "DELETE FROM graph_node WHERE node_type = 'psg_section' AND natural_key LIKE :prefix"
         ),
         {"prefix": f"{doc_id}-%"},
     )

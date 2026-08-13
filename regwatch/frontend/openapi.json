@@ -1347,14 +1347,13 @@
         "type": "object"
       },
       "SourceKind": {
+        "description": "The exact source universe exposed by the public API.",
         "enum": [
           "psg",
           "orange_book",
           "drugsfda",
-          "shortage",
-          "ndc",
-          "rems",
-          "dailymed"
+          "action_package",
+          "fda_be_guidance"
         ],
         "title": "SourceKind",
         "type": "string"
@@ -1451,18 +1450,6 @@
             "minimum": 1.0,
             "title": "Limit",
             "type": "integer"
-          },
-          "ndc": {
-            "anyOf": [
-              {
-                "maxLength": 40,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Ndc"
           },
           "query_text": {
             "default": "",
@@ -2211,6 +2198,39 @@
             "title": "Application Type",
             "type": "string"
           },
+          "approved_label_document_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved Label Document Id"
+          },
+          "approved_label_source_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved Label Source Url"
+          },
+          "approved_label_updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved Label Updated At"
+          },
           "ingredient": {
             "title": "Ingredient",
             "type": "string"
@@ -2260,6 +2280,9 @@
           "product_numbers",
           "setid",
           "spl_candidates",
+          "approved_label_document_id",
+          "approved_label_source_url",
+          "approved_label_updated_at",
           "warnings"
         ],
         "title": "WhitepaperSpine",

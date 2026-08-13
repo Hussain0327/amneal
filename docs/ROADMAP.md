@@ -3,8 +3,8 @@
 One list of everything that is NOT done yet. If another doc disagrees with this
 file or with [`PROD_READINESS.md`](PROD_READINESS.md), these two win.
 
-Last updated: 2026-08-12 against `main` at `ae30489` and the repository secret
-names. Live app, database and Fly values were last checked 2026-08-11.
+Last updated: 2026-08-13 for the authoritative FDA corpus implementation. Live
+app, database and Fly values were last checked 2026-08-11.
 
 Labels: **BLOCKER** stops external exposure. **SHOULD-HAVE** before launch.
 **DECISION** needs a person to choose. **LATER** is optional.
@@ -29,7 +29,7 @@ Labels: **BLOCKER** stops external exposure. **SHOULD-HAVE** before launch.
   There is no sentinel and no code word for "not found" any more.
 
 Already shipped, so not listed below: Router -> Handlers -> Synthesizer with
-INV-1..9 as tests; the seven FDA source handlers; cited conversational Q&A with
+INV-1..9 as tests; cited conversational Q&A with
 live token streaming; the White Paper populator and its runs automation; the
 deficiency analyzer; the Next.js shell on Vercel; the Go edge holding all public
 traffic on Fly (auth, sessions, feedback, settings, products, plus `POST /query`
@@ -41,6 +41,30 @@ sections of [`PROD_READINESS.md`](PROD_READINESS.md).
 ---
 
 ## Live operator action, complete this one first
+
+### Build and validate the authoritative FDA corpus  (SHOULD-HAVE)
+
+The code portion is done: exact five-family policy, official snapshot adapters,
+document/version/run schema, bounded fetch and parsing, per-document atomic
+chunks, resumable embedding batches, exact coverage, a fail-closed activation
+gate, and reversible `legacy` / `authoritative_fda` retrieval selection. The
+full read-only discovery found **140,339 source records** on 2026-08-13.
+
+The environment portion is open. Migration 0021 has not been claimed as
+deployed, and no production-scale download/parse/chunk/embed run was performed
+from this branch. Therefore the new corpus has no measured final chunk total or
+embedding-coverage result yet. Follow
+[`AUTHORITATIVE_FDA_CORPUS.md`](AUTHORITATIVE_FDA_CORPUS.md): deploy schema,
+reproduce discovery, run a scoped canary, complete the deferred full sync,
+backfill the active profile, pass retrieval/citation evaluation, verify
+`activation_ready=true`, smoke the cutover, and rehearse rollback.
+
+- Where: `src/regwatch/corpus/`, `src/regwatch/sources/policy.py`, migration
+  0021, and the corpus runbook.
+- Done when: the target environment processes the full current manifest with
+  zero document errors, searchable document parity, zero policy violations,
+  100% selected-profile chunk coverage, a passing eval, and tested cutover plus
+  rollback.
 
 ### Provision and validate the Watch embedding profile  (SHOULD-HAVE)
 
@@ -82,8 +106,8 @@ proxy machines, so the real fleet ceiling is about twice the configured rate.
 
 ### 2. Restore drill and least-privilege database credentials  (PROD_READINESS #2)
 
-The database is Databricks Lakebase, migrated to head (`0020_eval_run`) and
-serving prod. The migration release gate is done
+The database is Databricks Lakebase; the last verified live head was
+`0020_eval_run`, while repository head now includes 0021. The migration release gate is done
 (`release_command = "alembic upgrade head"` in `fly.toml`). What is missing is
 proof: nobody has ever rehearsed a restore, and the scripted
 `scripts/restore_drill.sh` was deleted in R5. The app also still connects with a
@@ -360,10 +384,9 @@ There is no in-app way for an analyst to add or manage them.
 - **Cross-encoder reranker.** Exists as a hook, off by default
   (`RERANKER_ENABLED`). Turn it on and tune `VECTOR_TOP_K` if retrieval precision
   needs it. Retrieve and rerank failures on the ask path are audited (INV-6).
-- **Corpus beyond PSGs.** Broaden the retrievable corpus past product-specific
-  guidances (`ingest/`, `sources/`).
-- **Ingest hardening at scale.** The multi-worker Alembic init race and
-  large-ingest resilience for `regwatch ingest-all` (`store/db.py`, `ingest/`).
+- **Further corpus families.** None are approved. Any future expansion requires
+  an explicit policy and product decision; arbitrary FDA/public sources must not
+  be added opportunistically.
 - **Kubernetes or Helm.** Only if the deploy outgrows Fly and Compose.
 - **Refactor backlog.** The 120-item working list in
   [`archive/REFACTOR_BACKLOG_2026-07-09.md`](archive/REFACTOR_BACKLOG_2026-07-09.md).
@@ -372,13 +395,15 @@ There is no in-app way for an analyst to add or manage them.
 
 ## Suggested order
 
-1. Provision the six Watch profile secrets and verify one manual dispatch. The
+1. Deploy migration 0023 and complete the authoritative-corpus canary, full
+   deferred sync, embedding backfill, eval, activation, and rollback gates.
+2. Provision the six Watch profile secrets and verify one manual dispatch. The
    code now fails closed until that owner action is complete.
-2. Gateway and SSO, plus distributed rate limiting. That is the exposure
+3. Gateway and SSO, plus distributed rate limiting. That is the exposure
    boundary.
-3. Restore drill and least-privilege credentials. Fold least-privilege into
+4. Restore drill and least-privilege credentials. Fold least-privilege into
    polyglot step 7 where you can.
-4. Make the blocking eval run the v7 chain, then revalidate the 0.30 threshold in
+5. Make the blocking eval run the v7 chain, then revalidate the 0.30 threshold in
    the Qwen3 space.
 5. Observability export and the post-deploy smoke job.
 6. Secrets policy and container resource limits.

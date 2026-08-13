@@ -646,9 +646,7 @@ def _interpretation_for(normalized_name: str) -> str:
     have = (
         f"FDA has {n} product-specific guidance {docs} for it" if n else "I have its FDA guidance"
     )
-    return (
-        f"You're asking about {normalized_name.title()}. {have} — " "what would you like to know?"
-    )
+    return f"You're asking about {normalized_name.title()}. {have} — what would you like to know?"
 
 
 def build_options(normalized_name: str) -> list[ClarifyOption]:
@@ -1812,7 +1810,7 @@ def _resolve_and_carry_over(
             # candidate, so a follow-up naming it still carries over. Closing
             # that needs a drug-name detector the resolver does not have.
             suggestions = suggest_products(question)
-            # One openFDA request, two answers: the in-corpus generics behind a
+            # One local Drugs@FDA lookup, two answers: the corpus generics behind a
             # brand name (the long-standing did-you-mean), and whether the name
             # is a real drug this corpus simply does not carry.
             external = lookup_external_drug(question)
@@ -1884,7 +1882,7 @@ def _resolve_and_carry_over(
                             "I don't currently have FDA product-specific guidance for "
                             "that product in this corpus."
                         ),
-                        # Empty here by construction: known_absent means openFDA
+                        # Empty here by construction: known_absent means Drugs@FDA
                         # matched nothing in the corpus. The catalog options the
                         # copy promises are a follow-up, not a fabrication.
                         options=_options_from_names(suggestions),
@@ -1965,7 +1963,7 @@ def _pre_retrieval_route(
 
     # Social gate: a pleasantry is a conversation, not a failed product lookup.
     # Sits here, BEFORE entity resolution, so a greeting costs no resolver work,
-    # no openFDA call and no model call -- and so it can never reach the
+    # no external product lookup and no model call -- and so it can never reach the
     # no-product branch that used to serve it an "Evidence gap" card.
     #
     # Guarded on there being no pinned or session product ON PURPOSE: "Hello"

@@ -502,9 +502,6 @@ class Settings(BaseSettings):
         dsn = str(v).strip()
         return dsn or None
 
-    # ---------- openFDA ----------
-    openfda_api_key: str | None = None
-
     # ---------- Company ----------
     company_name: str = "Amneal"
     company_applicant_aliases: str = "AMNEAL PHARMS,AMNEAL PHARMACEUTICALS,AMNEAL PHARMS LLC"
@@ -514,6 +511,15 @@ class Settings(BaseSettings):
         return [s.strip().upper() for s in self.company_applicant_aliases.split(",") if s.strip()]
 
     # ---------- Retrieval / refusal ----------
+    # Corpus cutover is a reversible configuration change. ``legacy`` keeps
+    # the serving path on the pre-0021 PSG index while the new FDA corpus is
+    # built and verified. ``authoritative_fda`` admits only chunks carrying
+    # one of the five policy-approved source families; API boot additionally
+    # refuses that mode unless a successful full-universe sync has 100%
+    # embedding coverage.
+    retrieval_corpus: Literal["legacy", "authoritative_fda"] = Field(
+        default="legacy", validation_alias="REGWATCH_RETRIEVAL_CORPUS"
+    )
     # Two-stage retrieval (per spec diagram):
     #   stage 1: vector search returns VECTOR_TOP_K candidates (wide net)
     #   stage 2: rerank to RERANK_TOP_K (the set we actually cite from)
@@ -625,15 +631,28 @@ class Settings(BaseSettings):
     # ---------- Crawler ----------
     user_agent: str = "RegWatch/0.1 (clinical-regulatory-affairs; +https://example.invalid/contact)"
     http_timeout_s: float = 30.0
-    # Reserved / not yet wired: the PSG crawl and ingest run sequentially today
-    # (politeness + the single-threaded alembic init path). Kept so the knob
-    # exists if a concurrent fetch path is added; it currently has no effect.
+    # The authoritative corpus worker uses this bounded concurrency after
+    # schema initialization. Request starts remain host-paced by
+    # crawl_min_interval_ms, so concurrency overlaps download/parse/database
+    # time without turning into an unbounded FDA request fan-out.
     crawl_concurrency: int = 4
     crawl_min_interval_ms: int = 250
-    # In-process cache-aside TTL for the Orange Book products ZIP. The ~50k-row
-    # file changes at most monthly, so a day-long TTL avoids re-downloading and
-    # re-parsing on every query. Set to 0 to disable caching.
+    # In-process cache-aside TTLs for the two official FDA data snapshots.
+    # Drugs@FDA is refreshed on business days; Orange Book is monthly.  A
+    # day-long cache keeps one process on one auditable snapshot while still
+    # refreshing on the next scheduled run. Set either to 0 to disable.
+    drugsfda_cache_ttl_s: float = 86_400.0
     orange_book_cache_ttl_s: float = 86_400.0
+    # Compressed snapshot byte caps. The parsers separately bound member count
+    # and total uncompressed bytes to defend against ZIP bombs.
+    drugsfda_zip_max_bytes: int = 128 * 1024 * 1024
+    orange_book_zip_max_bytes: int = 32 * 1024 * 1024
+    # Scientific/action-package PDFs can be much larger than PSGs.  These
+    # source-worker limits are still finite and are enforced while streaming
+    # and before page extraction; the API never parses untrusted PDFs.
+    fda_corpus_pdf_max_bytes: int = 200 * 1024 * 1024
+    fda_corpus_pdf_max_pages: int = 3_000
+    fda_corpus_pdf_parse_timeout_s: float = 180.0
 
     # ---------- PDF ingest safety (cron/ingest worker only) ----------
     # The daily `regwatch watch` run is the SOLE driver of FDA alerts and it

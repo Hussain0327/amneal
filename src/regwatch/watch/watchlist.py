@@ -1,8 +1,8 @@
 """Watchlist construction (INV-5: verified sources only).
 
-We build the product watchlist from THREE allowed sources, in this order:
+We build the product watchlist from THREE verified sources, in this order:
 
-  1. `drugsfda`     — openFDA Drugs@FDA `drug/drugsfda.json`, filtered to
+  1. `drugsfda`     — official Drugs@FDA weekday snapshot, filtered to
                        applications where the sponsor matches the company.
   2. `anda_letter`  — explicit user-uploaded ANDA approval letters
                        (one row per letter; the user is asserting the source).
@@ -18,19 +18,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from config.settings import get_settings
 from sqlmodel import select
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
 from regwatch.common.logging import get_logger
 from regwatch.common.text_normalize import canonical_name, stripped_name
-from regwatch.sources._utils import openfda_params
-from regwatch.sources.drugsfda import DRUGSFDA_ENDPOINT as DRUGSFDA_URL
+from regwatch.sources.drugsfda import DRUGSFDA_DOC_URL, get_drugsfda_snapshot
 from regwatch.store.db import session_scope
 from regwatch.store.models import Product
 
@@ -61,32 +53,6 @@ class WatchlistEntry:
             )
 
 
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
-    retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
-    reraise=True,
-)
-def _fetch_page(client: httpx.Client, url: str, params: dict[str, Any]) -> dict[str, Any]:
-    resp = client.get(url, params=params)
-    if resp.status_code == 429:
-        raise httpx.HTTPStatusError("rate limited", request=resp.request, response=resp)
-    # openFDA returns 404 as its normal end-of-results signal when skip exceeds
-    # the count. Treat it as an empty page HERE (mirrors aliases._fetch) so the
-    # retry wrapper doesn't burn 3 backoff attempts on every page boundary.
-    if resp.status_code == 404:
-        return {"results": []}
-    resp.raise_for_status()
-    return resp.json()
-
-
-def _drugsfda_query(applicant: str) -> str:
-    """openFDA query string — applications where sponsor matches `applicant`."""
-    # openFDA `search=` syntax uses Lucene-ish. Quote multi-word applicant names.
-    quoted = f'"{applicant}"' if " " in applicant else applicant
-    return f"sponsor_name:{quoted}"
-
-
 def fetch_drugsfda_for_company(
     aliases: list[str] | None = None,
     *,
@@ -94,7 +60,7 @@ def fetch_drugsfda_for_company(
     page_limit: int = 100,
     max_pages: int = 20,
 ) -> list[WatchlistEntry]:
-    """Query openFDA Drugs@FDA for applications matching each applicant alias.
+    """Read the official Drugs@FDA snapshot for matching applicant aliases.
 
     Returns one WatchlistEntry per (active_ingredient, dosage_form, route, appl_no).
 
@@ -110,85 +76,61 @@ def fetch_drugsfda_for_company(
     from regwatch.watch.aliases import get_aliases
 
     aliases = aliases or get_aliases()
-    s = get_settings()
     if not aliases:
         log.warning("no_applicant_aliases")
         return []
-
-    owned = False
-    if client is None:
-        client = httpx.Client(
-            timeout=s.http_timeout_s,
-            headers={"User-Agent": s.user_agent},
-        )
-        owned = True
-
+    # Retained keyword arguments keep callers source-compatible; the official
+    # snapshot is local once downloaded and has no pagination contract.
+    del page_limit, max_pages
+    snapshot = get_drugsfda_snapshot(client=client)
+    accepted = {alias.strip().upper() for alias in aliases if alias.strip()}
     out: dict[tuple[str, str | None, str | None, str], WatchlistEntry] = {}
-    try:
-        for alias in aliases:
-            params = openfda_params(_drugsfda_query(alias), page_limit)
-            for page in range(max_pages):
-                params["skip"] = page * page_limit
-                try:
-                    payload = _fetch_page(client, DRUGSFDA_URL, params)
-                except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code == 404:
-                        break  # openFDA returns 404 when skip > result count
-                    raise
-                results = payload.get("results") or []
-                if not results:
-                    break
-                for app in results:
-                    appl_no = app.get("application_number") or ""
-                    for prod in app.get("products") or []:
-                        ai_list = prod.get("active_ingredients") or []
-                        ai_raw = "; ".join(
-                            (a.get("name") or "").strip() for a in ai_list if a.get("name")
-                        )
-                        if not ai_raw:
-                            continue
-                        df = prod.get("dosage_form")
-                        route = prod.get("route")
-                        rld_name = prod.get("brand_name") or None
-                        status = _status_from_marketing_status(prod)
-                        key = (canonical_name(ai_raw), df, route, appl_no)
-                        if key in out:
-                            continue
-                        out[key] = WatchlistEntry(
-                            active_ingredient=ai_raw,
-                            normalized_name=canonical_name(ai_raw),
-                            dosage_form=df,
-                            route=route,
-                            rld_name=rld_name,
-                            rld_application_number=appl_no,
-                            company_status=status,
-                            source="drugsfda",
-                            source_url=DRUGSFDA_URL,
-                        )
-                if len(results) < page_limit:
-                    break
-    finally:
-        if owned:
-            client.close()
+    for application in snapshot.applications:
+        sponsor = (application.get("SponsorName") or "").strip().upper()
+        if sponsor not in accepted:
+            continue
+        bare = application.get("ApplNo") or ""
+        appl_type = application.get("ApplType") or ""
+        appl_no = f"{appl_type}{bare}" if appl_type else bare
+        for product in snapshot.application_products(bare):
+            ingredient = product.get("ActiveIngredient") or ""
+            if not ingredient:
+                continue
+            dosage_form, _, route = (product.get("Form") or "").partition(";")
+            key = (canonical_name(ingredient), dosage_form or None, route or None, appl_no)
+            if key in out:
+                continue
+            statuses = snapshot.product_marketing_status.get(
+                (bare, product.get("ProductNo") or ""), ()
+            )
+            out[key] = WatchlistEntry(
+                active_ingredient=ingredient,
+                normalized_name=canonical_name(ingredient),
+                dosage_form=dosage_form or None,
+                route=route or None,
+                rld_name=product.get("DrugName") or None,
+                rld_application_number=appl_no,
+                company_status=_status_from_marketing_status(statuses),
+                source="drugsfda",
+                source_url=f"{DRUGSFDA_DOC_URL}?event=overview.process&ApplNo={bare}",
+            )
     log.info("drugsfda_fetched", aliases=aliases, count=len(out))
     return list(out.values())
 
 
-def _status_from_marketing_status(prod: dict[str, Any]) -> str | None:
-    """Map openFDA marketing_status fields to our condensed status."""
+def _status_from_marketing_status(raw: object) -> str | None:
+    """Map official Drugs@FDA marketing-status labels to our status."""
+    if isinstance(raw, dict):
+        raw = raw.get("marketing_status")
     statuses = []
-    # openFDA returns marketing_status as a single STRING (e.g. "Prescription"),
-    # not a list — iterating it directly would walk characters and never match.
-    # Coerce a scalar to a one-element list before scanning.
-    raw = prod.get("marketing_status")
-    items = raw if isinstance(raw, list) else ([raw] if raw else [])
+    items = raw if isinstance(raw, list | tuple) else ([raw] if raw else [])
     for ms in items:
-        text = (ms or "").lower()
+        text = str(ms or "").lower()
         if "prescription" in text:
             statuses.append("approved")
         elif "discontinued" in text:
             statuses.append("discontinued")
-        elif "tentative" in text:
+        elif "tentative" in text or text == "none":
             statuses.append("tentative")
     # Explicit precedence (NOT scan order): a single application can carry
     # several marketing_status values, so return the most decision-relevant one

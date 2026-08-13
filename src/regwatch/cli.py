@@ -14,6 +14,7 @@ from rich.console import Console
 from uvicorn.config import STARTUP_FAILURE
 
 from regwatch.common.logging import configure_logging, get_logger
+from regwatch.sources.policy import FdaSourceFamily
 from regwatch.store.db import init_db
 
 log = get_logger(__name__)
@@ -147,6 +148,7 @@ def cmd_status() -> None:
         {
             "embedding_provider": s.embedding_provider,
             "active_embedding_profile": s.active_embedding_profile,
+            "retrieval_corpus": s.retrieval_corpus,
             "embedding_shadow_profile": s.embedding_shadow_profile,
             "qwen_embedding_model": s.qwen_embedding_model,
             "qwen_embedding_dimension": s.qwen_embedding_dimension,
@@ -160,6 +162,174 @@ def cmd_status() -> None:
             "company_name": s.company_name,
         }
     )
+
+
+def _corpus_families(value: str) -> list[FdaSourceFamily]:
+    if not value.strip():
+        return list(FdaSourceFamily)
+    requested = [item.strip() for item in value.split(",") if item.strip()]
+    try:
+        return [FdaSourceFamily(item) for item in requested]
+    except ValueError as exc:
+        allowed = ", ".join(family.value for family in FdaSourceFamily)
+        rprint(f"[red]error[/red] unknown FDA source family; allowed: {allowed}")
+        raise typer.Exit(code=2) from exc
+
+
+@app.command("authoritative-corpus-plan")
+def cmd_authoritative_corpus_plan(
+    families: str = typer.Option(
+        "",
+        "--families",
+        help="Comma-separated source families; empty means the complete FDA-only universe.",
+    ),
+    application: list[str] | None = typer.Option(
+        None,
+        "--application",
+        help="Limit application-scoped sources to these NDA/ANDA/BLA numbers (repeatable).",
+    ),
+) -> None:
+    """Discover and fingerprint an FDA-only corpus without changing the database."""
+    from regwatch.corpus.discovery import discover_authoritative_manifest
+
+    manifest = discover_authoritative_manifest(
+        families=_corpus_families(families),
+        application_numbers=application or (),
+    )
+    rprint(
+        {
+            "corpus": "authoritative_fda",
+            "manifest_sha256": manifest.sha256,
+            "documents": len(manifest.artifacts),
+            "by_source_family": manifest.counts_by_family(),
+            "by_document_type": manifest.counts_by_document_type(),
+            "source_snapshots": manifest.source_snapshots,
+        }
+    )
+
+
+@app.command("authoritative-corpus-sync")
+def cmd_authoritative_corpus_sync(
+    families: str = typer.Option(
+        "",
+        "--families",
+        help="Comma-separated source families; empty means the complete FDA-only universe.",
+    ),
+    application: list[str] | None = typer.Option(
+        None,
+        "--application",
+        help="Limit application-scoped sources to these NDA/ANDA/BLA numbers (repeatable).",
+    ),
+    limit: int = typer.Option(
+        0,
+        "--limit",
+        min=0,
+        help="Maximum discovered documents to write; 0 means the complete manifest.",
+    ),
+    defer_embeddings: bool = typer.Option(
+        True,
+        "--defer-embeddings/--embed-during-sync",
+        help=(
+            "Write parsed chunks first, then batch embeddings with "
+            "authoritative-corpus-embed. The deferred default avoids one provider "
+            "request per document on the full corpus."
+        ),
+    ),
+    workers: int = typer.Option(
+        0,
+        "--workers",
+        min=0,
+        max=16,
+        help="Bounded document workers; 0 uses CRAWL_CONCURRENCY.",
+    ),
+) -> None:
+    """Build the versioned FDA-only corpus with per-document atomic commits."""
+    from regwatch.corpus.discovery import discover_authoritative_manifest
+    from regwatch.corpus.sync import stats_dict, sync_manifest
+
+    init_db()
+    selected_workers = workers or get_settings().crawl_concurrency
+    manifest = discover_authoritative_manifest(
+        families=_corpus_families(families),
+        application_numbers=application or (),
+    )
+    rprint(
+        {
+            "phase": "discovered",
+            "manifest_sha256": manifest.sha256,
+            "documents": len(manifest.artifacts),
+            "by_source_family": manifest.counts_by_family(),
+            "embeddings_deferred": defer_embeddings,
+            "workers": selected_workers,
+        }
+    )
+    stats = sync_manifest(
+        manifest,
+        limit=limit,
+        defer_embeddings=defer_embeddings,
+        workers=selected_workers,
+    )
+    rprint(stats_dict(stats))
+    raise typer.Exit(code=0 if stats.succeeded else 2)
+
+
+@app.command("authoritative-corpus-status")
+def cmd_authoritative_corpus_status() -> None:
+    """Print exact document/chunk/embedding coverage for the FDA-only corpus."""
+    from regwatch.corpus.status import authoritative_corpus_coverage
+
+    init_db()
+    coverage = authoritative_corpus_coverage()
+    rprint(coverage.as_dict())
+
+
+@app.command("authoritative-corpus-embed")
+def cmd_authoritative_corpus_embed(
+    profile_id: str = typer.Option(
+        "",
+        "--profile-id",
+        help="Embedding profile to backfill; empty means ACTIVE_EMBEDDING_PROFILE.",
+    ),
+    batch_size: int = typer.Option(128, "--batch-size", min=1, max=512),
+    limit: int = typer.Option(
+        0,
+        "--limit",
+        min=0,
+        help="Maximum authoritative chunks this run; 0 means all pending chunks.",
+    ),
+) -> None:
+    """Backfill only authoritative FDA chunks with durable batch checkpoints."""
+    from dataclasses import asdict
+
+    from regwatch.corpus.embeddings import (
+        corpus_embedding_counts,
+        pending_corpus_chunks,
+        write_corpus_embeddings,
+    )
+    from regwatch.process.embedder import (
+        embed_documents,
+        get_embedding_provider,
+        get_embedding_provider_for_profile,
+    )
+    from regwatch.store.vector_store import get_embedding_profile
+
+    init_db()
+    selected = (profile_id or get_settings().active_embedding_profile or "legacy").strip()
+    if selected == "legacy":
+        provider = get_embedding_provider()
+    else:
+        provider = get_embedding_provider_for_profile(get_embedding_profile(selected))
+    processed = 0
+    while limit == 0 or processed < limit:
+        page_size = batch_size if limit == 0 else min(batch_size, limit - processed)
+        pending = pending_corpus_chunks(selected, limit=page_size)
+        if not pending:
+            break
+        embeddings = embed_documents(provider, [chunk.text for chunk in pending])
+        write_corpus_embeddings(selected, pending, embeddings)
+        processed += len(pending)
+        rprint({"profile_id": selected, "embedded_this_run": processed})
+    rprint({"processed": processed, "coverage": asdict(corpus_embedding_counts(selected))})
 
 
 @app.command("embedding-profile-register")

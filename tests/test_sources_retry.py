@@ -1,9 +1,7 @@
-"""Orange Book ZIP + REMS HTML fetches honor the polite-crawler 429/5xx backoff.
+"""The authoritative Orange Book ZIP fetch honors polite-crawler backoff.
 
-Regression for sources-2: both raw ``active_client.get()`` calls were replaced
-with ``get_with_retry``, so a transient 503 is retried instead of surfacing as a
-hard failure — matching every openFDA/DailyMed fetch. These tests fail if either
-fetch reverts to a single un-retried GET.
+Regression for sources-2: a transient 503 is retried instead of surfacing as a
+hard failure. Retired source fetches are covered by fail-closed policy tests.
 
 Mocked transport only; no network. The backoff ``time.sleep`` is stubbed so the
 retry path runs instantly.
@@ -23,7 +21,6 @@ from regwatch.sources.orange_book import (
     product_rows,
     reset_products_cache,
 )
-from regwatch.sources.rems import REMS_INDEX_URL, fetch_rems_index_html
 
 # Minimal valid Orange Book ZIP: only products.txt is required (orange_book.py).
 _PRODUCTS_TXT = (
@@ -32,7 +29,6 @@ _PRODUCTS_TXT = (
     "ALBUTEROL SULFATE~AEROSOL;INHALATION~PROAIR HFA~TEVA~0.09MG~N~020503~001~"
     "AB~Oct 29, 2004~RLD~RS~RX~TEVA BRANDED PHARM\n"
 )
-_REMS_HTML = "<table><tr><th>Drug Name</th></tr><tr><td>PROAIR (NDA #020503)</td></tr></table>"
 
 
 def _products_zip_bytes() -> bytes:
@@ -69,16 +65,6 @@ def test_orange_book_zip_fetch_retries_transient_503() -> None:
     assert route.call_count == 2
     assert result.rows  # the retried success actually parsed rows
     assert result.rows[0]["appl_no"] == "020503"
-
-
-def test_rems_html_fetch_retries_transient_503() -> None:
-    ok = httpx.Response(200, text=_REMS_HTML)
-    with respx.mock(assert_all_called=True) as mock:
-        route = mock.get(REMS_INDEX_URL).mock(side_effect=_transient_then_ok(ok))
-        html = fetch_rems_index_html()
-
-    assert route.call_count == 2
-    assert html == _REMS_HTML
 
 
 def test_orange_book_zip_fetch_single_get_on_success() -> None:

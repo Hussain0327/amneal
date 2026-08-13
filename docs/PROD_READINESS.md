@@ -1,7 +1,8 @@
 # Production readiness checklist
 
-Last updated: 2026-08-12 against `main` at `ae30489` and repository secret names.
-Live app, database and Fly values were last checked 2026-08-11.
+Last updated: 2026-08-13 for the authoritative FDA corpus implementation.
+Live app, database and Fly values were last checked 2026-08-11; repository
+implementation status is intentionally separate from deployed state.
 
 The system is deployed and running. The Fly app `amneal` (release v104) runs a Go
 edge (`go/internal/api`: auth, sessions, rate limiting, native `POST /query`) in
@@ -63,8 +64,11 @@ Two of these are now done. The numbers are kept because other docs cite them.
 - **In place:** production Postgres is Databricks Lakebase
   (`ep-super-hat-d8wkrjd9.database.us-east-2.cloud.databricks.com`, database
   `databricks_postgres`, app role `regwatch_app`), with pgvector in the same
-  database. Rows, vectors and audit all live together. The live Alembic head is
-  `0020_eval_run` and matches the repo, so nothing is pending. 5,494 chunk rows
+  database. Rows, vectors and audit all live together. The last independently
+  verified live Alembic head was `0020_eval_run`; current `main` contains
+  migrations through `0022_deficiency_run_source`, and this branch adds
+  `0023_authoritative_fda_corpus`, so corpus schema deployment is pending. The
+  serving legacy corpus had 5,494 chunk rows
   on 2026-08-11. R5 deleted the SQLite and Chroma dual-mode, so `DATABASE_URL` is
   unconditionally required and the app refuses to boot without it. pgvector
   dimension checks fail fast.
@@ -174,6 +178,9 @@ Two of these are now done. The numbers are kept because other docs cite them.
   presence, corpus count, warnings), `/ready` for DB and vector-store
   reachability plus LLM client constructability, and `/metrics` Prometheus
   counters derived from `query_log` (bearer-gated when `METRICS_TOKEN` is set).
+  The replacement corpus adds a durable run ledger, per-document typed outcome
+  and duration logs, exact document/chunk/embedding coverage, pending counts,
+  source-family breakdowns, policy-violation counts, and activation blockers.
 - **Gap:** Sentry is optional and a missing production DSN only logs a warning.
   Per-turn latency is captured (`query_log.latency_ms`, migration 0016, written
   by both runtimes) but not exported as histograms. Cost gauges, tracing and a
@@ -241,17 +248,25 @@ Two of these are now done. The numbers are kept because other docs cite them.
 ### 9. Structured-source layer
 
 - **Where:** [`src/regwatch/sources/`](../src/regwatch/sources/) handlers,
-  [`src/regwatch/whitepaper/`](../src/regwatch/whitepaper/) populator.
-- **Have:** Orange Book parses patents and exclusivity from the same cached ZIP;
-  DailyMed (SPL) is its own handler; the White Paper populator persists Orange
-  Book product, patent and exclusivity rows plus the DailyMed SPL resolution with
-  `last_fetched_at` freshness (migration 0005) and synthesizes a multi-source
-  cited cell graph across Orange Book, Drugs@FDA, NDC, DailyMed, Shortages, REMS
-  and PSG.
-- **Gap:** the Ask and Assemble read paths still query live HTTP without
-  persisting source rows or freshness.
-- **Done when:** persist-and-cite plus freshness is the default on every read
-  path, not just the White Paper.
+  [`src/regwatch/corpus/`](../src/regwatch/corpus/) pipeline, migration 0023,
+  and [`AUTHORITATIVE_FDA_CORPUS.md`](AUTHORITATIVE_FDA_CORPUS.md).
+- **Have:** an exact five-family source policy; official Drugs@FDA and Orange
+  Book ZIP adapters; action-package, PSG, and reviewed FDA BE-guidance discovery;
+  versioned documents; content-addressed artifacts; bounded fetch/parse;
+  per-document atomic chunk publication; durable run checkpoints; deferred,
+  resumable embeddings; exact coverage; and a fail-closed reversible activation
+  gate. A complete 2026-08-13 discovery found 140,339 source records. Approved
+  Drugs@FDA labeling now supplies White Paper and Assemble label evidence.
+- **Policy closure:** retired public API configuration/endpoints are removed.
+  DailyMed, NDC, shortage, and REMS acquisition paths are not routable and fail
+  closed if an old caller reaches their compatibility shims.
+- **Gap:** migration 0023, the production-scale fetch/parse/chunk run, profile
+  embedding backfill, new-corpus retrieval/citation evaluation, serving smoke,
+  and rollback rehearsal have not been executed in the target environment.
+- **Done when:** all 140,339 source records (or an explained newer manifest) are
+  processed with zero document errors, authoritative chunks have 100% selected-
+  profile coverage, status reports `activation_ready=true`, evaluation passes,
+  and cutover plus rollback are rehearsed.
 
 ### 10. Secrets management
 
@@ -260,8 +275,8 @@ Two of these are now done. The numbers are kept because other docs cite them.
 - **Have:** `.env`, `.env.local`, local data, generated docs and logs are
   gitignored. Production uses Fly and Vercel platform secrets for `DATABASE_URL`,
   the Databricks generation and embedding tokens, `INTERNAL_RAG_TOKEN`,
-  `SENTRY_DSN` and the optional `OPENFDA_API_KEY`. The Actions secret surface is
-  documented in the runbook.
+  and `SENTRY_DSN`. The authoritative FDA source layer needs no retired public
+  API credential. The Actions secret surface is documented in the runbook.
 - **Gap:** production still needs an approved secret manager or platform policy,
   and key rotation that is documented and rehearsed.
 - **Done when:** secrets come from approved platform or secret-manager injection
@@ -290,7 +305,9 @@ Two of these are now done. The numbers are kept because other docs cite them.
   an uncited one.
 - Pluggable `EmbeddingProvider` and `LLMProvider`, so no model name is hard-coded
   in business logic.
-- Alembic baseline plus incremental migrations, live head `0020_eval_run`.
+- Alembic baseline plus incremental migrations; current `main` contains
+  `0022_deficiency_run_source`, this branch adds `0023_authoritative_fda_corpus`,
+  and the last independently verified live head remains 0020.
 - CI: ruff, black, mypy strict, pytest, the live Databricks eval, docker build,
   the Go proxy lane, schema-drift checks and the cross-service contract lane, on
   Python 3.12 (see [`CI_CD.md`](CI_CD.md)).

@@ -1,6 +1,6 @@
 # REGWATCH Non-Technical Guide
 
-Last updated: 2026-08-11
+Last updated: 2026-08-13
 
 Plain English, for Clinical Regulatory Affairs, business stakeholders, managers,
 and reviewers who do not need to read code.
@@ -43,9 +43,9 @@ Today it can:
   not just the handful the FDA index page shows at a glance.
 - Parse PSG PDFs page by page and split the text into searchable pieces.
 - Store those pieces so they can be searched by meaning, not just by keyword.
-- Ingest the other FDA sources as structured records: Orange Book (products,
-  patents, exclusivity), Drugs@FDA, the NDC Directory, DailyMed SPL labels,
-  Drug Shortages, and REMS.
+- Discover and version the approved FDA source universe: Drugs@FDA, its
+  approval/action packages, Product-Specific Guidances, general FDA
+  bioequivalence guidance, and the Orange Book.
 - Answer questions in a chat, with FDA citations attached.
 - Work out which exact product you mean before answering, and ask you which one
   when the name is ambiguous.
@@ -58,27 +58,29 @@ Today it can:
   limits.
 - Log every question and answer for auditability.
 
-The stored corpus held 5,494 searchable text pieces when it was measured on
-2026-08-11.
+The currently serving PSG corpus held 5,494 searchable text pieces when it was
+measured on 2026-08-11. A replacement FDA-only pipeline is implemented but not
+yet activated. Its complete 2026-08-13 discovery found 140,339 source records;
+those are documents, not chunks or embeddings. The final searchable-piece and
+embedding totals will be reported only after the full backfill runs.
 
 ## The FDA Sources
 
-Your manager provided six FDA database areas. REGWATCH treats each as a
-first-class source, and adds DailyMed SPL labels as a seventh.
+REGWATCH now has one exact five-family source policy. Anything outside it is
+rejected instead of used as a quiet fallback.
 
 | FDA source | What people use it for | How REGWATCH uses it |
 |---|---|---|
 | Orange Book | RLD, reference standard, TE codes, patents, exclusivity | Structured data, looked up |
 | Product-Specific Guidances | Product-specific bioequivalence guidance | PDFs parsed, text searched, pages cited |
-| Drugs@FDA | Applications, sponsors, approval history, labels | Structured data, looked up |
-| Drug Shortages | Current shortage status | Structured data, refreshed |
-| NDC Directory | NDC product and package information | Structured data, looked up |
-| REMS | REMS programs and requirements | Structured data, source cited |
-| DailyMed SPL | Structured product labels for the RLD | Structured data, cited |
+| Drugs@FDA | Applications, products, sponsors, approval history, approved labels and letters | Official snapshot rows plus FDA documents |
+| SBOA / action packages | Clinical, statistical, clinical-pharmacology, quality, integrated and multidisciplinary reviews | FDA review documents parsed and cited |
+| FDA BE guidance | General bioequivalence guidance | Reviewed FDA guidance PDFs parsed and cited |
 
-Not every source is handled the same way. Product-Specific Guidances are PDFs,
-so they get text search and page citations. The rest behave like database rows,
-so they get looked up directly.
+Not every source is represented the same way. Structured FDA snapshot rows are
+stored as citable records; FDA PDFs and pages are parsed into page-aware
+passages. Every record keeps its exact source family, document type, source URL,
+version, and locator.
 
 ## How The Assistant Answers
 
@@ -217,16 +219,17 @@ it has the underlying FDA record in hand.
 
 The dossier builds a research brief for one product: matched PSGs, extracted
 bioequivalence requirements, cited PSG fields, RLD label information from
-openFDA when available, a PSG-based Q&A summary, and a checklist scaffold.
+approved Drugs@FDA labeling, a cited Q&A summary, and a checklist scaffold.
 
 The checklist is not a claim about what the company has done. It only organizes
 what the FDA source material appears to call for.
 
 ## What The White Paper Feature Does
 
-The White Paper builds a structured product brief that pulls from all the FDA
-sources at once: Orange Book, Drugs@FDA, NDC, DailyMed, Drug Shortages, REMS,
-and the PSGs.
+The White Paper builds a structured product brief from approved Drugs@FDA
+labeling and metadata, Orange Book records, PSGs, action-package evidence, and
+FDA BE guidance. A field that would need a source outside that boundary stays
+for analyst input.
 
 Each cell is one of three things:
 

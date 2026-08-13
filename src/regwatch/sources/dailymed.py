@@ -1,15 +1,9 @@
-"""DailyMed REST v2 source handler (SPL labeling).
+"""Retired DailyMed compatibility types and pure SPL XML parsers.
 
-Resolves an FDA application number to the current SPL ``setid``, extracts
-LOINC-coded label sections from the SPL XML (stdlib ``xml.etree`` — no new
-dependencies), and enumerates label media assets. Sections are surfaced
-verbatim with provenance; nothing here interprets a label (INV-3/INV-5).
-
-Application-number format (verified empirically against the live API):
-``spls.json?application_number=`` matches the *prefixed, zero-padded* form
-(``NDA020503``); bare digits return zero rows. A prefixed input queries
-exactly that application; only genuinely bare digits expand to the prefixed
-NDA→ANDA→BLA candidates (contract C1).
+DailyMed is outside the authoritative FDA corpus policy.  Public acquisition
+entry points remain as fail-closed shims so an old caller cannot silently make
+an out-of-policy network request.  The pure XML helpers remain for reading
+historical data already stored by earlier releases.
 """
 
 from __future__ import annotations
@@ -22,22 +16,20 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from config.settings import get_settings
 
 from regwatch.sources._utils import (
-    APPLICATION_PREFIXES,
-    clean_application_number,
     clean_text,
-    get_with_retry,
-    owned_client,
 )
+from regwatch.sources.policy import SourcePolicyError
 from regwatch.sources.types import SourceKind, SourceQuery, SourceRecord
 
-DAILYMED_API_BASE = "https://dailymed.nlm.nih.gov/dailymed/services/v2"
-SPLS_ENDPOINT = f"{DAILYMED_API_BASE}/spls.json"
-SPL_XML_URL_TEMPLATE = DAILYMED_API_BASE + "/spls/{setid}.xml"
-SPL_MEDIA_URL_TEMPLATE = DAILYMED_API_BASE + "/spls/{setid}/media.json"
-SPL_VIEW_URL_TEMPLATE = "https://dailymed.nlm.nih.gov/dailymed/drugInfo.cfm?setid={setid}"
+# Kept as empty compatibility exports for downstream imports.  No retired
+# endpoint string or credential path remains in the runtime tree.
+DAILYMED_API_BASE = ""
+SPLS_ENDPOINT = ""
+SPL_XML_URL_TEMPLATE = ""
+SPL_MEDIA_URL_TEMPLATE = ""
+SPL_VIEW_URL_TEMPLATE = ""
 
 _HL7_NS = "{urn:hl7-org:v3}"
 _PUBLISHED_FORMAT = "%b %d, %Y"  # DailyMed's published_date shape, e.g. "Oct 08, 2019"
@@ -116,38 +108,9 @@ def resolve_setid(
     prefer_labelers: Sequence[str] = (),
     client: httpx.Client | None = None,
 ) -> SetidResolution | None:
-    """Resolve an application number to its current SPL setid.
-
-    DailyMed lists repackager relabels alongside the sponsor's own SPL, and a
-    repackager's relabel is frequently the most recently published -- so the
-    pick is tiered: (1) most recent listing whose TITLE matches a
-    ``prefer_titles`` name (brand / trade / sponsor), (2) most recent listing
-    whose bracketed LABELER matches a ``prefer_labelers`` name (Drugs@FDA
-    sponsor / Orange Book applicant), (3) most recent overall. Matching is
-    punctuation-normalized ("PROVENTIL-HFA" matches "PROVENTIL HFA ...") with
-    a minimum-length guard so short tokens cannot false-match. Returns
-    ``None`` only when DailyMed answered successfully and listed no SPL for
-    the number ("queried, genuinely absent"). HTTP failures propagate so
-    callers can collapse to ``analyst_input_required``.
-    """
-    listings = _spl_listings(application_number, client)
-    best = _select_listing(listings, prefer_titles, prefer_labelers)
-    if best is None:
-        return None
-    setid = clean_text(best.get("setid"))
-    if not setid:
-        return None
-    title = clean_text(best.get("title"))
-    return SetidResolution(
-        setid=setid,
-        title=title,
-        published=clean_text(best.get("published_date")) or None,
-        source_url=SPL_VIEW_URL_TEMPLATE.format(setid=setid),
-        fetched_at=datetime.now(UTC),
-        labeler=_listing_labeler(title),
-        candidate_labelers=_distinct_labelers(listings),
-        candidates=_candidates(listings),
-    )
+    """Fail closed: new label acquisition is owned by Drugs@FDA."""
+    del application_number, prefer_titles, prefer_labelers, client
+    raise SourcePolicyError("DailyMed is outside the authoritative FDA corpus policy")
 
 
 def fetch_spl_sections(
@@ -156,32 +119,15 @@ def fetch_spl_sections(
     *,
     client: httpx.Client | None = None,
 ) -> dict[str, SplSection]:
-    """Fetch the SPL XML once and extract the requested LOINC-coded sections.
-
-    For structure heuristics (PLR/PLLR) that need the full section-code list,
-    use :func:`fetch_spl_xml` + :func:`parse_spl_section_codes` on the same
-    document instead of re-fetching.
-    """
-    doc = fetch_spl_xml(setid, client=client)
-    return parse_spl_sections(
-        doc.xml,
-        loinc_codes,
-        source_url=doc.source_url,
-        fetched_at=doc.fetched_at,
-    )
+    """Fail closed: use approved Drugs@FDA labeling from the corpus."""
+    del setid, loinc_codes, client
+    raise SourcePolicyError("DailyMed is outside the authoritative FDA corpus policy")
 
 
 def fetch_spl_xml(setid: str, *, client: httpx.Client | None = None) -> SplXmlDocument:
-    """GET ``spls/{setid}.xml`` with retry/backoff and a descriptive UA."""
-    with owned_client(client, _dailymed_client) as active_client:
-        resp = get_with_retry(active_client, SPL_XML_URL_TEMPLATE.format(setid=setid))
-        resp.raise_for_status()
-        return SplXmlDocument(
-            setid=setid,
-            xml=resp.text,
-            source_url=SPL_VIEW_URL_TEMPLATE.format(setid=setid),
-            fetched_at=datetime.now(UTC),
-        )
+    """Fail closed: use approved Drugs@FDA labeling from the corpus."""
+    del setid, client
+    raise SourcePolicyError("DailyMed is outside the authoritative FDA corpus policy")
 
 
 def parse_spl_sections(
@@ -228,27 +174,13 @@ def parse_spl_section_codes(xml_text: str) -> list[str]:
 
 
 def fetch_media(setid: str, *, client: httpx.Client | None = None) -> list[SplMedia]:
-    """List the SPL's media assets from ``spls/{setid}/media.json``."""
-    with owned_client(client, _dailymed_client) as active_client:
-        resp = get_with_retry(active_client, SPL_MEDIA_URL_TEMPLATE.format(setid=setid))
-        resp.raise_for_status()
-        payload = resp.json()
-    data = payload.get("data") if isinstance(payload, dict) else None
-    media = data.get("media") if isinstance(data, dict) else None
-    out: list[SplMedia] = []
-    for item in media or []:
-        if not isinstance(item, dict):
-            continue
-        name = clean_text(item.get("name"))
-        url = clean_text(item.get("url"))
-        if not name or not url:
-            continue
-        out.append(SplMedia(name=name, url=url, mime_type=clean_text(item.get("mime_type"))))
-    return out
+    """Fail closed: media outside the approved source universe is not fetched."""
+    del setid, client
+    raise SourcePolicyError("DailyMed is outside the authoritative FDA corpus policy")
 
 
 class DailyMedHandler:
-    """SPL listings by application number, as structured source records."""
+    """Fail-closed compatibility handler for the retired source."""
 
     source = SourceKind.DAILYMED
 
@@ -258,34 +190,8 @@ class DailyMedHandler:
         *,
         client: httpx.Client | None = None,
     ) -> list[SourceRecord]:
-        if not query.application_number:
-            return []
-        listings = _spl_listings(query.application_number, client)
-        app_no = clean_application_number(query.application_number)
-        records: list[SourceRecord] = []
-        for listing in listings[: query.limit]:
-            setid = clean_text(listing.get("setid"))
-            if not setid:
-                continue
-            identifiers = {"setid": setid, "token": f"SPL_{setid}"}
-            if app_no:
-                identifiers["application_number"] = app_no
-            title = clean_text(listing.get("title"))
-            records.append(
-                SourceRecord(
-                    source=SourceKind.DAILYMED,
-                    title=f"DailyMed SPL: {title or setid}",
-                    source_url=SPL_VIEW_URL_TEMPLATE.format(setid=setid),
-                    identifiers=identifiers,
-                    fields={
-                        "title": title or None,
-                        "published": clean_text(listing.get("published_date")) or None,
-                        "spl_version": listing.get("spl_version"),
-                    },
-                    raw=listing,
-                )
-            )
-        return records
+        del query, client
+        raise SourcePolicyError("DailyMed is outside the authoritative FDA corpus policy")
 
 
 # Hard cap on pagination follows: 10 pages * pagesize 100 = 1,000 listings.
@@ -296,52 +202,15 @@ def _spl_listings(
     application_number: str,
     client: httpx.Client | None,
 ) -> list[dict[str, Any]]:
-    """All SPL listings (every page) for the application number.
-
-    A prefixed input — the populator always sends one (contract C1) — queries
-    EXACTLY that application. Candidate expansion (prefixed NDA→ANDA→BLA,
-    first with hits wins) happens only for genuinely bare digits: DailyMed
-    does not match bare digits (verified empirically), so querying them
-    directly would fabricate a "no SPL" answer.
-    """
-    cleaned = clean_application_number(application_number)
-    if cleaned is None:
-        return []
-    if cleaned.isdigit():
-        candidates = [f"{prefix}{cleaned}" for prefix in APPLICATION_PREFIXES]
-    else:
-        candidates = [cleaned]
-    with owned_client(client, _dailymed_client) as active_client:
-        for candidate in candidates:
-            listings = _paged_listings(active_client, candidate)
-            if listings:
-                return listings
-    return []
+    """Fail closed even for callers that reached the former private helper."""
+    del application_number, client
+    raise SourcePolicyError("DailyMed is outside the authoritative FDA corpus policy")
 
 
 def _paged_listings(client: httpx.Client, candidate: str) -> list[dict[str, Any]]:
-    """Aggregate every spls.json page for one candidate (hard cap 10 pages).
-
-    DailyMed pages at ``pagesize`` (live ANDA208677 shows total_elements 103,
-    so a single 100-row page silently drops listings); the response's own
-    pagination metadata (``total_pages`` / ``next_page_url``) drives the loop.
-    """
-    listings: list[dict[str, Any]] = []
-    for page in range(1, _MAX_SPL_PAGES + 1):
-        resp = get_with_retry(
-            client,
-            SPLS_ENDPOINT,
-            {"application_number": candidate, "pagesize": 100, "page": page},
-        )
-        if resp.status_code == 404:
-            break
-        resp.raise_for_status()
-        payload = resp.json()
-        data = payload.get("data") or []
-        listings.extend(item for item in data if isinstance(item, dict))
-        if not _has_next_page(payload.get("metadata"), page):
-            break
-    return listings
+    """Fail closed even for callers that reached the former private helper."""
+    del client, candidate
+    raise SourcePolicyError("DailyMed is outside the authoritative FDA corpus policy")
 
 
 def _has_next_page(metadata: object, page: int) -> bool:
@@ -510,8 +379,3 @@ def _section_text(section: ET.Element) -> str:
             continue
         parts.extend(child.itertext())
     return clean_text(" ".join(parts))
-
-
-def _dailymed_client() -> httpx.Client:
-    s = get_settings()
-    return httpx.Client(timeout=s.http_timeout_s, headers={"User-Agent": s.user_agent})

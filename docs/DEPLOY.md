@@ -1,7 +1,7 @@
 # DEPLOY - Lakebase + Fly.io + Vercel runbook
 
-Last updated: 2026-08-12 for Watch workflow parity; live production values were
-last checked 2026-08-11.
+Last updated: 2026-08-13 for the authoritative FDA corpus implementation; live
+production values were last checked 2026-08-11.
 
 This is the production runbook. Read it top to bottom the first time; after that
 jump to the section you need. Section numbers are stable, other files link to
@@ -63,7 +63,8 @@ Production Postgres is Databricks Lakebase, in the company's own tenant.
 - Database `databricks_postgres`, app role `regwatch_app`
 - pgvector is preinstalled in the `extensions` schema
 - 5,494 chunk rows on 2026-08-11, which is exactly what `/health` reports as
-  `corpus_count`
+  `corpus_count`. These are the serving legacy PSG chunks, not the replacement
+  FDA corpus discovered on 2026-08-13.
 
 An older note argued for staying on Supabase
 (`docs/DATABRICKS_ADOPTION_2026-07-28.md`). That call was reversed and the move
@@ -112,8 +113,11 @@ The Fly deploy is the single migration authority. `fly.toml` sets
 machine BEFORE the rolling replace, so a schema-advancing release migrates
 itself. There is no manual pre-migration step on the normal path.
 
-The live DB is at `0020_eval_run`, which matches the repo head
-(`migrations/versions/0020_eval_run.py`). Nothing is pending.
+The last independently verified live DB head is `0020_eval_run`. Current
+`main` contains migrations through `0022_deficiency_run_source`; this branch
+adds `0023_authoritative_fda_corpus`, so its eventual release advances schema
+before any corpus backfill. Migration 0023 makes no network calls and
+intentionally writes no corpus rows.
 
 The boot guard is the other half. The entrypoint runs `regwatch init-db`, which
 compares the alembic stamp to the head this image expects and refuses to start on
@@ -131,6 +135,53 @@ guard then kills every machine.
 The daily Watch cron does NOT migrate, on purpose. If a migration is merged but
 not deployed, the cron fails loudly instead of pushing the live schema ahead of
 the running API machines.
+
+### 2.1 Authoritative FDA corpus rollout
+
+The complete 2026-08-13 read-only discovery found 140,339 source records. This
+is a manifest denominator, not a chunk or embedding count. Do not switch serving
+retrieval during schema deployment.
+
+After the release is healthy, use a separately supervised worker environment
+with the same database, data volume, and active embedding profile:
+
+```bash
+# read-only: reproduce the current official-source manifest
+uv run regwatch authoritative-corpus-plan
+
+# canary: bounded application-scoped write, incapable of retiring other docs
+uv run regwatch authoritative-corpus-sync \
+  --application NDA020503 --limit 25 --defer-embeddings --workers 4
+uv run regwatch authoritative-corpus-status
+
+# full build: resumable, per-document commits; no model traffic in this phase
+uv run regwatch authoritative-corpus-sync --defer-embeddings --workers 4
+
+# profile-scoped, durable embedding batches
+uv run regwatch authoritative-corpus-embed \
+  --profile-id "$ACTIVE_EMBEDDING_PROFILE" --batch-size 128
+uv run regwatch authoritative-corpus-status
+```
+
+The final status must report `activation_ready: true`, zero policy violations,
+all five families, a successful complete-universe run, exact document parity,
+and `embedded_chunks == chunks`. Run the new-namespace retrieval/citation eval
+and a serving canary before changing:
+
+```bash
+REGWATCH_RETRIEVAL_CORPUS=authoritative_fda
+```
+
+API boot independently checks readiness and refuses an unsafe cutover. Rollback
+is configuration-only and does not delete corpus data:
+
+```bash
+REGWATCH_RETRIEVAL_CORPUS=legacy
+```
+
+The full acceptance criteria, snapshot checksums, failure semantics, and Google
+Well-Architected/SRE control mapping are in
+[`AUTHORITATIVE_FDA_CORPUS.md`](AUTHORITATIVE_FDA_CORPUS.md).
 
 ## 3. API on Fly.io
 
@@ -210,7 +261,6 @@ These are the names set on the app today:
 # INTERNAL_RAG_TOKEN        Go proxy -> Python /internal/query/compute auth
 # METRICS_TOKEN             bearer gate on GET /metrics; unset = world-readable
 # SENTRY_DSN                error tracking
-# OPENFDA_API_KEY           optional, raises the openFDA rate limit
 # D1_ALLOWED_LLM_MODELS     JSON array of serving endpoints / served model ids
 fly secrets set \
   DATABASE_URL="postgresql://regwatch_app:...@ep-...cloud.databricks.com:5432/databricks_postgres" \
@@ -229,7 +279,6 @@ fly secrets set \
   INTERNAL_RAG_TOKEN="..." \
   METRICS_TOKEN="..." \
   SENTRY_DSN="https://...ingest.sentry.io/..." \
-  OPENFDA_API_KEY="..." \
   D1_ALLOWED_LLM_MODELS='["workspace.default.regwatch","gpt-oss-120b-080525"]'
 ```
 

@@ -44,8 +44,6 @@ name: watch-daily
 #                       then compares the named profile's fingerprint fields
 #                       (model, revision and dimension included) with its
 #                       immutable database registration before the crawl starts.
-#   OPENFDA_API_KEY     OPTIONAL: only raises the openFDA rate limit; the run
-#                       works without it. Leave unset to omit.
 # While WATCH_DATABASE_URL is unset, the job skips cleanly (no failures).
 #
 # Optional alerting secrets (this cron is the SOLE prod driver of the pipeline,
@@ -107,7 +105,6 @@ jobs:
       # This key serves change summaries, extraction and the advisory sweep,
       # never embeddings.
       OPENAI_API_KEY: ${{ secrets.WATCH_OPENAI_API_KEY }}
-      OPENFDA_API_KEY: ${{ secrets.OPENFDA_API_KEY }}
       # entrypoint.sh runs init-db on boot; here we run alembic + watch directly,
       # so this is informational parity with the container only.
       SENTRY_ENVIRONMENT: "production"

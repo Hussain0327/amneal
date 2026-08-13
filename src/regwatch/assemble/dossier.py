@@ -4,7 +4,7 @@ Inputs: active ingredient + (optional) dosage form + (optional) RLD.
 
 Sections (each line carries a source link):
   A. Matched PSG(s) and extracted BE requirements (with field-level citations)
-  B. RLD label (openFDA `/drug/label.json`)
+  B. RLD approved label from Drugs@FDA
   C. Applicable guidances surfaced via retrieval (cited)
   D. Dissolution method link (Dissolution Methods Database)
   E. Requirements checklist scaffold — derived from the PSG's structured fields
@@ -15,11 +15,11 @@ company has done. (Spec §10.15.)
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
-import httpx
-from config.settings import get_settings
 from sqlalchemy import desc
+from sqlalchemy import text as sa_text
 from sqlmodel import select
 
 from regwatch.common.audit import log_query
@@ -28,14 +28,21 @@ from regwatch.common.observability import capture_exception
 from regwatch.common.text_normalize import canonical_name, names_match, stripped_name
 from regwatch.generate.grounded_qa import ask
 from regwatch.generate.llm import current_model_name
-from regwatch.sources._utils import openfda_params
 from regwatch.store.db import session_scope
 from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
 
 log = get_logger(__name__)
 
-OPENFDA_LABEL_URL = "https://api.fda.gov/drug/label.json"
-DISSOLUTION_DB_URL = "https://www.accessdata.fda.gov/scripts/cder/dissolution/dsp_SearchResults.cfm"
+
+def _escape_lucene_phrase(value: str) -> str:
+    """Deprecated pure escape helper retained for stored-client compatibility.
+
+    The application no longer constructs Lucene queries or calls the retired
+    API; keeping this side-effect-free function avoids breaking code that only
+    imported its escaping behavior.
+    """
+
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _form_tokens(value: str) -> set[str]:
@@ -101,15 +108,6 @@ def _log_query_safe(**kwargs: Any) -> None:
     except Exception as exc:
         log.warning("assemble_audit_write_failed", error_type=type(exc).__name__)
         capture_exception(exc)
-
-
-def _escape_lucene_phrase(value: str) -> str:
-    """Escape a value for embedding inside an openFDA Lucene double-quoted phrase.
-
-    A raw double-quote in ``active_ingredient`` would otherwise terminate the
-    phrase early and corrupt the query (and its displayed source URL).
-    """
-    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _find_matching_psgs(active_ingredient: str, dosage_form: str | None) -> list[dict[str, Any]]:
@@ -186,39 +184,83 @@ def _latest_psg_version_summary(doc_id: int) -> str | None:
 
 
 def _fetch_rld_label(active_ingredient: str, rld: str | None) -> dict[str, Any] | None:
-    """Fetch one RLD label record from openFDA. Returns None on any failure."""
-    s = get_settings()
-    if rld and rld.isdigit():
-        query = f'openfda.application_number:"NDA{rld}"'
-    else:
-        # Search by generic name (active ingredient). Escape the interpolated
-        # value so a double-quote in the name can't break out of the phrase.
-        query = f'openfda.generic_name:"{_escape_lucene_phrase(stripped_name(active_ingredient))}"'
-    params = openfda_params(query, 1)
+    """Read one current approved-label document from the FDA-only corpus."""
+    digits = "".join(character for character in (rld or "") if character.isdigit())
+    normalized = canonical_name(active_ingredient)
     try:
-        with httpx.Client(timeout=s.http_timeout_s, headers={"User-Agent": s.user_agent}) as c:
-            resp = c.get(OPENFDA_LABEL_URL, params=params)
-        if resp.status_code != 200:
-            return None
-        results = resp.json().get("results") or []
-        if not results:
-            return None
-        r = results[0]
-        openfda = r.get("openfda", {}) or {}
+        with session_scope() as session:
+            rows = (
+                session.connection()
+                .execute(
+                    sa_text(
+                        "SELECT DISTINCT ON (d.id) d.id, d.brand_name, d.active_ingredient, "
+                        "d.normalized_name, d.application_number, d.source_url, "
+                        "c.fda_version_id FROM fda_document d JOIN chunk c "
+                        "ON c.fda_document_id = d.id WHERE d.is_active "
+                        "AND d.document_type = 'approved_label' "
+                        "AND (:digits = '' OR regexp_replace(COALESCE(d.application_number, ''), "
+                        "'[^0-9]', '', 'g') = :digits) "
+                        "ORDER BY d.id, c.fda_version_id DESC"
+                    ),
+                    {"digits": digits.zfill(6) if digits else ""},
+                )
+                .mappings()
+                .all()
+            )
+            if not digits:
+                rows = [
+                    row
+                    for row in rows
+                    if names_match(
+                        normalized,
+                        stripped_name(active_ingredient),
+                        str(row["normalized_name"] or ""),
+                        str(row["active_ingredient"] or ""),
+                    )
+                ]
+            if not rows:
+                return None
+            label = rows[0]
+            chunks = (
+                session.connection()
+                .execute(
+                    sa_text(
+                        "SELECT COALESCE(page, 1) AS page, text FROM chunk "
+                        "WHERE fda_document_id = :document_id "
+                        "AND fda_version_id = :version_id ORDER BY page, ordinal, id"
+                    ),
+                    {
+                        "document_id": label["id"],
+                        "version_id": label["fda_version_id"],
+                    },
+                )
+                .mappings()
+                .all()
+            )
+        indications, indications_page = _label_excerpt(chunks, "indications and usage")
+        dosage, dosage_page = _label_excerpt(chunks, "dosage and administration")
         return {
-            "brand_name": (openfda.get("brand_name") or [None])[0],
-            "generic_name": (openfda.get("generic_name") or [None])[0],
-            "application_number": (openfda.get("application_number") or [None])[0],
-            "indications_and_usage": " ".join(r.get("indications_and_usage") or [])[:1500],
-            "dosage_and_administration": " ".join(r.get("dosage_and_administration") or [])[:1500],
-            # Encode via httpx so the displayed/clickable Source link is
-            # syntactically valid (spaces/quotes escaped); api_key is left out on
-            # purpose (never surface the key in a shown URL).
-            "source_url": str(httpx.URL(OPENFDA_LABEL_URL, params={"search": query})),
+            "brand_name": label["brand_name"],
+            "generic_name": label["active_ingredient"],
+            "application_number": label["application_number"],
+            "indications_and_usage": indications,
+            "indications_page": indications_page,
+            "dosage_and_administration": dosage,
+            "dosage_page": dosage_page,
+            "source_url": label["source_url"],
         }
     except Exception as exc:
         log.warning("rld_label_fetch_failed", error=str(exc))
         return None
+
+
+def _label_excerpt(rows: Sequence[Any], heading: str) -> tuple[str, int | None]:
+    for row in rows:
+        text = str(row["text"] or "")
+        offset = text.lower().find(heading)
+        if offset >= 0:
+            return text[offset : offset + 1_500], int(row["page"])
+    return "", None
 
 
 def _applicable_guidance_question(active_ingredient: str, dosage_form: str | None) -> str:
@@ -412,7 +454,7 @@ def _assemble_dossier(
         if rld_label.get("indications_and_usage"):
             md_lines.append(f"  - **Indications**: {rld_label['indications_and_usage'][:400]}…")
     else:
-        md_lines.append("- *RLD label not available from openFDA (or rate-limited).*")
+        md_lines.append("- *RLD approved label is not present in the FDA corpus.*")
 
     # Section D — Applicable guidances (retrieval-driven, cited)
     md_lines.append("")
@@ -473,10 +515,13 @@ def _assemble_dossier(
             for c in qa.citations:
                 md_lines.append(f"- {c.short_name}, p.{c.page}: {c.source_url}")
 
-    # Section E — Dissolution methods link
+    # Section E — dissolution requirements are limited to allowed sources.
     md_lines.append("")
     md_lines.append("## E. Dissolution Method")
-    md_lines.append(f"- See FDA Dissolution Methods Database: {DISSOLUTION_DB_URL}")
+    md_lines.append(
+        "- See the cited PSG and FDA bioequivalence guidance above; no source "
+        "outside the authoritative corpus is consulted."
+    )
 
     # Section F — Requirements checklist scaffold
     md_lines.append("")

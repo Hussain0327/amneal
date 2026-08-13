@@ -56,6 +56,9 @@ SPINE_WIRE_KEYS = {
     "product_numbers",
     "setid",
     "spl_candidates",
+    "approved_label_document_id",
+    "approved_label_source_url",
+    "approved_label_updated_at",
     "warnings",
 }
 
@@ -135,42 +138,12 @@ def test_ready_success_omits_failure_keys() -> None:
 def test_resolve_spine_wire_keys_exact(
     auth_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from regwatch.sources import dailymed
-    from regwatch.sources.dailymed import SetidResolution, SplCandidate
-
     install_fake_sources(monkeypatch)
-
-    # The shared stub resolves with zero candidates; carry one so the typed
-    # spl_candidates path (WhitepaperSplCandidate) is actually exercised.
-    def _resolve_with_candidates(
-        application_number: str,
-        *,
-        prefer_titles: object = (),
-        prefer_labelers: object = (),
-        client: object = None,
-    ) -> SetidResolution:
-        return SetidResolution(
-            setid="abc-def-123",
-            title="PROVENTIL HFA [MERCK]",
-            published="Oct 08, 2019",
-            source_url="https://dailymed.nlm.nih.gov/dailymed/drugInfo.cfm?setid=abc-def-123",
-            fetched_at=datetime.now(UTC),
-            labeler="MERCK",
-            candidate_labelers=("MERCK",),
-            candidates=(
-                SplCandidate(
-                    setid="abc-def-123",
-                    title="PROVENTIL HFA [MERCK]",
-                    labeler="MERCK",
-                    published="Oct 08, 2019",
-                ),
-            ),
-        )
-
-    monkeypatch.setattr(dailymed, "resolve_setid", _resolve_with_candidates)
     r = auth_client.post("/resolve", json={"rld_name": RLD_NAME, "application_number": APPL_NO})
     assert r.status_code == 200, r.text
     body = r.json()
     assert set(body) == SPINE_WIRE_KEYS
-    assert body["spl_candidates"], "the stubbed resolution carries one candidate"
-    assert set(body["spl_candidates"][0]) == {"setid", "title", "labeler", "published"}
+    assert body["setid"] is None
+    assert body["spl_candidates"] == []
+    assert body["approved_label_document_id"] == "drugs-at-fda:application-doc:77"
+    assert body["approved_label_source_url"].startswith("https://www.accessdata.fda.gov/")

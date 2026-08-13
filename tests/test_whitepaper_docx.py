@@ -154,7 +154,9 @@ def test_prefix_matched_labels_fill_their_rows(
         r.cells[0].text.strip(): r.cells[-1].text for t in doc.tables for r in t.rows if r.cells
     }
     epc_row = next(v for k, v in by_label.items() if k.startswith("Established Pharmacologic"))
-    assert "[EPC]" in epc_row
+    # EPC's former structured source is outside the authoritative corpus; the
+    # prefix-matched row must remain explicit analyst input, never a legacy fact.
+    assert "Analyst input required" in epc_row
     pregnancy_row = next(v for k, v in by_label.items() if k.startswith("Pregnancy Registry"))
     assert "1-800-555-0100" in pregnancy_row
     salable_row = next(v for k, v in by_label.items() if k.startswith("Salable Unit"))

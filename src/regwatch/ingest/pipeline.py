@@ -32,18 +32,22 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from regwatch.common.logging import get_logger
+from regwatch.ingest.embedding_writer import (
+    ProfileEmbeddingBatch as _ProfileEmbeddingBatch,
+)
+from regwatch.ingest.embedding_writer import (
+    profile_document_embeddings as _profile_document_embeddings,
+)
+from regwatch.ingest.embedding_writer import (
+    write_profile_batches as _write_profile_batches,
+)
 from regwatch.ingest.pdf_parser import ParsedPdf, parse_pdf
 from regwatch.ingest.psg_crawler import PsgListing, download_pdf
 from regwatch.process.change_detector import summarize_change
 from regwatch.process.chunker import Chunk, chunk_pdf
-from regwatch.process.embedder import (
-    embed_documents,
-    get_embedding_provider,
-    get_embedding_provider_for_profile,
-)
+from regwatch.process.embedder import embed_documents, get_embedding_provider
 from regwatch.process.extractor import ExtractionResult, extract_be
 from regwatch.store.db import init_db, session_scope
-from regwatch.store.embedding_profiles import content_hash as embedding_content_hash
 from regwatch.store.graph_store import derive_document_graph
 from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
 from regwatch.store.vector_store import (
@@ -51,11 +55,25 @@ from regwatch.store.vector_store import (
     chunks_exist,
     delete_chunks_for_doc,
     delete_chunks_for_doc_except_version,
-    get_embedding_profile,
-    upsert_profile_embeddings,
 )
 
 log = get_logger(__name__)
+
+
+def _legacy_document_embeddings(texts: list[str]) -> Sequence[list[float] | None]:
+    """Compatibility seam for the PSG pipeline's legacy vector column.
+
+    Kept local because tests and controlled re-chunk tooling patch this
+    module's provider. The generic FDA corpus uses embedding_writer directly.
+    """
+
+    if not texts:
+        return []
+    provider = get_embedding_provider()
+    active_profile_id = (get_settings().active_embedding_profile or "legacy").strip()
+    if active_profile_id != "legacy" and getattr(provider, "name", "") == "qwen3":
+        return [None] * len(texts)
+    return embed_documents(provider, texts)
 
 
 @dataclass
@@ -65,105 +83,6 @@ class IngestStats:
     revised: int = 0
     unchanged: int = 0
     errors: int = 0
-
-
-@dataclass(frozen=True)
-class _ProfileEmbeddingBatch:
-    profile_id: str
-    embeddings: list[list[float]]
-    content_hashes: list[str]
-    required: bool
-
-
-def _legacy_document_embeddings(texts: list[str]) -> Sequence[list[float] | None]:
-    """Embed the rollback space, or leave it NULL after a Qwen-only cutover."""
-    if not texts:
-        return []
-    provider = get_embedding_provider()
-    active_profile_id = (get_settings().active_embedding_profile or "legacy").strip()
-    if active_profile_id != "legacy" and getattr(provider, "name", "") == "qwen3":
-        # A Qwen vector in the unversioned legacy column would silently mix
-        # geometries with the historical OpenAI corpus.  The named profile is
-        # the source of truth after cutover; NULL keeps that boundary honest.
-        return [None] * len(texts)
-    return embed_documents(provider, texts)
-
-
-def _profile_document_embeddings(texts: list[str]) -> list[_ProfileEmbeddingBatch]:
-    """Precompute active/shadow profile vectors before opening a DB transaction."""
-    if not texts:
-        return []
-    settings = get_settings()
-    active_profile_id = (settings.active_embedding_profile or "legacy").strip()
-    shadow_profile_id = (settings.embedding_shadow_profile or "").strip()
-    targets: list[tuple[str, bool]] = []
-    if active_profile_id != "legacy":
-        targets.append((active_profile_id, True))
-    if shadow_profile_id and shadow_profile_id != active_profile_id:
-        targets.append((shadow_profile_id, False))
-
-    hashes = [embedding_content_hash(text) for text in texts]
-    batches: list[_ProfileEmbeddingBatch] = []
-    for profile_id, required in targets:
-        try:
-            profile = get_embedding_profile(profile_id)
-            provider = get_embedding_provider_for_profile(profile)
-            embeddings = embed_documents(provider, texts)
-        except Exception as exc:
-            if required:
-                raise
-            # Shadow traffic must never take down the FDA ingest path.  The
-            # durable pending-chunk query makes the missed batch resumable.
-            log.warning(
-                "shadow_embedding_skipped",
-                profile_id=profile_id,
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            continue
-        batches.append(
-            _ProfileEmbeddingBatch(
-                profile_id=profile_id,
-                embeddings=embeddings,
-                content_hashes=list(hashes),
-                required=required,
-            )
-        )
-    return batches
-
-
-def _write_profile_batches(
-    session: Session,
-    chunk_ids: list[str],
-    batches: list[_ProfileEmbeddingBatch],
-) -> None:
-    """Persist required profiles atomically; isolate best-effort shadow writes."""
-    for batch in batches:
-        if batch.required:
-            upsert_profile_embeddings(
-                batch.profile_id,
-                chunk_ids,
-                batch.embeddings,
-                batch.content_hashes,
-                conn=session.connection(),
-            )
-            continue
-        try:
-            with session.begin_nested():
-                upsert_profile_embeddings(
-                    batch.profile_id,
-                    chunk_ids,
-                    batch.embeddings,
-                    batch.content_hashes,
-                    conn=session.connection(),
-                )
-        except Exception as exc:
-            log.warning(
-                "shadow_embedding_write_skipped",
-                profile_id=batch.profile_id,
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
 
 
 def _apply_content_fields(

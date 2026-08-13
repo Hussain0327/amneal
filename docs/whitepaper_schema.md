@@ -1,9 +1,9 @@
 # White-Paper Field-Extraction Schema
 
-**Status: shipped.** Last updated: 2026-08-11.
+**Status: shipped.** Last updated: 2026-08-13 for the FDA-only source policy.
 
 This file is the field-extraction contract: one row per template cell, giving
-the source, the endpoint or SPL section, the lookup key, and the mode. Edit this
+the source, the endpoint or label section, the lookup key, and the mode. Edit this
 contract first when a cell's source or mode changes.
 
 The code mirrors it cell for cell. `src/regwatch/whitepaper/template.py` encodes
@@ -19,7 +19,7 @@ per-field source annotations are preserved as Word comments in that file.
 
 Feature: populate on demand. Input: RLD name plus NDA or application number.
 Output: every template cell, each carrying provenance (source, record id or row,
-fetched timestamp, plus page or section for PSG and SPL).
+fetched timestamp, plus page or section for PSG and approved labeling).
 
 ---
 
@@ -32,7 +32,7 @@ RLD name + NDA #
    -> appl_no                      (the application number)
    -> Orange Book product_no set   (one NDA maps to one or more products)
    -> ingredient / normalized_name (canonical active ingredient)
-   -> DailyMed setid               (current SPL for the labeling block)
+   -> Drugs@FDA approved label ID  (current indexed labeling document)
 ```
 
 ## Mode legend
@@ -42,8 +42,8 @@ The code calls these `CellMode.AUTO`, `CellMode.EVIDENCE_ONLY` and
 
 | Mode | Meaning |
 |---|---|
-| **auto** | Deterministic join on appl_no, NDC or name. No LLM. The cell stores source, record id or row, and `fetched_at`. |
-| **evidence_only** | The value comes verbatim from a cited PSG RAG chunk or an extracted SPL LOINC section. Cited, never generated. |
+| **auto** | Deterministic join on application number, product number, or normalized name. No LLM. The cell stores source, record ID or row, and `fetched_at`. |
+| **evidence_only** | The value comes verbatim from a cited FDA chunk or an extracted approved-label section. Cited, never generated. |
 | **manual** | Analyst judgment. The system surfaces the underlying evidence (patent rows, exclusivity, protected uses, PSG study list) and marks the cell `analyst_input_required`. It never generates a value. |
 
 ### Absence rule, for every auto presence or Yes/No cell
@@ -51,14 +51,9 @@ The code calls these `CellMode.AUTO`, `CellMode.EVIDENCE_ONLY` and
 A "No" or "not listed" value is valid only when the source was actually queried
 and the record is genuinely absent. A query that did not conclude (HTTP error,
 rate limit, timeout) or a low-confidence or ambiguous match collapses the cell to
-`analyst_input_required`. Never emit a false negative. A wrong "No REMS" or "not
-on shortage" asserts an unverified fact and breaks INV-5.
-
-> **REMS Y/N and Drug Shortages Y/N are the two riskiest auto cells.** REMS is an
-> HTML scrape with fuzzy application-number matching. Shortages is a live API
-> that can rate-limit. Both handlers must tell "queried, genuinely absent" apart
-> from "query failed or was ambiguous" before rendering "No". Tri-state, not a
-> bare boolean.
+`analyst_input_required`. Never emit a false negative. Fields whose former
+source is outside the five-family corpus, including shortage and REMS status,
+now remain analyst input; they cannot render a corpus-backed "No".
 
 ---
 
@@ -75,7 +70,7 @@ on shortage" asserts an unverified fact and breaks INV-5.
 | Patents: No Relevant / PI / PII / PIII / PIV / Section viii | Orange Book `patent.txt` | `patent_no`, `patent_use_code`, drug-substance/product flags | appl_no/product_no | manual, surface the rows; the paragraph classification is judgment |
 | If PI, eligible for First-to-Market? Y/N | derived | OB exclusivity + Paragraph IV list | appl_no | manual |
 | If PIV, eligible for eFTF? Y/N (PIV website review) | FDA Paragraph IV list + OB `exclusivity.txt` | PIV certifications page | appl_no | manual |
-| Drug Shortages: on shortage list? Y/N | Drug Shortages (DSS) | `shortages.json` `openfda.application_number:"NDA{appl}"` -> `status` | appl_no | **auto, risky** |
+| Drug Shortages: on shortage list? Y/N | none in approved corpus | retired source; no automated lookup | appl_no | analyst_input_required |
 | Combination Product (Type 1-9) | derived, NOT the OB `type` column | Drugs@FDA products + 21 CFR 3.2(e) | appl_no | manual |
 | Reference Listed Drug (RLD) | Orange Book | row where the `rld` flag is "Yes" | appl_no | auto |
 | Reference Standard (RS) | Orange Book | row where the `rs` flag is "Yes" | appl_no/product_no | auto |
@@ -88,20 +83,20 @@ on shortage" asserts an unverified fact and breaks INV-5.
 | RLD Strength | Orange Book | `strength` | appl_no/product_no | auto |
 | NDA # | input / Drugs@FDA | `application_number`, confirmed | given | auto |
 | NDA Holder | Drugs@FDA / Orange Book | `sponsor_name` / `applicant_full_name` | appl_no | auto |
-| Indication | DailyMed SPL | LOINC **34067-9** (Indications and Usage) | setid | evidence_only |
-| REMS | REMS | accessdata REMS index match on appl_no | appl_no | **auto, risky** |
-| Restricted Distribution | REMS / SPL | REMS ETASU rows | appl_no | manual, "restricted" is an interpretation; surface the REMS row |
-| Labeling Images | DailyMed | SPL `observationMedia` / `spls/{setid}/media.json` | setid | evidence_only, list and link assets only |
-| Established Pharmacologic Class | DailyMed SPL / openFDA | EPC indexing / `openfda.pharm_class_epc` | setid / appl_no | evidence_only |
-| PLR (Physician Labeling Rule) Format | DailyMed SPL structure | Highlights + numbered-section heuristic | setid | evidence_only, low confidence, analyst can override |
+| Indication | Drugs@FDA approved labeling | Indications and Usage section | appl_no / page | evidence_only |
+| REMS | none in approved corpus | retired source; no automated lookup | appl_no | analyst_input_required |
+| Restricted Distribution | none in approved corpus | analyst determination | appl_no | manual |
+| Labeling Images | Drugs@FDA approved labeling | approved-label PDF pages | appl_no | evidence_only; document surfaced, image enumeration requires analyst review |
+| Established Pharmacologic Class | Drugs@FDA approved labeling | approved-label text / EPC indexing | appl_no / page | evidence_only |
+| PLR (Physician Labeling Rule) Format | Drugs@FDA approved-label structure | Highlights + numbered-section heuristic | appl_no / page | evidence_only, low confidence, analyst can override |
 | USP Monograph (API Y/N, Finished Drug Product Y/N) | none, USP-NF is paywalled | - | - | manual |
-| PLLR (Pregnancy and Lactation Labeling Rule) Format | DailyMed SPL | presence of LOINC 42228-7 / 77290-5 / 77291-3 subsections | setid | evidence_only |
-| Pregnancy Registry Contact Detail | DailyMed SPL | text scan inside the Pregnancy subsection (42228-7) | setid | evidence_only, presence Y/N is reliable, the detail is extracted text |
+| PLLR (Pregnancy and Lactation Labeling Rule) Format | Drugs@FDA approved labeling | Pregnancy, Lactation and Reproductive Potential subsection presence | appl_no / page | evidence_only |
+| Pregnancy Registry Contact Detail | Drugs@FDA approved labeling | text scan inside the Pregnancy subsection | appl_no / page | evidence_only; detail is extracted text |
 | Salable Unit (from Sales and Marketing) | none, internal | - | - | manual |
-| Packaging Configuration(s) | NDC / DailyMed | `ndc.json` `packaging[].package_ndc`, plus SPL packaging | appl_no -> product_ndc | auto |
+| Packaging Configuration(s) | Drugs@FDA approved labeling / analyst input | approved-label packaging text | appl_no / page | evidence_only |
 | Labeling Carveouts | derived | OB `patent_use_code` against RLD indications | appl_no | manual, the carve-out decision is judgment; surface use-codes and indications |
 | Emergency Use | none, the EUA list is unstructured | - | appl_no | manual |
-| DEA Classification (I/II/III/IV/N-A) | DailyMed SPL / openFDA | `openfda.dea_schedule` / controlled-substance field | setid / appl_no | evidence_only |
+| DEA Classification (I/II/III/IV/N-A) | Drugs@FDA approved labeling / analyst input | no approved structured corpus field | appl_no | evidence_only; absence never proves N/A |
 
 ## Section 3: Product Specific Bioequivalence Recommendation Guidance
 
@@ -147,10 +142,9 @@ on shortage" asserts an unverified fact and breaks INV-5.
    as evidence. Shipped: the Orange Book loader parses `patent.txt` and
    `exclusivity.txt` from the same ZIP, see `sources/orange_book.py`
    `patent_rows()` and `exclusivity_rows()`.
-4. **DailyMed is a new source.** Annotated "DailyMed" or "Drugs@FDA, DailyMed"
-   for the labeling block. Shipped: `sources/dailymed.py` resolves appl_no to
-   setid via DailyMed REST v2 and extracts SPL LOINC sections, replacing the
-   older openFDA `label.json` pull.
+4. **The labeling block now uses only approved Drugs@FDA labeling.** The corpus
+   indexes FDA label documents by application and page. Legacy SPL fields remain
+   nullable only so saved older runs deserialize; no external label lookup runs.
 5. **PLR-format detection is a heuristic.** "PLR format Y/N" is a formatting
    determination, not a discrete SPL field, so it is `evidence_only` with a
    stated confidence note and an analyst override. Never a bare auto Y/N.
@@ -169,9 +163,9 @@ on shortage" asserts an unverified fact and breaks INV-5.
 
 ---
 
-*What shipped:* the populator module, the DailyMed source, Orange Book patent
-and exclusivity parsing, persistence and caching with `last_fetched_at`
-freshness, structured citations, and `.docx` export. Landed in PR #2
+*What shipped:* the populator module, indexed Drugs@FDA approved-label reading,
+Orange Book patent and exclusivity parsing, persistence and caching with
+`last_fetched_at` freshness, structured citations, and `.docx` export. Landed in PR #2
 (`04f760e`), hardened in PR #3 (`96ecd86`). Still open: expanding the white-paper
 gold set from its current 16 rows (`src/regwatch/eval/whitepaper_gold.jsonl`,
 counted 2026-08-11) to 30-50, and applying the persist-and-cite plus freshness

@@ -8,11 +8,36 @@ ROOT = Path(__file__).resolve().parents[1]
 
 CURRENT_DOCS = [
     "README.md",
+    "docs/AUTHORITATIVE_FDA_CORPUS.md",
     "docs/ARCHITECTURE.md",
     "docs/CONVERSATIONAL_SESSIONS.md",
     "docs/PROD_READINESS.md",
     "docs/ROADMAP.md",
     "docs/TECH_GUIDE_SIMPLE.md",
+]
+
+AUTHORITATIVE_CORPUS_DOCS = [
+    "README.md",
+    "docs/AUTHORITATIVE_FDA_CORPUS.md",
+    "docs/ARCHITECTURE.md",
+    "docs/DEPLOY.md",
+    "docs/MAP.md",
+    "docs/NON_TECH_GUIDE.md",
+    "docs/PROD_READINESS.md",
+    "docs/PROJECT_SPEC.md",
+    "docs/ROADMAP.md",
+    "docs/SECRETS_RUNBOOK.md",
+    "docs/TECH_GUIDE_SIMPLE.md",
+    "docs/whitepaper_schema.md",
+]
+
+RETIRED_SOURCE_RUNTIME_CLAIMS = [
+    "api.fda.gov",
+    "download.open.fda.gov",
+    "OPENFDA_API_KEY",
+    "openFDA",
+    "OpenFDA",
+    "dailymed.nlm.nih.gov",
 ]
 
 STALE_CLAIMS = [
@@ -69,3 +94,21 @@ def test_current_docs_do_not_reintroduce_stale_watch_profile_claims(
 
     for stale in STALE_WATCH_PROFILE_CLAIMS:
         assert stale not in text, f"{doc_path} contains stale Watch claim: {stale!r}"
+
+
+@pytest.mark.parametrize("doc_path", AUTHORITATIVE_CORPUS_DOCS)
+def test_current_corpus_docs_do_not_reintroduce_retired_source_paths(doc_path: str) -> None:
+    text = (ROOT / doc_path).read_text(encoding="utf-8")
+
+    for stale in RETIRED_SOURCE_RUNTIME_CLAIMS:
+        assert stale not in text, f"{doc_path} contains retired source claim: {stale!r}"
+
+
+def test_discovery_denominator_is_not_claimed_as_chunks_or_embeddings() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    runbook = (ROOT / "docs/AUTHORITATIVE_FDA_CORPUS.md").read_text(encoding="utf-8")
+
+    assert "140,339 source records" in readme
+    assert "Those are documents, not chunks or embeddings" in readme
+    assert "140,339 is the source-record denominator" in runbook
+    assert "chunk and embedding totals pending" in runbook

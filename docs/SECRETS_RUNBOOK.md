@@ -11,11 +11,11 @@ Five workflows read secrets: `ci.yml`, `deploy.yml`, `watch-daily.yml`,
 `uptime-eval.yml` and `databricks-eval.yml`. No workflow declares an
 `environment:`, so only **repository** secrets are in play.
 
-**Configured today (8 names, checked 2026-08-12):**
+**Configured today (7 in-use names, checked 2026-08-12):**
 
 ```text
 DATABRICKS_LLM_BASE_URL   DATABRICKS_LLM_TOKEN   FLY_API_TOKEN
-OPENFDA_API_KEY           QWEN_EMBEDDING_BASE_URL  QWEN_EMBEDDING_TOKEN
+QWEN_EMBEDDING_BASE_URL  QWEN_EMBEDDING_TOKEN
 WATCH_DATABASE_URL        WATCH_OPENAI_API_KEY
 ```
 
@@ -74,7 +74,6 @@ live Databricks eval lane runs off `DATABRICKS_LLM_*` and
 | `FLY_API_TOKEN` | `deploy.yml`, the whole release path: docker build, Trivy re-scan, `scripts/fly-deploy.sh`. Unset means the deploy step fails and nothing ships. | `fly tokens create deploy` (mint fresh, not in `.env`) | **Set** |
 | `DATABRICKS_LLM_BASE_URL` / `DATABRICKS_LLM_TOKEN` | `databricks-eval.yml`, the live eval lane called by `ci.yml` and dispatchable by hand. | the Databricks workspace serving host and a token | **Set** |
 | `QWEN_EMBEDDING_BASE_URL` / `QWEN_EMBEDDING_TOKEN` | `databricks-eval.yml`. Both must be present or the eval resolves to a non-Qwen arm. | the `regwatch-embed` serving endpoint and a token | **Set** |
-| `OPENFDA_API_KEY` | `watch-daily.yml` `env.OPENFDA_API_KEY`. Only raises the openFDA rate limit. | `.env` key **`OPENFDA_API_KEY`** | **Set** |
 | `OPENAI_API_KEY` (repo-wide) | `databricks-eval.yml` job env. Separate from the WATCH_ copy on purpose: setting it turns on paid provider-backed work whose result gates CD. | an OpenAI project key approved for CI | Not set |
 | `SLACK_WEBHOOK_URL` | `watch-daily.yml`: failure alert AND the success digest. A quiet day posts nothing. Unset means both steps no-op. | Slack incoming webhook, no `.env` key | Not set |
 | `WATCH_HEALTHCHECK_URL` | `watch-daily.yml`: success ping plus `/fail` ping. This is the dead-man's-switch for a cron that never STARTS, which the in-job failure step cannot catch. | healthchecks.io-style ping URL | Not set |
@@ -218,10 +217,6 @@ rm -P "$tmp" 2>/dev/null || rm -f "$tmp"
 ### 3.3 Optional: alerting and uptime (recommended)
 
 ```bash
-# OPENFDA_API_KEY <- local OPENFDA_API_KEY (only raises the openFDA rate limit).
-grep -E '^OPENFDA_API_KEY=' .env | head -1 | cut -d= -f2- \
-  | gh secret set OPENFDA_API_KEY -R Hussain0327/amneal
-
 # SLACK_WEBHOOK_URL <- a Slack incoming-webhook URL.
 #   Slack -> Apps -> Incoming Webhooks -> Add to a channel -> copy the URL into a
 #   restricted temp file, then:
@@ -366,7 +361,6 @@ gh secret delete WATCH_OPENAI_API_KEY -R Hussain0327/amneal
 gh secret delete SLACK_WEBHOOK_URL -R Hussain0327/amneal
 gh secret delete WATCH_HEALTHCHECK_URL -R Hussain0327/amneal
 gh secret delete PROD_HEALTH_URL -R Hussain0327/amneal
-gh secret delete OPENFDA_API_KEY -R Hussain0327/amneal
 ```
 
 - Deleting `WATCH_DATABASE_URL` is the cleanest kill-switch for the cron: the

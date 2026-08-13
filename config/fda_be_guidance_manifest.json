@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "documents": [
+    {
+      "canonical_id": "fda-be-guidance:m13a-final-2024",
+      "title": "M13A Bioequivalence for Immediate-Release Solid Oral Dosage Forms",
+      "source_url": "https://www.fda.gov/media/165049/download",
+      "landing_url": "https://www.fda.gov/regulatory-information/search-fda-guidance-documents/m13a-bioequivalence-immediate-release-solid-oral-dosage-forms",
+      "issued": "2024-10",
+      "status": "final",
+      "docket_number": "FDA-2023-D-0093"
+    },
+    {
+      "canonical_id": "fda-be-guidance:m13a-questions-answers-2024",
+      "title": "M13A Bioequivalence for Immediate-Release Solid Oral Dosage Forms Questions and Answers",
+      "source_url": "https://www.fda.gov/media/183189/download",
+      "landing_url": "https://www.fda.gov/regulatory-information/search-fda-guidance-documents/m13a-bioequivalence-immediate-release-solid-oral-dosage-forms",
+      "issued": "2024-10",
+      "status": "final",
+      "docket_number": "FDA-2023-D-0093"
+    },
+    {
+      "canonical_id": "fda-be-guidance:m13b-draft-2025",
+      "title": "M13B Bioequivalence for Immediate-Release Solid Oral Dosage Forms: Additional Strengths Biowaiver",
+      "source_url": "https://www.fda.gov/media/186703/download",
+      "landing_url": "https://www.fda.gov/regulatory-information/search-fda-guidance-documents/m13b-bioequivalence-immediate-release-solid-oral-dosage-forms-additional-strengths-biowaiver",
+      "issued": "2025-05",
+      "status": "draft",
+      "docket_number": "FDA-2023-D-0093"
+    },
+    {
+      "canonical_id": "fda-be-guidance:pk-endpoints-anda-final-2026",
+      "title": "Bioequivalence Studies With Pharmacokinetic Endpoints for Drugs Submitted Under an Abbreviated New Drug Application",
+      "source_url": "https://www.fda.gov/media/192774/download",
+      "landing_url": "https://www.fda.gov/regulatory-information/search-fda-guidance-documents/bioequivalence-studies-pharmacokinetic-endpoints-drugs-submitted-under-abbreviated-new-drug",
+      "issued": "2026-05",
+      "status": "final",
+      "docket_number": "FDA-2013-D-1464"
+    },
+    {
+      "canonical_id": "fda-be-guidance:statistical-approaches-final-2026",
+      "title": "Statistical Approaches to Establishing Bioequivalence",
+      "source_url": "https://www.fda.gov/media/163638/download",
+      "landing_url": "https://www.fda.gov/regulatory-information/search-fda-guidance-documents/statistical-approaches-establishing-bioequivalence",
+      "issued": "2026-05",
+      "status": "final",
+      "docket_number": "FDA-2001-D-0197"
+    }
+  ]
+}

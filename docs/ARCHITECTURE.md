@@ -5,9 +5,9 @@
 > public FDA data. By design it never authors submission content and never
 > renders regulatory judgment.
 
-> Last updated: 2026-08-12 for Watch workflow parity. Live app, database and Fly
-> values were last checked 2026-08-11; repository secret names were checked
-> 2026-08-12.
+> Last updated: 2026-08-13 for the authoritative FDA corpus. Live app, database
+> and Fly values were last checked 2026-08-11; the replacement corpus discovery
+> was checked against official FDA snapshots on 2026-08-13.
 
 This is the canonical description of how REGWATCH is built. Read it once, then
 use it as a reference. Companion docs: [`PROJECT_SPEC.md`](PROJECT_SPEC.md) (the
@@ -254,11 +254,10 @@ The backend (`src/regwatch/`) is a classic RAG data pipeline. Each package is
 one stage with a clean boundary:
 
 ```
- sources/   ->   ingest/   ->   process/   ->   store/   ->   retrieve/   ->  generate/
- (FDA APIs:      (crawl PSG     (chunk,        (Postgres    (embed query,     (grounded LLM
-  7 handlers)     listings,      embed,         + pgvector    vector top-k,     synthesis +
-                  parse PDFs)    extract BE)    only)         rerank, scope     citation gate)
-                                                              to product)
+ sources/  ->  corpus/  ->  ingest/process/  ->  store/  ->  retrieve/  ->  generate/
+ (exact five   (manifest,    (bounded parse,     (Postgres   (embed query,   (grounded LLM
+  FDA families) atomic sync,  citable chunks,     + pgvector  vector top-k,   synthesis +
+                coverage)     batch embeddings)  only)       rerank, scope)  citation gate)
 
  watch/      change detection plus digests and alerts over the same store
  assemble/   higher-order composer: a cited dossier (retrieve + generate)
@@ -267,7 +266,7 @@ one stage with a clean boundary:
  common/     audit, citations, conversation memory, ratelimit, observability, logging
  eval/       offline gold-set metrics (the regression gate)
  api/        the FastAPI surface, the one boundary IT will wrap or replace
- cli.py      operator commands (seed, ingest-all, create-user, watch, ...)
+cli.py      operator commands (seed, ingest-all, create-user, watch, ...)
 ```
 
 `config/` is a sibling top-level package, imported as `config.settings`. It holds
@@ -571,13 +570,19 @@ closed.
 
 ## 7. Source layer
 
-`sources/router.py` is a deterministic, rules-first router (regex and keyword
-matching, no LLM) that fans a `SourceQuery` out to seven FDA source handlers
-behind a common `SourceHandler` interface.
+`sources/policy.py` is the acquisition boundary. It admits exactly five source
+families and validates the initial URL plus every redirect against reviewed,
+family-specific FDA hosts and paths. The allowlist is code-reviewed, not an
+environment variable. Retired API, DailyMed, NDC, shortage, and REMS acquisition
+paths fail closed and are not registered in the router.
+
+`sources/router.py` is deterministic and rules-first (regex and keywords, no
+LLM). It fans a `SourceQuery` out only to the approved handlers behind the common
+`SourceHandler` interface.
 
 ```
-SourceQuery -> route_sources()  (NDC pattern? "rems"? appl_no? "orange book"? ...)
-                   |   default when nothing matches: [DRUGSFDA, ORANGE_BOOK, PSG]
+SourceQuery -> route_sources()  (appl_no? label? review? PSG/BE? Orange Book?)
+                   |   default: [DRUGSFDA, ORANGE_BOOK, PSG, FDA_BE_GUIDANCE]
                    v
             for each routed source: handler.search()   <- failures logged per source, not fatal
                    |
@@ -587,50 +592,63 @@ SourceQuery -> route_sources()  (NDC pattern? "rems"? appl_no? "orange book"? ..
 
 | Handler | FDA source |
 |---|---|
-| `PsgHandler` | Product-Specific Guidance, the local indexed corpus |
-| `OrangeBookHandler` | Orange Book (TE codes, RLD/RS, patents, exclusivity) |
-| `DrugsFdaHandler` | Drugs@FDA (approvals, sponsors) |
-| `NdcHandler` | National Drug Code directory |
-| `RemsHandler` | Risk Evaluation and Mitigation Strategies |
-| `DailyMedHandler` | DailyMed SPL labeling |
-| `ShortagesHandler` | Drug shortages and availability |
+| `DrugsFdaHandler` | Official 12-table Drugs@FDA ZIP: applications, products, submissions, actions, and document links |
+| `ActionPackageHandler` | SBOA/action-package review links classified from the same Drugs@FDA snapshot |
+| `PsgHandler` | Product-Specific Guidance from the indexed PSG catalog |
+| `FdaBeGuidanceHandler` | Five reviewed general FDA BE guidance documents |
+| `OrangeBookHandler` | Official Orange Book ZIP: RLD, RS, TE codes, patents, and exclusivities |
 
-Adding an FDA source is one new handler plus one routing rule. A single flaky FDA
-endpoint never takes down a search: `search_sources` catches and logs per-source
-exceptions and returns whatever the other handlers produced.
+A new source requires a reviewed policy-family addition, a family-specific URL
+rule, a handler/discovery adapter, provenance and document types, and policy
+tests. One flaky approved endpoint does not take down a structured search:
+`search_sources` logs the family failure and returns the other approved results.
+The corpus sync is stricter: any failed document makes the run failed and blocks
+activation.
 
 ---
 
 ## 8. Ingest and processing pipeline
 
-The offline path that fills the stores, run through the `regwatch` CLI. GitHub
-Actions cron is the only scheduler (section 13).
+The replacement offline path is split into discovery, atomic document sync, and
+batched embeddings. It is run through the `regwatch` CLI; deployment migrations
+never fetch or backfill source data.
 
 ```
-psg_crawler  ->  pdf_parser  ->  chunker  ->  embedder  ->  store.add_chunks
-(A-Z letter      (extract       (split      (Databricks   (pgvector, on the
- routes)          text +         into        Qwen3,        active profile) +
-                  pages)         passages)   1024-dim)     psg_document/version rows
-
-change_detector -> compare content_hash -> new PsgVersion on change -> re-embed,
-                   delete superseded chunks (delete_chunks_for_doc_except_version)
-
-extractor -> per-PSG BE requirement extraction (study type and design,
-             dissolution, strengths, waivers) -> BeRequirement rows, every field
-             carrying a citation
+official FDA snapshots/catalogs -> sorted manifest + snapshot fingerprints
+  -> family/path/redirect validation -> bounded artifact fetch
+  -> PDF / FDA HTML / inline-record parse -> deterministic page-aware chunks
+  -> per-document transaction: document + immutable version + current chunks
+  -> resumable profile-scoped embedding batches -> activation readiness gate
 ```
 
 Key properties:
 
-- **Versioned, never overwritten.** A PSG content change creates a new
-  `PsgVersion`. Old chunks leave the search index, but the version history stays
-  in the structured store. That is INV-4: a defensible answer to "what changed
-  when".
-- **The full catalog** is reachable through A-Z letter routes (`fetch_all_listings`
-  / `ingest-all`), not just the handful the FDA landing index shows.
-- **Known concurrency note.** The multi-worker ingest path has a small alembic
-  init race (roughly 8 percent transient "No context configured" errors). It is
-  harmless: a single-threaded pass sweeps the remainder. Tracked as a future fix.
+- **Discovery is read-only and reproducible.** The complete 2026-08-13 manifest
+  has 140,339 source records and SHA-256
+  `4e5c3708cb309489d9056580a7578b3047560f32aca0345df6ee26c3cd2a7c5e`.
+- **Versioned, never overwritten.** A new content hash or processing fingerprint
+  creates an immutable `fda_document_version`. Only current chunks remain
+  searchable; version facts and content-addressed artifacts remain auditable.
+- **Per-document atomicity.** An advisory lock serializes one canonical document.
+  Its version, chunk set, provenance, and inline vectors commit together or roll
+  back together.
+- **Bounded work.** Downloads, redirects, archive expansion, PDF bytes/pages/time,
+  workers, in-flight futures, and embedding batches are finite. Request starts
+  remain paced per FDA host across threads.
+- **Resumable phases.** Sync defaults to deferred embeddings. Both sync and
+  embedding commands restart from durable committed state and skip ready work.
+- **Safe reconciliation.** Documents missing from discovery are retired only
+  after a zero-error, unfiltered complete-universe run. A developer's scoped or
+  limited run cannot retire production data.
+- **Reversible cutover.** `REGWATCH_RETRIEVAL_CORPUS=legacy` remains the default.
+  `authoritative_fda` is accepted at API boot only when all five families, a
+  successful full run, exact document parity, zero policy violations, and 100%
+  embedding coverage are present.
+
+The earlier PSG watch pipeline still drives daily change alerts. The replacement
+corpus generalizes the searchable evidence store; its full backfill and schedule
+must pass the activation runbook in
+[`AUTHORITATIVE_FDA_CORPUS.md`](AUTHORITATIVE_FDA_CORPUS.md) before cutover.
 
 ---
 
@@ -644,8 +662,11 @@ history for that design.)
 Production runs on Databricks Lakebase in us-east-2, database
 `databricks_postgres`, app role `regwatch_app`, with pgvector in the same
 database. Rows, vectors and audit all live in one Postgres. As of 2026-08-11 the
-corpus is 5,494 chunks and the live alembic head is `0020_eval_run`, matching the
-repo.
+serving legacy PSG corpus was 5,494 chunks and the live Alembic head was
+`0020_eval_run`. Current `main` contains migrations through
+`0022_deficiency_run_source`; this branch adds `0023_authoritative_fda_corpus`.
+The corpus migration and replacement backfill are not claimed as deployed by
+this document.
 
 - `store/vector_store.py` is a thin wrapper over `store/pgvector_store.py`. Every
   public function (`similarity_search`, `add_chunks`, `collection_size`,
@@ -701,8 +722,8 @@ repo.
 
 ## 10. Data model
 
-`store/models.py` holds the SQLModel definitions. Twenty alembic migrations,
-`0001` through `0020`, all in one Postgres.
+`store/models.py` holds the SQLModel definitions. Twenty-one Alembic migrations,
+`0001` through `0021`, all in one Postgres.
 
 ### Corpus and evidence
 
@@ -715,7 +736,10 @@ repo.
 | `ob_product` | Orange Book `Products.txt` row (raw rows only, INV-3) |
 | `ob_patent` | Orange Book `patent.txt` row (raw rows only) |
 | `ob_exclusivity` | Orange Book `exclusivity.txt` row (raw rows only) |
-| `spl_document` | DailyMed SPL document resolution (White Paper provenance) |
+| `fda_document` | Stable canonical identity for one of the five authoritative FDA source families |
+| `fda_document_version` | Immutable source-byte and processing version, with artifact/page/chunk provenance |
+| `fda_corpus_run` | Complete/scoped sync ledger, manifest hash, checkpoints, errors, and reconciliation facts |
+| `spl_document` | Historical pre-corpus SPL provenance retained for saved-run compatibility; no new acquisition |
 | `embedding_profile`, `chunk_embedding` | Named vector spaces and their vectors (migration 0015) |
 | `graph_node`, `graph_edge`, `graph_node_chunk` | The Tier-1 hierarchy from migration 0018; write-only today |
 

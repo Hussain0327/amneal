@@ -1,7 +1,7 @@
 """White-Paper populator — build the cited cell payload for an RLD + appl number.
 
-``build_whitepaper`` resolves the spine (Drugs@FDA + Orange Book product
-confirmation + DailyMed setid), then populates every registry cell by mode:
+``build_whitepaper`` resolves the spine from Drugs@FDA and Orange Book, then
+populates every registry cell by mode:
 
 - **auto** — deterministic joins on the pinned Orange Book / NDC / Shortages /
   REMS functions. Yes/No auto cells are TRI-STATE (compliance line): a "No"
@@ -9,7 +9,7 @@ confirmation + DailyMed setid), then populates every registry cell by mode:
   that returned zero rows; an exception/timeout/ambiguous match collapses the
   cell to ``analyst_input_required`` — a false "No" asserts an unverified fact
   (INV-5).
-- **evidence_only** — verbatim cited SPL LOINC sections, label media, and the
+- **evidence_only** — verbatim approved-label PDF sections and the
   scoped PSG ``grounded_qa.ask()`` for Requirements. No generation.
 - **manual** — always ``analyst_input_required`` with the underlying evidence
   attached (patent/exclusivity rows, REMS rows, PSG study fields). The system
@@ -47,24 +47,24 @@ from regwatch.common.citations import (
     ob_token,
     obexcl_token,
     obpat_token,
-    spl_token,
     validate_structured_citations,
 )
 from regwatch.common.logging import get_logger
 from regwatch.common.text_normalize import canonical_name, names_match, stripped_name
 from regwatch.generate.grounded_qa import QAResult, ask
 from regwatch.generate.llm import current_model_name
-from regwatch.sources import dailymed, orange_book
+from regwatch.sources import orange_book
 from regwatch.sources._utils import clean_application_number
-from regwatch.sources.dailymed import SetidResolution, SplMedia, SplSection
+from regwatch.sources.approved_label import (
+    ApprovedLabel,
+    load_latest_approved_label,
+    section_title,
+)
 from regwatch.sources.drugsfda import DRUGSFDA_DOC_URL, DrugsFdaHandler
 from regwatch.sources.ndc import NDC_DOC_URL, NdcHandler
 from regwatch.sources.orange_book import ORANGE_BOOK_SEARCH_URL
 from regwatch.sources.rems import (
     REMS_INDEX_URL,
-    RemsHandler,
-    fetch_rems_index_html,
-    parse_rems_rows,
 )
 from regwatch.sources.shortages import SHORTAGES_DOC_URL, ShortagesHandler
 from regwatch.sources.types import SourceQuery, SourceRecord
@@ -73,7 +73,6 @@ from regwatch.store.models import BeRequirement, PsgDocument
 from regwatch.store.queries import current_dosage_form_routes
 from regwatch.store.whitepaper_sources import (
     ObSnapshot,
-    SplSnapshot,
     persist_whitepaper_snapshot,
 )
 from regwatch.whitepaper.template import (
@@ -86,14 +85,13 @@ from regwatch.whitepaper.template import (
 
 log = get_logger(__name__)
 
-# SPL LOINC codes the populator fetches once (Indications, Pregnancy, Lactation,
-# Females-and-males-of-reproductive-potential) — drives indication/PLLR/registry.
+# Stable internal section keys used to extract Indications, Pregnancy,
+# Lactation, and reproductive-potential text from approved Drugs@FDA labels.
 LOINC_INDICATION = "34067-9"
 LOINC_PREGNANCY = "42228-7"
 LOINC_LACTATION = "77290-5"
 LOINC_REPRO = "77291-3"
 _PLLR_LOINCS = (LOINC_PREGNANCY, LOINC_LACTATION, LOINC_REPRO)
-_WANTED_LOINCS = (LOINC_INDICATION, *_PLLR_LOINCS)
 
 # Canonical Physician-Labeling-Rule numbered-section LOINC codes. PLR-format
 # detection is a heuristic (low confidence, analyst override) — presence of the
@@ -173,14 +171,8 @@ def _shortage_records(query: SourceQuery) -> list[SourceRecord]:
 
 
 def _rems_search(query: SourceQuery) -> tuple[list[SourceRecord], int]:
-    """Matched REMS records plus the TOTAL parsed-row count from the index.
-
-    The total count is the scrape-sanity signal: the REMS handler deliberately
-    parses zero rows when the page shape changes, so "no rows parsed at all"
-    must read as a failed query — never as "queried, genuinely absent" (INV-5).
-    """
-    html = fetch_rems_index_html()
-    return RemsHandler(html=html).search(query), len(parse_rems_rows(html))
+    del query
+    raise RuntimeError("REMS is outside the authoritative FDA corpus policy")
 
 
 @dataclass
@@ -210,14 +202,8 @@ class _Ctx:
     ob_patents_member_missing: bool = False
     ob_exclusivities_member_missing: bool = False
     drugsfda_records: list[SourceRecord] = field(default_factory=list)
-    setid: str | None = None
-    setid_resolution: SetidResolution | None = None
-    spl_sections: dict[str, SplSection] = field(default_factory=dict)
-    spl_section_codes: list[str] = field(default_factory=list)
-    spl_source_url: str | None = None
-    spl_fetched_at: datetime | None = None
-    spl_failed: bool = False
-    spl_media: list[SplMedia] | None = None
+    approved_label: ApprovedLabel | None = None
+    approved_label_failed: bool = False
     ndc_records: list[SourceRecord] | None = None  # None = the NDC query failed
     psg_docs: list[dict[str, Any]] = field(default_factory=list)
     # Same-ingredient PSGs whose dosage form/route does NOT match this
@@ -319,7 +305,7 @@ def _clip(value: str) -> str:
 #
 # The five fetch stages group by their real data dependencies:
 #   batch A: _fetch_orange_book || _fetch_drugsfda        (identity needs both)
-#   batch B: _fetch_dailymed || _fetch_ndc || _fetch_psg_store
+#   batch B: _fetch_approved_label || _fetch_ndc || _fetch_psg_store
 #            (each reads only identity fields finalized before the batch)
 # Everything else -- identity resolution, name reconcile, token build, persist,
 # and the cell builders -- stays sequential on the caller's thread. Two live
@@ -510,7 +496,7 @@ def _build_context(rld_name: str, application_number: str, *, user_id: str | Non
     _reconcile_rld_name(ctx)
     # Batch B: independent of one another; each reads only the identity fields
     # finalized above (resolved type/number, ingredient, product rows).
-    _run_stages_concurrently(ctx, (_fetch_dailymed, _fetch_ndc, _fetch_psg_store), deadline)
+    _run_stages_concurrently(ctx, (_fetch_approved_label, _fetch_ndc, _fetch_psg_store), deadline)
     _build_known_tokens(ctx)
     _persist(ctx)
     return ctx
@@ -704,70 +690,19 @@ def _reconcile_rld_name(ctx: _Ctx) -> None:
         )
 
 
-def _fetch_dailymed(ctx: _Ctx) -> None:
-    # Prefer the sponsor's own label: DailyMed lists repackager relabels for the
-    # same application number, and "most recent" alone can pick a repackager's
-    # SPL (stale content, repackager cartons) over the RLD holder's current one.
-    prefer = _unique(
-        [
-            _drugsfda_brand(ctx.drugsfda_records),
-            *(row.get("trade_name") for row in ctx.product_rows),
-            _drugsfda_sponsor(ctx.drugsfda_records),
-        ]
-    )
-    # Second preference tier (P1b): sponsor/applicant names rarely appear in a
-    # repackager's relabel TITLE, but DailyMed brackets the labeler
-    # organization into every listing title -- matching that labeler against
-    # the Drugs@FDA sponsor and Orange Book applicant names picks the RLD
-    # holder's own SPL when no brand/trade title matches.
-    prefer_labelers = _unique(
-        [
-            _drugsfda_sponsor(ctx.drugsfda_records),
-            *(row.get("applicant_full_name") for row in ctx.product_rows),
-            *(row.get("applicant") for row in ctx.product_rows),
-        ]
-    )
+def _fetch_approved_label(ctx: _Ctx) -> None:
     try:
-        # The RESOLVED, PREFIXED number — bare-digit input must not let the
-        # candidate expansion resolve another type's label (contract C1).
-        resolution = dailymed.resolve_setid(
-            _resolved_application_number(ctx),
-            prefer_titles=prefer,
-            prefer_labelers=prefer_labelers,
-        )
+        ctx.approved_label = load_latest_approved_label(_resolved_application_number(ctx))
     except Exception as exc:
-        ctx.warnings.append(f"DailyMed setid resolution failed ({type(exc).__name__}).")
-        log.warning("whitepaper_setid_failed", error=str(exc))
-        ctx.spl_failed = True
+        ctx.approved_label_failed = True
+        ctx.warnings.append(f"Drugs@FDA approved-label lookup failed ({type(exc).__name__}).")
+        log.warning("whitepaper_approved_label_failed", error=str(exc))
         return
-    if resolution is None:
-        ctx.warnings.append("DailyMed returned no SPL for this application number.")
-        return
-    ctx.setid_resolution = resolution
-    ctx.setid = resolution.setid
-    if len(resolution.candidate_labelers) > 1:
+    if ctx.approved_label is None:
         ctx.warnings.append(
-            f"DailyMed lists SPLs from {len(resolution.candidate_labelers)} distinct labelers "
-            f"for this application; using {resolution.title!r} — verify it is the RLD "
-            f"sponsor's label."
+            "No indexed Drugs@FDA approved label was found for this application; "
+            "labeling cells require analyst input."
         )
-    try:
-        doc = dailymed.fetch_spl_xml(resolution.setid)
-        ctx.spl_sections = dailymed.parse_spl_sections(
-            doc.xml, _WANTED_LOINCS, source_url=doc.source_url, fetched_at=doc.fetched_at
-        )
-        ctx.spl_section_codes = dailymed.parse_spl_section_codes(doc.xml)
-        ctx.spl_source_url = doc.source_url
-        ctx.spl_fetched_at = doc.fetched_at
-    except Exception as exc:
-        ctx.spl_failed = True
-        ctx.warnings.append(f"DailyMed SPL section fetch failed ({type(exc).__name__}).")
-        log.warning("whitepaper_spl_sections_failed", error=str(exc))
-    try:
-        ctx.spl_media = dailymed.fetch_media(resolution.setid)
-    except Exception as exc:
-        ctx.warnings.append(f"DailyMed media fetch failed ({type(exc).__name__}).")
-        log.warning("whitepaper_spl_media_failed", error=str(exc))
 
 
 def _fetch_ndc(ctx: _Ctx) -> None:
@@ -808,9 +743,6 @@ def _build_known_tokens(ctx: _Ctx) -> None:
     for row in ctx.exclusivity_rows:
         if row.get("exclusivity_code"):
             tokens.add(obexcl_token(row["exclusivity_code"]))
-    if ctx.setid:
-        for loinc in ctx.spl_sections:
-            tokens.add(spl_token(ctx.setid, loinc))
     ctx.known_tokens = tokens
 
 
@@ -1031,8 +963,7 @@ def _be_fields(row: BeRequirement) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Persistence write-through (freshness provenance, INV-5). Best-effort. The
 # semantics live in ``store.whitepaper_sources`` — Orange Book rows REPLACE the
-# application's previous snapshot (a delisted row never lingers as stale
-# evidence) and the SPL resolution upserts by setid. One implementation only.
+# application's previous snapshot so a delisted row never lingers as evidence.
 # ---------------------------------------------------------------------------
 def _persist(ctx: _Ctx) -> None:
     ob: ObSnapshot | None = None
@@ -1055,19 +986,8 @@ def _persist(ctx: _Ctx) -> None:
             exclusivities_fetched_at=ctx.ob_exclusivities_fetched_at or ctx.now,
             source_url=ORANGE_BOOK_SEARCH_URL,
         )
-    spl: SplSnapshot | None = None
-    if ctx.setid_resolution is not None:
-        resolution = ctx.setid_resolution
-        spl = SplSnapshot(
-            setid=resolution.setid,
-            appl_no=ctx.appl_no,
-            title=resolution.title,
-            published=resolution.published,
-            source_url=resolution.source_url,
-            fetched_at=ctx.spl_fetched_at or resolution.fetched_at,
-        )
     try:
-        persist_whitepaper_snapshot(ob=ob, spl=spl)
+        persist_whitepaper_snapshot(ob=ob)
     except Exception as exc:
         ctx.warnings.append(
             "Persistence write-through failed — the snapshot transaction rolled back "
@@ -1287,7 +1207,7 @@ def _drugsfda_evidence(ctx: _Ctx) -> list[dict[str, Any]]:
     for rec in ctx.drugsfda_records:
         out.append(
             _evidence(
-                "Drugs@FDA (openFDA)",
+                "Drugs@FDA",
                 rec.identifiers.get("application_number") or "drugsfda.json",
                 source_url=rec.source_url or DRUGSFDA_DOC_URL,
                 fetched_at=ctx.now,
@@ -1315,7 +1235,7 @@ def _ext_shortage(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
         statuses = _unique(str(r.fields.get("status") or "") for r in records)
         ev = [
             _evidence(
-                "Drug Shortages (openFDA)",
+                "Retired drug-shortage source",
                 r.identifiers.get("application_number") or "shortages.json",
                 source_url=r.source_url or SHORTAGES_DOC_URL,
                 fetched_at=ctx.now,
@@ -1323,7 +1243,7 @@ def _ext_shortage(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
             )
             for r in records
         ]
-        # openFDA retains RESOLVED shortages as historical records — a record
+        # Historical feeds can retain resolved shortages — a record
         # set whose every status is Resolved must not lead with "Yes" on a
         # "currently listed?" cell (that asserts current listing from history).
         if statuses and all("resolved" in s.lower() for s in statuses):
@@ -1332,7 +1252,7 @@ def _ext_shortage(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
                 f"{'; '.join(statuses)} — historical shortage record(s); no current "
                 f"shortage status returned.",
                 ev,
-                "openFDA retains resolved shortages as historical records; statuses are "
+                "The retired feed retained resolved shortages as historical records; statuses are "
                 "rendered verbatim, with no current-listing assertion.",
             )
         value = "Yes" + (f" — {'; '.join(statuses)}" if statuses else "")
@@ -1341,7 +1261,7 @@ def _ext_shortage(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
         spec,
         [
             _evidence(
-                "Drug Shortages (openFDA)",
+                "Retired drug-shortage source",
                 f"shortages.json application_number={ctx.appl_no}",
                 source_url=SHORTAGES_DOC_URL,
                 fetched_at=ctx.now,
@@ -1529,7 +1449,7 @@ def _ext_packaging(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
                 package_ndcs.append(pkg)
         ev.append(
             _evidence(
-                "NDC Directory (openFDA)",
+                "Retired NDC source",
                 rec.identifiers.get("product_ndc") or "ndc.json",
                 source_url=rec.source_url or NDC_DOC_URL,
                 fetched_at=ctx.now,
@@ -1550,7 +1470,7 @@ def _ext_packaging(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
 
 def _ext_epc(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     if ctx.ndc_records is None:
-        return _analyst(spec, [], "openFDA query failed; EPC not available.")
+        return _analyst(spec, [], "NDC source is outside corpus policy; EPC not available.")
     classes: list[str] = []
     ev: list[dict[str, Any]] = []
     for rec in ctx.ndc_records:
@@ -1560,7 +1480,7 @@ def _ext_epc(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
         if rec.raw.get("pharm_class"):
             ev.append(
                 _evidence(
-                    "openFDA NDC pharm_class",
+                    "Retired NDC pharm_class",
                     rec.identifiers.get("product_ndc") or "ndc.json",
                     source_url=rec.source_url or NDC_DOC_URL,
                     fetched_at=ctx.now,
@@ -1579,7 +1499,7 @@ def _ext_epc(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
 
 def _ext_dea(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     if ctx.ndc_records is None:
-        return _analyst(spec, [], "openFDA query failed; DEA schedule not available.")
+        return _analyst(spec, [], "NDC source is outside corpus policy; DEA data not available.")
     schedules: list[str] = []
     ev: list[dict[str, Any]] = []
     for rec in ctx.ndc_records:
@@ -1588,7 +1508,7 @@ def _ext_dea(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
             schedules.append(str(sched))
             ev.append(
                 _evidence(
-                    "openFDA NDC dea_schedule",
+                    "Retired NDC dea_schedule",
                     rec.identifiers.get("product_ndc") or "ndc.json",
                     source_url=rec.source_url or NDC_DOC_URL,
                     fetched_at=ctx.now,
@@ -1609,10 +1529,14 @@ def _ext_dea(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
 
 
 def _spl_guard(spec: CellSpec, ctx: _Ctx) -> dict[str, Any] | None:
-    if ctx.setid is None:
-        return _analyst(spec, [], "Could not resolve a DailyMed SPL for this application number.")
-    if ctx.spl_failed:
-        return _analyst(spec, [], "DailyMed SPL fetch failed; labeling cell not available.")
+    if ctx.approved_label_failed:
+        return _analyst(
+            spec, [], "Drugs@FDA approved-label lookup failed; labeling cell not available."
+        )
+    if ctx.approved_label is None:
+        return _analyst(
+            spec, [], "No indexed Drugs@FDA approved label exists for this application."
+        )
     return None
 
 
@@ -1621,20 +1545,21 @@ def _ext_spl_section(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     if guard is not None:
         return guard
     loinc = spec.arg or LOINC_INDICATION
-    section = ctx.spl_sections.get(loinc)
+    assert ctx.approved_label is not None  # noqa: S101 - narrowed by _spl_guard
+    section = ctx.approved_label.sections.get(loinc)
     if section is None or not section.text:
-        return _analyst(spec, [], f"SPL has no LOINC {loinc} section text.")
-    assert ctx.setid is not None  # noqa: S101 - narrowing; _spl_guard already gated setid
-    token = spl_token(ctx.setid, loinc)
-    valid, _ = validate_structured_citations([token], ctx.known_tokens)
-    if not valid:
-        return _analyst(spec, [], "SPL section citation failed validation (INV-8).")
+        return _analyst(
+            spec,
+            [],
+            f"The indexed approved label has no detected {section_title(loinc)} section text.",
+        )
     ev = [
         _evidence(
-            "DailyMed SPL",
-            token,
-            source_url=section.source_url,
-            fetched_at=section.fetched_at,
+            "Drugs@FDA approved labeling",
+            f"page:{section.page}",
+            source_url=ctx.approved_label.source_url,
+            fetched_at=ctx.approved_label.fetched_at,
+            page=section.page,
             section=section.title or loinc,
             snippet=section.text[:600],
         )
@@ -1643,35 +1568,24 @@ def _ext_spl_section(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
 
 
 def _ext_spl_media(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
-    if ctx.setid is None:
-        return _analyst(spec, [], "Could not resolve a DailyMed SPL; labeling images unavailable.")
-    if ctx.spl_media is None:
-        return _analyst(spec, [], "DailyMed media manifest fetch failed.")
-    if not ctx.spl_media:
-        return _populated(
-            spec,
-            "0 labeling images in the SPL media manifest.",
-            [
-                _evidence(
-                    "DailyMed media.json",
-                    f"setid={ctx.setid}",
-                    source_url=dailymed.SPL_MEDIA_URL_TEMPLATE.format(setid=ctx.setid),
-                    fetched_at=ctx.now,
-                    snippet="No media assets enumerated.",
-                )
-            ],
-        )
-    ev = [
-        _evidence(
-            "DailyMed media.json",
-            media.name,
-            source_url=media.url,
-            fetched_at=ctx.now,
-            snippet=media.mime_type,
-        )
-        for media in ctx.spl_media
-    ]
-    return _populated(spec, f"{len(ctx.spl_media)} labeling image(s) enumerated.", ev)
+    guard = _spl_guard(spec, ctx)
+    if guard is not None:
+        return guard
+    assert ctx.approved_label is not None  # noqa: S101 - narrowed by guard
+    return _analyst(
+        spec,
+        [
+            _evidence(
+                "Drugs@FDA approved labeling",
+                "document",
+                source_url=ctx.approved_label.source_url,
+                fetched_at=ctx.approved_label.fetched_at,
+                snippet=ctx.approved_label.title,
+            )
+        ],
+        "The approved-label PDF is indexed as citable text; image enumeration is not "
+        "a supported field and requires analyst review.",
+    )
 
 
 def _structure_guard(spec: CellSpec, ctx: _Ctx) -> dict[str, Any] | None:
@@ -1684,12 +1598,13 @@ def _structure_guard(spec: CellSpec, ctx: _Ctx) -> dict[str, Any] | None:
     guard = _spl_guard(spec, ctx)
     if guard is not None:
         return guard
-    if not ctx.spl_section_codes:
+    assert ctx.approved_label is not None  # noqa: S101 - narrowed by _spl_guard
+    if not ctx.approved_label.section_codes:
         return _analyst(
             spec,
             [],
-            "SPL fetched but no LOINC-coded sections parsed — cannot assess labeling "
-            "structure (INV-5).",
+            "Approved label indexed but no recognized prescribing-information headings "
+            "were detected; labeling structure cannot be assessed.",
         )
     return None
 
@@ -1698,13 +1613,14 @@ def _ext_plr_format(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     guard = _structure_guard(spec, ctx)
     if guard is not None:
         return guard
-    present = [c for c in ctx.spl_section_codes if c in _PLR_SECTION_LOINCS]
+    assert ctx.approved_label is not None  # noqa: S101 - narrowed by guard
+    present = [c for c in ctx.approved_label.section_codes if c in _PLR_SECTION_LOINCS]
     ev = [
         _evidence(
-            "DailyMed SPL structure",
-            f"setid={ctx.setid}",
-            source_url=ctx.spl_source_url,
-            fetched_at=ctx.spl_fetched_at,
+            "Drugs@FDA approved-label structure",
+            "document",
+            source_url=ctx.approved_label.source_url,
+            fetched_at=ctx.approved_label.fetched_at,
             snippet="numbered PLR sections present: " + (", ".join(present) or "none"),
         )
     ]
@@ -1726,19 +1642,19 @@ def _ext_pllr_format(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     guard = _structure_guard(spec, ctx)
     if guard is not None:
         return guard
-    present = [c for c in _PLLR_LOINCS if c in ctx.spl_section_codes]
-    assert ctx.setid is not None  # noqa: S101 - narrowing; _spl_guard already gated setid
+    assert ctx.approved_label is not None  # noqa: S101 - narrowed by guard
+    present = [c for c in _PLLR_LOINCS if c in ctx.approved_label.section_codes]
     ev: list[dict[str, Any]] = []
     for loinc in present:
-        token = spl_token(ctx.setid, loinc)
-        valid, _ = validate_structured_citations([token], ctx.known_tokens)
+        section = ctx.approved_label.sections[loinc]
         ev.append(
             _evidence(
-                "DailyMed SPL",
-                token if valid else f"setid={ctx.setid}#{loinc}",
-                source_url=ctx.spl_source_url,
-                fetched_at=ctx.spl_fetched_at,
-                section=loinc,
+                "Drugs@FDA approved labeling",
+                f"page:{section.page}",
+                source_url=ctx.approved_label.source_url,
+                fetched_at=ctx.approved_label.fetched_at,
+                page=section.page,
+                section=section.title,
                 snippet="PLLR subsection present",
             )
         )
@@ -1749,10 +1665,10 @@ def _ext_pllr_format(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
         "No PLLR subsections (LOINC 42228-7 / 77290-5 / 77291-3) detected.",
         [
             _evidence(
-                "DailyMed SPL structure",
-                f"setid={ctx.setid}",
-                source_url=ctx.spl_source_url,
-                fetched_at=ctx.spl_fetched_at,
+                "Drugs@FDA approved-label structure",
+                "document",
+                source_url=ctx.approved_label.source_url,
+                fetched_at=ctx.approved_label.fetched_at,
                 snippet="PLLR subsection codes absent from the section list.",
             )
         ],
@@ -1764,21 +1680,20 @@ def _ext_pregnancy_registry(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
     guard = _spl_guard(spec, ctx)
     if guard is not None:
         return guard
-    section = ctx.spl_sections.get(LOINC_PREGNANCY)
+    assert ctx.approved_label is not None  # noqa: S101 - narrowed by guard
+    section = ctx.approved_label.sections.get(LOINC_PREGNANCY)
     if section is None:
-        return _analyst(spec, [], "No Pregnancy subsection (LOINC 42228-7) in the SPL.")
-    assert ctx.setid is not None  # noqa: S101 - narrowing; _spl_guard already gated setid
-    token = spl_token(ctx.setid, LOINC_PREGNANCY)
-    valid, _ = validate_structured_citations([token], ctx.known_tokens)
-    locator = token if valid else f"setid={ctx.setid}#{LOINC_PREGNANCY}"
+        return _analyst(spec, [], "No Pregnancy subsection was detected in the approved label.")
+    locator = f"page:{section.page}"
     match = _find_registry_sentence(section.text)
     if match:
         ev = [
             _evidence(
-                "DailyMed SPL",
+                "Drugs@FDA approved labeling",
                 locator,
-                source_url=section.source_url,
-                fetched_at=section.fetched_at,
+                source_url=ctx.approved_label.source_url,
+                fetched_at=ctx.approved_label.fetched_at,
+                page=section.page,
                 section=section.title or LOINC_PREGNANCY,
                 snippet=match,
             )
@@ -1791,10 +1706,11 @@ def _ext_pregnancy_registry(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
         spec,
         [
             _evidence(
-                "DailyMed SPL",
+                "Drugs@FDA approved labeling",
                 locator,
-                source_url=section.source_url,
-                fetched_at=section.fetched_at,
+                source_url=ctx.approved_label.source_url,
+                fetched_at=ctx.approved_label.fetched_at,
+                page=section.page,
                 section=section.title or LOINC_PREGNANCY,
                 snippet=section.text[:300],
             )
@@ -1921,7 +1837,7 @@ def _guiding_note(qa: QAResult, base: str) -> str:
         note = f"{note} Closest matching guidance: {qa.interpretation}"
     labels = [o.label for o in (qa.related or [])] + [o.label for o in (qa.clarify or [])]
     if labels:
-        note = f'{note} Answerable next steps: {"; ".join(labels[:3])}.'
+        note = f"{note} Answerable next steps: {'; '.join(labels[:3])}."
     return note
 
 
@@ -2157,7 +2073,7 @@ def _ext_combination_product(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
         )
         ev.append(
             _evidence(
-                "Drugs@FDA (openFDA)",
+                "Drugs@FDA",
                 rec.identifiers.get("application_number") or "drugsfda.json",
                 source_url=rec.source_url or DRUGSFDA_DOC_URL,
                 fetched_at=ctx.now,
@@ -2233,21 +2149,19 @@ def _ext_labeling_carveouts(spec: CellSpec, ctx: _Ctx) -> dict[str, Any]:
                     snippet=f"patent {patent_no} use code {use_code}",
                 )
             )
-    indication = ctx.spl_sections.get(LOINC_INDICATION)
-    if indication is not None and ctx.setid is not None:
-        token = spl_token(ctx.setid, LOINC_INDICATION)
-        valid, _ = validate_structured_citations([token], ctx.known_tokens)
-        if valid:
-            ev.append(
-                _evidence(
-                    "DailyMed SPL",
-                    token,
-                    source_url=indication.source_url,
-                    fetched_at=indication.fetched_at,
-                    section=indication.title or LOINC_INDICATION,
-                    snippet=indication.text[:300],
-                )
+    indication = ctx.approved_label.sections.get(LOINC_INDICATION) if ctx.approved_label else None
+    if indication is not None and ctx.approved_label is not None:
+        ev.append(
+            _evidence(
+                "Drugs@FDA approved labeling",
+                f"page:{indication.page}",
+                source_url=ctx.approved_label.source_url,
+                fetched_at=ctx.approved_label.fetched_at,
+                page=indication.page,
+                section=indication.title or section_title(LOINC_INDICATION),
+                snippet=indication.text[:300],
             )
+        )
     note = (
         "Carve-out decision is regulatory judgment (INV-3): protected-use patent codes and the "
         "RLD indication are surfaced as evidence for the analyst."
@@ -2456,19 +2370,19 @@ def _spine_from_ctx(ctx: _Ctx) -> dict[str, Any]:
         "product_numbers": _unique(
             r.get("product_no") for r in ctx.product_rows if r.get("product_no")
         ),
-        "setid": ctx.setid,
-        # Additive (P1b): the full DailyMed candidate set behind the setid
-        # pick, so the repackager-vs-sponsor selection is auditable and
-        # overridable by the analyst -- never a silent pick.
-        "spl_candidates": [
-            {
-                "setid": c.setid,
-                "title": c.title,
-                "labeler": c.labeler,
-                "published": c.published,
-            }
-            for c in (ctx.setid_resolution.candidates if ctx.setid_resolution else ())
-        ],
+        # Deprecated compatibility fields: this FDA-only implementation never
+        # resolves or cites an external SPL.
+        "setid": None,
+        "spl_candidates": [],
+        "approved_label_document_id": (
+            ctx.approved_label.canonical_id if ctx.approved_label else None
+        ),
+        "approved_label_source_url": (
+            ctx.approved_label.source_url if ctx.approved_label else None
+        ),
+        "approved_label_updated_at": (
+            ctx.approved_label.source_updated_at if ctx.approved_label else None
+        ),
         "warnings": ctx.warnings,
     }
 
