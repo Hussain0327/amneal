@@ -31,6 +31,7 @@ var sessionFilterKeys = map[string]bool{
 	"route":           true,
 	"psg_type":        true,
 	"doc_id":          true,
+	"appl_no":         true,
 }
 
 // handleCompleteQuery is the native POST /query (step-5 cutover): gates + T1,

@@ -63,12 +63,13 @@ func TestWhitelistFilters(t *testing.T) {
 		"route":           json.RawMessage(`"oral"`),
 		"psg_type":        json.RawMessage(`"final"`),
 		"doc_id":          json.RawMessage(`42`),
+		"appl_no":         json.RawMessage(`"020503"`),
 		"version_id":      json.RawMessage(`7`),       // NOT whitelisted -> dropped (injection guard)
 		"source_url":      json.RawMessage(`"x"`),     // legacy key, not whitelisted -> dropped
 		"nested":          json.RawMessage(`{"a":1}`), // whitelisted key would still drop non-scalars
 	}
 	got := whitelistFilters(in)
-	wantKeys := []string{"normalized_name", "dosage_form", "route", "psg_type", "doc_id"}
+	wantKeys := []string{"normalized_name", "dosage_form", "route", "psg_type", "doc_id", "appl_no"}
 	if len(got) != len(wantKeys) {
 		t.Fatalf("kept %d keys, want %d: %v", len(got), len(wantKeys), got)
 	}
@@ -83,6 +84,9 @@ func TestWhitelistFilters(t *testing.T) {
 	// doc_id integer preserved byte-exact (int stays int, not float).
 	if string(got["doc_id"]) != "42" {
 		t.Errorf("doc_id = %s, want 42", got["doc_id"])
+	}
+	if string(got["appl_no"]) != `"020503"` {
+		t.Errorf("appl_no = %s, want %q", got["appl_no"], "020503")
 	}
 
 	// A whitelisted key with a non-scalar value is dropped.

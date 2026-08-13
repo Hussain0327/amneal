@@ -18,7 +18,7 @@ import pytest
 from regwatch.common.conversation import SESSION_FILTER_KEYS, _safe_filters
 from regwatch.retrieve.mode import RetrievalScope, default_mode_for_scope
 from regwatch.retrieve.retriever import _build_where, _fold_filter_casing
-from regwatch.retrieve.scope import ProductScope
+from regwatch.retrieve.scope import _PRODUCT_FILTER_KEYS, ProductScope
 
 # Every filter mapping shape the live paths can produce: the API whitelist keeps
 # only SESSION_FILTER_KEYS (api/main.py::_whitelist_filter_keys), and the two
@@ -35,6 +35,7 @@ _LIVE_SHAPES: list[dict[str, Any]] = [
         "route": "Inhalation",
     },
     {"normalized_name": "albuterol sulfate", "psg_type": "draft"},
+    {"normalized_name": "albuterol sulfate", "appl_no": "020503"},
     {"doc_id": "PSG_020503"},
     {"normalized_name": "albuterol sulfate", "doc_id": "PSG_020503"},
     # Empty values: dropped identically by _safe_filters and _build_where today.
@@ -100,21 +101,26 @@ def test_casing_is_left_alone_for_the_retriever_to_fold(raw: dict[str, Any]) -> 
             assert scoped[key] == raw[key], "ProductScope must not transform casing"
 
 
+def test_compiled_product_filter_keys_are_safe_to_persist() -> None:
+    """An executable product key may not disappear at the session boundary."""
+    assert _PRODUCT_FILTER_KEYS.issubset(SESSION_FILTER_KEYS)
+
+
 def test_it_is_lossless_beyond_the_session_key_set() -> None:
-    """The one place ProductScope and _safe_filters deliberately differ.
+    """ProductScope remains lossless for deliberate internal-only filters.
 
     _safe_filters projects onto SESSION_FILTER_KEYS because a session row must
     not accumulate arbitrary keys. ProductScope must NOT project: it feeds
     retrieval, which today receives the whole dict. A key the scope silently
     dropped would widen the WHERE clause and could return a wrong-drug passage,
-    which is INV-1's failure mode. appl_no is the live example of the divergence
-    (in _PRODUCT_FILTER_KEYS, absent from SESSION_FILTER_KEYS); it is pre-existing
-    and deliberately not "fixed" here.
+    which is INV-1's failure mode. version_id is deliberately internal-only: the
+    public/session whitelist excludes it because it disables automatic current-
+    version scoping, while trusted internal retrieval can still target one.
     """
-    raw = {"normalized_name": "albuterol sulfate", "appl_no": "020503"}
+    raw = {"normalized_name": "albuterol sulfate", "version_id": 17}
 
     assert ProductScope.from_filters(raw).as_filters() == raw
-    assert "appl_no" not in _safe_filters(raw)
+    assert "version_id" not in _safe_filters(raw)
     assert _build_where(ProductScope.from_filters(raw).as_filters()) == _build_where(raw)
 
 
