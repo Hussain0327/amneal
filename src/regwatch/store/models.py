@@ -561,6 +561,11 @@ class DeficiencyRun(SQLModel, table=True):
     created_by_user_id: int = Field(foreign_key="user.id", index=True)
     filename: str  # display label only; sanitized at the API boundary
     sha256: str  # of the uploaded bytes; the document itself is never stored
+    # What submitted this run. NULL is the original PDF-upload path, which is
+    # org-shared; "studio" is a Compliance Studio check, which is private to
+    # its creator. The two surfaces share this table but never share
+    # visibility, so every read path filters on it.
+    source: str | None = Field(default=None, index=True)
     status: str = Field(default="pending", index=True)
     started_at: datetime | None = None
     completed_at: datetime | None = None

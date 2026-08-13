@@ -30,12 +30,17 @@ log = get_logger(__name__)
 _STALE_ERROR = "analysis did not complete (process restarted or timed out)"
 
 
-def create_run(*, user_id: int, filename: str, sha256: str) -> DeficiencyRun:
+def create_run(
+    *, user_id: int, filename: str, sha256: str, source: str | None = None
+) -> DeficiencyRun:
+    """Create a pending run. ``source`` is None for a PDF upload and "studio"
+    for a Compliance Studio check; it decides who may read the row back."""
     run = DeficiencyRun(
         created_by_user_id=user_id,
         filename=filename,
         sha256=sha256,
         status="pending",
+        source=source,
     )
     with session_scope() as s:
         s.add(run)
@@ -129,17 +134,26 @@ def get_run(run_id: int) -> DeficiencyRun | None:
 
 
 def list_runs(*, limit: int = 50, offset: int = 0) -> tuple[list[DeficiencyRun], int]:
-    """Org-shared listing, newest first (same product decision as white-paper
-    runs: any authenticated analyst sees every run)."""
+    """Org-shared listing of UPLOAD runs, newest first (same product decision
+    as white-paper runs: any authenticated analyst sees every run).
+
+    Studio checks live in this table too and are deliberately excluded: they
+    are private to the analyst who ran them, so surfacing them in an org-shared
+    list would leak one analyst's draft into everyone else's history.
+    """
     from sqlalchemy import func
 
+    uploads_only = col(DeficiencyRun.source).is_(None)
     with session_scope() as s:
         total = int(
-            s.execute(select(func.count()).select_from(DeficiencyRun)).scalar_one()  # type: ignore[arg-type]
+            s.execute(
+                select(func.count()).select_from(DeficiencyRun).where(uploads_only)  # type: ignore[arg-type]
+            ).scalar_one()
         )
         rows = (
             s.execute(
                 select(DeficiencyRun)
+                .where(uploads_only)
                 .order_by(col(DeficiencyRun.created_at).desc(), col(DeficiencyRun.id).desc())
                 .limit(limit)
                 .offset(offset)
