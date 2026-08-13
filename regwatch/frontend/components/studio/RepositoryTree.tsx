@@ -276,7 +276,7 @@ export function RepositoryTree({
         <p className="st-check__note">
           {activeLibraryId !== null
             ? "Reads what this guidance requires of an application, with the page each requirement comes from."
-            : "Against ICH, USP, 21 CFR and your internal SOPs."}
+            : "Check this document for potential regulatory deficiencies."}
         </p>
       </div>
     </aside>
