@@ -142,7 +142,10 @@ describe("buildRefs -- the provenance appendix", () => {
           cell("product_name", { label: "Product Name", evidence: [ev()] }),
           cell("dosage_form", {
             label: "Dosage Form",
-            evidence: [ev(), ev({ source: "DailyMed SPL", locator: "setid=x" })],
+            evidence: [
+              ev(),
+              ev({ source: "Drugs@FDA approved labeling", locator: "page=3" }),
+            ],
           }),
         ],
       },

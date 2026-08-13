@@ -403,8 +403,8 @@ def _build_from_scratch(result: dict[str, Any], inputs: Inputs = None) -> DocxDo
         f"{spine.get('application_type', '')} {spine.get('application_number', '')} — "
         f"{spine.get('ingredient', '')}"
     )
-    if spine.get("setid"):
-        doc.add_paragraph(f"DailyMed setid: {spine['setid']}")
+    if spine.get("approved_label_document_id"):
+        doc.add_paragraph(f"Drugs@FDA label: {spine['approved_label_document_id']}")
     cells = _cells_by_id(result)
     for title in section_order():
         doc.add_heading(title, level=1)

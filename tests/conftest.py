@@ -229,6 +229,7 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     monkeypatch.setenv("LLM_PROVIDER", "echo")
     monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", "legacy")
     monkeypatch.setenv("EMBEDDING_SHADOW_PROFILE", "")
+    monkeypatch.setenv("REGWATCH_RETRIEVAL_CORPUS", "legacy")
     # Rate limiting off by default; rate-limit tests opt in explicitly.
     monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "0")
     # The API fail-fast guard rejects echo providers over a non-empty corpus;
@@ -238,7 +239,6 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     # so tests run from a clean slate regardless of the host's .env.
     monkeypatch.setenv("OPENAI_API_KEY", "")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
-    monkeypatch.setenv("OPENFDA_API_KEY", "")
     monkeypatch.setenv("QWEN_EMBEDDING_BASE_URL", "")
     monkeypatch.setenv("QWEN_EMBEDDING_TOKEN", "")
     monkeypatch.setenv("DATABRICKS_LLM_BASE_URL", "")
@@ -285,6 +285,6 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
 @pytest.fixture
 def cleared_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Optional fixture to wipe optional API keys so tests can assert provider errors."""
-    for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENFDA_API_KEY"):
+    for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
         if k in os.environ:
             monkeypatch.delenv(k, raising=False)

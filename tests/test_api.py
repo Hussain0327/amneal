@@ -289,6 +289,19 @@ def test_sources_search_accepts_explicit_source_without_network(
     assert body["records"] == []
 
 
+@pytest.mark.parametrize("retired", ["shortage", "ndc", "rems", "dailymed"])
+def test_sources_search_rejects_retired_source_values(
+    auth_client: TestClient,
+    retired: str,
+) -> None:
+    response = auth_client.post(
+        "/sources/search",
+        json={"query_text": "legacy source", "sources": [retired]},
+    )
+
+    assert response.status_code == 422
+
+
 def test_watch_latest_returns_empty_when_no_alerts(auth_client: TestClient) -> None:
     r = auth_client.get("/watch/latest")
     assert r.status_code == 200

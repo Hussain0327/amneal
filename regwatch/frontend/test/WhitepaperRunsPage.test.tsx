@@ -93,6 +93,9 @@ function makeSpine(overrides: Partial<WhitepaperSpine> = {}): WhitepaperSpine {
     product_numbers: ["001"],
     setid: null,
     spl_candidates: [],
+    approved_label_document_id: null,
+    approved_label_source_url: null,
+    approved_label_updated_at: null,
     warnings: [],
     ...overrides,
   };

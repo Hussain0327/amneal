@@ -1,6 +1,6 @@
 # regwatch
 
-Last updated: 2026-08-12
+Last updated: 2026-08-13
 
 regwatch helps a generic-drug regulatory team answer FDA research questions in
 minutes instead of days. Every factual sentence comes back with the source and
@@ -9,11 +9,11 @@ so in plain words.
 
 An analyst preparing a generic-drug application spends hours reading FDA
 **Product-Specific Guidances** (PSGs, the agency's per-drug instructions for
-proving a generic is equivalent to the brand) and cross-checking Drugs@FDA, the
-Orange Book, DailyMed, drug-shortage, and REMS. regwatch does that reading for
-them. It watches those sources, pins every question to one product so citations
-cannot cross drugs, and answers in plain language with a citation on every FDA
-fact.
+proving a generic is equivalent to the brand) and cross-checking Drugs@FDA,
+approval/action packages, FDA bioequivalence guidance, and the Orange Book.
+regwatch does that reading for them. It pins every question to one product so
+citations cannot cross drugs and answers in plain language with a citation on
+every FDA fact.
 
 The product **surfaces, organizes, compares, and cites public FDA information.**
 It never drafts submission content, never makes a regulatory recommendation, and
@@ -30,8 +30,8 @@ sits apart from them and is described below.
   ordinary words and points at a better next question. Ambiguous questions
   ("propranolol") get clickable clarifying options rather than a wrong answer.
 - **Assemble**: for a target product, build a fully cited dossier: the relevant
-  PSG(s), extracted bioequivalence requirements, the brand-drug label from
-  openFDA, applicable guidance, and a requirements checklist.
+  PSG(s), extracted bioequivalence requirements, approved Drugs@FDA labeling,
+  applicable FDA guidance, and a requirements checklist.
 - **Watch**: crawl the FDA PSG database daily, detect new and revised guidances,
   match them against the company's product pipeline, and surface a cited summary
   of what changed.
@@ -147,12 +147,23 @@ The canonical system design is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 ## Status
 
 regwatch runs as a **limited internal pilot**, not a generally available product.
-The numbers below were checked against the live system on 2026-08-11.
+The deployed-system numbers below were checked on 2026-08-11. The new corpus
+discovery was checked independently against official FDA snapshots on
+2026-08-13.
 
 - **Deployed.** The API runs on Fly.io (app `amneal`, release v104). The frontend
   runs on Vercel. Postgres and pgvector are on **Databricks Lakebase**, in the
   company's own Databricks tenant. Rows, vectors, and the audit log all live in
-  that one database. The corpus is 5,494 chunks.
+  that one database. The currently serving legacy PSG corpus is 5,494 chunks.
+- **The replacement authoritative FDA corpus pipeline is implemented but not
+  activated.** A complete read-only discovery found **140,339 source records**:
+  99,190 Drugs@FDA, 10,156 action-package, 1,795 PSG, 5 FDA BE-guidance, and
+  29,193 Orange Book records. Those are documents, not chunks or embeddings.
+  The full download/parse/chunk/embed backfill has not run, so its measured
+  chunk and embedding totals remain pending. The serving namespace stays on
+  `legacy` until a successful complete run reaches 100% profile coverage and
+  the activation gate passes. See
+  [`docs/AUTHORITATIVE_FDA_CORPUS.md`](docs/AUTHORITATIVE_FDA_CORPUS.md).
 - **Both model roles run on Databricks Model Serving**, in the same tenant.
   Generation is `gpt-oss-120b` (served id `gpt-oss-120b-080525`) behind the
   serving alias `workspace.default.regwatch`, and that one open-weight model
@@ -232,6 +243,15 @@ uv run regwatch aliases --refresh
 # (`regwatch ingest-all` loads the full catalog)
 uv run regwatch seed
 
+# discover the complete FDA-only replacement corpus without writing the DB
+uv run regwatch authoritative-corpus-plan
+
+# operator-only full build; chunks are committed first, embeddings are a
+# separate resumable batch phase. Read the runbook before starting this.
+uv run regwatch authoritative-corpus-sync --defer-embeddings --workers 4
+uv run regwatch authoritative-corpus-embed --batch-size 128
+uv run regwatch authoritative-corpus-status
+
 # create a login (password is prompted, never passed as an argument)
 uv run regwatch create-user analyst@example.com --name "Analyst"
 
@@ -282,7 +302,7 @@ flowchart LR
 | Vector store | **pgvector** in the same Postgres, everywhere (Lakebase in prod, a disposable local/CI Postgres otherwise). No other vector backend since R5 |
 | Structured store | **Postgres** via SQLModel (Lakebase in prod). `DATABASE_URL` is mandatory and the app refuses to boot without it. Schema changes ship as Alembic migrations |
 | Retrieval | Two-stage. Stage 1: vector top-k 50 (`VECTOR_TOP_K`). Stage 2: rerank to top-k 8 (`RERANK_TOP_K`); reranker off by default |
-| Ingest | `httpx` plus `selectolax`; `pdfplumber` (with `pypdf` fallback); heading- and page-aware chunking (~1000 tokens, ~150 overlap) |
+| Ingest | Exact five-family FDA source policy; deterministic manifest; bounded and host-paced `httpx`; `selectolax`; `pdfplumber` with `pypdf` fallback; immutable source versions; per-document atomic chunk publication; deferred, resumable embedding batches |
 | Deploy | One Fly.io app, **two process groups**: the Go proxy on the public port, the Python app (dual-stack `regwatch serve`) on an internal port behind it. DB and vectors on Lakebase, frontend on Vercel, LLM and embeddings on Databricks Model Serving, daily Watch via GitHub Actions cron. Alembic (run by the Fly release command) stays the single schema authority |
 | Tooling | Python: ruff, black, mypy (strict on `src/`), pytest, import-linter layering contracts. Go: gofmt, go vet, golangci-lint, sqlc (generated store plus `sqlc vet` against a real schema). A cross-service contract suite (`tests_contract/`) boots the real Go proxy, uvicorn, and Postgres to prove the wire contract across the boundary |
 
@@ -380,12 +400,12 @@ per-user rate limit (`RATE_LIMIT_PER_MINUTE`, default 30). Set
 
 ## Watchlist sources
 
-The watchlist is built from three allowed sources, in order. INV-5 rejects
-anything else, including model memory:
+The watchlist is built from three allowed identity inputs, in order. INV-5
+rejects anything else, including model memory:
 
-1. `drugsfda`: `api.fda.gov/drug/drugsfda.json`, filtered to applications whose
-   sponsor matches a discovered Amneal variant. Aliases come from
-   `uv run regwatch aliases`, not hand-coding.
+1. `drugsfda`: the official Drugs@FDA data-file snapshot, filtered to
+   applications whose sponsor matches a discovered Amneal variant. Aliases
+   come from `uv run regwatch aliases`, not hand-coding.
 2. `anda_letter`: user-uploaded approval letters.
 3. `manual`: explicit overrides.
 
@@ -428,11 +448,12 @@ cutoff.
 ```
 config/settings.py        pydantic-settings: all thresholds + secrets
 src/regwatch/
-  ingest/                 psg_crawler, pdf_parser, pipeline
+  corpus/                 FDA discovery, atomic sync, status, embedding backfill
+  ingest/                 psg_crawler, pdf_parser, pipeline, embedding writer
   process/                chunker, embedder, extractor, change_detector
   store/                  db, models, vector_store, pgvector_store
   retrieve/               retriever (stage 1), reranker (stage 2)
-  sources/                FDA source handlers + source router
+  sources/                exact five-family policy, adapters, and source router
   generate/               LLM provider interface, grounded_qa, prompts, turn_gate
   watch/                  watchlist, aliases, matcher, alerts
   assemble/               dossier builder
@@ -454,6 +475,9 @@ Start with the Map of Content, [`docs/MAP.md`](docs/MAP.md). Highest-value entry
 points:
 
 - [Architecture](docs/ARCHITECTURE.md): canonical system design.
+- [Authoritative FDA corpus](docs/AUTHORITATIVE_FDA_CORPUS.md): exact source
+  boundary, 140,339-record snapshot, counts, checksums, runbook, activation, and
+  rollback.
 - [Non-technical guide](docs/NON_TECH_GUIDE.md): plain English for business and
   regulatory readers.
 - [Production readiness](docs/PROD_READINESS.md): the POC-to-production path.

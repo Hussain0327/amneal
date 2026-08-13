@@ -1094,9 +1094,10 @@ export interface components {
         };
         /**
          * SourceKind
+         * @description The exact source universe exposed by the public API.
          * @enum {string}
          */
-        SourceKind: "psg" | "orange_book" | "drugsfda" | "shortage" | "ndc" | "rems" | "dailymed";
+        SourceKind: "psg" | "orange_book" | "drugsfda" | "action_package" | "fda_be_guidance";
         /** SourceRecordResponse */
         SourceRecordResponse: {
             /** Fields */
@@ -1128,8 +1129,6 @@ export interface components {
              * @default 10
              */
             limit: number;
-            /** Ndc */
-            ndc?: string | null;
             /**
              * Query Text
              * @default
@@ -1444,6 +1443,12 @@ export interface components {
              * @enum {string}
              */
             application_type: "NDA" | "ANDA" | "BLA";
+            /** Approved Label Document Id */
+            approved_label_document_id: string | null;
+            /** Approved Label Source Url */
+            approved_label_source_url: string | null;
+            /** Approved Label Updated At */
+            approved_label_updated_at: string | null;
             /** Ingredient */
             ingredient: string;
             /** Normalized Name */

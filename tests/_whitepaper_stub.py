@@ -13,8 +13,8 @@ from typing import Any
 import pytest
 
 from regwatch.generate.grounded_qa import Citation, QAResult
-from regwatch.sources import dailymed, orange_book
-from regwatch.sources.dailymed import SetidResolution, SplMedia, SplXmlDocument
+from regwatch.sources import orange_book
+from regwatch.sources.approved_label import ApprovedLabel, label_from_pages
 from regwatch.sources.orange_book import OrangeBookRows
 from regwatch.sources.types import SourceKind, SourceQuery, SourceRecord
 from regwatch.store.db import init_db, session_scope
@@ -24,36 +24,19 @@ from regwatch.whitepaper import populator
 APPL_NO = "020503"
 RLD_NAME = "albuterol sulfate"
 
-_SPL_XML = """<?xml version="1.0" encoding="UTF-8"?>
-<document xmlns="urn:hl7-org:v3">
-  <component><structuredBody>
-    <component><section>
-      <code code="34067-9"/>
-      <title>INDICATIONS AND USAGE</title>
-      <text>Albuterol sulfate inhalation aerosol is indicated for bronchospasm.</text>
-    </section></component>
-    <component><section>
-      <code code="34068-7"/>
-      <title>DOSAGE AND ADMINISTRATION</title>
-      <text>Two inhalations every 4 to 6 hours.</text>
-    </section></component>
-    <component><section>
-      <code code="43685-7"/>
-      <title>WARNINGS AND PRECAUTIONS</title>
-      <text>Paradoxical bronchospasm may occur.</text>
-    </section></component>
-    <component><section>
-      <code code="34084-4"/>
-      <title>ADVERSE REACTIONS</title>
-      <text>Most common adverse reactions include tremor.</text>
-    </section></component>
-    <component><section>
-      <code code="42228-7"/>
-      <title>PREGNANCY</title>
-      <text>To enroll, contact the pregnancy exposure registry at 1-800-555-0100.</text>
-    </section></component>
-  </structuredBody></component>
-</document>"""
+_LABEL_PAGES = [
+    """1 INDICATIONS AND USAGE
+Albuterol sulfate inhalation aerosol is indicated for bronchospasm.
+2 DOSAGE AND ADMINISTRATION
+Two inhalations every 4 to 6 hours.
+5 WARNINGS AND PRECAUTIONS
+Paradoxical bronchospasm may occur.
+6 ADVERSE REACTIONS
+Most common adverse reactions include tremor.""",
+    """8 USE IN SPECIFIC POPULATIONS
+8.1 PREGNANCY
+To enroll, contact the pregnancy exposure registry at 1-800-555-0100.""",
+]
 
 
 def _product_rows() -> list[dict[str, str]]:
@@ -109,7 +92,7 @@ def _drugsfda_record() -> SourceRecord:
     return SourceRecord(
         source=SourceKind.DRUGSFDA,
         title="Drugs@FDA: NDA020503",
-        source_url="https://open.fda.gov/apis/drug/drugsfda/",
+        source_url="https://www.accessdata.fda.gov/scripts/cder/daf/index.cfm?ApplNo=020503",
         identifiers={"application_number": "NDA020503"},
         fields={
             "sponsor_name": "MERCK SHARP DOHME CORP",
@@ -126,8 +109,10 @@ def _drugsfda_record() -> SourceRecord:
     )
 
 
-def _ndc_record(dea_schedule: str | None) -> SourceRecord:
-    raw: dict[str, Any] = {"pharm_class": ["Adrenergic beta2-Agonists [EPC]"]}
+def _ndc_record(dea_schedule: str | None, *, include_epc: bool) -> SourceRecord:
+    raw: dict[str, Any] = {}
+    if include_epc:
+        raw["pharm_class"] = ["Adrenergic beta2-Agonists [EPC]"]
     if dea_schedule:
         raw["dea_schedule"] = dea_schedule
     return SourceRecord(
@@ -143,13 +128,17 @@ def _ndc_record(dea_schedule: str | None) -> SourceRecord:
     )
 
 
-def _setid_resolution(setid: str) -> SetidResolution:
-    return SetidResolution(
-        setid=setid,
-        title="PROVENTIL HFA",
-        published="Oct 08, 2019",
-        source_url=f"https://dailymed.nlm.nih.gov/dailymed/drugInfo.cfm?setid={setid}",
+def _approved_label() -> ApprovedLabel:
+    return label_from_pages(
+        canonical_id="drugs-at-fda:application-doc:77",
+        title="PROVENTIL HFA approved labeling",
+        application_number="NDA020503",
+        source_url="https://www.accessdata.fda.gov/drugsatfda_docs/label/2026/020503lbl.pdf",
+        source_updated_at="2026-08-01",
         fetched_at=datetime.now(UTC),
+        document_id=77,
+        version_id=88,
+        pages=_LABEL_PAGES,
     )
 
 
@@ -224,6 +213,7 @@ def install_fake_sources(
     ob_raises: bool = False,
     shortage_raises: bool = False,
     ndc_raises: bool = False,
+    ndc_epc: bool = False,
     dea_schedule: str | None = None,
     setid: str | None = "abc-def-123",
     seed_psg: bool = True,
@@ -251,7 +241,7 @@ def install_fake_sources(
     def fake_ndc(query: SourceQuery) -> list[SourceRecord]:
         if ndc_raises:
             raise RuntimeError("ndc down")
-        return [_ndc_record(dea_schedule)]
+        return [_ndc_record(dea_schedule, include_epc=ndc_epc)]
 
     def fake_shortage(query: SourceQuery) -> list[SourceRecord]:
         if shortage_raises:
@@ -288,29 +278,11 @@ def install_fake_sources(
             )
         ], rems_index_rows
 
-    def fake_resolve(
-        application_number: str,
-        *,
-        prefer_titles: Any = (),
-        prefer_labelers: Any = (),
-        client: Any = None,
-    ) -> SetidResolution | None:
+    def fake_label(application_number: str) -> ApprovedLabel | None:
         if setid is None:
             return None
-        return _setid_resolution(setid)
-
-    def fake_xml(target_setid: str, *, client: Any = None) -> SplXmlDocument:
-        return SplXmlDocument(
-            setid=target_setid,
-            xml=_SPL_XML,
-            source_url=f"https://dailymed.nlm.nih.gov/dailymed/drugInfo.cfm?setid={target_setid}",
-            fetched_at=datetime.now(UTC),
-        )
-
-    def fake_media(target_setid: str, *, client: Any = None) -> list[SplMedia]:
-        return [
-            SplMedia(name="figure1.jpg", url="http://example/figure1.jpg", mime_type="image/jpeg")
-        ]
+        assert application_number == "NDA020503"
+        return _approved_label()
 
     def fake_ask(*args: Any, **kwargs: Any) -> QAResult:
         return _qa_result()
@@ -322,7 +294,5 @@ def install_fake_sources(
     monkeypatch.setattr(populator, "_ndc_records", fake_ndc)
     monkeypatch.setattr(populator, "_shortage_records", fake_shortage)
     monkeypatch.setattr(populator, "_rems_search", fake_rems_search)
-    monkeypatch.setattr(dailymed, "resolve_setid", fake_resolve)
-    monkeypatch.setattr(dailymed, "fetch_spl_xml", fake_xml)
-    monkeypatch.setattr(dailymed, "fetch_media", fake_media)
+    monkeypatch.setattr(populator, "load_latest_approved_label", fake_label)
     monkeypatch.setattr(populator, "ask", fake_ask)

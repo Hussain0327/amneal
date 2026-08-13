@@ -65,6 +65,18 @@ def add_chunks(
     pgvector_store.add_chunks(ids, embeddings, documents, metadatas, conn=conn)
 
 
+def update_legacy_chunk_embeddings(
+    chunk_ids: list[str],
+    documents: list[str],
+    embeddings: list[list[float]],
+) -> None:
+    """Write only legacy vectors for authoritative chunks."""
+
+    from regwatch.store import pgvector_store
+
+    pgvector_store.update_legacy_chunk_embeddings(chunk_ids, documents, embeddings)
+
+
 def delete_chunks_for_doc_except_version(doc_id: int, keep_version_id: int) -> int:
     """Delete indexed chunks for one PSG document except the current version.
 
@@ -87,6 +99,13 @@ def delete_chunks_for_doc(doc_id: int, *, conn: Connection) -> int:
     from regwatch.store import pgvector_store
 
     return pgvector_store.delete_chunks_for_doc(doc_id, conn=conn)
+
+
+def delete_chunks_for_fda_document(fda_document_id: int, *, conn: Connection) -> int:
+    """Replace one authoritative document's current-search rows atomically."""
+    from regwatch.store import pgvector_store
+
+    return pgvector_store.delete_chunks_for_fda_document(fda_document_id, conn=conn)
 
 
 def similarity_search(

@@ -7,9 +7,9 @@ Real records carry sponsor-name variants like:
   "Amneal Pharms Co India Pvt Ltd"
   "Amneal Pharms LLC"
 
-These can't be enumerated by hand. We query `api.fda.gov/drug/drugsfda.json`
-for the company's root token (e.g. "Amneal") and collect all distinct
-`sponsor_name` values that contain it. The result is cached as JSON so
+These can't be enumerated by hand. We scan the official Drugs@FDA weekday data
+snapshot for the company's root token (e.g. "Amneal") and collect all distinct
+``SponsorName`` values that contain it. The result is cached as JSON so
 subsequent watchlist builds reuse it.
 """
 
@@ -17,33 +17,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import httpx
 from config.settings import get_settings
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from regwatch.common.logging import get_logger
-from regwatch.sources._utils import openfda_params
-from regwatch.sources.drugsfda import DRUGSFDA_ENDPOINT as DRUGSFDA_URL
+from regwatch.sources.drugsfda import get_drugsfda_snapshot
 
 log = get_logger(__name__)
-
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
-    retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
-    reraise=True,
-)
-def _fetch(client: httpx.Client, params: dict[str, Any]) -> dict[str, Any]:
-    resp = client.get(DRUGSFDA_URL, params=params)
-    if resp.status_code == 429:
-        raise httpx.HTTPStatusError("rate limited", request=resp.request, response=resp)
-    if resp.status_code == 404:
-        return {"results": []}
-    resp.raise_for_status()
-    return resp.json()
 
 
 def discover_applicant_aliases(
@@ -76,34 +57,13 @@ def discover_applicant_aliases(
         except json.JSONDecodeError:
             pass
 
-    owned = False
-    if client is None:
-        client = httpx.Client(timeout=s.http_timeout_s, headers={"User-Agent": s.user_agent})
-        owned = True
-
     aliases: set[str] = set()
     root_upper = root.upper()
-    try:
-        # openFDA `sponsor_name` is keyword-matched. To catch every variant
-        # ("AMNEAL", "AMNEAL PHARMS", "AMNEAL PHARMACEUTICALS OF NY", ...) we
-        # use an upper-cased trailing wildcard, which openFDA accepts.
-        page_limit = 100
-        for page in range(50):
-            params = openfda_params(f"sponsor_name:{root_upper}*", page_limit)
-            params["skip"] = page * page_limit
-            payload = _fetch(client, params)
-            results = payload.get("results") or []
-            if not results:
-                break
-            for app in results:
-                sponsor = (app.get("sponsor_name") or "").strip()
-                if root_upper in sponsor.upper():
-                    aliases.add(sponsor.upper())
-            if len(results) < page_limit:
-                break
-    finally:
-        if owned:
-            client.close()
+    snapshot = get_drugsfda_snapshot(client=client)
+    for application in snapshot.applications:
+        sponsor = (application.get("SponsorName") or "").strip()
+        if root_upper in sponsor.upper():
+            aliases.add(sponsor.upper())
 
     ordered = sorted(aliases)
     cache.write_text(

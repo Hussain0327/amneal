@@ -1,9 +1,8 @@
-"""REMS@FDA source handler.
+"""Retired REMS compatibility parser and fail-closed source handler.
 
-REMS does not currently have an openFDA drug endpoint, so this handler parses
-FDA REMS search-result HTML into structured rows. It is deliberately
-conservative: if the page shape changes, it returns no rows instead of
-inventing fields.
+REMS is not one of the five approved corpus families.  The HTML parser remains
+for historical stored evidence, but every acquisition entry point rejects the
+request before a network call can occur.
 """
 
 from __future__ import annotations
@@ -16,17 +15,11 @@ import httpx
 from selectolax.parser import HTMLParser
 
 from regwatch.common.text_normalize import canonical_name
-from regwatch.sources._utils import (
-    application_number_candidates,
-    clean_application_number,
-    clean_text,
-    get_openfda_client,
-    get_with_retry,
-    owned_client,
-)
+from regwatch.sources._utils import clean_application_number, clean_text
+from regwatch.sources.policy import SourcePolicyError
 from regwatch.sources.types import SourceKind, SourceQuery, SourceRecord
 
-REMS_INDEX_URL = "https://www.accessdata.fda.gov/scripts/cder/rems/index.cfm"
+REMS_INDEX_URL = ""
 
 # How the live index embeds application numbers in row text: "NDA #022549".
 _APP_NO_IN_TEXT_RE = re.compile(r"\b(?:NDA|ANDA|BLA)\s*#?\s*\d{5,6}\b", re.IGNORECASE)
@@ -44,19 +37,8 @@ class RemsHandler:
         *,
         client: httpx.Client | None = None,
     ) -> list[SourceRecord]:
-        html = self._html or _fetch_rems_html(client)
-        rows = parse_rems_rows(html)
-        name_terms = _name_terms(query)
-        query_app_nos = set(application_number_candidates(query.application_number))
-        out: list[SourceRecord] = []
-        for row in rows:
-            row_app_nos = _row_application_numbers(row)
-            if not _matches(row, row_app_nos, name_terms, query_app_nos):
-                continue
-            out.append(_record(row, row_app_nos))
-            if len(out) >= query.limit:
-                break
-        return out
+        del query, client
+        raise SourcePolicyError("REMS is outside the authoritative FDA corpus policy")
 
 
 def parse_rems_rows(html: str) -> list[dict[str, str]]:
@@ -83,21 +65,14 @@ def parse_rems_rows(html: str) -> list[dict[str, str]]:
 
 
 def fetch_rems_index_html(client: httpx.Client | None = None) -> str:
-    """Fetch the REMS index page HTML once.
-
-    Callers that need a tri-state absence signal parse this with
-    :func:`parse_rems_rows` themselves: zero TOTAL parsed rows means the scrape
-    degraded (the parser deliberately invents nothing), which must never read
-    as "queried, genuinely absent" (INV-5).
-    """
-    return _fetch_rems_html(client)
+    """Fail closed: REMS is outside the authoritative corpus policy."""
+    del client
+    raise SourcePolicyError("REMS is outside the authoritative FDA corpus policy")
 
 
 def _fetch_rems_html(client: httpx.Client | None) -> str:
-    with owned_client(client, get_openfda_client) as active_client:
-        resp = get_with_retry(active_client, REMS_INDEX_URL)
-        resp.raise_for_status()
-        return resp.text
+    del client
+    raise SourcePolicyError("REMS is outside the authoritative FDA corpus policy")
 
 
 def _record(row: dict[str, str], app_nos: list[str]) -> SourceRecord:

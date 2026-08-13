@@ -729,3 +729,30 @@ alone does not certify this residual.
 - **Code safety and operational readiness are separate.** All six repository
   secrets were absent when checked on 2026-08-12. The workflow therefore fails
   before crawl until the owner provisions them and verifies a manual dispatch.
+
+## The searchable corpus is restricted to five authoritative FDA families (Aug 13 2026)
+
+- **Approved universe:** Drugs@FDA; SBOA/approval/action packages; PSGs; reviewed
+  general FDA bioequivalence guidance; and Orange Book. This supersedes earlier
+  source-layer decisions that admitted public drug APIs, DailyMed, NDC,
+  shortages, REMS, dissolution, or other opportunistic feeds.
+- **The boundary is code-reviewed and fail closed.** Family-specific FDA host
+  and path rules validate the initial URL and every redirect. Legacy handlers
+  remain only as compatibility shims and cannot make network calls.
+- **Discovery, chunks, and embeddings are separate facts.** The complete
+  2026-08-13 discovery found 140,339 source records. That number cannot be
+  labeled as chunks or embeddings. Exact indexed-document, chunk, selected-
+  profile embedding, and pending counts come only from database coverage.
+- **Backfill never runs in a migration.** Migration 0021 adds the source-neutral
+  document/version/run ledger and chunk provenance. A supervised, resumable CLI
+  sync performs network and parser work with per-document transactions;
+  embeddings default to a separate batch phase.
+- **Cutover is gated and reversible.** `legacy` remains the default.
+  `authoritative_fda` refuses API startup unless all five families, a successful
+  complete-universe run, document parity, zero policy violations, and 100%
+  selected-profile chunk coverage are present. Rollback flips the setting back
+  and deletes nothing.
+- **Current state:** implementation and read-only discovery are complete. The
+  target-environment full sync, measured chunk count, embedding backfill, new-
+  corpus eval, activation, and rollback rehearsal remain operator work. The
+  canonical contract is `docs/AUTHORITATIVE_FDA_CORPUS.md`.

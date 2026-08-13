@@ -22,6 +22,7 @@ from regwatch.process.embedder import (
     get_embedding_provider_for_profile,
 )
 from regwatch.retrieve.mode import RetrievalMode, RetrievalScope, default_mode_for_scope
+from regwatch.sources.policy import allowed_source_families
 from regwatch.store.db import get_engine, session_scope
 from regwatch.store.models import PsgDocument, PsgVersion
 from regwatch.store.vector_store import (
@@ -227,10 +228,20 @@ def retrieve(
     qv = embed_query(embedder, query)
     filters = _fold_filter_casing(filters)
     where = _build_where(filters)
+    authoritative = getattr(s, "retrieval_corpus", "legacy") == "authoritative_fda"
+    if authoritative:
+        # Namespace cutover: legacy PSG rows have NULL source_family, while
+        # every 0021 corpus row carries one of these reviewed values. Filtering
+        # in SQL keeps mixed/backfill databases safe and makes rollback a
+        # one-variable change with no destructive data rewrite.
+        where = _and_where(
+            where,
+            {"source_family": {"$in": list(allowed_source_families())}},
+        )
     # An explicit version_id filter (internal callers only -- the API whitelists
     # it out of external input) targets one specific version, so the current-
     # version scoping below would be contradictory; everything else is scoped.
-    if not (filters or {}).get("version_id"):
+    if not authoritative and not (filters or {}).get("version_id"):
         current_version_ids = _current_version_ids_for_filters(filters)
         if current_version_ids is not None:
             if not current_version_ids:
@@ -249,8 +260,11 @@ def retrieve(
                 chunk_id=h.chunk_id,
                 text=h.text,
                 score=h.score,
-                doc_id=int(meta.get("doc_id") or 0),
-                version_id=int(meta.get("version_id") or 0),
+                # The public citation contract predates source-neutral FDA ids.
+                # Preserve its positive integer fields during cutover while
+                # retaining the explicit generic ids in passage metadata.
+                doc_id=int(meta.get("doc_id") or meta.get("fda_document_id") or 0),
+                version_id=int(meta.get("version_id") or meta.get("fda_version_id") or 0),
                 page=int(meta.get("page") or 0),
                 section_path=meta.get("section_path") or None,
                 normalized_name=str(meta.get("normalized_name") or ""),

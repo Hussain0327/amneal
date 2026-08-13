@@ -106,6 +106,102 @@ class BeRequirement(SQLModel, table=True):
     citations_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
 
 
+class FdaDocument(SQLModel, table=True):
+    """Stable identity for one document in the authoritative FDA corpus.
+
+    ``canonical_id`` is derived from an FDA-owned primary key (for example an
+    ApplicationDocsID, an Orange Book row key, or a PSG application number),
+    never from a title.  Mutable source bytes live in version rows.
+    """
+
+    __tablename__ = "fda_document"
+    __table_args__ = (
+        CheckConstraint(
+            "source_family IN ('drugs_at_fda', 'action_package', 'psg', "
+            "'fda_be_guidance', 'orange_book')",
+            name="ck_fda_document_source_family",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    canonical_id: str = Field(index=True, unique=True)
+    source_family: str = Field(index=True)
+    document_type: str = Field(index=True)
+    title: str
+    source_url: str
+    application_number: str | None = Field(default=None, index=True)
+    product_number: str | None = Field(default=None, index=True)
+    active_ingredient: str | None = None
+    normalized_name: str | None = Field(default=None, index=True)
+    brand_name: str | None = None
+    dosage_form: str | None = None
+    route: str | None = None
+    is_active: bool = Field(default=True, index=True)
+    metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
+    first_seen_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    last_seen_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
+
+
+class FdaDocumentVersion(SQLModel, table=True):
+    """Immutable captured bytes and parse facts for one FDA document revision."""
+
+    __tablename__ = "fda_document_version"
+    __table_args__ = (
+        Index(
+            "uq_fda_document_version_doc_hash",
+            "fda_document_id",
+            "content_hash",
+            "processing_fingerprint",
+            unique=True,
+        ),
+        CheckConstraint("byte_size >= 0", name="ck_fda_document_version_byte_size"),
+        CheckConstraint("page_count >= 0", name="ck_fda_document_version_page_count"),
+        CheckConstraint("chunk_count >= 0", name="ck_fda_document_version_chunk_count"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    fda_document_id: int = Field(foreign_key="fda_document.id", index=True)
+    content_hash: str = Field(index=True, min_length=64, max_length=64)
+    processing_fingerprint: str = Field(index=True, min_length=64, max_length=64)
+    source_updated_at: str | None = None
+    fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
+    mime_type: str
+    byte_size: int
+    page_count: int
+    chunk_count: int
+    artifact_path: str | None = None
+    parse_engine: str | None = None
+    metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
+
+
+class FdaCorpusRun(SQLModel, table=True):
+    """Auditable plan/sync ledger for the authoritative corpus."""
+
+    __tablename__ = "fda_corpus_run"
+    __table_args__ = (
+        CheckConstraint("mode IN ('plan', 'sync')", name="ck_fda_corpus_run_mode"),
+        CheckConstraint(
+            "status IN ('running', 'succeeded', 'failed')",
+            name="ck_fda_corpus_run_status",
+        ),
+    )
+
+    id: str = Field(primary_key=True)
+    mode: str
+    status: str = Field(default="running", index=True)
+    manifest_sha256: str
+    started_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
+    completed_at: datetime | None = None
+    expected_documents: int = 0
+    discovered_documents: int = 0
+    added_documents: int = 0
+    revised_documents: int = 0
+    unchanged_documents: int = 0
+    error_documents: int = 0
+    chunks_written: int = 0
+    stats_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
+
+
 class User(SQLModel, table=True):
     """An authenticated analyst. Accounts are provisioned via the CLI — no self-signup."""
 

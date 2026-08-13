@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS chunk (
     id TEXT PRIMARY KEY,
     doc_id INTEGER,
     version_id INTEGER,
+    fda_document_id INTEGER REFERENCES fda_document(id),
+    fda_version_id INTEGER REFERENCES fda_document_version(id),
     ordinal INTEGER,
     page INTEGER,
     section_path TEXT,
@@ -75,6 +77,9 @@ CREATE TABLE IF NOT EXISTS chunk (
     psg_type TEXT,
     appl_no TEXT,
     short_name TEXT,
+    source_family TEXT,
+    document_type TEXT,
+    locator TEXT,
     text TEXT,
     embedding {vector_schema}.vector(1536)
 )
@@ -91,6 +96,10 @@ _CHUNK_INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS ix_chunk_normalized_name ON chunk (normalized_name)",
     "CREATE INDEX IF NOT EXISTS ix_chunk_doc_id ON chunk (doc_id)",
     "CREATE INDEX IF NOT EXISTS ix_chunk_version_id ON chunk (version_id)",
+    "CREATE INDEX IF NOT EXISTS ix_chunk_fda_document_id ON chunk (fda_document_id)",
+    "CREATE INDEX IF NOT EXISTS ix_chunk_fda_version_id ON chunk (fda_version_id)",
+    "CREATE INDEX IF NOT EXISTS ix_chunk_source_family ON chunk (source_family)",
+    "CREATE INDEX IF NOT EXISTS ix_chunk_document_type ON chunk (document_type)",
     "CREATE INDEX IF NOT EXISTS ix_chunk_appl_no ON chunk (appl_no)",
 )
 

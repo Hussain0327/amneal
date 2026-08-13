@@ -57,6 +57,8 @@ _FILTERABLE_COLUMNS = frozenset(
     {
         "doc_id",
         "version_id",
+        "fda_document_id",
+        "fda_version_id",
         "page",
         "section_path",
         "normalized_name",
@@ -66,9 +68,12 @@ _FILTERABLE_COLUMNS = frozenset(
         "psg_type",
         "appl_no",
         "short_name",
+        "source_family",
+        "document_type",
+        "locator",
     }
 )
-_INT_METADATA_COLUMNS = ("doc_id", "version_id", "page")
+_INT_METADATA_COLUMNS = ("doc_id", "version_id", "fda_document_id", "fda_version_id", "page")
 _TEXT_METADATA_COLUMNS = (
     "section_path",
     "normalized_name",
@@ -78,6 +83,9 @@ _TEXT_METADATA_COLUMNS = (
     "psg_type",
     "appl_no",
     "short_name",
+    "source_family",
+    "document_type",
+    "locator",
 )
 _METADATA_COLUMNS = _INT_METADATA_COLUMNS + _TEXT_METADATA_COLUMNS
 
@@ -90,6 +98,12 @@ class Chunk(SQLModel, table=True):
     id: str = Field(primary_key=True)
     doc_id: int | None = Field(default=None, index=True)
     version_id: int | None = Field(default=None, index=True)
+    # Generic authoritative-corpus identity. PSG compatibility stays in the
+    # legacy doc_id/version_id pair while the new source universe rolls out.
+    fda_document_id: int | None = Field(default=None, foreign_key="fda_document.id", index=True)
+    fda_version_id: int | None = Field(
+        default=None, foreign_key="fda_document_version.id", index=True
+    )
     # In-document ordering (0017). The chunker always stamps it; NULL only on
     # rows written before the column existed. Kept out of _FILTERABLE_COLUMNS:
     # it orders siblings, it is not a retrieval filter.
@@ -103,6 +117,9 @@ class Chunk(SQLModel, table=True):
     psg_type: str | None = Field(default=None)
     appl_no: str | None = Field(default=None, index=True)
     short_name: str | None = Field(default=None)
+    source_family: str | None = Field(default=None, index=True)
+    document_type: str | None = Field(default=None, index=True)
+    locator: str | None = Field(default=None)
     text: str | None = Field(default=None)
     embedding: Any = Field(default=None, sa_column=Column(Vector(EMBEDDING_DIM)))
 
@@ -122,16 +139,20 @@ _INSERT_BATCH_SIZE = 1000
 
 _UPSERT_SQL = """
 INSERT INTO chunk (
-    id, doc_id, version_id, ordinal, page, section_path, normalized_name, dosage_form,
-    route, source_url, psg_type, appl_no, short_name, text, embedding
+    id, doc_id, version_id, fda_document_id, fda_version_id, ordinal, page, section_path,
+    normalized_name, dosage_form, route, source_url, psg_type, appl_no, short_name,
+    source_family, document_type, locator, text, embedding
 ) VALUES (
-    :id, :doc_id, :version_id, :ordinal, :page, :section_path, :normalized_name, :dosage_form,
-    :route, :source_url, :psg_type, :appl_no, :short_name, :text,
+    :id, :doc_id, :version_id, :fda_document_id, :fda_version_id, :ordinal, :page,
+    :section_path, :normalized_name, :dosage_form, :route, :source_url, :psg_type,
+    :appl_no, :short_name, :source_family, :document_type, :locator, :text,
     CAST(:embedding AS vector)
 )
 ON CONFLICT (id) DO UPDATE SET
     doc_id = EXCLUDED.doc_id,
     version_id = EXCLUDED.version_id,
+    fda_document_id = EXCLUDED.fda_document_id,
+    fda_version_id = EXCLUDED.fda_version_id,
     ordinal = EXCLUDED.ordinal,
     page = EXCLUDED.page,
     section_path = EXCLUDED.section_path,
@@ -142,6 +163,9 @@ ON CONFLICT (id) DO UPDATE SET
     psg_type = EXCLUDED.psg_type,
     appl_no = EXCLUDED.appl_no,
     short_name = EXCLUDED.short_name,
+    source_family = EXCLUDED.source_family,
+    document_type = EXCLUDED.document_type,
+    locator = EXCLUDED.locator,
     text = EXCLUDED.text,
     embedding = EXCLUDED.embedding
 """
@@ -206,7 +230,16 @@ def ensure_schema(engine: Engine) -> None:
         "WITH (m = 16, ef_construction = 64)",
         *(
             f"CREATE INDEX IF NOT EXISTS ix_chunk_{column} ON chunk ({column})"
-            for column in ("normalized_name", "doc_id", "version_id", "appl_no")
+            for column in (
+                "normalized_name",
+                "doc_id",
+                "version_id",
+                "fda_document_id",
+                "fda_version_id",
+                "source_family",
+                "document_type",
+                "appl_no",
+            )
         ),
     )
     # Lock-safe like _enable_chunk_rls below and db.py's _ensure_postgres_objects:
@@ -425,6 +458,8 @@ def add_chunks(
                 "id": chunk_id,
                 "doc_id": _as_int(meta.get("doc_id")),
                 "version_id": _as_int(meta.get("version_id")),
+                "fda_document_id": _as_int(meta.get("fda_document_id")),
+                "fda_version_id": _as_int(meta.get("fda_version_id")),
                 "ordinal": _as_int(meta.get("ordinal")),
                 "page": _as_int(meta.get("page")),
                 "section_path": _as_text(meta.get("section_path")),
@@ -435,6 +470,9 @@ def add_chunks(
                 "psg_type": _as_text(meta.get("psg_type")),
                 "appl_no": _as_text(meta.get("appl_no")),
                 "short_name": _short_name(meta),
+                "source_family": _as_text(meta.get("source_family")),
+                "document_type": _as_text(meta.get("document_type")),
+                "locator": _as_text(meta.get("locator")),
                 "text": document,
                 "embedding": _vector_literal(embedding) if embedding is not None else None,
             }
@@ -451,6 +489,48 @@ def add_chunks(
     # A caller-owned transaction may still roll back after this returns; an
     # eagerly-cleared cache merely repopulates, so clearing here stays correct.
     _metadata_values_cache.clear()
+
+
+def update_legacy_chunk_embeddings(
+    chunk_ids: list[str],
+    documents: list[str],
+    embeddings: list[list[float]],
+) -> None:
+    """Checkpoint legacy vectors without modifying chunk text or provenance.
+
+    ``text = :document`` is an optimistic concurrency guard: if a revision
+    replaced a chunk after it was selected for embedding, the stale vector is
+    rejected and the new row remains pending for the next pass.
+    """
+
+    if not (len(chunk_ids) == len(documents) == len(embeddings)):
+        raise ValueError("chunk_ids, documents, and embeddings must have equal lengths")
+    if not chunk_ids:
+        return
+    rows: list[dict[str, str]] = []
+    for chunk_id, document, embedding in zip(chunk_ids, documents, embeddings, strict=True):
+        _validate_embedding(embedding)
+        rows.append(
+            {
+                "chunk_id": chunk_id,
+                "document": document,
+                "embedding": _vector_literal(embedding),
+            }
+        )
+    _ensure_ready()
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            sa_text(
+                "UPDATE chunk SET embedding = CAST(:embedding AS vector) "
+                "WHERE id = :chunk_id AND fda_document_id IS NOT NULL "
+                "AND text = :document"
+            ),
+            rows,
+        )
+    if int(result.rowcount or 0) != len(rows):
+        raise RuntimeError(
+            "authoritative chunk changed during legacy embedding backfill; retry the batch"
+        )
 
 
 def delete_chunks_for_doc_except_version(doc_id: int, keep_version_id: int) -> int:
@@ -490,6 +570,26 @@ def delete_chunks_for_doc(doc_id: int, *, conn: Connection) -> int:
         raise ValueError("delete_chunks_for_doc(conn=...) requires a Postgres connection")
     _ensure_ready()
     result = conn.execute(sa_text("DELETE FROM chunk WHERE doc_id = :doc_id"), {"doc_id": doc_id})
+    deleted = int(result.rowcount or 0)
+    if deleted:
+        _metadata_values_cache.clear()
+    return deleted
+
+
+def delete_chunks_for_fda_document(fda_document_id: int, *, conn: Connection) -> int:
+    """Delete current-search chunks for one authoritative FDA document.
+
+    The caller must insert the replacement version in the same transaction.
+    Historical version rows remain immutable; only the current-search index is
+    replaced, so retrieval can never mix revisions of one document.
+    """
+    if conn.dialect.name != "postgresql":
+        raise ValueError("delete_chunks_for_fda_document(conn=...) requires a Postgres connection")
+    _ensure_ready()
+    result = conn.execute(
+        sa_text("DELETE FROM chunk WHERE fda_document_id = :fda_document_id"),
+        {"fda_document_id": fda_document_id},
+    )
     deleted = int(result.rowcount or 0)
     if deleted:
         _metadata_values_cache.clear()
@@ -647,7 +747,7 @@ def chunks_exist(doc_id: int, version_id: int) -> bool:
     with get_engine().connect() as conn:
         found = conn.execute(
             sa_text(
-                "SELECT 1 FROM chunk WHERE doc_id = :doc_id " "AND version_id = :version_id LIMIT 1"
+                "SELECT 1 FROM chunk WHERE doc_id = :doc_id AND version_id = :version_id LIMIT 1"
             ),
             {"doc_id": doc_id, "version_id": version_id},
         ).scalar()

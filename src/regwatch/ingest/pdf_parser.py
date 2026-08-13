@@ -224,7 +224,12 @@ def _run_with_timeout(target: Callable[..., Any], args: tuple[Any, ...], timeout
         out.close()
 
 
-def parse_pdf(pdf_bytes: bytes, *, timeout_s: float | None = None) -> ParsedPdf:
+def parse_pdf(
+    pdf_bytes: bytes,
+    *,
+    timeout_s: float | None = None,
+    max_pages: int | None = None,
+) -> ParsedPdf:
     """Parse a PDF blob (pdfplumber, then pypdf), bounded by a hard timeout.
 
     By default extraction runs in a killable child process so a malformed or
@@ -240,7 +245,8 @@ def parse_pdf(pdf_bytes: bytes, *, timeout_s: float | None = None) -> ParsedPdf:
     # get_settings() would rebuild Settings from env and miss in-process
     # overrides (a patched get_settings or mutated Settings instance; env-var
     # overrides WOULD survive, since the spawn child inherits os.environ).
-    max_pages = get_settings().pdf_max_pages
+    if max_pages is None:
+        max_pages = get_settings().pdf_max_pages
     if timeout_s > 0:  # timeout_s is a resolved float here; <=0 means parse in-process
         return _run_with_timeout(_extract, (pdf_bytes, max_pages), timeout_s)
     return _extract(pdf_bytes, max_pages)

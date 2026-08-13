@@ -27,9 +27,13 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 
 from rapidfuzz import fuzz
+from sqlalchemy import func, or_
+from sqlmodel import select
 
 from regwatch.common.logging import get_logger
 from regwatch.common.text_normalize import canonical_name, split_ingredients, stripped_name
+from regwatch.store.db import session_scope
+from regwatch.store.models import FdaDocument
 from regwatch.store.vector_store import distinct_metadata_values
 
 log = get_logger(__name__)
@@ -317,13 +321,11 @@ def suggest_products(
 
 @dataclass(frozen=True)
 class ExternalDrugMatch:
-    """What openFDA knows about a name this corpus could not resolve.
+    """What indexed Drugs@FDA metadata knows about an unresolved name.
 
     ``corpus_products`` are in-corpus ingredients to OFFER as "did you mean".
-    ``known_absent`` is the stricter signal: openFDA recognised the name as a
-    real drug and NONE of its ingredients are in this corpus -- the only
-    evidence we have that a turn names a credible product we simply do not
-    cover, as opposed to a typo or a non-drug word.
+    ``known_absent`` is the stricter signal: Drugs@FDA recognised the name and
+    none of its ingredients are in the searchable corpus.
     """
 
     corpus_products: list[str]
@@ -336,22 +338,7 @@ _NO_EXTERNAL_MATCH = ExternalDrugMatch(corpus_products=[], known_absent=False)
 def lookup_external_drug(
     question: str, *, products: set[str] | None = None, limit: int = 5
 ) -> ExternalDrugMatch:
-    """Ask openFDA whether an unresolved name is a real drug, and whose.
-
-    One Drugs@FDA request searching BOTH ``brand_name`` and ``generic_name``:
-    the brand half is the long-standing "Adderall -> amphetamine" lookup, the
-    generic half is what lets a real but uncovered drug (romidepsin) be told
-    apart from a nonsense token. Same endpoint, same request, same timeout --
-    widening the query costs no extra round trip.
-
-    Gated on an OpenFDA key (so tests stay offline) and graceful: any error, no
-    key or no match yields no corpus products AND ``known_absent=False``, so the
-    caller degrades to asking which product rather than asserting we lack one.
-    """
-    from config.settings import get_settings
-
-    if not get_settings().openfda_api_key:
-        return _NO_EXTERNAL_MATCH
+    """Resolve a brand/generic name against local authoritative FDA metadata."""
     known = products if products is not None else distinct_metadata_values("normalized_name")
     if not known:
         return _NO_EXTERNAL_MATCH
@@ -359,26 +346,41 @@ def lookup_external_drug(
     if not candidates:
         return _NO_EXTERNAL_MATCH
     try:
-        from regwatch.sources._utils import fetch_openfda_results
-        from regwatch.sources.drugsfda import DRUGSFDA_ENDPOINT
-
-        rows = fetch_openfda_results(
-            DRUGSFDA_ENDPOINT,
-            [
-                f'openfda.{field}:"{tok}"'
-                for tok in candidates
-                for field in ("brand_name", "generic_name")
-            ],
-            limit=5,
-        )
-    except Exception:  # offline / rate-limited / malformed — degrade to no match
+        clauses = [
+            or_(
+                func.lower(FdaDocument.brand_name).contains(token.lower()),
+                func.lower(FdaDocument.active_ingredient).contains(token.lower()),
+            )
+            for token in candidates
+        ]
+        with session_scope() as session:
+            rows = list(
+                session.scalars(
+                    select(FdaDocument)
+                    .where(
+                        FdaDocument.source_family == "drugs_at_fda",
+                        FdaDocument.is_active == True,  # noqa: E712
+                        or_(*clauses),
+                    )
+                    .limit(100)
+                )
+            )
+    except Exception:  # DB unavailable / corpus not migrated — degrade safely
         log.debug("ingredient_resolution_failed", exc_info=True)
         return _NO_EXTERNAL_MATCH
     generics: set[str] = set()
     for row in rows:
-        openfda = row.get("openfda") or {}
-        for name in openfda.get("generic_name") or []:
-            generics.add(str(name).lower())
+        names = (row.brand_name or "", row.active_ingredient or "")
+        if (
+            any(
+                candidate in canonical_name(name)
+                for candidate in candidates
+                for name in names
+                if name
+            )
+            and row.active_ingredient
+        ):
+            generics.add(row.active_ingredient.lower())
     if not generics:
         return _NO_EXTERNAL_MATCH
     known_tokens = {name: _product_tokens(name) for name in known}
@@ -392,7 +394,7 @@ def lookup_external_drug(
         for name, ntokens in known_tokens.items():
             if gtokens & ntokens:
                 matches.add(name)
-    # openFDA recognised the name but nothing it maps to is in the corpus: a
+    # Drugs@FDA recognised the name but nothing it maps to is in the corpus: a
     # real drug we do not cover. When it DID map to a corpus product the turn is
     # a brand lookup, which the caller handles first and which is not "absent".
     return ExternalDrugMatch(

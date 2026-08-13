@@ -130,8 +130,7 @@ def add_entries(
             raise ValueError("deficiency_text must be non-empty")
         if len(vec) != KB_EMBEDDING_DIM:
             raise ValueError(
-                f"embedding has {len(vec)} dims; deficiency_kb stores "
-                f"vector({KB_EMBEDDING_DIM})"
+                f"embedding has {len(vec)} dims; deficiency_kb stores vector({KB_EMBEDDING_DIM})"
             )
     from regwatch.store.db import get_engine
 

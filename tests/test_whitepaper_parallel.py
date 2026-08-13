@@ -1,7 +1,7 @@
 """Whitepaper populator concurrency + the overall build deadline.
 
 The five fetch stages run as two parallel batches (orange_book || drugsfda,
-then dailymed || ndc || psg-store after identity) under an overall
+then approved-label corpus || ndc-shim || psg-store after identity) under an overall
 WHITEPAPER_BUILD_TIMEOUT_S deadline. These tests pin:
 
 - real concurrency: stage wall-clock intervals overlap, and the whole build
@@ -31,7 +31,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import select
 
-from regwatch.sources import dailymed, orange_book
+from regwatch.sources import orange_book
 from regwatch.store import whitepaper_runs as run_store
 from regwatch.store.db import session_scope
 from regwatch.store.models import QueryLog
@@ -93,7 +93,7 @@ def test_independent_fetches_overlap_and_beat_serial_sum(
     # row fetch; patents/exclusivity stay fast inside the same stage thread).
     slow("orange_book", orange_book, "product_rows")
     slow("drugsfda", populator, "_drugsfda_records")
-    slow("dailymed", dailymed, "resolve_setid")
+    slow("approved_label", populator, "load_latest_approved_label")
     slow("ndc", populator, "_ndc_records")
 
     start = time.monotonic()
@@ -108,7 +108,7 @@ def test_independent_fetches_overlap_and_beat_serial_sum(
         return spans[a][0] < spans[b][1] and spans[b][0] < spans[a][1]
 
     assert overlap("orange_book", "drugsfda"), "batch A stages did not overlap"
-    assert overlap("dailymed", "ndc"), "batch B stages did not overlap"
+    assert overlap("approved_label", "ndc"), "batch B stages did not overlap"
     # The parallel build still produced the full sequential payload.
     cells = _cells(result)
     assert result["spine"]["application_number"] == APPL_NO
@@ -121,12 +121,12 @@ def test_stage_b_never_starts_before_batch_a_completes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Identity resolution runs between the batches, so every batch-B fetch
-    must observe BOTH batch-A fetches finished (and the dailymed query must
+    must observe BOTH batch-A fetches finished (and the label query must
     carry the post-identity resolved, prefixed application number)."""
     install_fake_sources(monkeypatch)
     completed: list[str] = []
     seen_at_start: dict[str, set[str]] = {}
-    dailymed_appl: list[str] = []
+    label_appl: list[str] = []
 
     def finishing(name: str, module: Any, attr: str) -> None:
         inner = getattr(module, attr)
@@ -153,43 +153,43 @@ def test_stage_b_never_starts_before_batch_a_completes(
     snapshotting("ndc", populator, "_ndc_records")
     snapshotting("psg", populator, "_matching_psg_docs")
 
-    real_resolve = dailymed.resolve_setid
+    real_label_lookup = populator.load_latest_approved_label
 
-    def spying_resolve(application_number: str, **kwargs: Any) -> Any:
-        seen_at_start["dailymed"] = set(completed)
-        dailymed_appl.append(application_number)
-        return real_resolve(application_number, **kwargs)
+    def spying_label_lookup(application_number: str) -> Any:
+        seen_at_start["approved_label"] = set(completed)
+        label_appl.append(application_number)
+        return real_label_lookup(application_number)
 
-    monkeypatch.setattr(dailymed, "resolve_setid", spying_resolve)
+    monkeypatch.setattr(populator, "load_latest_approved_label", spying_label_lookup)
 
-    # Bare digits: the prefixed number handed to DailyMed can only come from
+    # Bare digits: the prefixed number handed to the corpus lookup can only come from
     # the identity step between the batches.
     build_whitepaper(RLD_NAME, APPL_NO)
 
-    for name in ("dailymed", "ndc", "psg"):
+    for name in ("approved_label", "ndc", "psg"):
         assert seen_at_start[name] == {"orange_book", "drugsfda"}, (
             f"batch B stage {name!r} started before batch A completed: " f"{seen_at_start[name]}"
         )
-    assert dailymed_appl == [f"NDA{APPL_NO}"]
+    assert label_appl == [f"NDA{APPL_NO}"]
 
 
 # --------------------------- degrade parity ---------------------------
 def test_single_source_failure_degrades_like_sequential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failing DailyMed resolve collapses exactly the SPL cells with the
+    """A failing approved-label lookup collapses exactly the label cells with the
     sequential build's warning text; unrelated sources stay populated."""
     install_fake_sources(monkeypatch)
 
-    def failing_resolve(application_number: str, **kwargs: Any) -> Any:
-        raise RuntimeError("dailymed down")
+    def failing_label_lookup(application_number: str) -> Any:
+        raise RuntimeError("label index down")
 
-    monkeypatch.setattr(dailymed, "resolve_setid", failing_resolve)
+    monkeypatch.setattr(populator, "load_latest_approved_label", failing_label_lookup)
     result = build_whitepaper(RLD_NAME, APPL_NO)
     cells = _cells(result)
     for cell_id in ("indication", "pllr_format", "plr_format", "pregnancy_registry"):
         assert cells[cell_id]["status"] == "analyst_input_required", cell_id
-    assert "DailyMed setid resolution failed (RuntimeError)." in result["spine"]["warnings"]
+    assert "Drugs@FDA approved-label lookup failed (RuntimeError)." in result["spine"]["warnings"]
     # The other batch-B sources are untouched by the failure.
     assert cells["product_name"]["status"] == "populated"
     assert cells["packaging"]["status"] == "populated"
@@ -198,26 +198,25 @@ def test_single_source_failure_degrades_like_sequential(
 def test_same_batch_double_failure_warning_order_is_canonical(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """NDC fails instantly, DailyMed fails 0.4s later -- thread-finish order is
-    ndc-then-dailymed, but the merged warnings must keep the sequential
-    build's stage order (dailymed before ndc)."""
+    """NDC fails instantly, approved-label lookup fails 0.4s later -- completion
+    order differs, but merged warnings retain canonical stage order."""
     install_fake_sources(monkeypatch)
 
-    def slow_failing_resolve(application_number: str, **kwargs: Any) -> Any:
+    def slow_failing_label_lookup(application_number: str) -> Any:
         time.sleep(0.4)
-        raise RuntimeError("dailymed down")
+        raise RuntimeError("label index down")
 
     def fast_failing_ndc(query: Any) -> Any:
         raise RuntimeError("ndc down")
 
-    monkeypatch.setattr(dailymed, "resolve_setid", slow_failing_resolve)
+    monkeypatch.setattr(populator, "load_latest_approved_label", slow_failing_label_lookup)
     monkeypatch.setattr(populator, "_ndc_records", fast_failing_ndc)
 
     result = build_whitepaper(RLD_NAME, APPL_NO)
     warnings = result["spine"]["warnings"]
-    dm = warnings.index("DailyMed setid resolution failed (RuntimeError).")
+    label = warnings.index("Drugs@FDA approved-label lookup failed (RuntimeError).")
     ndc = warnings.index("NDC Directory fetch failed (RuntimeError).")
-    assert dm < ndc, f"warning order not canonical: {warnings}"
+    assert label < ndc, f"warning order not canonical: {warnings}"
     cells = _cells(result)
     assert cells["packaging"]["status"] == "analyst_input_required"
     assert cells["indication"]["status"] == "analyst_input_required"
@@ -278,13 +277,13 @@ def test_whitepaper_deadline_maps_to_504_with_no_run_row(
 ) -> None:
     install_fake_sources(monkeypatch)
 
-    def stalled_resolve(application_number: str, **kwargs: Any) -> Any:
+    def stalled_label_lookup(application_number: str) -> Any:
         time.sleep(1.5)
         # Same orphan-thread rule as stalled_products above: never return into
         # a post-teardown stage.
         raise RuntimeError("orphan stage thread stopped after deadline breach")
 
-    monkeypatch.setattr(dailymed, "resolve_setid", stalled_resolve)
+    monkeypatch.setattr(populator, "load_latest_approved_label", stalled_label_lookup)
     _set_build_timeout(monkeypatch, "0.35")
 
     r = auth_client.post("/whitepaper", json={"rld_name": RLD_NAME, "application_number": APPL_NO})
@@ -304,12 +303,12 @@ def test_resolve_deadline_maps_to_504_with_no_audit_row(
     surface stays audit-free (it writes no row on success or failure)."""
     install_fake_sources(monkeypatch)
 
-    def stalled_resolve(application_number: str, **kwargs: Any) -> Any:
+    def stalled_label_lookup(application_number: str) -> Any:
         time.sleep(1.5)
         # Same orphan-thread rule as stalled_products above.
         raise RuntimeError("orphan stage thread stopped after deadline breach")
 
-    monkeypatch.setattr(dailymed, "resolve_setid", stalled_resolve)
+    monkeypatch.setattr(populator, "load_latest_approved_label", stalled_label_lookup)
     _set_build_timeout(monkeypatch, "0.35")
 
     r = auth_client.post("/resolve", json={"rld_name": RLD_NAME, "application_number": APPL_NO})

@@ -6,8 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from regwatch.sources import dailymed, orange_book
-from regwatch.sources.dailymed import SetidResolution, SplXmlDocument
+from regwatch.sources import orange_book
 from regwatch.sources.orange_book import OrangeBookRows
 from regwatch.sources.types import SourceKind, SourceQuery, SourceRecord
 from regwatch.store.db import session_scope
@@ -84,7 +83,8 @@ def test_spine_resolves_format_variants(monkeypatch: pytest.MonkeyPatch, appl: s
     assert spine["ingredient"] == "ALBUTEROL SULFATE"
     assert spine["normalized_name"] == "albuterol sulfate"
     assert spine["product_numbers"] == ["001"]
-    assert spine["setid"] == "abc-def-123"
+    assert spine["setid"] is None
+    assert spine["approved_label_document_id"] == "drugs-at-fda:application-doc:77"
 
 
 def test_spine_name_mismatch_raises_422(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -246,7 +246,8 @@ def test_evidence_only_indication(monkeypatch: pytest.MonkeyPatch) -> None:
     cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["indication"]
     assert cell["status"] == "populated"
     assert "bronchospasm" in cell["value"]
-    assert cell["evidence"][0]["locator"] == "SPL_abc-def-123#34067-9"
+    assert cell["evidence"][0]["locator"] == "page:1"
+    assert cell["evidence"][0]["source"] == "Drugs@FDA approved labeling"
 
 
 def test_evidence_only_pllr_and_plr(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -267,7 +268,7 @@ def test_evidence_only_pregnancy_registry(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_evidence_only_epc(monkeypatch: pytest.MonkeyPatch) -> None:
-    install_fake_sources(monkeypatch)
+    install_fake_sources(monkeypatch, ndc_epc=True)
     cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["epc"]
     assert cell["status"] == "populated"
     assert "[EPC]" in cell["value"]
@@ -585,43 +586,45 @@ def test_plr_pllr_collapse_when_no_sections_parse(monkeypatch: pytest.MonkeyPatc
     # structural negative from that state would be unverified (INV-5).
     install_fake_sources(monkeypatch)
 
-    def empty_xml(target_setid: str, *, client: object = None) -> SplXmlDocument:
-        return SplXmlDocument(
-            setid=target_setid,
-            xml='<document xmlns="urn:hl7-org:v3"/>',
-            source_url="https://example.invalid/spl",
+    from regwatch.sources.approved_label import label_from_pages
+
+    def empty_label(application_number: str) -> object:
+        return label_from_pages(
+            canonical_id="drugs-at-fda:application-doc:blank",
+            title="blank approved label",
+            application_number=application_number,
+            source_url="https://www.accessdata.fda.gov/drugsatfda_docs/label/blank.pdf",
+            source_updated_at=None,
             fetched_at=datetime.now(UTC),
+            document_id=1,
+            version_id=1,
+            pages=["unstructured label text"],
         )
 
-    monkeypatch.setattr(dailymed, "fetch_spl_xml", empty_xml)
+    monkeypatch.setattr(populator, "load_latest_approved_label", empty_label)
     cells = _cells(build_whitepaper(RLD_NAME, APPL_NO))
     for cell_id in ("plr_format", "pllr_format"):
         assert cells[cell_id]["status"] == "analyst_input_required", cell_id
         assert cells[cell_id]["value"] is None, cell_id
 
 
-_PREGNANCY_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
-<document xmlns="urn:hl7-org:v3">
-  <component><structuredBody>
-    <component><section>
-      <code code="42228-7"/>
-      <title>PREGNANCY</title>
-      <text>{text}</text>
-    </section></component>
-  </structuredBody></component>
-</document>"""
-
-
 def _install_pregnancy_xml(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
-    def custom_xml(target_setid: str, *, client: object = None) -> SplXmlDocument:
-        return SplXmlDocument(
-            setid=target_setid,
-            xml=_PREGNANCY_XML_TEMPLATE.format(text=text),
-            source_url="https://example.invalid/spl",
+    from regwatch.sources.approved_label import label_from_pages
+
+    def custom_label(application_number: str) -> object:
+        return label_from_pages(
+            canonical_id="drugs-at-fda:application-doc:pregnancy",
+            title="approved label",
+            application_number=application_number,
+            source_url="https://www.accessdata.fda.gov/drugsatfda_docs/label/pregnancy.pdf",
+            source_updated_at=None,
             fetched_at=datetime.now(UTC),
+            document_id=1,
+            version_id=1,
+            pages=[f"8 USE IN SPECIFIC POPULATIONS\n8.1 PREGNANCY\n{text}"],
         )
 
-    monkeypatch.setattr(dailymed, "fetch_spl_xml", custom_xml)
+    monkeypatch.setattr(populator, "load_latest_approved_label", custom_label)
 
 
 def test_pregnancy_registry_matches_newer_tollfree_prefix(
@@ -1136,68 +1139,17 @@ def test_requirements_ask_unfiltered_when_vocab_query_fails(
     assert cell["status"] == "populated"
 
 
-# --------------------------- P1b: SPL candidates on the spine ---------------------------
-def test_spine_surfaces_spl_candidates_and_selection_warning(
+# --------------------------- FDA approved-label provenance on the spine ---------------------------
+def test_spine_surfaces_approved_label_provenance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from regwatch.sources.dailymed import SplCandidate
-
     install_fake_sources(monkeypatch)
-    sponsor_title = "PROVENTIL HFA (ALBUTEROL SULFATE) AEROSOL, METERED [MERCK SHARP & DOHME CORP.]"
-    repack_title = "ALBUTEROL SULFATE AEROSOL, METERED [PREFERRED PHARMACEUTICALS INC.]"
-    resolution = SetidResolution(
-        setid="sponsor-setid",
-        title=sponsor_title,
-        published="Oct 08, 2019",
-        source_url="https://dailymed.nlm.nih.gov/dailymed/drugInfo.cfm?setid=sponsor-setid",
-        fetched_at=datetime.now(UTC),
-        labeler="MERCK SHARP & DOHME CORP.",
-        candidate_labelers=("PREFERRED PHARMACEUTICALS INC.", "MERCK SHARP & DOHME CORP."),
-        candidates=(
-            SplCandidate(
-                setid="repackager-setid",
-                title=repack_title,
-                labeler="PREFERRED PHARMACEUTICALS INC.",
-                published="Jan 16, 2026",
-            ),
-            SplCandidate(
-                setid="sponsor-setid",
-                title=sponsor_title,
-                labeler="MERCK SHARP & DOHME CORP.",
-                published="Oct 08, 2019",
-            ),
-        ),
-    )
-
-    def fake_resolve(
-        application_number: str,
-        *,
-        prefer_titles: object = (),
-        prefer_labelers: object = (),
-        client: object = None,
-    ) -> SetidResolution:
-        return resolution
-
-    monkeypatch.setattr(dailymed, "resolve_setid", fake_resolve)
     result = build_whitepaper(RLD_NAME, APPL_NO)
     spine = result["spine"]
-    assert spine["setid"] == "sponsor-setid"
-    assert spine["spl_candidates"] == [
-        {
-            "setid": "repackager-setid",
-            "title": repack_title,
-            "labeler": "PREFERRED PHARMACEUTICALS INC.",
-            "published": "Jan 16, 2026",
-        },
-        {
-            "setid": "sponsor-setid",
-            "title": sponsor_title,
-            "labeler": "MERCK SHARP & DOHME CORP.",
-            "published": "Oct 08, 2019",
-        },
-    ]
-    # The multi-labeler selection warning is preserved (never a silent pick).
-    assert any("2 distinct labelers" in w for w in spine["warnings"])
+    assert spine["setid"] is None
+    assert spine["spl_candidates"] == []
+    assert spine["approved_label_document_id"] == "drugs-at-fda:application-doc:77"
+    assert spine["approved_label_source_url"].startswith("https://www.accessdata.fda.gov/")
 
 
 def test_spine_spl_candidates_empty_when_resolution_has_none(
@@ -1288,25 +1240,19 @@ def test_post_resolution_queries_use_resolved_prefixed_number(
         seen["rems"] = query.application_number
         return [], 47
 
-    def capture_resolve(
-        application_number: str,
-        *,
-        prefer_titles: object = (),
-        prefer_labelers: object = (),
-        client: object = None,
-    ) -> SetidResolution | None:
-        seen["dailymed"] = application_number
+    def capture_label(application_number: str) -> object:
+        seen["label"] = application_number
         return None
 
     monkeypatch.setattr(populator, "_shortage_records", capture_shortage)
     monkeypatch.setattr(populator, "_ndc_records", capture_ndc)
     monkeypatch.setattr(populator, "_rems_search", capture_rems)
-    monkeypatch.setattr(dailymed, "resolve_setid", capture_resolve)
+    monkeypatch.setattr(populator, "load_latest_approved_label", capture_label)
     build_whitepaper(RLD_NAME, APPL_NO)  # bare digits in
     assert seen["shortage"] == f"NDA{APPL_NO}"
     assert seen["ndc"] == f"NDA{APPL_NO}"
     assert seen["rems"] == f"NDA{APPL_NO}"
-    assert seen["dailymed"] == f"NDA{APPL_NO}"
+    assert seen["label"] == f"NDA{APPL_NO}"
 
 
 # --------------------------- A6: Drugs@FDA never overrides / never blends ----------
@@ -1425,18 +1371,17 @@ def test_populated_rejects_empty_and_whitespace_values() -> None:
 
 def test_whitespace_spl_section_collapses_to_analyst(monkeypatch: pytest.MonkeyPatch) -> None:
     install_fake_sources(monkeypatch)
-    _install_pregnancy_xml(monkeypatch, "Call the registry at 1-800-555-0100.")
+    from dataclasses import replace
 
-    class _Blank:
-        text = "   "
-        title = "INDICATIONS"
-        source_url = "https://example.invalid/spl"
-        fetched_at = None
+    from tests._whitepaper_stub import _approved_label
 
-    def blank_sections(*args: object, **kwargs: object) -> dict:
-        return {"34067-9": _Blank()}
-
-    monkeypatch.setattr(dailymed, "parse_spl_sections", blank_sections)
+    label = _approved_label()
+    blank = replace(label.sections["34067-9"], text="   ")
+    monkeypatch.setattr(
+        populator,
+        "load_latest_approved_label",
+        lambda application_number: replace(label, sections={**label.sections, "34067-9": blank}),
+    )
     cell = _cells(build_whitepaper(RLD_NAME, APPL_NO))["indication"]
     assert cell["status"] == "analyst_input_required"
     assert cell["value"] is None

@@ -17,6 +17,10 @@ class SourceKind(StrEnum):
     PSG = "psg"
     ORANGE_BOOK = "orange_book"
     DRUGSFDA = "drugsfda"
+    ACTION_PACKAGE = "action_package"
+    FDA_BE_GUIDANCE = "fda_be_guidance"
+    # Legacy values remain parseable during the API migration, but the router
+    # rejects them and no handler is registered for them.
     SHORTAGE = "shortage"
     NDC = "ndc"
     REMS = "rems"

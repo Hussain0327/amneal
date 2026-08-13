@@ -274,7 +274,7 @@ def pytest_configure(config: pytest.Config) -> None:
             "RATE_LIMIT_PER_MINUTE": "0",
             "OPENAI_API_KEY": "",
             "ANTHROPIC_API_KEY": "",
-            "OPENFDA_API_KEY": "",
+            "REGWATCH_RETRIEVAL_CORPUS": "legacy",
             "SENTRY_DSN": "",
             "SENTRY_ENVIRONMENT": "dev",
             # Unpinned secret-bearing fields would still load from the repo
@@ -726,6 +726,10 @@ class Harness:
         env.update(
             {
                 "DATABASE_URL": _TEST_DB_URL,
+                # Force subprocesses to import this checkout. The developer
+                # venv is editable and may point at a different worktree whose
+                # schema head has advanced independently.
+                "PYTHONPATH": os.pathsep.join((str(_REPO_ROOT / "src"), str(_REPO_ROOT))),
                 "EMBEDDING_PROVIDER": "echo",
                 "LLM_PROVIDER": "echo",
                 # The lifespan guard refuses echo providers over a non-empty
@@ -744,7 +748,7 @@ class Harness:
                 "METADATA_CACHE_TTL_S": "0.01",
                 "OPENAI_API_KEY": "",
                 "ANTHROPIC_API_KEY": "",
-                "OPENFDA_API_KEY": "",
+                "REGWATCH_RETRIEVAL_CORPUS": "legacy",
                 "SENTRY_DSN": "",
                 "SENTRY_ENVIRONMENT": "dev",
                 "AUTH_COOKIE_SECURE": "false",
@@ -764,14 +768,14 @@ class Harness:
         # The canonical fresh-PG path, as a subprocess with cwd=tmp: alembic
         # config resolution is __file__-relative (store/db.py), so the child
         # never needs the repo cwd and therefore never sees the repo .env.
-        regwatch_bin = Path(sys.executable).parent / "regwatch"
-        if not regwatch_bin.is_file():
-            raise RuntimeError(f"regwatch console script not found next to {sys.executable}")
-        self._regwatch_bin = regwatch_bin
+        # Launch by module under an explicit worktree PYTHONPATH. The venv's
+        # generated console script belongs to whichever editable checkout last
+        # installed it and is therefore unsafe in a parallel worktree.
+        self._regwatch_command = (sys.executable, "-m", "regwatch.cli")
         env = self._uvicorn_env({})
         env.pop("REGWATCH_DB_INITIALIZED", None)
         result = subprocess.run(
-            [str(regwatch_bin), "init-db"],
+            [*self._regwatch_command, "init-db"],
             cwd=self.tmp,
             env=env,
             capture_output=True,
@@ -855,7 +859,7 @@ class Harness:
             proxy_handle = proxy_log.open("wb")
             handles.append(proxy_handle)
             uvicorn_proc = subprocess.Popen(
-                [str(self._regwatch_bin), "serve", "--port", str(uvicorn_port)],
+                [*self._regwatch_command, "serve", "--port", str(uvicorn_port)],
                 cwd=self.tmp,
                 env=uv_env,
                 stdout=uv_handle,

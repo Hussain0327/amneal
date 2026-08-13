@@ -241,11 +241,26 @@ def chunk_pdf(
     *,
     base_metadata: dict[str, Any],
 ) -> list[Chunk]:
-    """Chunk a PDF's per-page text. Page numbers are 1-indexed."""
+    """Chunk a PSG PDF, removing its repeated template boilerplate first."""
+    return chunk_document_pages(prepare_pages(pages), base_metadata=base_metadata)
+
+
+def chunk_document_pages(
+    pages: list[str],
+    *,
+    base_metadata: dict[str, Any],
+) -> list[Chunk]:
+    """Chunk generic FDA document pages without PSG-specific text removal.
+
+    Page boundaries are never crossed, preserving the page locator used by
+    citations.  Callers that own a source-specific cleanup step apply it before
+    this function; silently applying PSG disclaimer rules to review packages or
+    approved labeling would delete valid evidence.
+    """
     chunks: list[Chunk] = []
     ordinal = 0
     current_section: str | None = None
-    for page_idx, page_text in enumerate(prepare_pages(pages), start=1):
+    for page_idx, page_text in enumerate(pages, start=1):
         if not page_text.strip():
             continue
         sections = _split_into_sections(page_text, current_section)

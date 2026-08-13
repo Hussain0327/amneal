@@ -8,24 +8,30 @@ from collections.abc import Iterable
 import httpx
 
 from regwatch.common.logging import get_logger
-from regwatch.sources.dailymed import DailyMedHandler
+from regwatch.sources.action_packages import ActionPackageHandler
+from regwatch.sources.be_guidance import FdaBeGuidanceHandler
 from regwatch.sources.drugsfda import DrugsFdaHandler
-from regwatch.sources.ndc import NdcHandler
 from regwatch.sources.orange_book import OrangeBookHandler
 from regwatch.sources.psg import PsgHandler
-from regwatch.sources.rems import RemsHandler
-from regwatch.sources.shortages import ShortagesHandler
 from regwatch.sources.types import SourceHandler, SourceKind, SourceQuery, SourceRecord
 
-NDC_PATTERN = re.compile(r"\b\d{4,5}-\d{3,4}(?:-\d{1,2})?\b")
 APP_PATTERN = re.compile(r"\b(?:NDA|ANDA|BLA)?\s*\d{5,6}\b", re.IGNORECASE)
 RS_PATTERN = re.compile(r"\brs\b", re.IGNORECASE)
-SPL_PATTERN = re.compile(r"\bspl\b", re.IGNORECASE)
 # Word-boundary matched: a bare "rld"/"te code" substring would fire on "world",
 # "worldwide", "integrate code", spuriously routing to ORANGE_BOOK.
 RLD_PATTERN = re.compile(r"\brld\b", re.IGNORECASE)
 TE_CODE_PATTERN = re.compile(r"\bte code\b", re.IGNORECASE)
 log = get_logger(__name__)
+
+_APPROVED_KINDS = frozenset(
+    {
+        SourceKind.DRUGSFDA,
+        SourceKind.ACTION_PACKAGE,
+        SourceKind.PSG,
+        SourceKind.FDA_BE_GUIDANCE,
+        SourceKind.ORANGE_BOOK,
+    }
+)
 
 
 def route_sources(
@@ -34,7 +40,11 @@ def route_sources(
     requested: Iterable[SourceKind] | None = None,
 ) -> list[SourceKind]:
     if requested:
-        return _dedupe(requested)
+        explicitly_routed = _dedupe(requested)
+        rejected = [source.value for source in explicitly_routed if source not in _APPROVED_KINDS]
+        if rejected:
+            raise ValueError(f"sources outside the authoritative FDA policy: {rejected}")
+        return explicitly_routed
 
     text = " ".join(
         value
@@ -49,21 +59,6 @@ def route_sources(
     ).lower()
 
     routed: list[SourceKind] = []
-    if query.ndc or "ndc" in text or NDC_PATTERN.search(text):
-        routed.append(SourceKind.NDC)
-    if "shortage" in text or "availability" in text:
-        routed.append(SourceKind.SHORTAGE)
-    if "rems" in text or "risk evaluation" in text or "mitigation strategy" in text:
-        routed.append(SourceKind.REMS)
-    # DailyMed routes only on an explicit labeling cue AND a structured
-    # application number: DailyMedHandler queries spls.json by application
-    # number alone, so without one the cue would exclusive-route the query to
-    # a guaranteed-empty handler. A labeling-cue query with no application
-    # number falls through to the other cues / default triple instead.
-    if query.application_number and (
-        "dailymed" in text or "structured product label" in text or SPL_PATTERN.search(text)
-    ):
-        routed.append(SourceKind.DAILYMED)
     if (
         "orange book" in text
         or "therapeutic equivalence" in text
@@ -78,10 +73,25 @@ def route_sources(
         or APP_PATTERN.search(text)
         or "drugs@fda" in text
         or "approval" in text
+        or "label" in text
         or "sponsor" in text
         or "applicant" in text
     ):
         routed.append(SourceKind.DRUGSFDA)
+    if any(
+        term in text
+        for term in (
+            "action package",
+            "clinical review",
+            "statistical review",
+            "clinical pharmacology review",
+            "cmc review",
+            "quality review",
+            "integrated review",
+            "multidisciplinary review",
+        )
+    ):
+        routed.append(SourceKind.ACTION_PACKAGE)
     if (
         "psg" in text
         or "product-specific guidance" in text
@@ -90,12 +100,18 @@ def route_sources(
         or "dissolution" in text
     ):
         routed.append(SourceKind.PSG)
+        routed.append(SourceKind.FDA_BE_GUIDANCE)
 
     if routed:
         return _dedupe(routed)
 
     # Default to structured approval/product identity plus local PSG evidence.
-    return [SourceKind.DRUGSFDA, SourceKind.ORANGE_BOOK, SourceKind.PSG]
+    return [
+        SourceKind.DRUGSFDA,
+        SourceKind.ORANGE_BOOK,
+        SourceKind.PSG,
+        SourceKind.FDA_BE_GUIDANCE,
+    ]
 
 
 def search_sources(
@@ -123,10 +139,8 @@ _HANDLERS: dict[SourceKind, SourceHandler] = {
     SourceKind.PSG: PsgHandler(),
     SourceKind.ORANGE_BOOK: OrangeBookHandler(),
     SourceKind.DRUGSFDA: DrugsFdaHandler(),
-    SourceKind.SHORTAGE: ShortagesHandler(),
-    SourceKind.NDC: NdcHandler(),
-    SourceKind.REMS: RemsHandler(),
-    SourceKind.DAILYMED: DailyMedHandler(),
+    SourceKind.ACTION_PACKAGE: ActionPackageHandler(),
+    SourceKind.FDA_BE_GUIDANCE: FdaBeGuidanceHandler(),
 }
 
 
