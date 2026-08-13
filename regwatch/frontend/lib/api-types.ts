@@ -76,6 +76,10 @@ export interface paths {
         /**
          * Deficiency Run Detail
          * @description One run + its verbatim stored fault report (null until complete).
+         *
+         *     Uploads only. Studio checks share this table but are private to their
+         *     creator, so serving one here would let any analyst read a colleague's
+         *     draft by asking the org-shared route for the same id.
          */
         get: operations["deficiency_run_detail_deficiency_runs__run_id__get"];
         put?: never;
@@ -377,6 +381,50 @@ export interface paths {
         put?: never;
         /** Sources Search */
         post: operations["sources_search_sources_search_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/studio/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Studio Check
+         * @description Check one Studio document for candidate deficiencies.
+         *
+         *     202 + run_id; the UI polls GET /studio/check/{id}. The document is hashed
+         *     from the text that will actually be checked, so two checks of an unedited
+         *     draft are comparable and an edit is visibly a different document.
+         */
+        post: operations["studio_check_studio_check_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/studio/check/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Studio Check Detail
+         * @description One of the caller's own checks + its verbatim stored report.
+         */
+        get: operations["studio_check_detail_studio_check__run_id__get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1098,6 +1146,40 @@ export interface components {
             records: components["schemas"]["SourceRecordResponse"][];
             /** Routed Sources */
             routed_sources: components["schemas"]["SourceKind"][];
+        };
+        /**
+         * StudioBlockIn
+         * @description One editable block of a Studio document, as the canvas holds it.
+         */
+        StudioBlockIn: {
+            /** Id */
+            id: string;
+            /** Rows */
+            rows?: components["schemas"]["StudioRowIn"][] | null;
+            /** Text */
+            text: string;
+            /** Type */
+            type: string;
+        };
+        /** StudioCheckRequest */
+        StudioCheckRequest: {
+            /** Blocks */
+            blocks: components["schemas"]["StudioBlockIn"][];
+            /** Name */
+            name: string;
+        };
+        /**
+         * StudioRowIn
+         * @description One row of a Studio table block.
+         */
+        StudioRowIn: {
+            /** Cells */
+            cells?: string[];
+            /**
+             * Head
+             * @default false
+             */
+            head: boolean;
         };
         /** ValidationError */
         ValidationError: {
@@ -1918,6 +2000,74 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SourceSearchResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    studio_check_studio_check_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StudioCheckRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeficiencyAnalyzeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    studio_check_detail_studio_check__run_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeficiencyRunDetailResponse"];
                 };
             };
             /** @description Validation Error */

@@ -1524,6 +1524,86 @@
         "title": "SourceSearchResponse",
         "type": "object"
       },
+      "StudioBlockIn": {
+        "description": "One editable block of a Studio document, as the canvas holds it.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "rows": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/StudioRowIn"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rows"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "text"
+        ],
+        "title": "StudioBlockIn",
+        "type": "object"
+      },
+      "StudioCheckRequest": {
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/components/schemas/StudioBlockIn"
+            },
+            "title": "Blocks",
+            "type": "array"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "blocks"
+        ],
+        "title": "StudioCheckRequest",
+        "type": "object"
+      },
+      "StudioRowIn": {
+        "description": "One row of a Studio table block.",
+        "properties": {
+          "cells": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Cells",
+            "type": "array"
+          },
+          "head": {
+            "default": false,
+            "title": "Head",
+            "type": "boolean"
+          }
+        },
+        "title": "StudioRowIn",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -2421,7 +2501,7 @@
     },
     "/deficiency/runs/{run_id}": {
       "get": {
-        "description": "One run + its verbatim stored fault report (null until complete).",
+        "description": "One run + its verbatim stored fault report (null until complete).\n\nUploads only. Studio checks share this table but are private to their\ncreator, so serving one here would let any analyst read a colleague's\ndraft by asking the org-shared route for the same id.",
         "operationId": "deficiency_run_detail_deficiency_runs__run_id__get",
         "parameters": [
           {
@@ -3093,6 +3173,119 @@
           }
         },
         "summary": "Sources Search"
+      }
+    },
+    "/studio/check": {
+      "post": {
+        "description": "Check one Studio document for candidate deficiencies.\n\n202 + run_id; the UI polls GET /studio/check/{id}. The document is hashed\nfrom the text that will actually be checked, so two checks of an unedited\ndraft are comparable and an edit is visibly a different document.",
+        "operationId": "studio_check_studio_check_post",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StudioCheckRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeficiencyAnalyzeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Studio Check"
+      }
+    },
+    "/studio/check/{run_id}": {
+      "get": {
+        "description": "One of the caller's own checks + its verbatim stored report.",
+        "operationId": "studio_check_detail_studio_check__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeficiencyRunDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Studio Check Detail"
       }
     },
     "/watch/latest": {

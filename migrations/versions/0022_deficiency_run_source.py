@@ -24,8 +24,8 @@ store/deficiency_runs.list_runs, and the per-surface guards in api/main). It is
 created without CONCURRENTLY because the table is small and this migration
 already holds a brief ACCESS EXCLUSIVE lock for the ADD COLUMN.
 
-Revision ID: 0021_deficiency_run_source
-Revises: 0020_eval_run
+Revision ID: 0022_deficiency_run_source
+Revises: 0021_chat_session_origin
 Create Date: 2026-08-13
 """
 
@@ -36,8 +36,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0021_deficiency_run_source"
-down_revision: str | None = "0020_eval_run"
+revision: str = "0022_deficiency_run_source"
+down_revision: str | None = "0021_chat_session_origin"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
