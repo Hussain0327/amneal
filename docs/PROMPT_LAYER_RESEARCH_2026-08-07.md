@@ -105,9 +105,9 @@ detail.
   alongside.
 - Serving reality: the Databricks path is one model for every role. JSON mode
   needs the word "json" in a user turn on Databricks. Synthesis runs at
-  temperature 0.0 with a 3000-token cap and reasoning effort pinned low. Gemma
-  has no system role, which mattered while Gemma was a candidate; production
-  serves `gpt-oss-120b-080525` today.
+  temperature 0.0 with a 3000-token cap and reasoning effort pinned low. Some
+  earlier candidate models had no system role, which shaped the layout;
+  production serves `gpt-oss-120b-080525` today.
 - INV-1 (grounding) and INV-7 through INV-9 (never blend forms or products
   silently) stay. INV-2 changes meaning, from "refuse over guess" to "never
   present an unsupported statement as an FDA fact". INV-3 was already amended
@@ -239,8 +239,9 @@ changed.
 
 ### 2.5 Prompting small open models
 
-- [strong] Gemma 3 has no system role. The chat template folds system content
-  into user turn 1, so a "system prompt" has no architectural privilege there.
+- [strong] Some small open models have no system role: the chat template folds
+  system content into user turn 1, so a "system prompt" has no architectural
+  privilege there.
   The contract has to be short, re-rendered every turn, with the critical rule
   repeated at the tail. v6 and v7 both do this, and it costs nothing on the
   model prod actually serves.
@@ -257,8 +258,9 @@ changed.
   not transfer. The convergent pattern is a single agent whose per-turn decision
   is a schema-constrained mode field with deterministic downstream handling.
   That is exactly the route call plus scope compiler.
-- [medium] Official sampling guidance conflicts with our temperature 0.0. The
-  Gemma 3 team recommends temp 1.0, and Qwen3 says not to use greedy decoding
+- [medium] Official sampling guidance conflicts with our temperature 0.0.
+  Small-open-model vendor guidance recommends temp 1.0, and Qwen3 says not to
+  use greedy decoding
   because of repetition risk. We kept 0.0 for byte-replay determinism. If natural
   prose ever reads stilted, low nonzero (0.2 to 0.4) for the prose call while
   keeping 0.0 for the mode envelope and extraction is the experiment to run, with
@@ -443,8 +445,8 @@ Production: Anthropic Citations API and reduce-hallucinations docs
 (docs.cohere.com, huggingface.co/CohereLabs); Gemini grounding (ai.google.dev);
 Claude published system prompts (platform.claude.com/docs/en/release-notes/
 system-prompts); OpenAI Model Spec (model-spec.openai.com); Databricks FMAPI and
-structured outputs (docs.databricks.com); Gemma prompt structure
-(ai.google.dev/gemma); Qwen3 and 3.5 model cards (huggingface.co/Qwen).
+structured outputs (docs.databricks.com); Qwen3 and 3.5 model cards
+(huggingface.co/Qwen).
 
 Papers: AIS (Rashkin et al., CL 2023); ALCE (2305.14627); Liu et al.
 verifiability audit (2023.findings-emnlp.467); Self-RAG (2310.11511); Sufficient

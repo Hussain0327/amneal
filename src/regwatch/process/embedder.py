@@ -192,11 +192,35 @@ class EchoEmbeddingProvider:
         return self.embed(texts)
 
 
+def _full_jitter_delay_s(base_s: float, cap_s: float, retry_index: int) -> float:
+    """Returns one full-jitter backoff delay, in seconds.
+
+    Full jitter draws uniformly from ``[0, min(cap, base * 2**retry_index)]``
+    rather than adding a small jitter on top of the whole exponential delay.
+    Equal jitter left a hard floor under every waiting client, so callers that
+    one 429 burst rejected together also woke up together. The served
+    embedding endpoint rate-limits above roughly 24 inputs per request, which
+    makes those synchronized retry waves routine during a bulk embed; drawing
+    from zero is what actually spreads them out.
+
+    Args:
+      base_s: Delay ceiling for the first retry, in seconds.
+      cap_s: Upper bound on the ceiling, in seconds.
+      retry_index: 0 for the first retry, 1 for the second, and so on.
+
+    Returns:
+      Seconds to sleep before the next attempt.
+    """
+    ceiling = min(cap_s, base_s * (2**retry_index))
+    # Retry jitter, not a cryptographic draw.
+    return random.uniform(0, ceiling)  # noqa: S311
+
+
 class OpenAIEmbeddingProvider:
     """OpenAI `text-embedding-3-small` (1536 dims, unit-norm vectors).
 
     Batches up to 512 inputs per API call and retries 429/5xx responses with
-    exponential backoff + jitter. The chunk table in Postgres mode stores
+    full-jitter exponential backoff. The chunk table in Postgres mode stores
     `vector(1536)`, so `dim` must stay in lockstep with it (the pgvector
     store asserts this at startup — see store/pgvector_store.py).
 
@@ -245,16 +269,15 @@ class OpenAIEmbeddingProvider:
         return status == 429 or status >= 500
 
     def _create_with_retry(self, client: Any, batch: list[str]) -> Any:
-        delay = self._backoff_base_s
         for attempt in range(1, self._max_attempts + 1):
             try:
                 return client.embeddings.create(model=self.model, input=batch)
             except Exception as exc:
                 if attempt >= self._max_attempts or not self._is_retryable(exc):
                     raise
-                # Retry jitter, not a cryptographic draw.
-                time.sleep(delay + random.uniform(0, delay / 2))  # noqa: S311
-                delay = min(delay * 2, self._backoff_cap_s)
+                time.sleep(
+                    _full_jitter_delay_s(self._backoff_base_s, self._backoff_cap_s, attempt - 1)
+                )
         raise RuntimeError("unreachable")  # pragma: no cover
 
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -415,16 +438,15 @@ class Qwen3EmbeddingProvider:
         return response.json()
 
     def _create_with_retry(self, client: Any, batch: list[str]) -> Any:
-        delay = self._backoff_base_s
         for attempt in range(1, self._max_attempts + 1):
             try:
                 return self._request_once(client, batch)
             except Exception as exc:
                 if attempt >= self._max_attempts or not self._is_retryable(exc):
                     raise
-                # Retry jitter, not a cryptographic draw.
-                time.sleep(delay + random.uniform(0, delay / 2))  # noqa: S311
-                delay = min(delay * 2, self._backoff_cap_s)
+                time.sleep(
+                    _full_jitter_delay_s(self._backoff_base_s, self._backoff_cap_s, attempt - 1)
+                )
         raise RuntimeError("unreachable")  # pragma: no cover
 
     @staticmethod

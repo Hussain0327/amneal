@@ -24,6 +24,7 @@ from regwatch.generate.prompts import (
     CHANGE_SUMMARY_SYSTEM,
     CHANGE_SUMMARY_USER,
 )
+from regwatch.process.span_match import normalize_for_match, quote_on_page
 
 log = get_logger(__name__)
 
@@ -71,10 +72,12 @@ def _units(pages: list[str]) -> list[_Unit]:
 
 
 def _changed_by_page(units: list[_Unit]) -> dict[int, str]:
+    # Joined with newlines, not spaces, so a hyphen the PDF left at a line
+    # break still reads as a wrap to the shared normalizer and rejoins.
     by_page: dict[int, list[str]] = {}
     for unit in units:
         by_page.setdefault(unit.page, []).append(unit.text)
-    return {page: _normalize(" ".join(texts)) for page, texts in by_page.items()}
+    return {page: normalize_for_match("\n".join(texts)) for page, texts in by_page.items()}
 
 
 def _render_units(units: list[_Unit]) -> list[dict[str, Any]]:
@@ -160,13 +163,30 @@ def _validated_evidence(
         return None
     if not isinstance(quote, str) or not quote.strip() or len(quote) > _MAX_QUOTE_CHARS:
         return None
-    normalized = _normalize(quote)
-    if normalized not in _normalize(pages[page - 1]):
+    on_page = quote_on_page(quote, pages[page - 1])
+    if not on_page.found:
         return None
     # A real page quote is not enough: it must come from a line the deterministic
     # diff marked changed, preventing unrelated cover-page evidence from passing.
-    if normalized not in changed_by_page.get(page, ""):
+    on_changed_line = quote_on_page(quote, changed_by_page.get(page, ""))
+    if not on_changed_line.found:
         return None
+    if on_page.exact and not on_changed_line.exact:
+        # Verbatim somewhere on the page but only fuzzily among the changed
+        # lines: the verbatim line it sits on is an UNCHANGED one, and the
+        # changed/unchanged distinction is exactly what this check exists to
+        # preserve. The budget may absorb a model transcription artifact
+        # (both checks fuzzy) but never blur the diff.
+        return None
+    if not (on_page.exact and on_changed_line.exact):
+        # At least one side was not verbatim; the edit budget carried it.
+        # Logged so the new leniency is measurable in prod.
+        log.info(
+            "change_summary_quote_fuzzy_match",
+            page=page,
+            distance=max(on_page.distance, on_changed_line.distance),
+            quote=quote[:80],
+        )
     return page, quote.strip()
 
 

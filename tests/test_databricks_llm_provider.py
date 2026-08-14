@@ -1,4 +1,4 @@
-"""Offline contract tests for the Databricks Gemma Chat Completions provider."""
+"""Offline contract tests for the Databricks Chat Completions provider."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def _response(
     finish_reason: str | None = "stop",
     prompt_tokens: int = 11,
     completion_tokens: int = 7,
-    model: str | None = "served-gemma-revision",
+    model: str | None = "served-model-revision",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         id="db-response",
@@ -92,10 +92,10 @@ def _provider(
     d1_allowed_models: tuple[str, ...] = (),
 ) -> DatabricksProvider:
     # The new params default UNARMED so every pre-existing case is unchanged:
-    # _response() reports "served-gemma-revision", which is in no allowlist, so
+    # _response() reports "served-model-revision", which is in no allowlist, so
     # a default-armed guard would fail nearly every test in this file.
     return DatabricksProvider(
-        model="gemma-endpoint",
+        model="llm-endpoint",
         base_url="https://workspace.example/serving-endpoints",
         token="token",
         role=role,
@@ -137,7 +137,7 @@ def _stream_event(
     content: str,
     *,
     finish_reason: str | None = None,
-    model: str | None = "served-gemma-revision",
+    model: str | None = "served-model-revision",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         id="db-stream",
@@ -224,13 +224,13 @@ def test_complete_strips_inline_and_structured_reasoning_from_text_and_raw() -> 
     result = _provider(completions).complete([LLMMessage("user", "question")])
 
     assert result.text == "Grounded answer [PSG_1, p.1]"
-    assert result.model == "served-gemma-revision"
+    assert result.model == "served-model-revision"
     assert result.usage == LLMUsage(input_tokens=11, output_tokens=7)
     assert result.raw == {
         "id": "db-response",
         "object": "chat.completion",
         "created": 123,
-        "model": "served-gemma-revision",
+        "model": "served-model-revision",
         "finish_reason": "stop",
     }
     assert "PRIVATE" not in result.text
@@ -303,12 +303,12 @@ def test_synthesizer_thinking_is_opt_in_but_json_mode_disables_it() -> None:
 def test_stream_buffers_split_thought_delimiters_and_accounts_for_usage() -> None:
     events = [
         SimpleNamespace(
-            model="served-gemma-revision",
+            model="served-model-revision",
             choices=[_choice("<|channel>tho", finish_reason=None, delta=True)],
             usage=None,
         ),
         SimpleNamespace(
-            model="served-gemma-revision",
+            model="served-model-revision",
             choices=[
                 _choice(
                     "ught\nPRIVATE STREAM THOUGHT<channel|>Grounded ",
@@ -321,14 +321,14 @@ def test_stream_buffers_split_thought_delimiters_and_accounts_for_usage() -> Non
         SimpleNamespace(
             id="db-stream",
             object="chat.completion.chunk",
-            model="served-gemma-revision",
+            model="served-model-revision",
             choices=[_choice("answer.", finish_reason="stop", delta=True)],
             usage=None,
         ),
         SimpleNamespace(
             id="db-stream",
             object="chat.completion.chunk",
-            model="served-gemma-revision",
+            model="served-model-revision",
             choices=[],
             usage=SimpleNamespace(prompt_tokens=20, completion_tokens=13),
         ),
@@ -449,7 +449,7 @@ def test_reasoning_effort_survives_json_mode_and_every_role(role: str) -> None:
 
 # ---------- D1 served-model runtime check ----------
 
-_ALIAS_ONLY = ("gemma-endpoint",)
+_ALIAS_ONLY = ("llm-endpoint",)
 
 
 def test_served_model_outside_the_allowlist_is_refused_when_enforced() -> None:
@@ -490,7 +490,7 @@ def test_partner_served_model_is_refused_even_when_a_human_allowlisted_it() -> N
 
     with pytest.raises(RuntimeError, match="partner-hosted"):
         _provider(
-            completions, d1_enforced=True, d1_allowed_models=("gemma-endpoint", served)
+            completions, d1_enforced=True, d1_allowed_models=("llm-endpoint", served)
         ).complete([LLMMessage("user", "question")])
 
 
@@ -501,7 +501,7 @@ def test_compliant_served_model_is_served_unchanged_when_enforced() -> None:
     result = _provider(
         completions,
         d1_enforced=True,
-        d1_allowed_models=("gemma-endpoint", "open-weight-served"),
+        d1_allowed_models=("llm-endpoint", "open-weight-served"),
     ).complete([LLMMessage("user", "question")])
 
     assert result.text == "Grounded answer."
@@ -610,7 +610,7 @@ def test_served_model_is_logged_once_per_distinct_pair(
     provider.complete([LLMMessage("user", "question again")])
 
     assert recorder.events == [
-        ("llm_served_model", {"endpoint": "gemma-endpoint", "served": "gpt-oss-20b-080525"})
+        ("llm_served_model", {"endpoint": "llm-endpoint", "served": "gpt-oss-20b-080525"})
     ]
 
     repointed = _Completions(_response("answer", model="some-other-model"))
@@ -629,13 +629,13 @@ def test_factory_builds_role_aware_databricks_provider(
         llm_provider="databricks",
         databricks_llm_base_url="https://workspace.example/serving-endpoints",
         databricks_llm_token="token",
-        databricks_llm_model="gemma-endpoint",
-        gemma_thinking_enabled=True,
+        databricks_llm_model="llm-endpoint",
+        databricks_thinking_enabled=True,
         databricks_reasoning_effort="low",
         llm_timeout_s=31.0,
         llm_max_retries=1,
         d1_enforced=True,
-        d1_allowed_llm_models=["gemma-endpoint"],
+        d1_allowed_llm_models=["llm-endpoint"],
     )
     monkeypatch.setattr(llm_mod, "get_settings", lambda: settings)
 
@@ -649,11 +649,11 @@ def test_factory_builds_role_aware_databricks_provider(
     # Dead config otherwise: the settings would exist and never reach the wire.
     assert synthesizer.reasoning_effort == "low"
     assert synthesizer.d1_enforced is True
-    assert synthesizer.d1_allowed_models == ("gemma-endpoint",)
+    assert synthesizer.d1_allowed_models == ("llm-endpoint",)
     assert isinstance(extractor, DatabricksProvider)
     assert extractor.thinking_enabled is False
     assert extractor.reasoning_effort == "low"
-    assert current_model_name(role="extractor") == "gemma-endpoint"
+    assert current_model_name(role="extractor") == "llm-endpoint"
 
 
 def test_factory_defaults_the_new_knobs_when_settings_predate_them(
@@ -665,8 +665,8 @@ def test_factory_defaults_the_new_knobs_when_settings_predate_them(
         llm_provider="databricks",
         databricks_llm_base_url="https://workspace.example/serving-endpoints",
         databricks_llm_token="token",
-        databricks_llm_model="gemma-endpoint",
-        gemma_thinking_enabled=False,
+        databricks_llm_model="llm-endpoint",
+        databricks_thinking_enabled=False,
         llm_timeout_s=31.0,
         llm_max_retries=1,
     )
@@ -697,8 +697,8 @@ def test_factory_fails_loudly_for_missing_databricks_config(
         llm_provider="databricks",
         databricks_llm_base_url="https://workspace.example/serving-endpoints",
         databricks_llm_token="token",
-        databricks_llm_model="gemma-endpoint",
-        gemma_thinking_enabled=False,
+        databricks_llm_model="llm-endpoint",
+        databricks_thinking_enabled=False,
         llm_timeout_s=31.0,
         llm_max_retries=1,
     )

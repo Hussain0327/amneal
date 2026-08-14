@@ -177,7 +177,7 @@ GROUNDED_QA_SYSTEM_V6 = dedent("""\
     """)
 
 # The tail restatement paragraph below is the LAST pre-generation text on the
-# Databricks/Gemma path: _request_messages front-loads every system message
+# Databricks path: _request_messages front-loads every system message
 # into one leading system turn, so a trailing system message never sits last on
 # the wire -- only the user prompt's tail does.
 GROUNDED_QA_USER_V6 = dedent("""\

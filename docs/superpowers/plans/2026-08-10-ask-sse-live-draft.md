@@ -246,7 +246,7 @@ git commit -m "docs(ask): G1 stream-format probe + recorded wire facts"
 
 **Files:**
 - Modify: `src/regwatch/generate/llm.py` (LLMStreamChunk ~line 53; new
-  _StreamScrubber after _visible_gemma_text ~line 557; rewrite
+  _StreamScrubber after _visible_answer_text ~line 557; rewrite
   DatabricksProvider.stream ~line 955)
 - Test: `tests/test_stream_scrubber.py` (new)
 
@@ -276,10 +276,10 @@ git commit -m "docs(ask): G1 stream-format probe + recorded wire facts"
 - [ ] **Step 2: Write the failing scrubber tests** (`tests/test_stream_scrubber.py`):
 
 ```python
-"""_StreamScrubber: the incremental twin of _visible_gemma_text.
+"""_StreamScrubber: the incremental twin of _visible_answer_text.
 
 Property pinned here: for ANY split of the wire text into chunks, the
-concatenated visible output (pushes + flush) equals _visible_gemma_text of
+concatenated visible output (pushes + flush) equals _visible_answer_text of
 the full text, and no push ever emits private-block content or a partial
 delimiter.
 """
@@ -287,7 +287,7 @@ delimiter.
 from __future__ import annotations
 
 import pytest
-from regwatch.generate.llm import _StreamScrubber, _visible_gemma_text
+from regwatch.generate.llm import _StreamScrubber, _visible_answer_text
 
 CASES = [
     "plain answer with no markup at all.",
@@ -311,7 +311,7 @@ def _every_split(text: str, parts: int = 2):
 
 @pytest.mark.parametrize("text", CASES)
 def test_incremental_equals_buffered_scrub_for_every_two_way_split(text: str) -> None:
-    expected = _visible_gemma_text(text)
+    expected = _visible_answer_text(text)
     for chunks in _every_split(text):
         scrub = _StreamScrubber()
         out: list[str] = []
@@ -345,7 +345,7 @@ def test_stray_close_delimiter_signals_reset() -> None:
     v2, r2 = scrub.push("<channel|>the real answer")
     assert r2 is True
     assert "looked like" not in v2
-    assert ("".join([v2, scrub.flush()])).strip() == _visible_gemma_text(
+    assert ("".join([v2, scrub.flush()])).strip() == _visible_answer_text(
         "looked like an answer <channel|>the real answer"
     )
 ```
@@ -356,7 +356,7 @@ Run: `env -u VIRTUAL_ENV uv run pytest tests/test_stream_scrubber.py -q`
 Expected: FAIL / collection error - `_StreamScrubber` not defined.
 
 - [ ] **Step 4: Implement _StreamScrubber** in llm.py, directly after
-  `_visible_gemma_text`. Extend `_OPENERS`/`_CLOSER` pairs with the
+  `_visible_answer_text`. Extend `_OPENERS`/`_CLOSER` pairs with the
   G1-confirmed Harmony forms if (and only if) Task 2 recorded
   harmony_markup_in_content=true (add `("<|channel|>analysis<|message|>",
   "<|end|>")` and treat `<|channel|>final<|message|>` as a visible-channel
@@ -364,7 +364,7 @@ Expected: FAIL / collection error - `_StreamScrubber` not defined.
 
 ```python
 class _StreamScrubber:
-    """Incremental twin of ``_visible_gemma_text`` for live draft streaming.
+    """Incremental twin of ``_visible_answer_text`` for live draft streaming.
 
     push() returns (visible_delta, retroactive_reset). It never emits text
     inside a private block, never emits a tail that could still grow into a
@@ -376,8 +376,8 @@ class _StreamScrubber:
 
     # (compiled opener, literal closer) pairs, buffered-scrubber-aligned.
     _PAIRS: tuple[tuple[re.Pattern[str], str], ...] = (
-        (_GEMMA_THOUGHT_START, "<channel|>"),
-        (_GEMMA_XML_THOUGHT_START, "</think>"),
+        (_THOUGHT_CHANNEL_START, "<channel|>"),
+        (_THINK_TAG_START, "</think>"),
     )
     # Longest text that could still be an incomplete opener/closer; holding
     # this much tail is what makes split-across-chunks delimiters safe.
@@ -704,7 +704,7 @@ Expected: the six provider tests FAIL (stream() is still atomic).
         yield LLMStreamChunk(
             done=True,
             response=LLMResponse(
-                text=_visible_gemma_text("".join(parts)),
+                text=_visible_answer_text("".join(parts)),
                 model=served or self.model,
                 raw=_safe_chat_raw(last_event, finish_reason=finish_reason),
                 usage=usage,

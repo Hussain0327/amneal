@@ -133,10 +133,10 @@ class Settings(BaseSettings):
 
     # Private Databricks Chat Completions endpoint. Prod points this at the
     # Unity Catalog alias workspace.default.regwatch, which serves gpt-oss-120b
-    # (served id gpt-oss-120b-080525) for every role. Gemma is the other
-    # supported family; for Gemma, thinking is a runtime mode rather than a
-    # different checkpoint, and the provider allows it only for the synthesizer
-    # role and strips reasoning from outputs.
+    # (served id gpt-oss-120b-080525) for every role. On endpoints where
+    # thinking is a runtime mode rather than a different checkpoint, the
+    # provider allows it only for the synthesizer role and strips reasoning
+    # from outputs.
     databricks_llm_base_url: str | None = None
     databricks_llm_token: str | None = None
     # No default: this is a Databricks SERVING ENDPOINT NAME, which only the
@@ -146,7 +146,7 @@ class Settings(BaseSettings):
     # question. Unset instead, so get_llm_provider's `missing` check fails the
     # turn loudly.
     databricks_llm_model: str | None = None
-    gemma_thinking_enabled: bool = False
+    databricks_thinking_enabled: bool = False
     # Bound what a reasoning model spends THINKING before it answers.
     # Open-weight reasoning models (gpt-oss-120b) draw thought and answer from
     # the SAME max_tokens budget, so an unbounded effort level burns the whole
@@ -532,6 +532,15 @@ class Settings(BaseSettings):
     # identity (first rerank_top_k of the wide net). Read via Settings (not a
     # bare os.getenv) so the knob is documented and validated like every other.
     reranker_enabled: bool = False
+    # MMR diversity in stage 2 (docs/DSA.md section 33). OFF by default: when
+    # false the trim is the unchanged first-RERANK_TOP_K slice, so production
+    # stays bit-identical until an eval A/B flips it. When true the same NUMBER
+    # of passages is kept, but a candidate that repeats what is already
+    # selected loses to a distinct one -- eight near-clones of one paragraph
+    # are one piece of evidence, not eight. Similarity is text-based
+    # (retrieve/diversity.py), so the flip costs no extra embedding or query.
+    # Aliased so the flip reads as a REGWATCH_* Fly secret like the flags above.
+    mmr_diversity_enabled: bool = Field(default=False, validation_alias="REGWATCH_MMR_DIVERSITY")
     # Legacy alias, populated from RETRIEVAL_TOP_K if set (backwards compat).
     retrieval_top_k: int | None = None
     # Cosine floor: passages below it are withheld from the synthesizer, so a

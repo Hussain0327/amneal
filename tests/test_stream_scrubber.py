@@ -1,7 +1,7 @@
-"""_StreamScrubber: the incremental twin of _visible_gemma_text.
+"""_StreamScrubber: the incremental twin of _visible_answer_text.
 
 Property pinned here: for ANY split of the wire text into chunks, the
-concatenated visible output (pushes + flush) equals _visible_gemma_text of
+concatenated visible output (pushes + flush) equals _visible_answer_text of
 the full text, and no push ever emits private-block content or a partial
 delimiter.
 """
@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from regwatch.generate.llm import LLMMessage, _StreamScrubber, _visible_gemma_text
+from regwatch.generate.llm import LLMMessage, _StreamScrubber, _visible_answer_text
 
 if TYPE_CHECKING:
     from regwatch.generate.llm import DatabricksProvider
@@ -40,7 +40,7 @@ def _every_split(text: str, parts: int = 2) -> Iterator[list[str]]:
 
 @pytest.mark.parametrize("text", CASES)
 def test_incremental_equals_buffered_scrub_for_every_two_way_split(text: str) -> None:
-    expected = _visible_gemma_text(text)
+    expected = _visible_answer_text(text)
     for chunks in _every_split(text):
         scrub = _StreamScrubber()
         out: list[str] = []
@@ -74,7 +74,7 @@ def test_stray_close_delimiter_signals_reset() -> None:
     v2, r2 = scrub.push("<channel|>the real answer")
     assert r2 is True
     assert "looked like" not in v2
-    assert ("".join([v2, scrub.flush()])).strip() == _visible_gemma_text(
+    assert ("".join([v2, scrub.flush()])).strip() == _visible_answer_text(
         "looked like an answer <channel|>the real answer"
     )
 

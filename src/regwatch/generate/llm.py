@@ -629,9 +629,9 @@ class OpenAIProvider:
         )
 
 
-# ---------- Databricks Gemma provider ----------
-_GEMMA_THOUGHT_START = re.compile(r"<\|channel>thought(?:\r?\n)?", re.IGNORECASE)
-_GEMMA_XML_THOUGHT_START = re.compile(r"<think>", re.IGNORECASE)
+# ---------- Databricks provider ----------
+_THOUGHT_CHANNEL_START = re.compile(r"<\|channel>thought(?:\r?\n)?", re.IGNORECASE)
+_THINK_TAG_START = re.compile(r"<think>", re.IGNORECASE)
 
 
 def _drop_private_block(text: str, start: re.Pattern[str], end: str) -> str:
@@ -639,7 +639,7 @@ def _drop_private_block(text: str, start: re.Pattern[str], end: str) -> str:
 
     Unterminated thought output is discarded from its opening delimiter to the
     end. Returning a shorter/empty answer is safer than exposing chain of
-    thought when a serving engine truncates before Gemma's closing token.
+    thought when a serving engine truncates before the model's closing token.
     """
     visible: list[str] = []
     cursor = 0
@@ -653,19 +653,20 @@ def _drop_private_block(text: str, start: re.Pattern[str], end: str) -> str:
     return "".join(visible)
 
 
-def _visible_gemma_text(text: str) -> str:
-    """Return only Gemma's final-answer channel.
+def _visible_answer_text(text: str) -> str:
+    """Return only the model's final-answer channel.
 
-    Gemma 4 can emit its thought channel inline even when thinking is disabled,
-    and some OpenAI-compatible servers expose reasoning in ``content`` instead
-    of a separate field. Handle both Gemma's native delimiters and the common
-    ``<think>`` compatibility form. A stray closing delimiter is treated
-    conservatively: everything before it may have been private reasoning.
+    Reasoning models can emit their thought channel inline even when thinking
+    is disabled, and some OpenAI-compatible servers expose reasoning in
+    ``content`` instead of a separate field. Handle both the native
+    thought-channel delimiters and the common ``<think>`` compatibility form.
+    A stray closing delimiter is treated conservatively: everything before it
+    may have been private reasoning.
     """
-    cleaned = _drop_private_block(text, _GEMMA_THOUGHT_START, "<channel|>")
+    cleaned = _drop_private_block(text, _THOUGHT_CHANNEL_START, "<channel|>")
     if "<channel|>" in cleaned:
         cleaned = cleaned.rsplit("<channel|>", 1)[-1]
-    cleaned = _drop_private_block(cleaned, _GEMMA_XML_THOUGHT_START, "</think>")
+    cleaned = _drop_private_block(cleaned, _THINK_TAG_START, "</think>")
     lower = cleaned.lower()
     if "</think>" in lower:
         cleaned = cleaned[lower.rfind("</think>") + len("</think>") :]
@@ -673,7 +674,7 @@ def _visible_gemma_text(text: str) -> str:
 
 
 class _StreamScrubber:
-    """Incremental twin of ``_visible_gemma_text`` for live draft streaming.
+    """Incremental twin of ``_visible_answer_text`` for live draft streaming.
 
     ``push()`` returns ``(visible_delta, retroactive_reset)``. It never emits
     text inside a private reasoning block, never emits a tail that could
@@ -686,8 +687,8 @@ class _StreamScrubber:
     """
 
     # Literal delimiter probes a held tail could still be a prefix of. The
-    # Gemma opener regex allows an optional trailing newline, so the literal
-    # opener itself is the longest prefix worth holding for.
+    # thought-channel opener regex allows an optional trailing newline, so the
+    # literal opener itself is the longest prefix worth holding for.
     _PROBES = ("<|channel>thought", "<think>", "</think>", "<channel|>", "<|think|>")
 
     def __init__(self) -> None:
@@ -721,8 +722,8 @@ class _StreamScrubber:
             opener_match: re.Match[str] | None = None
             opener_closer = ""
             for start, closer in (
-                (_GEMMA_THOUGHT_START, "<channel|>"),
-                (_GEMMA_XML_THOUGHT_START, "</think>"),
+                (_THOUGHT_CHANNEL_START, "<channel|>"),
+                (_THINK_TAG_START, "</think>"),
             ):
                 m = start.search(self._buf)
                 if m and (opener_match is None or m.start() < opener_match.start()):
@@ -826,7 +827,7 @@ def _log_served_model_once(endpoint: str, served: str) -> None:
 
 
 class DatabricksProvider:
-    """Gemma over a Databricks OpenAI-compatible Chat Completions endpoint.
+    """Chat model over a Databricks OpenAI-compatible Chat Completions endpoint.
 
     The client and all connection inputs are injectable for deterministic
     tests. Thinking is opt-in *and* synthesizer-only. Generated thought content
@@ -887,9 +888,10 @@ class DatabricksProvider:
         *,
         allow_thinking: bool,
     ) -> list[dict[str, str]]:
-        # Gemma expects one consolidated system turn. Always remove a caller's
-        # accidental control token first; this is what makes router/extractor
-        # thinking definitively off rather than prompt-dependent.
+        # The endpoint gets one consolidated system turn. Always remove a
+        # caller's accidental control token first; this is what makes
+        # router/extractor thinking definitively off rather than
+        # prompt-dependent.
         system = "\n\n".join(
             message.content.replace("<|think|>", "")
             for message in messages
@@ -908,7 +910,7 @@ class DatabricksProvider:
             # Do not feed a prior assistant thought channel back into a later
             # turn. User text is left byte-for-byte intact.
             if message.role == "assistant":
-                content = _visible_gemma_text(content)
+                content = _visible_answer_text(content)
             request.append({"role": message.role, "content": content})
         return request
 
@@ -1064,7 +1066,7 @@ class DatabricksProvider:
         message = getattr(choice, "message", None)
         candidate = _chat_content_text(getattr(message, "content", None))
         if response_format == "json":
-            # _visible_gemma_text is a PROSE thought-channel scrubber and it
+            # _visible_answer_text is a PROSE thought-channel scrubber and it
             # destroys JSON: it returns only what follows the LAST "</think>",
             # drops everything from a "<|channel>thought" opener, and deletes
             # "<|think|>" inline. A JSON payload quoting any of those tokens
@@ -1075,7 +1077,7 @@ class DatabricksProvider:
             # (_request_kwargs forces allow_thinking False).
             text = _extract_json_blob(candidate)
         else:
-            text = _visible_gemma_text(candidate)
+            text = _visible_answer_text(candidate)
         model = served or self.model
         return LLMResponse(
             text=text,
@@ -1193,7 +1195,7 @@ class DatabricksProvider:
         yield LLMStreamChunk(
             done=True,
             response=LLMResponse(
-                text=_visible_gemma_text("".join(parts)),
+                text=_visible_answer_text("".join(parts)),
                 model=served or self.model,
                 raw=_safe_chat_raw(last_event, finish_reason=finish_reason),
                 usage=usage,
@@ -1305,20 +1307,20 @@ def get_llm_provider(name: str | None = None, *, role: str = "default") -> LLMPr
         assert isinstance(databricks_model, str)  # noqa: S101
         if (
             role == "synthesizer"
-            and bool(getattr(s, "gemma_thinking_enabled", False))
+            and bool(getattr(s, "databricks_thinking_enabled", False))
             and bool(getattr(s, "prose_synthesis_enabled", False))
         ):
             # Prose synthesis carries no json response_format, so allow_thinking
             # becomes REACHABLE for the synthesizer for the first time and
-            # _visible_gemma_text is answer-path load-bearing. Runbook:
-            # GEMMA_THINKING_ENABLED stays unset through the v6 rollout.
-            log.warning("gemma_thinking_enabled_with_prose_synthesis")
+            # _visible_answer_text is answer-path load-bearing. Runbook:
+            # DATABRICKS_THINKING_ENABLED stays unset through the v6 rollout.
+            log.warning("thinking_enabled_with_prose_synthesis")
         return DatabricksProvider(
             model=databricks_model,
             base_url=base_url,
             token=token,
             role=role,
-            thinking_enabled=bool(getattr(s, "gemma_thinking_enabled", False)),
+            thinking_enabled=bool(getattr(s, "databricks_thinking_enabled", False)),
             # getattr with defaults throughout: tests construct settings as a
             # SimpleNamespace with a fixed field list, and a bare attribute read
             # would turn a new knob into an AttributeError at provider build.
