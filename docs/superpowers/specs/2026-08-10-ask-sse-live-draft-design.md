@@ -36,7 +36,7 @@ Key code facts the design is fitted to:
   buffers every wire event before returning (llm.py:886-953), then stream()
   yields one full-text delta plus done=True (llm.py:955-989). True
   incremental delivery requires a new provider path.
-- The reasoning scrubber _visible_gemma_text matches only the Gemma
+- The reasoning scrubber _visible_answer_text matches only the legacy
   thought-channel delimiters and generic think-tags (llm.py:518-519,
   541-557). gpt-oss emits the Harmony response format, which wraps
   reasoning in its own channel/message delimiter tokens that the scrubber
@@ -138,7 +138,7 @@ No L1 code is written until (a)-(d) are answered in writing.
 New incremental path (`_stream_events`) feeding DatabricksProvider.stream(),
 with four bindings:
 
-1. Adapter-boundary stream parser. Reasoning/control markup (the Gemma
+1. Adapter-boundary stream parser. Reasoning/control markup (the legacy
    thought-channel and think-tag forms, plus the G1-confirmed Harmony
    channel structure) is PARSED at the model adapter, not forwarded: the
    parser tracks channel state across wire chunks, drops reasoning-channel

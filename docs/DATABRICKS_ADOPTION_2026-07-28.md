@@ -42,7 +42,8 @@
 >   allowlist and rejects partner-hosted families outright.
 > - **Corpus numbers below are July figures.** Wherever this file says 10,749
 >   chunks, the live count is 5,494, measured 2026-08-11.
-> - **The cost table in section 5 is stale.** It prices `gemma-3-12b` synthesis
+> - **The cost table in section 5 is stale.** It prices the retired 12b
+>   candidate's synthesis
 >   against an OpenAI baseline. Prod now runs a 120b model for every role and
 >   embeds on Databricks, so both sides of that comparison are wrong. Nobody has
 >   re-priced it.
@@ -120,7 +121,7 @@ Legal, in writing: (a) is "processor swap, <=30-day abuse retention, no training
 
 **Work.**
 - Enforce an `https://` scheme in `_normalize_optional_provider_value` (config/settings.py:101-107, verified: it only calls `str(v).strip()` today). A typo'd `http://` base URL would ship confidential queries in plaintext.
-- Change `databricks_llm_model` default from `"google/gemma-4-31B-it"` (a HuggingFace repo id, not a Databricks endpoint name) to `None`, so a half-configured operator fails loudly at the constructor (llm.py:823-833) instead of 404ing every synthesis into an audited refusal - which looks alive while refusing everything.
+- Change `databricks_llm_model` default from a hardcoded HuggingFace repo id (not a Databricks endpoint name) to `None`, so a half-configured operator fails loudly at the constructor (llm.py:823-833) instead of 404ing every synthesis into an audited refusal - which looks alive while refusing everything.
 - Add `d1_enforced: bool = False` plus a boot allowlist of open-weight endpoint names, and a validator that refuses to construct Settings when `d1_enforced` is true and either (a) the model is off the allowlist, or (b) the pair is mixed (`llm_provider=databricks` with `active_embedding_profile=legacy`, or the inverse). `databricks-gpt-5-nano` and `databricks-claude-*` are one string edit away, identical at the call site (`model=self.model` verbatim, llm.py:592-597), and carry documented partner-retention paths. `LLM_PROVIDER` is one global switch, so a wrong string moves router, synthesizer and extractor at once.
 - Add `"databricks"` to `_QWEN3_PROVIDER_NAMES` (embedder.py:38-46, verified: the sibling `_QWEN3_PROFILE_PROVIDER_NAMES` at line 47 already includes it), so `assert_embedding_runtime_available` emits its intended remediation instead of a late `ValueError`.
 - Additive migration 0016: nullable `query_log.latency_ms`, written on the audit path. There is no latency column today, so no step in any plan can gate on p95 without it. *[Graft: both critiques flagged latency gates against a metric that does not exist.]*
@@ -135,11 +136,11 @@ Legal, in writing: (a) is "processor swap, <=30-day abuse retention, no training
 
 ### Step 2 - Flip generation (secrets only) *[DONE 2026-07-28]*
 
-**Work.** `fly secrets set LLM_PROVIDER=databricks DATABRICKS_LLM_BASE_URL=<root from step 0> DATABRICKS_LLM_TOKEN=<sp-pat> DATABRICKS_LLM_MODEL=databricks-gemma-3-12b GEMMA_THINKING_ENABLED=false LLM_MODEL=databricks-gemma-3-12b`.
+**Work.** `fly secrets set LLM_PROVIDER=databricks DATABRICKS_LLM_BASE_URL=<root from step 0> DATABRICKS_LLM_TOKEN=<sp-pat> DATABRICKS_LLM_MODEL=<generation-endpoint> DATABRICKS_THINKING_ENABLED=false LLM_MODEL=<generation-endpoint>`.
 
-Model choice is not arbitrary. The shipped output sanitizer matches **Gemma delimiters only** - `<|channel>thought` and `<think>` (`_GEMMA_THOUGHT_START` / `_GEMMA_XML_THOUGHT_START` feeding `_visible_gemma_text`, src/regwatch/generate/llm.py, verified) - and the `_visible_gemma_text` docstring warns that "some OpenAI-compatible servers expose reasoning in `content` instead of a separate field". A chain-of-thought model such as `databricks-gpt-oss-120b` uses different delimiters and would risk leaking reasoning into a cited regulatory answer; it also burns the synthesis output budget (`SYNTHESIZER_MAX_TOKENS`, default 900, read once per turn in grounded_qa.ask) on reasoning tokens, and `finish_reason == "length"` **raises** in DatabricksProvider, converting real answers into refusals. *[Graft from the critique of the all-in design.]* **This is what happened on 2026-07-28**, when `LLM_PROVIDER=databricks` went live against `gpt-oss-20b-080525`. Two mitigations shipped: `DATABRICKS_REASONING_EFFORT` (default `low`) bounds the thinking spend at the request, measured to finish at 272 completion tokens under the 900 cap where default/medium/high all hit it; and `SYNTHESIZER_MAX_TOKENS` makes the cap an operator knob so headroom needs no deploy. The default stays 900 because `LLM_PROVIDER=openai` is the rollback path.
+Model choice is not arbitrary. The shipped output sanitizer matches **two delimiter forms only** - `<|channel>thought` and `<think>` (`_THOUGHT_CHANNEL_START` / `_THINK_TAG_START` feeding `_visible_answer_text`, src/regwatch/generate/llm.py, verified) - and the `_visible_answer_text` docstring warns that "some OpenAI-compatible servers expose reasoning in `content` instead of a separate field". A chain-of-thought model such as `databricks-gpt-oss-120b` uses different delimiters and would risk leaking reasoning into a cited regulatory answer; it also burns the synthesis output budget (`SYNTHESIZER_MAX_TOKENS`, default 900, read once per turn in grounded_qa.ask) on reasoning tokens, and `finish_reason == "length"` **raises** in DatabricksProvider, converting real answers into refusals. *[Graft from the critique of the all-in design.]* **This is what happened on 2026-07-28**, when `LLM_PROVIDER=databricks` went live against `gpt-oss-20b-080525`. Two mitigations shipped: `DATABRICKS_REASONING_EFFORT` (default `low`) bounds the thinking spend at the request, measured to finish at 272 completion tokens under the 900 cap where default/medium/high all hit it; and `SYNTHESIZER_MAX_TOKENS` makes the cap an operator knob so headroom needs no deploy. The default stays 900 because `LLM_PROVIDER=openai` is the rollback path.
 
-*[Outcome, 2026-08-11: prod runs a reasoning model anyway. The alias serves `gpt-oss-120b-080525` and has since 2026-08-05, with `DATABRICKS_REASONING_EFFORT=low`. The leak worry was handled in code rather than by model choice: `generate/llm.py` drops `reasoning`, `reasoning_content`, `thinking` and `analysis` content parts through an allow-list, and `_visible_gemma_text` plus its streaming twin scrub thought-channel markup out of both the buffered and the streamed answer.]*
+*[Outcome, 2026-08-11: prod runs a reasoning model anyway. The alias serves `gpt-oss-120b-080525` and has since 2026-08-05, with `DATABRICKS_REASONING_EFFORT=low`. The leak worry was handled in code rather than by model choice: `generate/llm.py` drops `reasoning`, `reasoning_content`, `thinking` and `analysis` content parts through an allow-list, and `_visible_answer_text` plus its streaming twin scrub thought-channel markup out of both the buffered and the streamed answer.]*
 
 `LLM_MODEL` is a zero-code fix for a cosmetic split brain: Go resolves `/settings` from env `LLM_MODEL`, defaulting to `gpt-5.4-nano` (go/internal/api/config.go:143), while Python records the Databricks endpoint. It is inert on Python's databricks branch. Without it the UI tells analysts they are still on OpenAI - to the exact stakeholders D1 exists for.
 
@@ -181,7 +182,7 @@ The Q&A gold set is 12 items (6 ordinary must-answer, 5 must-refuse, 1 must-clar
 
 ### Step 5 - PR B: real incremental streaming *[DONE]*
 
-**Work.** Replace the buffer-everything path (`_complete_stream`, llm.py) with a safe-prefix emitter that holds back only the longest suffix that could still be a partial thought delimiter under the `_GEMMA_*` regexes and flushes the rest as it arrives. Keep `stream()`'s existing exception fallback to buffered `complete()` so an endpoint without SSE still works - and keep `D1ResidencyError` excluded from that fallback: the safe-prefix rewrite must not reintroduce the re-send of the analyst question to an off-perimeter endpoint. Extend the split-delimiter test in tests/test_databricks_llm_provider.py to assert more than one delta and that no delimiter fragment escapes.
+**Work.** Replace the buffer-everything path (`_complete_stream`, llm.py) with a safe-prefix emitter that holds back only the longest suffix that could still be a partial thought delimiter under the thought-delimiter regexes and flushes the rest as it arrives. Keep `stream()`'s existing exception fallback to buffered `complete()` so an endpoint without SSE still works - and keep `D1ResidencyError` excluded from that fallback: the safe-prefix rewrite must not reintroduce the re-send of the analyst question to an off-perimeter endpoint. Extend the split-delimiter test in tests/test_databricks_llm_provider.py to assert more than one delta and that no delimiter fragment escapes.
 
 **Gate.** The 9 existing Databricks provider tests plus the new multi-delta test; tests_contract stream test green against real Go + uvicorn + Postgres; visual check that the Ask UI types again.
 
@@ -263,7 +264,7 @@ Assumptions stated: 424 Asks/month (99 query_log rows in 7 days), per Ask roughl
 
 | Line | Volume | DBU/month | @ $0.07 | @ $0.20 |
 |---|---|---|---|---|
-| Synthesis, `databricks-gemma-3-12b` (2.143 in / 7.143 out per M) | 2.29M in / 0.24M out | 6.6 | $0.46 | $1.32 |
+| Synthesis, retired 12b candidate (2.143 in / 7.143 out per M) | 2.29M in / 0.24M out | 6.6 | $0.46 | $1.32 |
 | Query embedding, 1024-dim endpoint (0.286 per M) | 0.021M | 0.006 | $0.0004 | $0.001 |
 | **Steady state** | 424 Asks | **~6.6** | **~$0.50** | **~$1.35** |
 | At 10x (5,000 Asks/mo) | | ~78 | ~$5.50 | ~$15.60 |
@@ -271,7 +272,7 @@ Assumptions stated: 424 Asks/month (99 query_log rows in 7 days), per Ask roughl
 
 Baseline being replaced: `gpt-5.4-nano` at $0.05/M in and $0.40/M out is about $0.25/month, plus text-embedding-3-small at under a cent. **The inference swap is a delta of roughly +$0.30 to +$1.30/month at current volume.** Inference is not the cost story.
 
-*[STALE 2026-08-11. This whole table prices `gemma-3-12b` synthesis and an OpenAI embedding baseline. Prod runs `gpt-oss-120b-080525` for every role and embeds on Databricks Qwen3, and the corpus is 5,494 chunks rather than 10,749, so both the new-cost and the replaced-baseline columns are wrong. The shape of the finding, that inference is not the cost story, has not been re-checked at 120b. Nobody has re-priced it.]*
+*[STALE 2026-08-11. This whole table prices the retired 12b candidate's synthesis and an OpenAI embedding baseline. Prod runs `gpt-oss-120b-080525` for every role and embeds on Databricks Qwen3, and the corpus is 5,494 chunks rather than 10,749, so both the new-cost and the replaced-baseline columns are wrong. The shape of the finding, that inference is not the cost story, has not been re-checked at 120b. Nobody has re-priced it.]*
 
 Unchanged at the time: Supabase $0-25/month (208 MB fits the Free tier), Fly, Vercel, GitHub Actions. *[Supabase is no longer the datastore; Lakebase cost is not priced here.]*
 
@@ -304,7 +305,7 @@ Nobody should plan on these.
 - The $/DBU multiplier, the serverless-jobs DBU rate, Lakebase CU pricing, and the AI Search DSU storage rate. All render behind JS selectors or 404.
 - Whether pay-per-token FMAPI endpoints have any cold start.
 - Where AI Gateway guardrail evaluation executes and whether it involves a separate model call that sees the prompt.
-- Real Gemma thought-channel delimiters as emitted by an actual Databricks endpoint. The stripping regexes (`_GEMMA_THOUGHT_START` / `_GEMMA_XML_THOUGHT_START`, llm.py) are written against an assumed format; keep `GEMMA_THINKING_ENABLED=false` until a real payload is captured in an integration test.
+- Real thought-channel delimiters as emitted by an actual Databricks endpoint. The stripping regexes (`_THOUGHT_CHANNEL_START` / `_THINK_TAG_START`, llm.py) are written against an assumed format; keep `DATABRICKS_THINKING_ENABLED=false` until a real payload is captured in an integration test.
 
 **Repo / environment side:**
 - No test suite was executed in this analysis. Test coverage claims come from reading function names.
