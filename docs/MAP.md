@@ -116,6 +116,7 @@ This is the only index of `docs/`. Every living doc appears exactly once below.
 - [Deploy runbook](DEPLOY.md) - Fly, Lakebase, and Vercel operations, rollback levers, restore procedure
 - [CI/CD pipeline](CI_CD.md) - every CI job mapped to its local command. Read this before pushing
 - [Secrets runbook](SECRETS_RUNBOOK.md) - where every secret lives and how to rotate it
+- [Provider triage](PROVIDER_TRIAGE.md) - is the Databricks embedding/LLM endpoint actually serving? Read before concluding one is missing
 
 **Status and what's left**
 
