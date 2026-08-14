@@ -39,7 +39,7 @@ is the how.
 | PR11b | route shadow logging and metrics (#181) | done |
 | PR11c | route v2 reliability correction, still shadow-only (#184) | **in review** |
 | Checkpoint 3 | route promotion decision | **open**, needs shadow data |
-| PR12 | route `live` + deterministic scope compiler executing | **open** |
+| PR12 | route `live` + deterministic scope compiler executing | **in review** |
 | PR12b | route default flip | **open** |
 | PR13 | retrieval-group gates + clarifies that name candidates | **open** |
 | PR14 | decline humanization, guidance shrink, refusal_accuracy removal | **open** |

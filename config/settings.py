@@ -183,9 +183,15 @@ class Settings(BaseSettings):
     # also on AND the request opts in. Alias so the prod flip is a REGWATCH_*
     # Fly secret like the prose flag. ON in prod.
     live_draft_enabled: bool = Field(default=False, validation_alias="REGWATCH_LIVE_DRAFT")
-    # Conversational route-call rollout. PR11b observes only: both ``shadow``
-    # and the reserved ``live`` value execute as shadow and cannot steer Ask.
-    # PR12 is the first change allowed to give ``live`` executable meaning.
+    # Conversational route-call rollout. ``off``/``shadow`` are unchanged from
+    # PR11b: no call, or observe-only. PR12 gave ``live`` a real meaning --
+    # generate/grounded_qa.py's no-product branch may carry a session product
+    # over on the route's compiled scope + standalone rewrite instead of the
+    # word-list heuristic, guarded the same way (no suggestion/brand
+    # candidate) and failing open to the heuristic on any route failure. A
+    # live-classified corpus scope still only compiles and audits
+    # (retrieve/scope.py, unchanged); it does not execute (see
+    # grounded_qa._compile_route_live_scope). Default stays off.
     route_call_mode: Literal["off", "shadow", "live"] = Field(
         default="off", validation_alias="REGWATCH_ROUTE_CALL"
     )

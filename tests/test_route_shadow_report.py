@@ -263,6 +263,43 @@ def test_the_loader_lifts_route_call_out_of_route_json_and_skips_turns_without_o
     assert report.mode_matrix == {("lookup", "lookup"): 1}
 
 
+def test_live_rows_summarize_the_same_way_as_shadow_rows() -> None:
+    """PR12: a `configured_mode=live` row carries a `live_steering` subfield
+    the report never reads. Checkpoint 3's arithmetic must keep working once
+    live rows land in the same table as shadow rows -- this pins that
+    ``summarize()`` aggregates them identically rather than tripping on an
+    unrecognized key.
+    """
+    report = summarize(
+        [
+            _row(
+                configured_mode="live",
+                live_steering={
+                    "applied": True,
+                    "outcome": "applied",
+                    "compiled_kind": "product",
+                },
+            ),
+            _row(
+                configured_mode="live",
+                outcome="provider_error",
+                compile_status="not_attempted",
+                compiled_scope=None,
+                live_steering={
+                    "applied": False,
+                    "outcome": "route_call_failed",
+                    "compiled_kind": None,
+                },
+            ),
+        ]
+    )
+
+    assert report.configured_live == 2
+    assert report.attempted == 2
+    assert report.failure_rate == 0.5
+    assert report.mode_matrix == {("lookup", "lookup"): 1}
+
+
 def test_an_uncompiled_row_contributes_no_matrix_entry() -> None:
     """A provider error has no proposal to compare, and must not invent one."""
     report = summarize(
