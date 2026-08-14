@@ -133,10 +133,10 @@ class Settings(BaseSettings):
 
     # Private Databricks Chat Completions endpoint. Prod points this at the
     # Unity Catalog alias workspace.default.regwatch, which serves gpt-oss-120b
-    # (served id gpt-oss-120b-080525) for every role. Gemma is the other
-    # supported family; for Gemma, thinking is a runtime mode rather than a
-    # different checkpoint, and the provider allows it only for the synthesizer
-    # role and strips reasoning from outputs.
+    # (served id gpt-oss-120b-080525) for every role. On endpoints where
+    # thinking is a runtime mode rather than a different checkpoint, the
+    # provider allows it only for the synthesizer role and strips reasoning
+    # from outputs.
     databricks_llm_base_url: str | None = None
     databricks_llm_token: str | None = None
     # No default: this is a Databricks SERVING ENDPOINT NAME, which only the
@@ -146,7 +146,7 @@ class Settings(BaseSettings):
     # question. Unset instead, so get_llm_provider's `missing` check fails the
     # turn loudly.
     databricks_llm_model: str | None = None
-    gemma_thinking_enabled: bool = False
+    databricks_thinking_enabled: bool = False
     # Bound what a reasoning model spends THINKING before it answers.
     # Open-weight reasoning models (gpt-oss-120b) draw thought and answer from
     # the SAME max_tokens budget, so an unbounded effort level burns the whole

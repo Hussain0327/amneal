@@ -1,10 +1,11 @@
-# Open-model rollout: Qwen3 embeddings + Gemma generation
+# Open-model rollout: Qwen3 embeddings + Databricks generation
 
 > **STATUS 2026-07-29:** this plan is partially executed, out of its written
 > order, and parts of it are superseded.
 > - The machinery (migration 0015 embedding profiles, `Qwen3EmbeddingProvider`,
 >   `DatabricksProvider`) merged and deployed DORMANT on 2026-07-23 (#125).
-> - Generation cut over FIRST, on 2026-07-28 -- and not to Gemma: prod runs
+> - Generation cut over FIRST, on 2026-07-28 -- and not to the planned
+>   generation model: prod runs
 >   gpt-oss-20b behind the Databricks endpoint alias
 >   `workspace.default.regwatch` (served model id `gpt-oss-20b-080525`), one
 >   model for ALL roles, `LLM_PROVIDER=databricks`. OpenAI is rollback only.
@@ -14,7 +15,7 @@
 >   live call. App wiring is NOT built yet -- prod queries still embed on
 >   OpenAI, and the config defaults below still describe the 4B/1536
 >   Matryoshka plan.
-> - The Qwen3-4B / 2560-dim sections and the Gemma GPU sizing section below
+> - The Qwen3-4B / 2560-dim sections and the generation GPU sizing section below
 >   are historical planning kept for context; the shape actually adopted is
 >   pay-per-token Databricks Model Serving.
 
@@ -27,7 +28,7 @@ documents ──> Qwen3-Embedding-4B endpoint ──> Postgres/pgvector profile
                                                        │
 question ──> Qwen3-Embedding-4B endpoint ──> retrieval ─┤
                                                        ▼
-                                      Gemma 4 31B IT endpoint ──> answer
+                                          generation endpoint ──> answer
 ```
 
 The embedding and generation endpoints have separate credentials,
@@ -41,7 +42,7 @@ receive the versioned regulatory instruction; document chunks are embedded as
 raw text. Responses are rejected if their count, ordering, dimension, numeric
 values, or unit normalization is invalid.
 
-The Gemma provider uses a separate Databricks OpenAI-compatible Chat
+The generation provider uses a separate Databricks OpenAI-compatible Chat
 Completions endpoint. Thinking is opt-in and synthesizer-only. Router and
 extractor calls force it off, and thought content is removed before responses
 or audit payloads leave the provider.
@@ -114,7 +115,7 @@ DATABRICKS_LLM_TOKEN=<service-principal-token>
 # The value sent in the Chat Completions `model` field, normally the Databricks
 # serving endpoint name (in prod: the Unity Catalog alias workspace.default.regwatch).
 DATABRICKS_LLM_MODEL=<generation-endpoint-name>
-GEMMA_THINKING_ENABLED=false
+DATABRICKS_THINKING_ENABLED=false
 
 # Truncation knobs (merged 2026-07-29 in PR #138 after the 2026-07-28 incident):
 # "low" is the only reasoning level measured to finish under the 900-token cap
@@ -179,7 +180,8 @@ skips them.
 > Qwen3-Embedding-0.6B endpoint; step 3's 2560-dim comparison applies only if
 > a 4B endpoint is ever revisited.
 
-1. Deploy Qwen and Gemma as private, independently scaled endpoints. Keep the
+1. Deploy the embedding and generation models as private, independently scaled
+   endpoints. Keep the
    existing providers active while validating credentials and network paths.
 2. Apply the migration, register the 1,536-dimensional profile with the exact
    serving-runtime/deployment version, and backfill only a representative
@@ -199,7 +201,7 @@ skips them.
 7. Cut generation over separately with `LLM_PROVIDER=databricks`. Rollback is
    independent of the embedding profile.
 
-## Gemma production sizing (HISTORICAL)
+## Generation production sizing (HISTORICAL)
 
 > **2026-07-29:** superseded. Prod adopted Databricks pay-per-token Model
 > Serving for both generation (gpt-oss-20b) and embeddings
@@ -217,6 +219,6 @@ Treat a quantized 24 GB A10 deployment as an experiment, not an assumed
 production fallback. Keep endpoint autoscaling and maximum context limits
 independent from the Qwen embedding service.
 
-Keep `GEMMA_THINKING_ENABLED=false` until the real serving endpoint's reasoning
+Keep `DATABRICKS_THINKING_ENABLED=false` until the real serving endpoint's reasoning
 payload/delimiters have been captured in an integration test; the default
 prevents unverified thought formats from reaching users or audit records.

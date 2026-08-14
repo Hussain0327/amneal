@@ -2319,7 +2319,7 @@ def _synthesize_and_admit(
         # parser now -- and the few-shot exemplars ride between the system
         # prompt and the live turn as real user/assistant pairs. The tail
         # restatement inside GROUNDED_QA_USER_V6 is the true last-read text on
-        # the Gemma path (all system content is front-loaded on that wire).
+        # the Databricks path (all system content is front-loaded on that wire).
         synth_messages = [LLMMessage(role="system", content=GROUNDED_QA_SYSTEM_V6)]
         synth_messages.extend(
             LLMMessage(role=exemplar_role, content=exemplar_text)
