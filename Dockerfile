@@ -6,11 +6,11 @@
 # fully static binary, so the python:3.12-slim runtime stage below needs no
 # extra libraries. Digest-pinned like the python base (mutable tag kept as
 # documentation); bump by resolving the multi-arch INDEX digest:
-#   docker manifest inspect golang:1.26.5-alpine
+#   docker manifest inspect golang:1.26.6-alpine
 # Scan note: this puts a Go stdlib binary inside the Trivy-scanned API image,
 # so a fixable Go stdlib CVE can now fail that gate; the remedy is bumping
 # this digest, not .trivyignore.
-FROM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS proxy-build
+FROM golang:1.26.6-alpine@sha256:af8d6740070b8906d12eae1c3e3ea0957fb63f492051ea05e354c38ef9fe88df AS proxy-build
 # The pinned toolchain alone must satisfy go.mod's `go` directive:
 # GOTOOLCHAIN=local turns "pinned image too old" into a loud build failure
 # instead of a silent mid-build network download of a different toolchain.
