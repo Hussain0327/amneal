@@ -9,9 +9,7 @@ fabricated.
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any
 
 from regwatch.common.logging import get_logger
@@ -21,6 +19,7 @@ from regwatch.generate.prompts import (
     BE_EXTRACTION_SYSTEM,
     BE_EXTRACTION_USER,
 )
+from regwatch.process.span_match import NO_MATCH, SpanMatch, quote_on_page
 
 log = get_logger(__name__)
 
@@ -59,34 +58,28 @@ def _passages_for_prompt(pages: list[str], max_chars: int = 18_000) -> str:
     return "\n".join(parts)
 
 
-def _quote_appears_on_page(quote: str, pages: list[str], page: int) -> bool:
-    """Quote must verbatim appear (modulo whitespace) on the CLAIMED page only.
+def _match_quote_on_page(quote: str, pages: list[str], page: int) -> SpanMatch:
+    """Locate the quote on the CLAIMED page only.
 
     `page` is 1-indexed and must already be range-checked by the caller. We
     search ONLY pages[page-1] so a quote cited to the wrong page is rejected
     even if it appears elsewhere in the document (INV-1: provenance must point
     at the page the quote actually came from).
+
+    Args:
+      quote: The verbatim span the model claims it copied.
+      pages: The parsed pages of the source document, in order.
+      page: 1-indexed page the citation claims.
+
+    Returns:
+      The match outcome, or `NO_MATCH` when the quote is empty or the
+      claimed page is out of range.
     """
     if not quote:
-        return False
+        return NO_MATCH
     if not isinstance(page, int) or page < 1 or page > len(pages):
-        return False
-    needle = re.sub(r"\s+", " ", quote).strip().lower()
-    if not needle:
-        return False
-    pat = _quote_pattern(needle)
-    if pat is None:
-        return False
-    haystack = re.sub(r"\s+", " ", pages[page - 1].lower())
-    return pat.search(haystack) is not None
-
-
-@lru_cache(maxsize=2048)
-def _quote_pattern(needle: str) -> re.Pattern[str] | None:
-    parts = [re.escape(tok) for tok in needle.split(" ") if tok]
-    if not parts:
-        return None
-    return re.compile(r"\s+".join(parts), flags=re.IGNORECASE)
+        return NO_MATCH
+    return quote_on_page(quote, pages[page - 1])
 
 
 def _validate_field_citation(
@@ -113,9 +106,20 @@ def _validate_field_citation(
     if not isinstance(quote, str) or len(quote) > 200:
         log.warning("be_extraction_bad_quote_length", field=field_name)
         return None, None
-    if not _quote_appears_on_page(quote, pages, page):
+    match = _match_quote_on_page(quote, pages, page)
+    if not match.found:
         log.warning("be_extraction_quote_not_found", field=field_name, quote=quote[:80])
         return None, None
+    if not match.exact:
+        # The quote is not on the page verbatim, only within the edit budget.
+        # Logged separately so the new leniency is measurable in prod.
+        log.info(
+            "be_extraction_quote_fuzzy_match",
+            field=field_name,
+            page=page,
+            distance=match.distance,
+            quote=quote[:80],
+        )
     return value, {"page": page, "quote": quote}
 
 

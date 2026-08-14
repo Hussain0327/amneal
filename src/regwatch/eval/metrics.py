@@ -38,13 +38,20 @@ later flip a flag — for now everything is mechanical):
                           was WITHHELD (no claims, no citations) in any shape --
                           see withheld_answer(). Turns that errored made no
                           decision and leave the denominator.
+  - latency p50/p95     : wall-clock milliseconds per gold question, over the
+                          turns that measured something. A retrieval change
+                          that lifts recall by 0.01 and doubles p95 is not an
+                          improvement, and until this existed the eval could
+                          not see it.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any
 
 from regwatch.common.citations import has_citation, strip_sources_trailer
@@ -185,6 +192,36 @@ def rejection_reasons(details: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def percentile(values: Sequence[float], pct: float) -> float | None:
+    """Nearest-rank percentile over ``values``.
+
+    THE percentile of the eval package: route_shadow_report imports this rather
+    than keeping its own copy, so "p95" means one thing wherever it is printed.
+    (embedding_benchmark.percentile is deliberately NOT this function -- it
+    rounds an index instead of taking a rank, which disagrees here at even n,
+    and its recorded diagnostic numbers were produced under that rule.)
+
+    Nearest-rank rather than interpolated: every number returned is a value
+    some sample actually took, so a reported p95 names a turn that really ran
+    that slowly.
+
+    Args:
+        values: The observations. Any order -- a sorted copy is taken.
+        pct: Which percentile to read, on a 0..100 scale.
+
+    Returns:
+        The percentile, or None when ``values`` is empty. Deliberately not 0.0:
+        a fabricated zero reads as an instantaneous turn and would silently
+        CLEAR a latency ceiling instead of reporting that nothing was measured
+        (same rule as the NULL-not-zero latency column in store/models.py).
+    """
+    if not values:
+        return None
+    ordered = sorted(values)
+    rank = max(1, min(len(ordered), math.ceil(len(ordered) * pct / 100.0)))
+    return float(ordered[rank - 1])
+
+
 @dataclass
 class Scorecard:
     n: int = 0
@@ -238,6 +275,18 @@ class Scorecard:
     # run_eval FAILS the build when this gets large: a run that could not
     # measure must never be reported as a run that measured well.
     errored: int = 0
+    # Wall-clock milliseconds per gold question, end to end around the ask()
+    # call. None when nothing was timed -- see percentile() for why that is not
+    # 0.0. Transport-failed turns leave this distribution exactly as they leave
+    # every other denominator: a 429 that comes back in 200ms would deflate p95
+    # and a timeout would inflate it, and neither number describes the system.
+    # Every row still carries its own "latency_ms" in `details`, errored rows
+    # included, so an outage remains visible per row.
+    latency_p50_ms: float | None = None
+    latency_p95_ms: float | None = None
+    # How many turns the percentiles above were taken over. Printed so "p95 is
+    # None" and "p95 was taken over 2 turns" can never look alike.
+    latency_samples: int = 0
     # Per-category breakdown. An aggregate says quality moved; only this says
     # WHERE, and that is the difference between "the re-chunk regressed" and
     # "the re-chunk regressed table questions specifically". Categories absent
@@ -482,9 +531,17 @@ def evaluate(
     answer_unmeasured = 0  # answerable rows whose synthesis crashed: no answer to judge
     fact_items = 0  # answered items that actually carry expected_facts
     details: list[dict[str, Any]] = []
+    latencies_ms: list[float] = []  # one per item, in item order
 
     for it in items:
+        started = perf_counter()
         result = ask_callable(it.question)
+        # Wall clock around the WHOLE turn. The retrieval phase is not
+        # separable here: ask() is one opaque call and its QAResult carries no
+        # phase timings, so splitting retrieval out would mean changing that
+        # return contract. Rounded once, at the source, so the p95 the
+        # scorecard reports is literally one of the per-row numbers below.
+        latencies_ms.append(round((perf_counter() - started) * 1000.0, 3))
         retrieved = result.retrieved
         citations = [c.__dict__ for c in result.citations]
         # Every branch below records this. A scorecard says a metric moved; only
@@ -659,11 +716,17 @@ def evaluate(
             }
         )
 
-    # Every branch above appends exactly one details entry per item, so the two
-    # lists are positionally aligned. Stamping the category here (rather than in
-    # five separate append sites) keeps that invariant in one place.
-    for it, detail in zip(items, details, strict=True):
+    # Every branch above appends exactly one details entry per item, so the
+    # three lists are positionally aligned. Stamping the category and the
+    # latency here (rather than in five separate append sites) keeps that
+    # invariant in one place.
+    for it, detail, elapsed_ms in zip(items, details, latencies_ms, strict=True):
         detail["category"] = it.category
+        detail["latency_ms"] = elapsed_ms
+
+    # Errored turns keep their per-row latency above but leave the summary:
+    # see Scorecard.latency_p50_ms.
+    measured_ms = [ms for ms, d in zip(latencies_ms, details, strict=True) if not d.get("errored")]
 
     n = len(items)
     decision_expected = sum(1 for it in items if it.must_refuse or it.must_clarify)
@@ -735,6 +798,9 @@ def evaluate(
         forbidden_violations=sum(1 for d in shaped if not d["forbidden_ok"]),
         rejection_reasons=rejection_reasons(details),
         errored=errored,
+        latency_p50_ms=percentile(measured_ms, 50),
+        latency_p95_ms=percentile(measured_ms, 95),
+        latency_samples=len(measured_ms),
         by_category=_by_category(items, details),
         details=details,
     )

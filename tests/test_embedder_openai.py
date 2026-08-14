@@ -1,8 +1,8 @@
 """OpenAIEmbeddingProvider — mocked API, no network.
 
 Covers the K6 contract: text-embedding-3-small at 1536 dims, batches of up
-to 512 inputs, retry with backoff on 429/5xx (and only those), and the
-provider interface staying identical to the local/echo providers.
+to 512 inputs, retry on 429/5xx (and only those) with full-jitter backoff,
+and the provider interface staying identical to the local/echo providers.
 """
 
 from __future__ import annotations
@@ -53,6 +53,30 @@ def _fake_client(api: _FakeEmbeddingsApi) -> SimpleNamespace:
 def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     """Backoff sleeps are pointless against a fake API."""
     monkeypatch.setattr("regwatch.process.embedder.time.sleep", lambda _s: None)
+
+
+def _record_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[tuple[float, float]], list[float]]:
+    """Captures every jitter draw range and every sleep the retry loop makes.
+
+    The stub returns each draw's own upper bound so the recorded sleeps are
+    deterministic without a seeded RNG.
+
+    Returns:
+        (draws, slept): the (low, high) pairs passed to random.uniform, and
+        the delays handed to time.sleep, in retry order.
+    """
+    draws: list[tuple[float, float]] = []
+    slept: list[float] = []
+
+    def fake_uniform(low: float, high: float) -> float:
+        draws.append((low, high))
+        return high
+
+    monkeypatch.setattr("regwatch.process.embedder.random.uniform", fake_uniform)
+    monkeypatch.setattr("regwatch.process.embedder.time.sleep", slept.append)
+    return draws, slept
 
 
 def test_provider_interface() -> None:
@@ -126,6 +150,51 @@ def test_gives_up_after_max_attempts() -> None:
     with pytest.raises(_ApiError):
         p.embed(["hello"])
     assert len(api.calls) == OpenAIEmbeddingProvider._max_attempts
+
+
+def test_backoff_is_full_jitter_from_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Full jitter: every wait is drawn from [0, min(cap, base * 2**retry)], so
+    # 429'd bulk-embed callers cannot re-collide on a shared delay floor.
+    draws, slept = _record_backoff(monkeypatch)
+    api = _FakeEmbeddingsApi(errors=[_ApiError(429)] * 5)
+    p = OpenAIEmbeddingProvider(client=_fake_client(api))
+
+    assert len(p.embed(["hello"])) == 1
+    assert draws == [(0, 1.0), (0, 2.0), (0, 4.0), (0, 8.0), (0, 16.0)]
+    assert slept == [1.0, 2.0, 4.0, 8.0, 16.0]
+
+
+def test_backoff_ceiling_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    draws, _slept = _record_backoff(monkeypatch)
+    monkeypatch.setattr(OpenAIEmbeddingProvider, "_backoff_cap_s", 3.0)
+    api = _FakeEmbeddingsApi(errors=[_ApiError(500)] * 5)
+    p = OpenAIEmbeddingProvider(client=_fake_client(api))
+
+    assert len(p.embed(["hello"])) == 1
+    assert [high for _low, high in draws] == [1.0, 2.0, 3.0, 3.0, 3.0]
+
+
+def test_non_retryable_error_never_sleeps(monkeypatch: pytest.MonkeyPatch) -> None:
+    draws, slept = _record_backoff(monkeypatch)
+    api = _FakeEmbeddingsApi(errors=[_ApiError(400)])
+    p = OpenAIEmbeddingProvider(client=_fake_client(api))
+
+    with pytest.raises(_ApiError):
+        p.embed(["hello"])
+    assert draws == []
+    assert slept == []
+
+
+def test_exhausted_retries_sleep_once_per_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+    draws, _slept = _record_backoff(monkeypatch)
+    api = _FakeEmbeddingsApi(errors=[_ApiError(429)] * 10)
+    p = OpenAIEmbeddingProvider(client=_fake_client(api))
+
+    with pytest.raises(_ApiError):
+        p.embed(["hello"])
+    # The last attempt raises instead of waiting on a retry that never comes.
+    assert len(api.calls) == OpenAIEmbeddingProvider._max_attempts
+    assert len(draws) == OpenAIEmbeddingProvider._max_attempts - 1
 
 
 def test_dim_mismatch_raises() -> None:

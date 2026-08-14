@@ -21,9 +21,13 @@ reviewer should not have to eyeball it.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
+
+# One nearest-rank percentile for the whole eval package, so a p95 printed here
+# and a p95 printed on an eval scorecard mean the same arithmetic.
+from regwatch.eval.metrics import percentile
 
 # Checkpoint 3 acceptance: parse failure under 2% of attempted route calls
 # (plan doc :186-188). Expressed as a fraction of attempts, not of successes.
@@ -95,17 +99,6 @@ class RouteShadowReport:
         return bool(self.unsafe_corpus)
 
 
-def _percentile(values: Sequence[float], fraction: float) -> float:
-    """Nearest-rank percentile over a sorted sequence.
-
-    Nearest-rank rather than interpolated: the number is read as "a real
-    observed call took this long", and an interpolated p95 names a latency no
-    request actually experienced.
-    """
-    rank = max(1, min(len(values), int(-(-len(values) * fraction // 1))))
-    return values[rank - 1]
-
-
 def _latency(rows: Iterable[Mapping[str, Any]]) -> LatencyProfile:
     observed = sorted(
         float(row["latency_ms"])
@@ -117,8 +110,8 @@ def _latency(rows: Iterable[Mapping[str, Any]]) -> LatencyProfile:
         return LatencyProfile(count=0)
     return LatencyProfile(
         count=len(observed),
-        p50=_percentile(observed, 0.50),
-        p95=_percentile(observed, 0.95),
+        p50=percentile(observed, 50),
+        p95=percentile(observed, 95),
         maximum=observed[-1],
     )
 
