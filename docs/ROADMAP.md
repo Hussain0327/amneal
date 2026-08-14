@@ -52,8 +52,9 @@ fail-closed reversible cutover. The full read-only discovery found **140,339
 source records** on 2026-08-13.
 
 Migration 0023 is deployed. The first production canary indexed 18 / 21 records
-and 347 chunks, then stopped on three parse failures; the active profile is
-therefore 5,494 / 5,841 embedded. The follow-up migration 0024 and worker image
+and 347 chunks, then stopped on three parse failures; all 347 chunks are
+embedded on the active profile (5,841 / 5,841 verified 2026-08-14). The
+follow-up migration 0024 and worker image
 must be released before ingestion resumes. Then rerun the OCR-enabled canary to
 21 / 21, freeze the exact full manifest, run chunk and embedding partition
 backfills, pass 512-shard acceptance plus retrieval/citation evaluation, verify

@@ -6,7 +6,11 @@ storage:
       env: DAGSTER_POSTGRES_URL
 
 run_coordinator:
-  module: dagster.core.run_coordinator
+  # The public package path has no `dagster.core`; the coordinator lives under
+  # the private `dagster._core` namespace and is resolved by importlib, so the
+  # underscore is load-bearing: the daemon and webserver crash at startup
+  # without it.
+  module: dagster._core.run_coordinator
   class: QueuedRunCoordinator
   config: {}
 

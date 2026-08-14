@@ -67,9 +67,10 @@ Two of these are now done. The numbers are kept because other docs cite them.
   database. Rows, vectors and audit all live together. Fly release 135 deployed
   `0023_authoritative_fda_corpus`; this follow-up adds
   `0024_fda_streaming_lifecycle`. The first production canary added 347 chunks,
-  so the database has 5,841 total while the active profile still covers 5,494.
-  A fresh serving boot fails closed until the OCR-enabled 21 / 21 canary repairs
-  that vector gap. R5 deleted the SQLite and Chroma dual-mode, so `DATABASE_URL` is
+  all embedded on the active profile: 5,841 / 5,841 verified against the
+  production database on 2026-08-14, so fresh serving boots pass the
+  profile-readiness guard. The OCR-enabled 21 / 21 canary rerun still owes the
+  three unparsed documents. R5 deleted the SQLite and Chroma dual-mode, so `DATABASE_URL` is
   unconditionally required and the app refuses to boot without it. pgvector
   dimension checks fail fast.
   - Note on history: the earlier call
@@ -263,7 +264,7 @@ Two of these are now done. The numbers are kept because other docs cite them.
   DailyMed, NDC, shortage, and REMS acquisition paths are not routable and fail
   closed if an old caller reaches their compatibility shims.
 - **Gap:** release migration 0024 and the dedicated worker; repeat the production
-  canary from its current 18 / 21 and 5,494 / 5,841 vector state to 21 / 21;
+  canary from its current 18 / 21 state (embeddings complete) to 21 / 21;
   complete both 512-shard backfills; then run acceptance, new-corpus
   retrieval/citation evaluation, serving smoke, and rollback rehearsal.
 - **Done when:** all 140,339 source records (or an explained newer manifest) are

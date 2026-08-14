@@ -171,7 +171,16 @@ def authoritative_fda_chunk_shard(
             default_value="",
             description="Empty selects ACTIVE_EMBEDDING_PROFILE.",
         ),
-        "batch_size": dg.Field(int, default_value=128),
+        "batch_size": dg.Field(
+            int,
+            default_value=128,
+            description=(
+                "Database page size per embedding write. The per-HTTP-request"
+                " input count is the separate QWEN_EMBEDDING_BATCH_SIZE"
+                " setting, which must stay at or below 24: the endpoint"
+                " rejects larger input arrays with 429."
+            ),
+        ),
     },
     retry_policy=_SHARD_RETRY,
     pool="fda_embedding_shards",
@@ -184,13 +193,14 @@ def authoritative_fda_embedding_shard(
     manifest = _configured_manifest(context)
     shard_id = parse_shard_partition_key(context.partition_key)
     profile_id = (
-        str(context.op_config["profile_id"]).strip()
+        str(context.op_execution_context.op_config["profile_id"]).strip()
         or get_settings().active_embedding_profile
         or "legacy"
     ).strip()
-    batch_size = int(context.op_config["batch_size"])
+    batch_size = int(context.op_execution_context.op_config["batch_size"])
     if not 1 <= batch_size <= 512:
-        raise dg.Failure("batch_size must be between 1 and 512")
+        # Deterministic operator input error: retrying reproduces it verbatim.
+        raise dg.Failure("batch_size must be between 1 and 512", allow_retries=False)
     canonical_ids = _canonical_ids_for_shard(manifest, shard_id)
     processed = embed_pending_corpus(
         profile_id,
@@ -246,8 +256,10 @@ def authoritative_fda_canary(
     context: dg.AssetExecutionContext,
 ) -> dg.MaterializeResult:  # type: ignore[type-arg]
     init_db(assert_provider=False)
-    applications = tuple(str(value) for value in context.op_config["applications"])
-    expected = int(context.op_config["expected_documents"])
+    applications = tuple(
+        str(value) for value in context.op_execution_context.op_config["applications"]
+    )
+    expected = int(context.op_execution_context.op_config["expected_documents"])
     manifest = discover_authoritative_manifest(application_numbers=applications)
     if len(manifest.artifacts) != expected:
         raise dg.Failure(
@@ -269,13 +281,13 @@ def authoritative_fda_canary(
             metadata={"sync": stats_dict(stats)},
         )
     profile_id = (
-        str(context.op_config["profile_id"]).strip()
+        str(context.op_execution_context.op_config["profile_id"]).strip()
         or get_settings().active_embedding_profile
         or "legacy"
     ).strip()
     processed = embed_pending_corpus(
         profile_id,
-        batch_size=int(context.op_config["batch_size"]),
+        batch_size=int(context.op_execution_context.op_config["batch_size"]),
         canonical_ids=[artifact.canonical_id for artifact in manifest.artifacts],
     )
     readiness = [
@@ -326,7 +338,7 @@ def authoritative_fda_acceptance(
     init_db(assert_provider=False)
     manifest = _configured_manifest(context)
     profile_id = (
-        str(context.op_config["profile_id"]).strip()
+        str(context.op_execution_context.op_config["profile_id"]).strip()
         or get_settings().active_embedding_profile
         or "legacy"
     ).strip()
@@ -363,9 +375,13 @@ def authoritative_fda_acceptance(
 
 
 def _configured_manifest(context: dg.AssetExecutionContext) -> CorpusManifest:
-    manifest_sha256 = str(context.op_config["manifest_sha256"]).strip().lower()
+    manifest_sha256 = str(context.op_execution_context.op_config["manifest_sha256"]).strip().lower()
     if _SHA256_RE.fullmatch(manifest_sha256) is None:
-        raise dg.Failure("manifest_sha256 must be a lowercase SHA-256")
+        # Deterministic operator input error: retrying reproduces it verbatim.
+        raise dg.Failure(
+            "manifest_sha256 must be a lowercase SHA-256",
+            allow_retries=False,
+        )
     return load_persisted_manifest(manifest_sha256)
 
 

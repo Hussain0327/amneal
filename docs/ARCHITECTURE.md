@@ -670,8 +670,9 @@ Production runs on Databricks Lakebase in us-east-2, database
 database. Rows, vectors and audit all live in one Postgres. Fly release 135
 deployed migration `0023_authoritative_fda_corpus`; this follow-up adds
 `0024_fda_streaming_lifecycle`. The partial canary increased the corpus from
-5,494 to 5,841 chunks while the active Qwen profile remains at 5,494 vectors,
-so the worker release and 21 / 21 canary repair precede the full backfill.
+5,494 to 5,841 chunks, all embedded on the active Qwen profile (5,841 / 5,841
+verified 2026-08-14); the worker release and the 21 / 21 canary rerun for the
+three unparsed documents precede the full backfill.
 
 - `store/vector_store.py` is a thin wrapper over `store/pgvector_store.py`. Every
   public function (`similarity_search`, `add_chunks`, `collection_size`,

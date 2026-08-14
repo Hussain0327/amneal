@@ -142,10 +142,12 @@ is a manifest denominator, not a chunk or embedding count. Do not switch serving
 retrieval during schema deployment.
 
 The first production canary indexed 18 / 21 records and 347 chunks before three
-parse failures. Those chunks changed the active profile from 5,494 / 5,494 to
-5,494 / 5,841 embedded. Existing Fly release-135 processes remain healthy, but
-any restart correctly fails the profile-readiness guard until the missing
-vectors are repaired. Do not add more production chunks from the old worker.
+parse failures. All 347 canary chunks carry active-profile embeddings, so
+coverage is 5,841 / 5,841 (verified against the production database on
+2026-08-14) and fresh boots pass the profile-readiness guard. Any future
+deferred-embedding run reopens that gap until its embedding phase completes,
+and a fresh boot then fails closed. Do not add more production chunks from the
+old worker.
 
 After this release is healthy, deploy `Dockerfile.corpus-worker` on separately
 supervised compute. It uses bounded ephemeral scratch, durable S3-compatible raw
@@ -161,7 +163,8 @@ uv run regwatch authoritative-corpus-status
 Then use the Dagster jobs in this exact order:
 
 1. `authoritative_fda_canary_job`: `NDA020503`, expected 21, chunk and embed to
-   21 / 21 with zero errors. This also repairs the current 347-vector gap.
+   21 / 21 with zero errors. The three previously unparseable documents retry
+   through OCR; the 18 indexed documents and their embeddings are reused.
 2. `authoritative_fda_manifest_job`: freeze one durable exact full manifest.
 3. `authoritative_fda_chunk_shards_job`: backfill partitions 000–511 with that
    manifest SHA-256.

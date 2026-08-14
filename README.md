@@ -169,9 +169,9 @@ The deployed-system and corpus counters below were checked on 2026-08-13.
   serving alias `workspace.default.regwatch`, and that one open-weight model
   handles every LLM role (`LLM_PROVIDER=databricks`). Embeddings are Qwen3 on
   `workspace.default.regwatch-embed`, 1024-dim, profile
-  `ep_2e7368b354d911ea3a013c3125e276c2`. It covers all 5,494 serving legacy
-  chunks, but not the 347 newly indexed canary chunks (5,494 / 5,841 globally);
-  this worker release's first canary step repairs that gap. The interactive app sends no model traffic to OpenAI; its
+  `ep_2e7368b354d911ea3a013c3125e276c2`. It covers all 5,841 chunks -- the
+  5,494 serving legacy chunks plus the 347 canary chunks (5,841 / 5,841,
+  verified against the production database on 2026-08-14). The interactive app sends no model traffic to OpenAI; its
   provider remains a tested LLM rollback. Scheduled Watch still uses its scoped
   OpenAI key for public-document change summaries and extraction, never for
   embeddings. The legacy OpenAI embedding arm is no longer refreshed by Watch

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 
 import dagster as dg
@@ -51,3 +52,16 @@ def test_worker_runtime_is_durable_bounded_and_non_root() -> None:
     assert "tesseract-ocr-eng" in worker_dockerfile
     assert "USER regwatch" in worker_dockerfile
     assert 'CMD ["dagster-daemon", "run"' in worker_dockerfile
+
+
+def test_instance_config_classes_are_importable() -> None:
+    # DagsterInstance resolves these module/class strings with importlib at
+    # daemon/webserver startup; a typo (e.g. `dagster.core` without the
+    # underscore) crashes the whole control plane before any asset loads, and
+    # nothing else in CI executes that resolution path.
+    root = Path(__file__).resolve().parents[1]
+    instance_config = yaml.safe_load((root / "docker/dagster.yaml").read_text())
+    for section in ("run_coordinator",):
+        block = instance_config[section]
+        module = importlib.import_module(block["module"])
+        assert hasattr(module, block["class"]), (section, block)

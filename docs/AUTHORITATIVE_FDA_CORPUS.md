@@ -20,10 +20,12 @@ them.
 
 The FDA-only schema through migration `0023` is deployed on Fly release 135.
 The first `NDA020503` production canary discovered 21 records, indexed 18 of
-them into 347 chunks, and exposed three image-only/otherwise unparseable PDFs.
-Those 347 chunks have not been embedded: the active Qwen profile is currently
-5,494 / 5,841. Existing machines remain in service, but a fresh serving process
-correctly fails its readiness check until the gap is repaired.
+them into 347 chunks, and exposed three image-only/otherwise unparseable PDFs;
+the run is recorded as `failed` with those three errors. All 5,841 chunks
+carry active-profile embeddings (5,841 / 5,841, zero pending, verified
+directly against the production database on 2026-08-14), so fresh serving
+boots pass the profile-readiness guard. The outstanding canary work is the
+three unparsed documents, not a vector gap.
 
 This follow-up release adds migration `0024`, document-at-a-time temporary
 storage, durable raw artifacts and exact manifests, sandboxed OCR, separate
@@ -218,6 +220,11 @@ a supervised, restartable machine. Run the same image with
 private operator network. Required worker configuration includes:
 
 - the application `DATABASE_URL` and the deployed active Qwen profile settings;
+- `QWEN_EMBEDDING_BATCH_SIZE` at or below 24. This setting, not the Dagster
+  `batch_size` op config (a database page size), controls how many inputs go
+  into one embedding HTTP request, and the endpoint rejects larger input
+  arrays with 429 -- the retry loop then resends the same oversized payload
+  until the shard fails;
 - a separate `DAGSTER_POSTGRES_URL` for run/event/schedule state;
 - `FDA_ARTIFACT_STORE=s3`, its bucket/prefix, encryption choice, and preferably
   workload-identity credentials; and
@@ -252,9 +259,9 @@ ops:
 
 The job must report exactly 21 / 21 documents, zero errors, non-zero chunks,
 and complete active-profile embeddings. It is safe to rerun: the 18 existing
-versions are reused, the three failed documents retry through OCR, and the 347
-pending vectors are backfilled. Do not start the full manifest until this gate
-passes. Check the application-owned counters at any time—even while the serving
+versions are reused (their 347 chunks are already embedded), and the three
+failed documents retry through OCR. Do not start the full manifest until this
+gate passes. Check the application-owned counters at any time—even while the serving
 profile is incomplete—with:
 
 ```bash
@@ -389,5 +396,6 @@ target environment:
 
 Discovery alone satisfies none of steps 3 through 10. The honest current
 handoff is: **140,339 authoritative source records discovered; the first canary
-is 18 / 21 with 347 chunks and zero new embeddings; deploy this worker upgrade,
-repair the canary to 21 / 21, then launch the production backfills.**
+is 18 / 21 with 347 chunks, all embedded on the active profile; deploy this
+worker upgrade, repair the canary to 21 / 21, then launch the production
+backfills.**
