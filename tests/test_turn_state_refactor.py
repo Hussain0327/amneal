@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from config.settings import get_settings
 
 from regwatch.generate import grounded_qa as qa
 from regwatch.retrieve.resolver import ExternalDrugMatch, Resolution
@@ -43,6 +44,8 @@ def test_resolution_writes_into_the_turn_state(monkeypatch: pytest.MonkeyPatch) 
     result = qa._resolve_and_carry_over(
         state,
         question="What BE study is recommended for albuterol sulfate?",
+        session_id="sess-turnstate-resolved",
+        s=get_settings(),
         _decline=_no_decline,
         _session_filters=lambda: {},
     )
@@ -68,6 +71,8 @@ def test_carry_over_flows_through_the_dataclass(monkeypatch: pytest.MonkeyPatch)
     result = qa._resolve_and_carry_over(
         state,
         question="tell me more",
+        session_id="sess-turnstate-carry-over",
+        s=get_settings(),
         _decline=_no_decline,
         # Canonical, as the shell stores it: the form carry-over compares the
         # session name against the canonicalized resolved name.

@@ -118,6 +118,7 @@ from regwatch.generate.route import (
     ROUTE_PROMPT,
     CorpusPolicyHint,
     RouteHistoryTurn,
+    ScopeHint,
 )
 from regwatch.generate.route_shadow import (
     RouteShadowObservation,
@@ -132,7 +133,13 @@ from regwatch.retrieve.mode import RetrievalPlan, RetrievalScope, default_mode_f
 from regwatch.retrieve.reranker import rerank_passages
 from regwatch.retrieve.resolver import lookup_external_drug, resolve_product, suggest_products
 from regwatch.retrieve.retriever import RetrievedPassage, retrieve
-from regwatch.retrieve.scope import ProductScope, compiled_scope_from_audit
+from regwatch.retrieve.scope import (
+    CompiledScope,
+    CompiledScopeKind,
+    ProductScope,
+    compile_scope,
+    compiled_scope_from_audit,
+)
 from regwatch.retrieve.scope_catalog import load_corpus_policy_snapshots
 from regwatch.store.db import session_scope
 from regwatch.store.models import PsgDocument
@@ -1690,6 +1697,22 @@ class TurnState:
     # existing path returns or retrieves.
     route_shadow: RouteShadowObservation | None = None
     route_shadow_audit: dict[str, Any] | None = None
+    # PR12, live mode only: the compiled scope that actually steered this
+    # turn's pre-retrieval path (set only from _resolve_and_carry_over's
+    # no-product branch), and the standalone rewrite _retrieve_and_group
+    # should search with instead of _retrieval_query's heuristic rewrite.
+    # Both stay None on every off/shadow turn and on every live turn where
+    # steering did not apply -- active_filters already carries whatever the
+    # deterministic path decided either way.
+    route_live_scope: CompiledScope | None = None
+    route_live_query: str | None = None
+    # Audit-only bookkeeping for why live steering did or did not apply.
+    # Stays "not_attempted" whenever resolve_product() resolves (or
+    # ambiguously matches) a product directly: PR12 does not touch that path
+    # (existing product resolution still produces an exact product scope), so
+    # the no-product branch is the only place this changes.
+    route_live_outcome: str = "not_attempted"
+    route_live_compiled_kind: str | None = None
 
 
 _ROUTE_CLARIFY_REASONS = frozenset(
@@ -1759,6 +1782,62 @@ def _attach_route_shadow(state: TurnState, route_json: dict[str, Any]) -> None:
         route_json["route_call"] = dict(state.route_shadow_audit)
 
 
+def _compile_route_live_scope(
+    state: TurnState,
+    *,
+    question: str,
+    session_id: str,
+    session_filters: dict[str, Any],
+) -> CompiledScope | None:
+    """PR12: compile the live route decision into an executable scope.
+
+    Only called from ``_resolve_and_carry_over``'s no-product branch, so
+    ``resolved_product_filters`` is always None here -- a question that
+    directly names a product is still resolved deterministically by
+    ``resolve_product`` before this ever runs, unchanged by PR12 (plan doc
+    PR12 section: "existing product resolution produces an exact product
+    scope").
+
+    Fails open like the rest of the route call: any exception here is a LIVE
+    MODE failure, never a turn failure. Caught, logged, and recorded on
+    ``state.route_live_outcome`` so the caller falls back to exactly the
+    heuristic path shadow/off already run.
+    """
+    observation = state.route_shadow
+    if observation is None or observation.decision is None:
+        state.route_live_outcome = "route_call_failed"
+        return None
+    decision = observation.decision
+    try:
+        prior = load_prior_corpus_scope(session_id)
+        prior_scope = compiled_scope_from_audit(prior.compiled_scope) if prior else None
+        # The catalog read is I/O; skip it unless the decision could actually
+        # need it, mirroring finalize_route_observation's same guard.
+        needs_catalog = decision.scope_hint is ScopeHint.CORPUS or (
+            decision.scope_hint is ScopeHint.INHERIT
+            and prior_scope is not None
+            and prior_scope.corpus_policy is not None
+        )
+        corpus_policies = load_corpus_policy_snapshots() if needs_catalog else {}
+        compiled = compile_scope(
+            decision,
+            original_question=question,
+            resolved_product_filters=None,
+            session_product_filters=session_filters,
+            corpus_policies=corpus_policies,
+            prior_audited_scope=prior_scope,
+            prior_audit_id=prior.audit_id if prior else None,
+        )
+    except Exception as exc:
+        # Broad on purpose: a live-mode failure must degrade to the heuristic
+        # path below, never surface as a turn error.
+        log.warning("qa_route_live_compile_failed", error_type=type(exc).__name__)
+        state.route_live_outcome = "compile_error"
+        return None
+    state.route_live_compiled_kind = compiled.kind.value
+    return compiled
+
+
 # The stage functions keep the ask_core closure names (_decline/_emit/
 # _session_filters/_recent_turns) as PARAMETER names on purpose: their bodies
 # are transplanted verbatim from the pre-split ask_core, and identical names
@@ -1769,6 +1848,8 @@ def _resolve_and_carry_over(
     state: TurnState,
     *,
     question: str,
+    session_id: str,
+    s: Settings,
     _decline: Callable[..., tuple[RagOutcome, AuditPayload, SessionPatch]],
     _session_filters: Callable[[], dict[str, Any]],
 ) -> tuple[RagOutcome, AuditPayload, SessionPatch] | TurnState:
@@ -1817,11 +1898,51 @@ def _resolve_and_carry_over(
             external = lookup_external_drug(question)
             brand_matches = external.corpus_products
             session_filters = _session_filters()
+            # PR12: ask the live route call whether this IS the genuine
+            # elliptical follow-up the word-list heuristic below keeps missing
+            # (issue #219 -- "what kind of fasting? you mentioned 'similar
+            # fasting'" carries neither a listed prefix nor a pronoun). Only in
+            # live mode, and only once suggestions/brand_matches are known
+            # empty, so a route decision can never override the did-you-mean
+            # or brand-lookup guards that catch a question naming a DIFFERENT
+            # product -- the same anti-leak guard the heuristic branch below
+            # already relies on.
+            route_scope: CompiledScope | None = None
+            if s.route_call_mode == "live":
+                route_scope = _compile_route_live_scope(
+                    state,
+                    question=question,
+                    session_id=session_id,
+                    session_filters=session_filters,
+                )
+                if route_scope is not None:
+                    if route_scope.kind is not CompiledScopeKind.PRODUCT:
+                        # CORPUS/CLARIFY/CONVERSE: PR12 owns compiling and
+                        # authorizing these (retrieve/scope.py, unchanged),
+                        # not executing them. CORPUS in particular has no
+                        # $in-membership translation in the retriever yet, and
+                        # the post-retrieval mixed-products guard is not
+                        # scope-aware yet (that is PR13's job per the plan) --
+                        # wiring execution here would either bypass that
+                        # guard's intent or break every corpus turn on it. So
+                        # a compiled corpus scope stays audited (see this
+                        # turn's route_call.compiled_scope, unchanged from
+                        # PR11b) and dark, and the turn falls through to
+                        # today's deterministic path below exactly as shadow
+                        # does.
+                        state.route_live_outcome = f"compiled_{route_scope.kind.value}"
+                        route_scope = None
+                    elif suggestions or brand_matches:
+                        state.route_live_outcome = "leak_guard"
+                        route_scope = None
+                    else:
+                        state.route_live_outcome = "applied"
+            route_carries_product = route_scope is not None
             if (
                 session_filters.get("normalized_name")
                 and not suggestions
                 and not brand_matches
-                and _looks_like_follow_up(question)
+                and (_looks_like_follow_up(question) or route_carries_product)
             ):
                 # Carry the product across turns (the chosen dosage_form/route are
                 # carried just below, after resolved_name is set, so the same logic
@@ -1831,6 +1952,13 @@ def _resolve_and_carry_over(
                 )
                 state.context_applied = True
                 state.resolved_by_name = False
+                if (
+                    route_carries_product
+                    and state.route_shadow is not None
+                    and state.route_shadow.decision is not None
+                ):
+                    state.route_live_scope = route_scope
+                    state.route_live_query = state.route_shadow.decision.standalone_question
             else:
                 # No product named. Offer a high-confidence "did you mean" for genuine
                 # typos, then a brand -> generic lookup (Adderall -> amphetamine);
@@ -1909,7 +2037,12 @@ def _resolve_and_carry_over(
         resolved_name
         and not state.active_filters.get("dosage_form")
         and not state.active_filters.get("route")
-        and _looks_like_follow_up(question)
+        # PR12: a live-steered carry-over already trusts session_filters for
+        # normalized_name above, so it must trust the same session's
+        # form/route too -- otherwise a multi-form product the heuristic
+        # would have missed carries a product but no form, and immediately
+        # hits the multi-form clarify guard below instead of retrieving.
+        and (_looks_like_follow_up(question) or state.route_live_scope is not None)
     ):
         session_filters = _session_filters()
         if session_filters.get("normalized_name") == resolved_name:
@@ -1925,6 +2058,8 @@ def _pre_retrieval_route(
     state: TurnState,
     *,
     question: str,
+    session_id: str,
+    s: Settings,
     _decline: Callable[..., tuple[RagOutcome, AuditPayload, SessionPatch]],
     _session_filters: Callable[[], dict[str, Any]],
     _recent_turns: Callable[[], list[PriorTurn]],
@@ -1980,7 +2115,12 @@ def _pre_retrieval_route(
         )
 
     resolved = _resolve_and_carry_over(
-        state, question=question, _decline=_decline, _session_filters=_session_filters
+        state,
+        question=question,
+        session_id=session_id,
+        s=s,
+        _decline=_decline,
+        _session_filters=_session_filters,
     )
     if not isinstance(resolved, TurnState):
         return resolved
@@ -2145,9 +2285,18 @@ def _retrieve_and_group(
     # every question that carries its own topic, so single-turn behaviour and
     # the offline eval are byte-identical. Orthogonal to the mode above: this
     # decides WHAT text is searched, the mode decides HOW the search runs.
-    search_query = _retrieval_query(
-        question, normalized_name=resolved_name, prior_turns=_recent_turns()
-    )
+    if state.route_live_query is not None:
+        # PR12: the route call's standalone rewrite steered this turn instead
+        # of the heuristic (_resolve_and_carry_over set both together, only
+        # in live mode). It already retains every named study, metric,
+        # subpart and qualifier by contract (route.py's ROUTE_SYSTEM), and it
+        # is what let this turn reach retrieval at all.
+        search_query = state.route_live_query
+        route_json["retrieval_query_source"] = "route_live"
+    else:
+        search_query = _retrieval_query(
+            question, normalized_name=resolved_name, prior_turns=_recent_turns()
+        )
     # Persist WHETHER the rewrite fired, never the rewritten text: the audit row
     # must show that this turn searched on something other than the user's
     # words, and M7 (follow-up miss rate) counts exactly this flag.
@@ -2929,6 +3078,20 @@ def ask_core(
                 "qa_route_shadow_compile_error",
                 error_type=type(finalized.error).__name__,
             )
+        if s.route_call_mode == "live":
+            # PR12: what actually steered this turn, distinct from
+            # finalize_route_observation's agrees_with_mode/scope above (which
+            # compare the route's PROPOSAL to today's path regardless of
+            # whether live mode used it). "applied" means
+            # _resolve_and_carry_over's carry-over ran off route_live_scope's
+            # compiled product filters and standalone rewrite, not the
+            # word-list heuristic; every other outcome describes why it did
+            # not, including a live route call that itself failed.
+            state.route_shadow_audit["live_steering"] = {
+                "applied": state.route_live_scope is not None,
+                "outcome": state.route_live_outcome,
+                "compiled_kind": state.route_live_compiled_kind,
+            }
 
     def _decline(
         maker: Callable[..., tuple[RagOutcome, AuditPayload]],
@@ -3125,6 +3288,8 @@ def ask_core(
     routed = _pre_retrieval_route(
         state,
         question=question,
+        session_id=session_id,
+        s=s,
         _decline=_decline,
         _session_filters=_session_filters,
         _recent_turns=_recent_turns,
