@@ -1,0 +1,119 @@
+name: machine-monitor
+
+# Last updated: 2026-08-14
+#
+# Every 10 minutes, assert that NO machine in the Fly "app" process group is
+# stopped. This is the only thing that can notice a fleet that has already
+# given up: a stopped machine runs no health checks (so none can fail), serves
+# no request, and triggers no deploy -- it is silent by construction.
+#
+# WHY (postmortem #224, the 2026-08-13 outage): an oversized embedding batch
+# tripped the profile boot guard, both app machines crash-looped, exhausted
+# their 10 restart attempts, stopped -- and prod stayed down 3h35m with nothing
+# paging. uptime-eval.yml probes /health every 30 minutes but only when the
+# PROD_HEALTH_URL secret is set, and it watches the public edge (the PROXY
+# group), which stays "healthy" answering 502s once its upstream is gone
+# (fly.toml's /healthz tradeoff). This job watches the app group's machines
+# themselves, which is where that outage actually lived.
+#
+# The check is scripts/fly-verify-machines.sh, shared with deploy.yml's
+# post-deploy gate; its `check` mode fails ONLY on state "stopped" (the app
+# group has no autostop config, so stopped is never legitimate) and never on a
+# machine transiently restarting between two polls.
+#
+# Required repository secret (Settings -> Secrets and variables -> Actions):
+#   FLY_API_TOKEN   the SAME secret deploy.yml uses. While it is unset the job
+#                   skips cleanly -- no failures, no noise, forks are fine.
+#
+# Optional alerting secret:
+#   SLACK_WEBHOOK_URL  OPTIONAL: Slack incoming-webhook URL, same secret
+#                      watch-daily.yml uses. When set, a failed OR timed-out
+#                      (cancelled) run posts repo/workflow/run-URL. Unset =>
+#                      the notify step is a graceful no-op and the red run in
+#                      the Actions tab is the only signal.
+#
+# Deliberately NO healthchecks.io dead-man's-switch ping (watch-daily.yml has
+# one). That switch exists to catch a cron that never STARTS, which matters for
+# a once-a-day job. At a 10-minute cadence GitHub routinely delays or drops
+# scheduled runs under queue load, so a dead-man switch here would page for
+# GitHub's scheduler far more often than for prod -- noise that would train us
+# to ignore the very alert that ends an outage. The signal we want comes from
+# the check itself.
+
+on:
+  schedule:
+    # Every 10 minutes: fast enough that a stopped fleet is caught in minutes
+    # instead of hours, slow enough to stay well inside Actions' scheduling
+    # granularity.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+# Never overlap probes of the same app; let an in-flight run finish rather than
+# cancelling it (a cancelled run cannot report what it saw).
+concurrency:
+  group: machine-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  machines:
+    runs-on: ubuntu-latest
+    # A single machine-list call plus setup. Anything slower is itself a
+    # symptom; the cap keeps a wedged flyctl from holding the no-cancel slot
+    # into the next scheduled run.
+    timeout-minutes: 5
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      # Mapped to env so `if:` can test presence and the notify step no-ops
+      # cleanly when the secret is absent.
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    steps:
+      - name: skipped (secret not configured)
+        if: env.FLY_API_TOKEN == ''
+        run: |
+          echo "FLY_API_TOKEN secret not set - skipping the app-machine check."
+          echo "Set it to the same Fly token deploy.yml uses (fly tokens create deploy)."
+
+      # The check lives in this repo (scripts/fly-verify-machines.sh), so this
+      # monitor needs the code -- unlike uptime-eval.yml, which only curls a URL.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: env.FLY_API_TOKEN != ''
+        with:
+          persist-credentials: false
+
+      # Pinned in LOCKSTEP with deploy.yml: both workflows drive the same
+      # scripts/fly-verify-machines.sh, and a monitor reading machine state
+      # through a different flyctl than the deploy gate could disagree with it
+      # for pure version-skew reasons. Bump both files together, deliberately.
+      - name: setup flyctl
+        if: env.FLY_API_TOKEN != ''
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1  # v1
+        with:
+          version: "0.4.71"  # no leading v
+
+      # `bash scripts/...` (not `./scripts/...`) so the check never depends on
+      # the committed exec bit surviving every checkout path, and matches
+      # exactly how deploy.yml and the test drive the script.
+      - name: check app machines
+        if: env.FLY_API_TOKEN != ''
+        run: bash scripts/fly-verify-machines.sh check
+
+      # Post to Slack on any failure OR cancellation. cancelled() is
+      # load-bearing: the job-level timeout-minutes CANCELS a hung run (it does
+      # not fail it), and failure() is false on cancellation, so without it an
+      # overrun would page nobody. RUN_URL etc. are trusted GitHub context (no
+      # user input) but are passed via env and quoted per the safe pattern.
+      - name: notify slack on failure
+        if: (failure() || cancelled()) && env.SLACK_WEBHOOK_URL != ''
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          WORKFLOW: ${{ github.workflow }}
+        run: |
+          set -euo pipefail
+          curl -fsS --max-time 20 --retry 2 --retry-delay 10 \
+            -X POST -H 'Content-Type: application/json' \
+            --data "$(printf '{"text":":rotating_light: *%s* / *%s* FAILED - app-group machines are stopped or unreadable; prod is likely DOWN. <%s|View run>"}' "$REPO" "$WORKFLOW" "$RUN_URL")" \
+            "$SLACK_WEBHOOK_URL"
