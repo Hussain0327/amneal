@@ -287,7 +287,7 @@ describe("AskPage — run()/stop() orchestration", () => {
 });
 
 describe("AskPage -- fallback notice + status log persist onto the settled turn (B8)", () => {
-  it("keeps the fallback notice and all status frames after settle, though state was wiped", async () => {
+  it("keeps the fallback notice and all status frames after a MID-DRAFT fallback settles", async () => {
     const user = userEvent.setup();
     const stream = pendingStream();
     const { container } = render(<AskPage />);
@@ -296,16 +296,19 @@ describe("AskPage -- fallback notice + status log persist onto the settled turn 
     act(() => {
       stream.cb?.onStatus?.("Resolving product...");
       stream.cb?.onStatus?.("Searching 1,795 documents...");
+      // Draft text painted BEFORE the stream died: the only shape the notice
+      // is true for -- the analyst watched this text vanish.
+      stream.cb?.onToken?.("half a sent");
       stream.cb?.onStatus?.(STREAM_FALLBACK_STATUS);
     });
     act(() => stream.resolve?.(makeResponse()));
     await screen.findByText(ANSWER_TEXT);
 
-    // statusFrames STATE is cleared in run()'s finally -- only the closure-local
-    // copy stamped onto the turn can render these.
     expect(container.querySelector(".msg__fallback")?.textContent).toBe(
       "Connection dropped mid-draft \u2014 the answer was re-run over a fresh request and may differ from the draft.",
     );
+    // statusFrames STATE is cleared in run()'s finally -- only the closure-local
+    // copy stamped onto the turn can render these.
     // Children of the (closed) Provenance details are still queryable in jsdom.
     const frames = [...container.querySelectorAll(".prov__log li")].map((li) => li.textContent);
     expect(frames).toEqual([
@@ -313,6 +316,51 @@ describe("AskPage -- fallback notice + status log persist onto the settled turn 
       "Searching 1,795 documents...",
       STREAM_FALLBACK_STATUS,
     ]);
+  });
+
+  it("logs the retry but shows no notice when the stream fell back with no draft painted", async () => {
+    const user = userEvent.setup();
+    const stream = pendingStream();
+    const { container } = render(<AskPage />);
+
+    await submit(user, "a question");
+    // Status frames only -- not one token or draft delta ever reached the DOM.
+    act(() => {
+      stream.cb?.onStatus?.("Resolving product...");
+      stream.cb?.onStatus?.("Searching 1,795 documents...");
+      stream.cb?.onStatus?.(STREAM_FALLBACK_STATUS);
+    });
+    act(() => stream.resolve?.(makeResponse()));
+    await screen.findByText(ANSWER_TEXT);
+
+    // Nothing was withdrawn, so the turn must not claim a draft was lost...
+    expect(container.querySelector(".msg__fallback")).toBeNull();
+    // ...while the retry itself stays on the record: the status log is
+    // provenance and is NOT gated on the notice.
+    const frames = [...container.querySelectorAll(".prov__log li")].map((li) => li.textContent);
+    expect(frames).toEqual([
+      "Resolving product...",
+      "Searching 1,795 documents...",
+      STREAM_FALLBACK_STATUS,
+    ]);
+  });
+
+  it("shows no fallback notice when the stream 502s before the first token (#224)", async () => {
+    const user = userEvent.setup();
+    const stream = pendingStream();
+    const { container } = render(<AskPage />);
+
+    await submit(user, "a question");
+    // The exact prod shape of the 2026-08-13 outage: /query/stream answered
+    // !res.ok, so api.ts emitted the fallback status with zero token/draft
+    // frames behind it and the plain POST /query then answered normally. For
+    // 3h35m every such turn told the analyst a draft had been dropped when
+    // none had ever painted.
+    act(() => stream.cb?.onStatus?.(STREAM_FALLBACK_STATUS));
+    act(() => stream.resolve?.(makeResponse()));
+    await screen.findByText(ANSWER_TEXT);
+
+    expect(container.querySelector(".msg__fallback")).toBeNull();
   });
 
   it("shows no fallback notice when the stream settles cleanly (control)", async () => {
