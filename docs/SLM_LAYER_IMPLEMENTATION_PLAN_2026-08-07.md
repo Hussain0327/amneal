@@ -261,6 +261,10 @@ and option labels, so it has to be exercised.
   `brand_lookup` supply clarify context, but an unresolved or ambiguous product
   still cannot execute a product-scoped retrieval.
 - `model_refusal` renders conversationally. Status unchanged.
+- `material_drop` copy reframes from an evidence-failure register to what it
+  actually is: a rationale question meeting a guidance that only states
+  requirements, not why. Status stays `refused` and the reason stays
+  `material_drop`. Copy only.
 - The scope-warning gate dies here, because its replacement (cited requirements
   plus framed reasoning on the v7 path) is already live. The META gate and
   `_meta_answer_text` survive to PR16: their replacement is converse, which
@@ -275,7 +279,9 @@ and option labels, so it has to be exercised.
 - Byte-pins that move in this PR: `NO_PRODUCT_GUIDANCE_TEXT`,
   `LOW_SCORE_GUIDANCE_TEXT`, the guidance next-step asserts, and contract
   scenario rows S8, S9, S10 and S12. S9 pins the `low_top_score` copy this PR
-  changes. S13 (meta) stays until PR16.
+  changes. S13 (meta) stays until PR16. `MATERIAL_DROP_TEXT`
+  (`turn_gate.py`) and its `turns.ts` `REASON_COPY.material_drop` pair move
+  together, plus any contract row asserting either string.
 - A/B the new decline copy before merge. Abstention is a prompt artifact, so
   phrasing has to be checked before the eval numbers mean anything.
 

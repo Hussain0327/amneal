@@ -99,7 +99,7 @@ describe("reasonCopy — plain-language decline/clarify reasons", () => {
       "The model response could not be validated.",
     );
     expect(reasonCopy("material_drop")).toBe(
-      "The draft omitted a material qualifier, so it was withheld.",
+      "A rationale question meets a guidance that documents requirements, not reasoning.",
     );
   });
 
