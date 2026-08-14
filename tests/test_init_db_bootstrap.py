@@ -15,12 +15,23 @@ profile that has not been registered.
 This went unnoticed because every real-DB fixture sets EMBEDDING_PROVIDER=openai
 to get past that same assert (tests/test_embedding_profiles.py), and because the
 CI eval steps that call these commands had never once executed.
+
+The same flag now covers the REPAIR commands too (embedding-profile-list,
+-coverage, -backfill and authoritative-corpus-status, -embed). Postmortem #224:
+on 2026-08-13 ACTIVE_EMBEDDING_PROFILE named an incomplete profile, so
+assert_profile_ready_for_activation failed closed inside every command an
+operator reached for while diagnosing it -- including the backfill that WAS the
+fix. The three tests at the bottom of this file pin all sides of that: the
+deadlock is real, the repair commands survive it, and the serving-path commands
+still refuse.
 """
 
 from __future__ import annotations
 
 import os
 import re
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from config.settings import get_settings
@@ -37,6 +48,10 @@ runner = CliRunner()
 # ep_ + sha256[:32]; the register command's --id-only output must be exactly this
 # and nothing else, because CI captures it with PROFILE_ID=$(...).
 _PROFILE_ID_RE = re.compile(r"^ep_[0-9a-f]{32}$")
+
+# The legacy chunk.embedding column is vector(1536); the seeded chunk only has
+# to be storable, never searched.
+_LEGACY_DIM = 1536
 
 
 def _ci_spec() -> EmbeddingProfileSpec:
@@ -261,3 +276,173 @@ def test_serving_path_still_refuses_a_mismatched_provider(
         cs.get_settings.cache_clear()
         db.reset_for_tests()
         pgvector_store.reset_for_tests()
+
+
+def _wedge_spec() -> EmbeddingProfileSpec:
+    """A registrable profile with a 3-dim geometry, so a fake backfill stays readable."""
+    return EmbeddingProfileSpec(
+        provider="databricks",
+        model="Qwen/Qwen3-Embedding-4B",
+        revision="0123456789abcdef",
+        dimension=3,
+        dtype="float32",
+        normalization="l2",
+        query_instruction_version="psg-retrieval-v1",
+        preprocessing_version="text-v1",
+        chunking_version="page-window-1000-v1",
+        serving_runtime_version="vllm-0.19.0",
+    )
+
+
+def _wedge_on_an_incomplete_profile(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Rebuild the 2026-08-13 outage state; return the wedged profile id.
+
+    Registers a profile, seeds one chunk, embeds NOTHING for that profile, then
+    points ACTIVE_EMBEDDING_PROFILE at it and drops both init_db memos so the
+    next call re-runs the assert against this database.
+
+    EMBEDDING_PROVIDER=echo is 1536-dim and network-free, so the legacy-geometry
+    branch of assert_embedding_provider_dim passes and the profile-readiness
+    branch -- the one under test -- is what fires. Every value is set
+    EXPLICITLY, for the reason given at the top of this file: pydantic-settings
+    also reads the repo `.env`, so deleting a variable would let a developer's
+    file supply it.
+    """
+    import config.settings as cs
+
+    from regwatch.store import db, pgvector_store, vector_store
+
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
+    monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", "legacy")
+    cs.get_settings.cache_clear()
+    db.reset_for_tests()
+    pgvector_store.reset_for_tests()
+
+    engine = db.get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+    db.init_db(assert_provider=False)
+
+    profile = vector_store.register_embedding_profile(_wedge_spec())
+    vector_store.add_chunks(
+        ids=["chunk-a"],
+        embeddings=[[1.0] + [0.0] * (_LEGACY_DIM - 1)],
+        documents=["fasting bioequivalence"],
+        metadatas=[{"doc_id": 1, "version_id": 10, "page": 1, "normalized_name": "drug a"}],
+    )
+
+    monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", profile.profile_id)
+    cs.get_settings.cache_clear()
+    db.reset_for_tests()
+    pgvector_store.reset_for_tests()
+    return profile.profile_id
+
+
+def _release_wedge() -> None:
+    """Drop the process-global caches the wedge installs, for the next test."""
+    import config.settings as cs
+
+    from regwatch.store import db, pgvector_store
+
+    cs.get_settings.cache_clear()
+    db.reset_for_tests()
+    pgvector_store.reset_for_tests()
+
+
+@pytest.mark.skipif(not TEST_DATABASE_URL, reason="TEST_DATABASE_URL is not set")
+def test_an_incomplete_active_profile_wedges_plain_init_db(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deadlock the repair flag exists for, pinned at its cause.
+
+    Without this the two tests below could pass vacuously: if the guard ever
+    stopped firing on an incomplete ACTIVE_EMBEDDING_PROFILE, "the repair
+    commands still run" would prove nothing.
+    """
+    from regwatch.store import db
+
+    profile_id = _wedge_on_an_incomplete_profile(monkeypatch)
+    try:
+        with pytest.raises(RuntimeError, match="incomplete") as excinfo:
+            db.init_db()
+        assert profile_id in str(excinfo.value)
+    finally:
+        _release_wedge()
+
+
+@pytest.mark.skipif(not TEST_DATABASE_URL, reason="TEST_DATABASE_URL is not set")
+def test_repair_commands_stay_usable_and_backfill_clears_the_wedge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every command an operator needs mid-incident must run in the wedged state.
+
+    On 2026-08-13 each of these died inside init_db with the same message the
+    operator was trying to read about, which is what turned one oversized
+    embedding batch into 3h35m of downtime.
+    """
+    from regwatch.process import embedder as embedder_module
+    from regwatch.store import vector_store
+
+    profile_id = _wedge_on_an_incomplete_profile(monkeypatch)
+    try:
+        for argv in (
+            ["embedding-profile-list"],
+            ["embedding-profile-coverage", profile_id],
+            ["authoritative-corpus-status"],
+        ):
+            result = runner.invoke(app, argv)
+            assert result.exit_code == 0, f"{argv}: {result.output}{result.exception!r}"
+        assert vector_store.profile_embedding_coverage(profile_id).complete is False
+
+        # The serving endpoint is the ONE thing a test cannot reach. The pending
+        # page, the content-hash check, the upsert and the coverage read all run
+        # against the real database, so "the wedge clears" is an assertion about
+        # the database rather than about a stub.
+        monkeypatch.setattr(
+            embedder_module,
+            "get_embedding_provider_for_profile",
+            lambda _profile: SimpleNamespace(dim=3),
+        )
+        monkeypatch.setattr(
+            embedder_module,
+            "embed_documents",
+            lambda _provider, texts: [[1.0, 0.0, 0.0] for _ in texts],
+        )
+        backfill = runner.invoke(app, ["embedding-profile-backfill", profile_id])
+        assert backfill.exit_code == 0, f"{backfill.output}{backfill.exception!r}"
+        assert vector_store.profile_embedding_coverage(profile_id).complete is True
+    finally:
+        _release_wedge()
+
+
+@pytest.mark.skipif(not TEST_DATABASE_URL, reason="TEST_DATABASE_URL is not set")
+def test_serving_path_commands_still_refuse_the_wedge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The repair flag must never leak onto a command that WRITES vectors.
+
+    seed and ingest-all embed everything they ingest. Give either one
+    assert_provider=False and a wrong-geometry provider writes into the active
+    space instead of refusing at boot -- the K6 hazard the guard exists for.
+    """
+    from regwatch.ingest import psg_crawler
+
+    profile_id = _wedge_on_an_incomplete_profile(monkeypatch)
+
+    # Both commands crawl the FDA catalog right after init_db. If the refusal
+    # ever regresses, fail here instead of reaching the live index.
+    def _no_network(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("init_db must refuse before the FDA catalog is crawled")
+
+    monkeypatch.setattr(psg_crawler, "fetch_all_listings", _no_network)
+    try:
+        for argv in (["seed"], ["ingest-all"]):
+            result = runner.invoke(app, argv)
+            assert result.exit_code != 0, f"{argv} must refuse: {result.output}"
+            assert isinstance(result.exception, RuntimeError), repr(result.exception)
+            assert "incomplete" in str(result.exception)
+            assert profile_id in str(result.exception)
+    finally:
+        _release_wedge()

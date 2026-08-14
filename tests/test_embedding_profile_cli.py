@@ -34,7 +34,9 @@ def test_backfill_batches_raw_text_and_preserves_source_hashes(
     profile = SimpleNamespace(profile_id=PROFILE_ID, dimension=32)
     provider = SimpleNamespace(dim=32)
 
-    monkeypatch.setattr(cli_module, "init_db", lambda: None)
+    # **_kwargs, not (): backfill calls init_db(assert_provider=False) so an
+    # incomplete profile stays repairable, and a zero-arg stub would TypeError.
+    monkeypatch.setattr(cli_module, "init_db", lambda **_kwargs: None)
     monkeypatch.setattr(vector_store, "get_embedding_profile", lambda _profile_id: profile)
     monkeypatch.setattr(
         embedder_module,
@@ -106,7 +108,7 @@ def test_backfill_rejects_profile_config_mismatch_before_embedding(
     from regwatch.process import embedder as embedder_module
     from regwatch.store import vector_store
 
-    monkeypatch.setattr(cli_module, "init_db", lambda: None)
+    monkeypatch.setattr(cli_module, "init_db", lambda **_kwargs: None)
     monkeypatch.setattr(
         vector_store,
         "get_embedding_profile",
