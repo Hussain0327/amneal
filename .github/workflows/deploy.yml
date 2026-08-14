@@ -136,3 +136,17 @@ jobs:
         # the committed exec bit surviving every checkout/patch path, and matches
         # exactly how the test drives the script.
         run: bash scripts/fly-deploy.sh
+
+      # A green `flyctl deploy` is NOT proof the app is serving. Deploy v137
+      # returned 0 while BOTH app machines were crash-looping: fly.toml's
+      # [checks.app_health] sat in Fly's "warning" state (not-yet-passing is not
+      # FAILING), and flyctl's own wait logic accepts warning -- so the release
+      # shipped green and prod was down 3h35m before anyone noticed (postmortem
+      # #224, 2026-08-13). Machine STATE is the signal that wait misses, so
+      # assert it directly here, after the roll: every app-group machine must
+      # report "started" or this job goes red. Same FLY_API_TOKEN and the same
+      # `bash scripts/...` invocation as the deploy step above.
+      - name: verify app machines are running
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: bash scripts/fly-verify-machines.sh wait
