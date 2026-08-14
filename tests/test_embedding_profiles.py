@@ -355,3 +355,175 @@ def test_activation_gate_requires_complete_coverage_and_ready_index(
     )
 
     assert pg_profile_store.assert_profile_ready_for_activation(profile.profile_id) == profile
+
+
+def _mark_authoritative(ids: list[str]) -> None:
+    """Move chunk rows into the authoritative namespace (reviewed source_family)."""
+    from regwatch.store import db
+
+    with db.get_engine().begin() as conn:
+        conn.execute(
+            text("UPDATE chunk SET source_family = 'drugs_at_fda' WHERE id = ANY(:ids)"),
+            {"ids": ids},
+        )
+
+
+def _flip_corpus(monkeypatch: pytest.MonkeyPatch, corpus: str) -> None:
+    import config.settings as cs
+
+    # validation_alias, not the field name: settings.py binds this field to
+    # REGWATCH_RETRIEVAL_CORPUS. Setting the unprefixed name silently changes
+    # nothing, which this suite would misread as "the flip is not respected".
+    monkeypatch.setenv("REGWATCH_RETRIEVAL_CORPUS", corpus)
+    cs.get_settings.cache_clear()
+
+
+def _embed_all_pending(store: Any, profile_id: str) -> None:
+    pending = store.pending_profile_chunks(profile_id)
+    if not pending:
+        return
+    axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    store.upsert_profile_embeddings(
+        profile_id,
+        [chunk.chunk_id for chunk in pending],
+        [axes[i % 3] for i in range(len(pending))],
+        [chunk.content_hash for chunk in pending],
+    )
+
+
+def test_boot_coverage_ignores_an_unembedded_building_corpus(
+    pg_profile_store: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Serving `legacy` must boot regardless of authoritative backfill state.
+
+    Coverage used to count the chunk table database-wide, so one unembedded
+    backfill chunk anywhere failed every cold boot -- a multi-day corpus
+    backfill therefore implied a multi-day production deploy freeze. The guard
+    exists to protect what retrieval can RETURN, and retrieval under `legacy`
+    never returns an authoritative row.
+    """
+    from regwatch.store import embedding_profiles
+
+    _flip_corpus(monkeypatch, "legacy")
+    _seed_two_chunks(pg_profile_store)
+    profile = pg_profile_store.register_embedding_profile(_spec())
+    _embed_all_pending(pg_profile_store, profile.profile_id)
+
+    # Building corpus appears: authoritative chunks with NO vectors at all.
+    pg_profile_store.add_chunks(
+        ids=["fda-1", "fda-2"],
+        embeddings=[_legacy_unit(2), _legacy_unit(3)],
+        documents=["authoritative letter text", "authoritative label text"],
+        metadatas=[_meta(3, 30, "drug c"), _meta(4, 40, "drug d")],
+    )
+    _mark_authoritative(["fda-1", "fda-2"])
+
+    coverage = embedding_profiles.profile_embedding_coverage(profile.profile_id)
+    assert coverage.complete, (
+        f"legacy boot failed on building-corpus rows: "
+        f"{coverage.embedded_chunks}/{coverage.total_chunks}"
+    )
+
+
+def test_boot_coverage_still_fails_on_an_incomplete_active_corpus(
+    pg_profile_store: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scoping must not weaken the guard for the corpus actually being served:
+    an unembedded ACTIVE-namespace chunk fails the boot even while the other
+    namespace is fully embedded."""
+    from regwatch.store import embedding_profiles
+
+    _flip_corpus(monkeypatch, "legacy")
+    _seed_two_chunks(pg_profile_store)
+    profile = pg_profile_store.register_embedding_profile(_spec())
+    _embed_all_pending(pg_profile_store, profile.profile_id)
+
+    # A NEW legacy chunk lands without its vector; authoritative side complete.
+    pg_profile_store.add_chunks(
+        ids=["legacy-new"],
+        embeddings=[_legacy_unit(4)],
+        documents=["new legacy guidance text"],
+        metadatas=[_meta(5, 50, "drug e")],
+    )
+
+    coverage = embedding_profiles.profile_embedding_coverage(profile.profile_id)
+    assert not coverage.complete
+    assert coverage.total_chunks == 3
+    assert coverage.embedded_chunks == 2
+
+
+def test_boot_coverage_follows_the_cutover_flip(
+    pg_profile_store: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flip swaps universes; it must not merely widen them.
+
+    Before cutover an incomplete authoritative corpus is invisible; the moment
+    `retrieval_corpus` flips it becomes the ONLY corpus the guard counts, so an
+    incomplete flip fails closed and a complete one passes even though the
+    now-dormant legacy corpus still has pending rows.
+    """
+    from regwatch.store import embedding_profiles
+
+    _flip_corpus(monkeypatch, "legacy")
+    _seed_two_chunks(pg_profile_store)
+    profile = pg_profile_store.register_embedding_profile(_spec())
+    pg_profile_store.add_chunks(
+        ids=["fda-1"],
+        embeddings=[_legacy_unit(2)],
+        documents=["authoritative letter text"],
+        metadatas=[_meta(3, 30, "drug c")],
+    )
+    _mark_authoritative(["fda-1"])
+
+    # Premature flip: authoritative namespace has no vectors -> fail closed.
+    _flip_corpus(monkeypatch, "authoritative_fda")
+    premature = embedding_profiles.profile_embedding_coverage(profile.profile_id)
+    assert not premature.complete
+    assert premature.total_chunks == 1
+
+    # Embed everything, then the flip passes -- while legacy rows would still
+    # be pending if they were counted, proving the universes swapped.
+    _flip_corpus(monkeypatch, "legacy")
+    _embed_all_pending(pg_profile_store, profile.profile_id)
+    from regwatch.store import db
+
+    with db.get_engine().begin() as conn:
+        conn.execute(
+            text(
+                "DELETE FROM chunk_embedding WHERE chunk_id IN "
+                "(SELECT id FROM chunk WHERE source_family IS NULL) "
+                "AND profile_id = :pid"
+            ),
+            {"pid": profile.profile_id},
+        )
+    _flip_corpus(monkeypatch, "authoritative_fda")
+    flipped = embedding_profiles.profile_embedding_coverage(profile.profile_id)
+    assert flipped.complete
+    assert flipped.total_chunks == 1
+
+
+def test_boot_coverage_numerator_and_denominator_share_one_universe(
+    pg_profile_store: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Embeddings of OUT-of-namespace chunks must not inflate the numerator.
+
+    One legacy chunk embedded plus one embedded authoritative chunk must read
+    1/1 under `legacy` -- a global numerator over a scoped denominator would
+    read 2/1 and hide a real gap behind arithmetic nonsense.
+    """
+    from regwatch.store import embedding_profiles
+
+    _flip_corpus(monkeypatch, "legacy")
+    pg_profile_store.add_chunks(
+        ids=["legacy-a", "fda-a"],
+        embeddings=[_legacy_unit(0), _legacy_unit(1)],
+        documents=["legacy guidance text", "authoritative letter text"],
+        metadatas=[_meta(1, 10, "drug a"), _meta(2, 20, "drug b")],
+    )
+    _mark_authoritative(["fda-a"])
+    profile = pg_profile_store.register_embedding_profile(_spec())
+    _embed_all_pending(pg_profile_store, profile.profile_id)
+
+    coverage = embedding_profiles.profile_embedding_coverage(profile.profile_id)
+    assert coverage.total_chunks == 1
+    assert coverage.embedded_chunks == 1

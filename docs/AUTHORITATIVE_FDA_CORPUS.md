@@ -322,29 +322,26 @@ whose documents did not all chunk is never embedded.
 The two single-asset jobs are retained for repair. Re-embedding one shard after
 a provider outage must not re-fetch and re-parse that shard's PDFs.
 
-#### What interleaving does NOT fix: freeze deploys for the whole backfill
+#### Why the backfill does not freeze production deploys
 
-Interleaving bounds the SIZE of the exposure, not its DURATION, and the
-difference matters operationally.
+The boot guard counts the SERVING namespace, not the whole chunk table.
+`profile_embedding_coverage` applies the same predicate retrieval uses --
+`REGWATCH_RETRIEVAL_CORPUS=legacy` serves rows with NULL `source_family`, the
+authoritative corpus serves rows carrying a reviewed family -- to both its
+numerator and its denominator. While prod serves `legacy`, an accumulating
+authoritative corpus with any number of unembedded chunks cannot fail an app
+boot, so deploys and restarts stay safe for the entire backfill.
 
-`profile_embedding_coverage` counts `chunk` and `chunk_embedding` for the whole
-database, with no shard or corpus filter. So the guard does not care that only
-one shard is outstanding -- any single unembedded chunk anywhere fails it. Since
-each of the 512 partitions passes through a chunked-but-not-yet-embedded state,
-there is almost no instant during a multi-day backfill when the corpus is
-globally complete.
+The guard bites again exactly where it should: the moment
+`REGWATCH_RETRIEVAL_CORPUS` flips, the authoritative namespace becomes the
+counted universe, and a premature flip over an incomplete corpus fails closed
+at the next boot. The flip itself remains gated by the acceptance job's own
+full-manifest counts, which are independent of this guard.
 
-The practical consequence: **while the backfill runs, an `amneal` app machine
-that restarts for any reason -- deploy, OOM, host migration, crash -- will fail
-its boot guard.** Interleaving means a repair is one shard of work rather than
-the whole corpus, which is the difference between minutes and days of recovery.
-It does not make a restart safe.
-
-Therefore, for the duration of the backfill: do not deploy the `amneal` app, and
-treat any unplanned machine restart as an incident requiring the in-flight shard
-to be embedded before the machine can boot. Scoping the guard to the active
-serving corpus, so an accumulating not-yet-cutover corpus cannot fail it, is the
-real fix and is not yet implemented.
+Interleaving still matters even with the scoped guard: it keeps the pending
+window inside the BUILDING namespace to one shard, so a mid-run repair (a
+failed embedding partition, a provider outage) is one shard of work rather
+than a corpus-wide reconciliation at acceptance time.
 
 ### 4. Acceptance and cutover
 

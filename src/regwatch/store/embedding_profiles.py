@@ -558,17 +558,52 @@ def upsert_profile_embeddings(
         )
 
 
+def _serving_namespace_predicate() -> str:
+    """SQL predicate (over alias ``c``) for chunks the ACTIVE corpus serves.
+
+    Coverage exists to answer one question: can this process serve every chunk
+    a retrieval query may return? That universe is what `retrieval_corpus`
+    selects in retriever.py -- legacy rows carry NULL source_family, every
+    authoritative corpus row carries a reviewed value -- so the guard must
+    count the same universe. Counting the whole chunk table instead made ANY
+    unembedded chunk anywhere fail every cold boot, which turned a multi-day
+    authoritative backfill into a multi-day production deploy freeze: rows the
+    server would never return still held serving readiness hostage.
+
+    IS NOT NULL rather than the policy IN-list, deliberately: ingest only
+    writes reviewed families, and if a rogue family ever appeared the guard
+    would then be STRICTER than serving (demand a vector for a row retrieval
+    filters out), which fails safe. Mirroring the IN-list here would add a
+    store->sources import and a second copy of the list to drift.
+    """
+    from config.settings import get_settings
+
+    corpus = getattr(get_settings(), "retrieval_corpus", "legacy")
+    if corpus == "authoritative_fda":
+        return "c.source_family IS NOT NULL"
+    return "c.source_family IS NULL"
+
+
 def profile_embedding_coverage(profile_id: str) -> ProfileEmbeddingCoverage:
     _validate_profile_id(profile_id)
     get_embedding_profile(profile_id)
+    # Numerator and denominator MUST apply the identical namespace predicate.
+    # A numerator that stays global while the denominator narrows (or the
+    # reverse) reports nonsense coverage the first time both corpora hold rows.
+    namespace = _serving_namespace_predicate()
     with _engine().connect() as conn:
         row = (
             conn.execute(
                 sa_text(
-                    "SELECT "
-                    "(SELECT count(*) FROM chunk WHERE text IS NOT NULL) AS total_chunks, "
-                    "(SELECT count(*) FROM chunk_embedding "
-                    " WHERE profile_id = :profile_id) AS embedded_chunks"
+                    # S608: `namespace` is one of two hard-coded literals from
+                    # _serving_namespace_predicate, never external input.
+                    "SELECT "  # noqa: S608
+                    "(SELECT count(*) FROM chunk c "
+                    f" WHERE c.text IS NOT NULL AND {namespace}) AS total_chunks, "
+                    "(SELECT count(*) FROM chunk_embedding ce "
+                    " JOIN chunk c ON c.id = ce.chunk_id "
+                    f" WHERE ce.profile_id = :profile_id AND {namespace}"
+                    ") AS embedded_chunks"
                 ),
                 {"profile_id": profile_id},
             )

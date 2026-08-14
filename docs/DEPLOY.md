@@ -169,9 +169,12 @@ Then use the Dagster jobs in this exact order:
 3. `authoritative_fda_shard_job`: backfill partitions 000–511 with that manifest
    SHA-256 and the active profile. This one job chunks shard N and then embeds
    shard N. Do NOT substitute the two single-asset jobs and run all chunking
-   before all embedding: a chunk without its vector fails a cold boot, so that
-   order parks prod one restart away from refusing to start for the whole
-   embedding phase. The single-asset jobs exist for per-shard repair only.
+   before all embedding: it leaves the building corpus chunked-but-unembedded
+   for the whole embedding phase, turning any mid-run repair into a corpus-wide
+   reconciliation. The single-asset jobs exist for per-shard repair only.
+   Production deploys stay safe throughout: the boot guard counts only the
+   ACTIVE serving namespace (see AUTHORITATIVE_FDA_CORPUS.md), so backfill rows
+   cannot fail an app boot until `REGWATCH_RETRIEVAL_CORPUS` flips.
 4. `authoritative_fda_acceptance_job`: require all 512 blocking checks and write
    the complete-universe success ledger.
 
