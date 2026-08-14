@@ -30,13 +30,42 @@ OVERLAP_TOKENS = 150
 # of being emitted on its own: the 2026-07-30 corpus audit measured ~21% of
 # sampled chunks as bare headings / stranded fragments with no citable content.
 MIN_SECTION_CHARS = 250
-CHUNKING_VERSION = "page-section-window-1000-overlap-150-v2"
+# A carried section holding less prose than this UNDER its heading line is a bare
+# stranded heading: it travels into the next section's chunk without claiming that
+# chunk's identity. Above it, the carried section has citable content of its own
+# and keeps its heading. See _merge_small_sections.
+MIN_CARRY_PROSE_CHARS = 40
+# BUMP THIS whenever chunk boundaries or section attribution change. sync.py folds
+# it into _processing_fingerprint, which is what decides whether an already-indexed
+# document is re-chunked. Leaving it stale ships the fix to new documents only and
+# leaves the corpus holding two different chunk shapes; chunk_embedding cascades on
+# chunk delete, so re-chunking cannot orphan vectors. v3: header regex no longer
+# reads genus-species abbreviations as headings, and a forward-merged chunk keeps
+# the carried section's path.
+CHUNKING_VERSION = "page-section-window-1000-overlap-150-v3"
 
 # Section identity: Roman-numeral / lettered headers plus unnumbered
 # "Option N" blocks. Arabic-numbered lines are LIST ITEMS inside a section,
 # not boundaries -- v1 split on them, which stranded real headings as tiny
 # chunks and promoted list sentences to section_path identity.
-_HEADER_RE = re.compile(r"^\s*([IVX]+\.|[A-Z]\.|Option \d+[.:])\s+(.{2,120})$", re.MULTILINE)
+#
+# The `[A-Z0-9"(]` opener is load-bearing, not tidying. Without it `[A-Z]\.`
+# matches the genus abbreviation that opens a species name, so "E. coli is the
+# primary pathogen of interest." parsed as marker "E." + heading "coli is the
+# primary pathogen of interest." -- a whole sentence promoted to section
+# identity, the surrounding paragraph split at it, and section_path (what INV-1
+# citations resolve against) left holding prose. An FDA corpus is saturated with
+# "E. coli", "S. aureus", "H. pylori", "P. aeruginosa", "C. difficile", so at
+# full-corpus scale this is structural, not an edge case. A real header's text
+# opens with a capital, digit, quote or paren ("A. Dissolution",
+# "II. Recommendations", 'A. Type of Study: ...'); a species name continues in
+# lowercase, which is exactly the discriminator. Residual, accepted: a document
+# writing "E. Coli" still false-positives, and a genuinely lowercase heading is
+# now missed -- a missed header only inherits the previous section_path, while a
+# false one invents a wrong one, so failing closed here is the safer direction.
+_HEADER_RE = re.compile(
+    r"^\s*([IVX]+\.|[A-Z]\.|Option \d+[.:])\s+([A-Z0-9\"(].{1,119})$", re.MULTILINE
+)
 
 # Fixed page furniture, dropped line-wise from the chunk path. The revision
 # footer carries the page number glued to its end ("Recommended Sep 2012;
@@ -163,6 +192,12 @@ def _split_into_sections(page_text: str, inherited: str | None) -> list[tuple[st
     return sections
 
 
+def _has_body_prose(body: str) -> bool:
+    """True when a section carries citable content beneath its heading line."""
+    _, _, remainder = body.partition("\n")
+    return len(remainder.strip()) >= MIN_CARRY_PROSE_CHARS
+
+
 def _merge_small_sections(
     sections: list[tuple[str | None, str]],
 ) -> list[tuple[str | None, str]]:
@@ -177,7 +212,17 @@ def _merge_small_sections(
         if carry is not None:
             carry_path, carry_body = carry
             body = f"{carry_body}\n{body}"
-            path = path if path is not None else carry_path
+            # The merged chunk's TEXT starts in the carried section, so the
+            # citation belongs to the carried heading whenever that section had
+            # citable content of its own. Unconditionally preferring `path` (the
+            # section being merged INTO) attributed a chunk opening with
+            # "A. Dissolution ..." to "B Study design" -- an answer citing it
+            # would name a section the quoted text is not in, which is precisely
+            # the provenance INV-1 exists to guarantee. A carried section that is
+            # only a stranded heading has no content to claim, so it keeps
+            # travelling as the first line of the section it introduces.
+            if (carry_path is not None and _has_body_prose(carry_body)) or path is None:
+                path = carry_path
             carry = None
         if len(body) < MIN_SECTION_CHARS:
             carry = (path, body)

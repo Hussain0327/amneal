@@ -341,7 +341,25 @@ def _fill_blank_pages_with_ocr(
         result = list(pages) if pages else [""] * page_count
         scale = config.dpi / 72.0
         matrix = pymupdf.Matrix(scale, scale)  # type: ignore[no-untyped-call]
-        with tempfile.TemporaryDirectory(prefix="regwatch-ocr-") as temporary:
+        # dir= keeps OCR scratch inside the same bounded volume as the staged
+        # artifact it is rendering. Without it these page renders -- up to
+        # fda_corpus_ocr_max_pixels each -- land in the OS default temp dir,
+        # outside the FDA_CORPUS_TEMP_DIR budget the runbook tells operators to
+        # size. Derived from `path` rather than from settings because this runs
+        # in a SPAWN child: `path` crosses the process boundary as an argument,
+        # while get_settings() there would rebuild from env and miss an
+        # in-process override. sync.py stages that artifact with
+        # dir=fda_corpus_temp_dir, so this is the same volume; when that setting
+        # is unset both are the OS default and behaviour is unchanged.
+        #
+        # RESIDUAL: a parse TIMEOUT still leaks this directory. _terminate()
+        # SIGTERMs then SIGKILLs the child, and neither runs __exit__, so the
+        # renders survive the process. The leak is now inside the operator's
+        # bounded scratch volume where it can be swept, instead of system /tmp,
+        # but a long backfill still needs that sweep.
+        with tempfile.TemporaryDirectory(
+            prefix="regwatch-ocr-", dir=Path(path).parent
+        ) as temporary:
             directory = Path(temporary)
             for index, current in enumerate(result):
                 if current.strip():

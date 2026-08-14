@@ -393,3 +393,34 @@ def test_pdf_max_pages_env_override_and_default(monkeypatch: pytest.MonkeyPatch)
         assert cs.get_settings().pdf_max_pages == 7
     finally:
         cs.get_settings.cache_clear()
+
+
+def test_ocr_scratch_lives_beside_the_staged_artifact_not_in_system_tmp(
+    tmp_path: Path,
+) -> None:
+    """OCR page renders must land in the staged artifact's directory.
+
+    The corpus worker stages every artifact under FDA_CORPUS_TEMP_DIR precisely
+    so scratch usage is bounded to a volume the operator sized. The OCR
+    TemporaryDirectory used to omit dir= and land in the OS default temp dir,
+    outside that budget -- and a SIGKILLed parse timeout leaks it permanently,
+    which over a 140k-document backfill is unbounded growth on the system disk.
+    """
+    pdf_path = tmp_path / "image-only.pdf"
+    pdf_path.write_bytes(_make_blank_pdf())
+    observed = tmp_path / "observed-input-path.txt"
+    fake_tesseract = tmp_path / "fake-tesseract"
+    fake_tesseract.write_text(
+        '#!/bin/sh\nprintf %s "$1" > '
+        f'"{observed}"\n'
+        "printf 'Authoritative FDA OCR text' > \"$2.txt\"\n",
+        encoding="utf-8",
+    )
+    fake_tesseract.chmod(0o700)
+
+    parse_pdf_path(pdf_path, timeout_s=30, max_pages=10, ocr=_ocr_config(fake_tesseract))
+
+    rendered_page = Path(observed.read_text(encoding="utf-8"))
+    assert rendered_page.is_relative_to(
+        tmp_path
+    ), f"OCR scratch escaped the staged-artifact volume: {rendered_page}"
