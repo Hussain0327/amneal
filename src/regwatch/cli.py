@@ -278,7 +278,10 @@ def cmd_authoritative_corpus_status() -> None:
     """Print exact document/chunk/embedding coverage for the FDA-only corpus."""
     from regwatch.corpus.status import authoritative_corpus_coverage
 
-    init_db()
+    # Read-only: SQL counts over chunk/fda_* rows; no provider is constructed.
+    # The coverage report is how an operator finds out WHY the active profile is
+    # incomplete, so the incompleteness must not also silence the report.
+    init_db(assert_provider=False)
     coverage = authoritative_corpus_coverage()
     rprint(coverage.as_dict())
 
@@ -313,7 +316,13 @@ def cmd_authoritative_corpus_embed(
     )
     from regwatch.store.vector_store import get_embedding_profile
 
-    init_db()
+    # Same seam as embedding-profile-backfill: for a named profile the
+    # get_embedding_provider_for_profile call below is the real geometry guard,
+    # and requiring completeness before the backfill that creates it is
+    # circular. The legacy branch keeps its own guard -- write_corpus_embeddings
+    # routes to update_legacy_chunk_embeddings, which asserts the provider
+    # dimension against vector(1536) at write time.
+    init_db(assert_provider=False)
     selected = (profile_id or get_settings().active_embedding_profile or "legacy").strip()
     if selected == "legacy":
         provider = get_embedding_provider()
@@ -407,7 +416,11 @@ def cmd_embedding_profile_list() -> None:
 
     from regwatch.store.vector_store import list_embedding_profiles
 
-    init_db()
+    # Read-only: a SELECT over embedding_profile rows, no vector write and no
+    # search. Keeping the K6 assert here made an incomplete
+    # ACTIVE_EMBEDDING_PROFILE refuse the first command an operator reaches for
+    # while diagnosing it (2026-08-13 outage, postmortem #224).
+    init_db(assert_provider=False)
     profiles = [asdict(profile) for profile in list_embedding_profiles()]
     rprint({"count": len(profiles), "profiles": profiles})
 
@@ -422,7 +435,10 @@ def cmd_embedding_profile_coverage(profile_id: str = typer.Argument(...)) -> Non
         profile_hnsw_index_ready,
     )
 
-    init_db()
+    # Read-only: count queries plus one index-readiness read. This is the
+    # command that REPORTS how incomplete a profile is, so it has to survive the
+    # incompleteness the K6 assert refuses to boot on.
+    init_db(assert_provider=False)
     coverage = profile_embedding_coverage(profile_id)
     rprint(
         {
@@ -465,7 +481,12 @@ def cmd_embedding_profile_backfill(
         upsert_profile_embeddings,
     )
 
-    init_db()
+    # get_embedding_provider_for_profile below is the narrower, correct guard:
+    # it validates the configured endpoint against THIS profile's geometry
+    # before a single vector is written. The K6 assert instead demands the
+    # profile already be COMPLETE, which is circular -- this command is what
+    # completes it, and that circle is what wedged the 2026-08-13 recovery.
+    init_db(assert_provider=False)
     profile = get_embedding_profile(profile_id)
     provider = get_embedding_provider_for_profile(profile)
     processed = 0
