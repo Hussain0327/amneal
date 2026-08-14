@@ -1,0 +1,28 @@
+# Shared Dagster control-plane state. Use a dedicated Postgres database or
+# schema/role; this is intentionally not SQLite on an ephemeral worker disk.
+storage:
+  postgres:
+    postgres_url:
+      env: DAGSTER_POSTGRES_URL
+
+run_coordinator:
+  # The public package path has no `dagster.core`; the coordinator lives under
+  # the private `dagster._core` namespace and is resolved by importlib, so the
+  # underscore is load-bearing: the daemon and webserver crash at startup
+  # without it.
+  module: dagster._core.run_coordinator
+  class: QueuedRunCoordinator
+  config: {}
+
+# Every FDA asset is assigned to a named pool. Run granularity means a shard
+# consumes one slot for its whole process, matching the one-document-at-a-time
+# memory/disk contract inside that shard.
+concurrency:
+  runs:
+    max_concurrent_runs: 4
+  pools:
+    default_limit: 4
+    granularity: run
+
+telemetry:
+  enabled: false

@@ -740,8 +740,8 @@ def init_db(*, assert_provider: bool = True) -> None:
     idempotent but not free, and ingest calls init_db once per listing.
 
     ``assert_provider=False`` applies the schema WITHOUT the K6 serving-path
-    provider check. It exists for the two bootstrap commands that necessarily
-    run before a serving-ready provider can exist:
+    provider check. It exists for offline bootstrap and corpus-maintenance
+    commands that necessarily run before a serving-ready provider can exist:
 
       * ``embedding-profile-register`` mints the profile id, so it cannot name
         an ACTIVE_EMBEDDING_PROFILE that does not exist yet; with the default
@@ -749,10 +749,18 @@ def init_db(*, assert_provider: bool = True) -> None:
         it trips the "Qwen3 cannot write into the legacy space" branch instead.
       * ``embedding-profile-index`` BUILDS the HNSW index that
         assert_profile_ready_for_activation requires be already built.
+      * authoritative corpus sync creates pending chunks; status diagnoses
+        them; and the embedding backfill repairs them. Requiring complete
+        global coverage at the entrance to any of those commands would make a
+        partial run unrecoverable. The selected immutable profile is still
+        validated when the backfill constructs its embedder.
+      * ``authoritative-corpus-init-db`` gives the private Dagster worker the
+        same schema/RLS guard without importing serving readiness into the
+        maintenance control plane.
 
-    Neither writes vectors, so neither needs a dimension-compatible provider.
-    Every other caller keeps the fail-fast: pass this flag only for a command
-    that provably does no embedding or vector search.
+    None of these paths serves retrieval. Every serving caller keeps the
+    fail-fast: pass this flag only for a command that performs maintenance and
+    validates any provider at its actual write boundary.
     """
     global _schema_ready, _provider_asserted
     if _schema_ready and (_provider_asserted or not assert_provider):

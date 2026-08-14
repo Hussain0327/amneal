@@ -1,0 +1,56 @@
+# syntax=docker/dockerfile:1
+
+# Dedicated authoritative-FDA worker. It is intentionally separate from the
+# serving API image: Tesseract, Dagster, and object-storage clients never enter
+# the public request surface. The digest matches the reviewed API base image.
+ARG PYTHON_VERSION=3.12
+FROM python:3.12-slim@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    VIRTUAL_ENV=/app/.venv \
+    PATH="/app/.venv/bin:${PATH}" \
+    DATA_DIR=/app/data \
+    FDA_CORPUS_TEMP_DIR=/app/tmp \
+    DAGSTER_HOME=/app/dagster
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --system --gid 1001 regwatch \
+    && useradd --system --uid 1001 --gid 1001 --home-dir /app --no-create-home regwatch
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --extra llm --extra corpus-worker --no-dev --no-install-project
+
+COPY README.md alembic.ini ./
+COPY config ./config
+COPY migrations ./migrations
+COPY src ./src
+COPY docker/entrypoint.sh /usr/local/bin/regwatch-entrypoint
+COPY docker/dagster.yaml /app/dagster/dagster.yaml
+COPY docker/workspace.yaml /app/dagster/workspace.yaml
+
+RUN chmod +x /usr/local/bin/regwatch-entrypoint \
+    && uv sync --frozen --extra llm --extra corpus-worker --no-dev \
+    && apt-get purge -y --auto-remove build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p "$DATA_DIR" "$FDA_CORPUS_TEMP_DIR" "$DAGSTER_HOME" \
+    && chown -R regwatch:regwatch /app
+
+USER regwatch
+ENTRYPOINT ["regwatch-entrypoint"]
+# The daemon owns the queued-run coordinator and launches bounded worker
+# subprocesses. Deploy the same image with `dagster-webserver -w ...` only for
+# the private operator UI; never expose that UI publicly.
+CMD ["dagster-daemon", "run", "-w", "/app/dagster/workspace.yaml"]

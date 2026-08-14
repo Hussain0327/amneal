@@ -64,12 +64,13 @@ Two of these are now done. The numbers are kept because other docs cite them.
 - **In place:** production Postgres is Databricks Lakebase
   (`ep-super-hat-d8wkrjd9.database.us-east-2.cloud.databricks.com`, database
   `databricks_postgres`, app role `regwatch_app`), with pgvector in the same
-  database. Rows, vectors and audit all live together. The last independently
-  verified live Alembic head was `0020_eval_run`; current `main` contains
-  migrations through `0022_deficiency_run_source`, and this branch adds
-  `0023_authoritative_fda_corpus`, so corpus schema deployment is pending. The
-  serving legacy corpus had 5,494 chunk rows
-  on 2026-08-11. R5 deleted the SQLite and Chroma dual-mode, so `DATABASE_URL` is
+  database. Rows, vectors and audit all live together. Fly release 135 deployed
+  `0023_authoritative_fda_corpus`; this follow-up adds
+  `0024_fda_streaming_lifecycle`. The first production canary added 347 chunks,
+  all embedded on the active profile: 5,841 / 5,841 verified against the
+  production database on 2026-08-14, so fresh serving boots pass the
+  profile-readiness guard. The OCR-enabled 21 / 21 canary rerun still owes the
+  three unparsed documents. R5 deleted the SQLite and Chroma dual-mode, so `DATABASE_URL` is
   unconditionally required and the app refuses to boot without it. pgvector
   dimension checks fail fast.
   - Note on history: the earlier call
@@ -194,8 +195,9 @@ Two of these are now done. The numbers are kept because other docs cite them.
 
 - **Where:** [`src/regwatch/watch/run.py`](../src/regwatch/watch/run.py) and
   [`.github/workflows/watch-daily.yml`](../.github/workflows/watch-daily.yml).
-  GitHub Actions cron is the only scheduler; the Dagster package was deleted in
-  R5.
+  GitHub Actions cron remains the only scheduler for Watch. The new private
+  Dagster control plane is isolated to the authoritative FDA replacement corpus
+  and does not schedule Watch.
 - **In place:** `regwatch watch` runs crawl, watchlist match, ingest of matched
   PSGs, durable alerts, digest. The workflow adds Slack failure notification, a
   success digest, healthcheck pings and an advisory threshold-sweep artifact.
@@ -248,21 +250,23 @@ Two of these are now done. The numbers are kept because other docs cite them.
 ### 9. Structured-source layer
 
 - **Where:** [`src/regwatch/sources/`](../src/regwatch/sources/) handlers,
-  [`src/regwatch/corpus/`](../src/regwatch/corpus/) pipeline, migration 0023,
+  [`src/regwatch/corpus/`](../src/regwatch/corpus/) pipeline, migrations 0023–0024,
   and [`AUTHORITATIVE_FDA_CORPUS.md`](AUTHORITATIVE_FDA_CORPUS.md).
 - **Have:** an exact five-family source policy; official Drugs@FDA and Orange
   Book ZIP adapters; action-package, PSG, and reviewed FDA BE-guidance discovery;
-  versioned documents; content-addressed artifacts; bounded fetch/parse;
-  per-document atomic chunk publication; durable run checkpoints; deferred,
-  resumable embeddings; exact coverage; and a fail-closed reversible activation
-  gate. A complete 2026-08-13 discovery found 140,339 source records. Approved
-  Drugs@FDA labeling now supplies White Paper and Assemble label evidence.
+  versioned documents; bounded streamed fetch; durable content-addressed raw
+  artifacts and exact manifests; sandboxed OCR; atomic chunk publication;
+  separately checkpointed embedding state; 512 deterministic Dagster shards;
+  blocking acceptance checks; exact coverage; and a fail-closed reversible
+  activation gate. A complete 2026-08-13 discovery found 140,339 source records.
+  Approved Drugs@FDA labeling now supplies White Paper and Assemble label evidence.
 - **Policy closure:** retired public API configuration/endpoints are removed.
   DailyMed, NDC, shortage, and REMS acquisition paths are not routable and fail
   closed if an old caller reaches their compatibility shims.
-- **Gap:** migration 0023, the production-scale fetch/parse/chunk run, profile
-  embedding backfill, new-corpus retrieval/citation evaluation, serving smoke,
-  and rollback rehearsal have not been executed in the target environment.
+- **Gap:** release migration 0024 and the dedicated worker; repeat the production
+  canary from its current 18 / 21 state (embeddings complete) to 21 / 21;
+  complete both 512-shard backfills; then run acceptance, new-corpus
+  retrieval/citation evaluation, serving smoke, and rollback rehearsal.
 - **Done when:** all 140,339 source records (or an explained newer manifest) are
   processed with zero document errors, authoritative chunks have 100% selected-
   profile coverage, status reports `activation_ready=true`, evaluation passes,

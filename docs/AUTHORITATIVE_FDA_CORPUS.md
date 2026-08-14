@@ -18,10 +18,21 @@ them.
 
 ## Current state
 
-The implementation and a full read-only official-source discovery are complete.
-The production-scale download, parse, chunk, and embedding backfill have **not**
-been run from this worktree. Therefore 140,339 is the source-record denominator;
-it is not a chunk count and it is not an embedding count.
+The FDA-only schema through migration `0023` is deployed on Fly release 135.
+The first `NDA020503` production canary discovered 21 records, indexed 18 of
+them into 347 chunks, and exposed three image-only/otherwise unparseable PDFs;
+the run is recorded as `failed` with those three errors. All 5,841 chunks
+carry active-profile embeddings (5,841 / 5,841, zero pending, verified
+directly against the production database on 2026-08-14), so fresh serving
+boots pass the profile-readiness guard. The outstanding canary work is the
+three unparsed documents, not a vector gap.
+
+This follow-up release adds migration `0024`, document-at-a-time temporary
+storage, durable raw artifacts and exact manifests, sandboxed OCR, separate
+chunk/embedding lifecycle state, and Dagster orchestration. It must be merged
+and deployed before production ingestion resumes. Therefore 140,339 is the
+source-record denominator; it is not a chunk count and it is not an embedding
+count.
 
 The 2026-08-13 discovery produced:
 
@@ -98,8 +109,8 @@ Activation ready:                true | false
 ```
 
 Until the full sync runs, the correct statement is **140,339 discovered source
-records; chunk and embedding totals pending**. A projected chunk count must not
-be presented as measured coverage.
+records; final chunk and embedding totals pending**. Partial canary counters may
+be reported separately but must not be presented as full-corpus coverage.
 
 ## Source boundary
 
@@ -133,13 +144,14 @@ instead of accepting every FDA media URL.
 
 ```mermaid
 flowchart LR
-    D[Official FDA discovery] --> M[Sorted, hashed manifest]
-    M --> F[Bounded fetch and redirect validation]
-    F --> P[PDF / FDA HTML / inline snapshot parsing]
-    P --> C[Deterministic citable chunks]
-    C --> T[Per-document atomic transaction]
-    T --> E[Resumable batch embeddings]
-    E --> G{Activation gate}
+    D[Official FDA discovery] --> M[Durable exact manifest]
+    M --> F[Stream one bounded artifact]
+    F --> A[SHA-256 + durable object upload]
+    A --> P[Text parse + sandboxed OCR fallback]
+    P --> C[Atomic chunk publication]
+    C --> X[Unconditional local unlink]
+    X --> E[Profile-scoped embedding shard]
+    E --> G{512-shard acceptance gate}
     G -- ready --> R[Authoritative retrieval namespace]
     G -- blocked --> L[Legacy retrieval remains active]
 ```
@@ -147,21 +159,31 @@ flowchart LR
 The durability contract is:
 
 - one advisory lock per canonical document;
-- one database transaction publishes the document, immutable version, current
-  chunks, provenance, and any inline embeddings;
-- a failed document transaction exposes neither a partial version nor partial
-  chunks;
-- artifacts are written by atomic rename into a content-addressed store;
+- the bounded download is SHA-256 hashed while streaming, uploaded to a
+  pluggable content-addressed store, and then recorded as an acquired immutable
+  version before parsing starts;
+- one later database transaction atomically publishes that version's current
+  chunks and provenance; a parser failure leaves an auditable failed lifecycle
+  row but exposes no partial chunks;
+- every staged source, manifest, OCR image, OCR output, and partial download is
+  unlinked in a `finally` block on success, failure, timeout, or cancellation;
+- raw artifacts and exact gzip manifests are retained by atomic filesystem
+  rename locally or SHA-256 metadata-verified S3-compatible upload in production;
+- blank PDF pages fall back to Tesseract only inside the killable parser child,
+  with page, pixel, CPU, wall-clock, output, file-descriptor, and Linux memory
+  limits and no shell invocation;
 - unchanged `(content hash, processing fingerprint)` versions are reused;
+- `chunk_status` and profile-keyed embedding lifecycle rows checkpoint the two
+  phases separately;
 - each run records expected, discovered, added, revised, unchanged, failed,
   retired, and chunk counts with a bounded error ledger;
-- a queue of at most four futures per worker prevents a 140k-record manifest
-  from becoming 140k in-memory futures;
-- embeddings default to a separate batch phase with durable checkpoints;
+- canonical IDs are deterministically assigned to 512 shards; Dagster runs at
+  most four shard processes while each shard processes one document at a time;
+- embeddings run as a separate shard backfill with durable checkpoints;
 - retirement reconciliation runs only after a successful, unfiltered,
-  complete-universe sync; a scoped, limited, or failed run cannot retire data.
+  exact-manifest acceptance; a scoped, limited, or failed run cannot retire data.
 
-Migration `0023_authoritative_fda_corpus` adds:
+Migration `0023_authoritative_fda_corpus` added:
 
 - `fda_document`: stable canonical identity and current source metadata;
 - `fda_document_version`: immutable source and processing version facts;
@@ -169,50 +191,126 @@ Migration `0023_authoritative_fda_corpus` adds:
 - chunk provenance: `fda_document_id`, `fda_version_id`, `source_family`,
   `document_type`, and `locator`.
 
-The migration performs no network calls or backfill. It is bounded by a lock
-timeout, preserves the serving corpus, enables RLS on new public tables, and is
-reversible.
+Migration `0024_fda_streaming_lifecycle` adds:
+
+- deterministic `shard_id` ownership;
+- artifact URI/retention and acquired/chunked timestamps;
+- explicit pending/complete/failed chunk state;
+- per-version, per-profile embedding state; and
+- the durable exact-manifest pointer and checksum ledger.
+
+Both migrations perform no network calls or backfill. They are bounded by a
+lock timeout, preserve the serving corpus, enable RLS on new public tables, and
+are reversible.
 
 ## Operating runbook
 
-Run schema deployment first:
+### 1. Release and preflight
+
+Deploy schema and code before resuming the canary:
 
 ```bash
 uv run alembic upgrade head
+uv run alembic current
 ```
 
-Reproduce discovery without changing the database:
+Build `Dockerfile.corpus-worker` and run its default `dagster-daemon` command on
+a supervised, restartable machine. Run the same image with
+`dagster-webserver -w /app/dagster/workspace.yaml --host 0.0.0.0` only on a
+private operator network. Required worker configuration includes:
+
+- the application `DATABASE_URL` and the deployed active Qwen profile settings;
+- `QWEN_EMBEDDING_BATCH_SIZE` at or below 24. This setting, not the Dagster
+  `batch_size` op config (a database page size), controls how many inputs go
+  into one embedding HTTP request, and the endpoint rejects larger input
+  arrays with 429 -- the retry loop then resends the same oversized payload
+  until the shard fails;
+- a separate `DAGSTER_POSTGRES_URL` for run/event/schedule state;
+- `FDA_ARTIFACT_STORE=s3`, its bucket/prefix, encryption choice, and preferably
+  workload-identity credentials; and
+- bounded ephemeral `FDA_CORPUS_TEMP_DIR` with Tesseract available at the
+  reviewed `FDA_CORPUS_OCR_BINARY` path.
+
+`docker/dagster.yaml` uses Postgres storage, a queued coordinator, four
+concurrent runs, and run-granularity pools. The only schedule freezes a weekly
+manifest and is stopped by default. Full chunk and embedding backfills are
+always operator-launched.
+
+Reproduce discovery without changing the database and compare its count and
+fingerprints before creating a Dagster manifest:
 
 ```bash
 uv run regwatch authoritative-corpus-plan
 ```
 
-Exercise one application before the full run:
+### 2. Repair and repeat the canary
+
+Launch `authoritative_fda_canary_job` with:
+
+```yaml
+ops:
+  authoritative_fda_canary:
+    config:
+      applications: [NDA020503]
+      expected_documents: 21
+      profile_id: ""
+      batch_size: 128
+```
+
+The job must report exactly 21 / 21 documents, zero errors, non-zero chunks,
+and complete active-profile embeddings. It is safe to rerun: the 18 existing
+versions are reused (their 347 chunks are already embedded), and the three
+failed documents retry through OCR. Do not start the full manifest until this
+gate passes. Check the application-owned counters at any time—even while the serving
+profile is incomplete—with:
 
 ```bash
-uv run regwatch authoritative-corpus-plan --application NDA020503
-uv run regwatch authoritative-corpus-sync \
-  --application NDA020503 --limit 25 --defer-embeddings --workers 4
 uv run regwatch authoritative-corpus-status
 ```
 
-Build the complete chunk corpus. The default defers model traffic:
+### 3. Freeze and process the full universe
 
-```bash
-uv run regwatch authoritative-corpus-sync --defer-embeddings --workers 4
+Launch `authoritative_fda_manifest_job`. Record its logical
+`manifest_sha256`, durable artifact URI, compressed artifact SHA-256, source
+snapshots, and document count. Every downstream run must use that exact logical
+hash; never rediscover separately inside each shard.
+
+In Dagster, launch a 512-partition backfill for
+`authoritative_fda_chunk_shards_job`, partitions `000` through `511`, with:
+
+```yaml
+ops:
+  authoritative_fda_chunk_shard:
+    config:
+      manifest_sha256: <recorded-logical-sha256>
 ```
 
-Backfill the active immutable embedding profile in durable batches:
+Wait for every partition and its blocking `all_manifest_documents_chunked`
+check to pass. Retry only failed partitions; completed documents are immutable
+checkpoints. Then launch the same partition range for
+`authoritative_fda_embedding_shards_job`:
 
-```bash
-uv run regwatch authoritative-corpus-embed \
-  --profile-id "$ACTIVE_EMBEDDING_PROFILE" --batch-size 128
-uv run regwatch authoritative-corpus-status
+```yaml
+ops:
+  authoritative_fda_embedding_shard:
+    config:
+      manifest_sha256: <same-logical-sha256>
+      profile_id: ""
+      batch_size: 128
 ```
 
-The embed command selects only authoritative FDA chunks. It never backfills an
-unrelated legacy chunk by accident. Re-running sync or embedding is expected and
-resumes from committed state.
+The embedding query is scoped to authoritative FDA chunks and that partition's
+canonical IDs. It cannot backfill unrelated legacy chunks. Each partition must
+pass `all_manifest_chunks_embedded`.
+
+### 4. Acceptance and cutover
+
+Launch `authoritative_fda_acceptance_job` with the same manifest hash and active
+profile. Acceptance re-reads all 512 shards from Lakebase, requires exact
+document/chunk/vector parity, all five families, zero errors, a complete-universe
+manifest, and then performs retirement reconciliation. The job records one
+successful full orchestrated run and must pass
+`full_manifest_activation_gate`.
 
 Do not set `REGWATCH_RETRIEVAL_CORPUS=authoritative_fda` until status reports:
 
@@ -222,6 +320,9 @@ Do not set `REGWATCH_RETRIEVAL_CORPUS=authoritative_fda` until status reports:
 - a successful complete-universe run;
 - processed documents equal the run's expected and discovered counts;
 - searchable documents equal the complete manifest count.
+
+Run the new-namespace evidence-page/span retrieval and end-to-end citation
+evaluation before cutover. A passing document hit rate alone is insufficient.
 
 API startup re-evaluates those conditions and refuses the authoritative mode if
 any condition is false. Activation is then a reversible configuration change:
@@ -251,10 +352,10 @@ This implementation maps those principles to concrete controls:
 
 | Area | Implemented control | Release evidence |
 | --- | --- | --- |
-| Operational excellence | deterministic plan, explicit run ledger, structured per-document completion/error logs, documented runbook and rollback | manifest hash, run ID, status output, logs |
-| Security, privacy, compliance | exact FDA source allowlist, manual redirect validation, no retired API key/path, parser and download limits, RLS | policy/runtime tests, migration review |
-| Reliability | idempotent immutable versions, content hashes, advisory locks, per-document atomicity, full-run-only reconciliation, fail-closed activation | rollback/idempotency/reconciliation tests |
-| Performance | bounded worker pool, bounded in-flight queue, per-host pacing, snapshot cache, batched embedding writes | concurrency test, duration logs |
+| Operational excellence | exact manifests, partitioned backfills, explicit lifecycle/run ledgers, blocking checks, documented runbook and rollback | manifest hashes, shard/run IDs, asset checks, status output |
+| Security, privacy, compliance | exact FDA source allowlist, manual redirect validation, no retired API key/path, sandboxed OCR, encrypted raw storage, RLS | policy/runtime/OCR tests, image scan, migration review |
+| Reliability | immutable acquired versions, atomic chunk publication, independent vector checkpoints, retries, exact-manifest reconciliation, fail-closed activation | cleanup/idempotency/shard/acceptance tests |
+| Performance | four run-granularity pools, one-document shard workers, bounded bytes/pages/OCR, per-host pacing, batched vectors | Dagster config test, duration and saturation logs |
 | Cost optimization | discovery-only plan, deferred embeddings by default, unchanged-version skip, batch and run limits | zero model calls during plan; pending counters |
 | Sustainability | avoid redundant downloads, parses, and embeddings; reuse content-addressed artifacts and immutable versions | content and processing fingerprints |
 
@@ -265,8 +366,8 @@ equivalents of the four golden signals:
 - traffic: discovered/expected documents, workers, chunks written, embedded
   batches;
 - errors: failed document count, typed bounded error samples, failed run state;
-- saturation: bounded workers/in-flight queue, pending chunks, and embedding
-  coverage.
+- saturation: queued/running shard counts, pool utilization, pending chunks, and
+  embedding coverage.
 
 Alerts should be based on user-visible objectives, not raw noise. Recommended
 release objectives are: zero policy violations; zero document errors in a
@@ -282,16 +383,19 @@ target environment:
 1. migration upgrade and downgrade/re-upgrade rehearsal pass;
 2. read-only plan reproduces the reviewed manifest or an explained newer FDA
    snapshot;
-3. full deferred sync succeeds with zero document errors;
-4. indexed documents equal the full manifest denominator;
-5. embedding backfill reaches `embedded_chunks == chunks` on the serving
+3. the application canary reaches exactly 21 / 21 with zero document errors;
+4. all 512 chunk partitions and blocking checks pass against one exact manifest;
+5. indexed documents equal the full manifest denominator;
+6. all 512 embedding partitions reach `embedded_chunks == chunks` on the serving
    profile;
-6. authoritative status reports no source-policy violations and
+7. authoritative status reports no source-policy violations and
    `activation_ready=true`;
-7. retrieval/citation evaluation passes on the new namespace;
-8. a serving smoke test passes after cutover;
-9. rollback to `legacy` is rehearsed without data loss.
+8. retrieval/citation evaluation passes on the new namespace;
+9. a serving smoke test passes after cutover;
+10. rollback to `legacy` is rehearsed without data loss.
 
-Discovery alone satisfies none of steps 3 through 9. The honest current
-handoff is: **implementation ready; 140,339 authoritative source records
-discovered; production-scale chunks and embeddings not yet built.**
+Discovery alone satisfies none of steps 3 through 10. The honest current
+handoff is: **140,339 authoritative source records discovered; the first canary
+is 18 / 21 with 347 chunks, all embedded on the active profile; deploy this
+worker upgrade, repair the canary to 21 / 21, then launch the production
+backfills.**

@@ -12,12 +12,14 @@ import io
 import os
 import time
 from collections.abc import Iterator
+from pathlib import Path
 
 import httpx
 import pytest
 import respx
 
 from regwatch.ingest.pdf_parser import (
+    OcrConfig,
     ParsedPdf,
     PdfPageLimitError,
     PdfParseError,
@@ -27,6 +29,7 @@ from regwatch.ingest.pdf_parser import (
     _try_pdfplumber,
     _try_pypdf,
     parse_pdf,
+    parse_pdf_path,
 )
 from regwatch.ingest.psg_crawler import (
     PdfInvalidError,
@@ -79,6 +82,30 @@ def _make_pdf_with_pages(num_pages: int, text: str) -> bytes:
     buf = io.BytesIO()
     writer.write(buf)
     return buf.getvalue()
+
+
+def _make_blank_pdf() -> bytes:
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+def _ocr_config(binary: Path, *, max_pixels: int = 20_000_000) -> OcrConfig:
+    return OcrConfig(
+        enabled=True,
+        binary=str(binary),
+        language="eng",
+        dpi=200,
+        page_timeout_s=5,
+        max_pages=10,
+        max_pixels=max_pixels,
+        max_output_bytes=1024 * 1024,
+        memory_limit_bytes=2 * 1024 * 1024 * 1024,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +216,43 @@ def test_parse_pdf_happy_path_through_subprocess() -> None:
     assert "subprocess works" in parsed.text
     assert len(parsed.pages) == 1
     assert parsed.engine in {"pdfplumber", "pypdf"}
+
+
+def test_parse_pdf_path_uses_sandboxed_ocr_for_image_only_page(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "image-only.pdf"
+    pdf_path.write_bytes(_make_blank_pdf())
+    fake_tesseract = tmp_path / "fake-tesseract"
+    fake_tesseract.write_text(
+        "#!/bin/sh\nprintf 'Authoritative FDA OCR text' > \"$2.txt\"\n",
+        encoding="utf-8",
+    )
+    fake_tesseract.chmod(0o700)
+
+    parsed = parse_pdf_path(
+        pdf_path,
+        timeout_s=30,
+        max_pages=10,
+        ocr=_ocr_config(fake_tesseract),
+    )
+
+    assert parsed.pages == ["Authoritative FDA OCR text"]
+    assert parsed.engine.endswith("+tesseract")
+
+
+def test_parse_pdf_path_rejects_ocr_render_over_pixel_bound(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "image-only.pdf"
+    pdf_path.write_bytes(_make_blank_pdf())
+    fake_tesseract = tmp_path / "fake-tesseract"
+    fake_tesseract.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    fake_tesseract.chmod(0o700)
+
+    with pytest.raises(PdfParseError, match="exceeds fda_corpus_ocr_max_pixels"):
+        parse_pdf_path(
+            pdf_path,
+            timeout_s=0,
+            max_pages=10,
+            ocr=_ocr_config(fake_tesseract, max_pixels=1),
+        )
 
 
 def test_parse_pdf_propagates_child_failure_as_parse_error() -> None:

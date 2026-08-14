@@ -15,6 +15,9 @@ and the staged phase-3 proxy group -- docs/GO_PROXY_ROLLOUT.md):
   init-db: the proxy must boot DB-independent. A proxy machine crash-looping
   on the stamp guard while holding the public port is the 2026-06-18/07-07
   incident class.
+* ``dagster-daemon`` and ``dagster-webserver`` run the corpus-maintenance
+  schema guard, which deliberately does not require complete serving-profile
+  coverage, then hand off with argv intact.
 * ``regwatch serve`` (app process group, the real fly.toml/Dockerfile boot
   command since the phase-2 dual-stack listener) runs ``regwatch init-db``
   FIRST, exports REGWATCH_DB_INITIALIZED=1, then hands off with argv intact.
@@ -35,9 +38,18 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[1] / "docker" / "entrypoint.sh"
 
-STUBS = ("regwatch", "uvicorn", "alembic", "regwatch-proxy")
+STUBS = (
+    "regwatch",
+    "uvicorn",
+    "alembic",
+    "regwatch-proxy",
+    "dagster-daemon",
+    "dagster-webserver",
+)
 
 # Each stub appends "name|argv|db_init=<REGWATCH_DB_INITIALIZED or unset>" so a
 # single log proves WHAT ran, in WHICH order, with WHICH env the entrypoint
@@ -151,6 +163,26 @@ def test_path_qualified_proxy_skips_init_db(tmp_path: Path) -> None:
     assert lines == ["regwatch-proxy||db_init=unset"]
 
 
+@pytest.mark.parametrize(
+    ("command", "arguments"),
+    [
+        ("dagster-daemon", ["run", "-w", "/app/dagster/workspace.yaml"]),
+        ("dagster-webserver", ["-w", "/app/dagster/workspace.yaml"]),
+    ],
+)
+def test_dagster_uses_maintenance_safe_schema_guard(
+    tmp_path: Path,
+    command: str,
+    arguments: list[str],
+) -> None:
+    proc, lines = _run(tmp_path, [command, *arguments])
+    assert proc.returncode == 0, proc.stderr
+    assert lines == [
+        "regwatch|authoritative-corpus-init-db|db_init=unset",
+        f"{command}|{' '.join(arguments)}|db_init=unset",
+    ]
+
+
 def test_regwatch_init_db_false_skips_for_app_command(tmp_path: Path) -> None:
     proc, lines = _run(
         tmp_path,
@@ -159,6 +191,16 @@ def test_regwatch_init_db_false_skips_for_app_command(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert lines == ["uvicorn|regwatch.api.main:app|db_init=unset"]
+
+
+def test_regwatch_init_db_false_skips_for_dagster(tmp_path: Path) -> None:
+    proc, lines = _run(
+        tmp_path,
+        ["dagster-daemon", "run"],
+        env_extra={"REGWATCH_INIT_DB": "false"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert lines == ["dagster-daemon|run|db_init=unset"]
 
 
 def test_init_db_failure_aborts_boot(tmp_path: Path) -> None:

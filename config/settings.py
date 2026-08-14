@@ -676,6 +676,63 @@ class Settings(BaseSettings):
     fda_corpus_pdf_max_bytes: int = 200 * 1024 * 1024
     fda_corpus_pdf_max_pages: int = 3_000
     fda_corpus_pdf_parse_timeout_s: float = 180.0
+    # Corpus documents are always staged one-at-a-time under this directory and
+    # unlinked in a finally block. None delegates placement to the operating
+    # system temp directory. The full corpus must never accumulate below
+    # DATA_DIR on an ephemeral or capacity-constrained worker disk.
+    fda_corpus_temp_dir: Path | None = None
+    # Raw FDA artifacts are pluggable. ``discard`` preserves only the checksum
+    # and source URL after successful processing; ``filesystem`` is suitable
+    # for local development; ``s3`` is the production-grade durable option.
+    fda_artifact_store: Literal["discard", "filesystem", "s3"] = "discard"
+    fda_artifact_dir: Path = Path("./data/fda_corpus/artifacts")
+    fda_artifact_s3_bucket: str | None = None
+    fda_artifact_s3_prefix: str = "regwatch/fda-corpus"
+    fda_artifact_s3_endpoint_url: str | None = None
+    fda_artifact_s3_region: str | None = None
+    fda_artifact_s3_access_key_id: str | None = None
+    fda_artifact_s3_secret_access_key: str | None = None
+    fda_artifact_s3_session_token: str | None = None
+    fda_artifact_s3_sse: Literal["AES256", "aws:kms"] | None = "AES256"
+    fda_artifact_s3_kms_key_id: str | None = None
+
+    @field_validator(
+        "fda_artifact_s3_bucket",
+        "fda_artifact_s3_endpoint_url",
+        "fda_artifact_s3_region",
+        "fda_artifact_s3_access_key_id",
+        "fda_artifact_s3_secret_access_key",
+        "fda_artifact_s3_session_token",
+        "fda_artifact_s3_kms_key_id",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_optional_artifact_setting(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
+    # OCR runs only in the killable PDF-parser child. It invokes the reviewed
+    # tesseract executable without a shell, bounds rendered pixels, page count,
+    # per-page runtime, and the enclosing document parse wall clock.
+    fda_corpus_ocr_enabled: bool = True
+    fda_corpus_ocr_binary: str = "tesseract"
+    fda_corpus_ocr_language: str = "eng"
+    fda_corpus_ocr_dpi: int = Field(default=200, ge=72, le=400)
+    fda_corpus_ocr_page_timeout_s: float = Field(default=60.0, gt=0, le=300)
+    fda_corpus_ocr_max_pages: int = Field(default=500, ge=1, le=3_000)
+    fda_corpus_ocr_max_pixels: int = Field(default=20_000_000, ge=1_000_000, le=100_000_000)
+    fda_corpus_ocr_max_output_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        ge=64 * 1024,
+        le=100 * 1024 * 1024,
+    )
+    fda_corpus_ocr_memory_limit_bytes: int = Field(
+        default=2 * 1024 * 1024 * 1024,
+        ge=256 * 1024 * 1024,
+        le=8 * 1024 * 1024 * 1024,
+    )
 
     # ---------- PDF ingest safety (cron/ingest worker only) ----------
     # The daily `regwatch watch` run is the SOLE driver of FDA alerts and it

@@ -107,8 +107,9 @@ def test_current_corpus_docs_do_not_reintroduce_retired_source_paths(doc_path: s
 def test_discovery_denominator_is_not_claimed_as_chunks_or_embeddings() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     runbook = (ROOT / "docs/AUTHORITATIVE_FDA_CORPUS.md").read_text(encoding="utf-8")
+    normalized_runbook = " ".join(runbook.split())
 
     assert "140,339 source records" in readme
     assert "Those are documents, not chunks or embeddings" in readme
-    assert "140,339 is the source-record denominator" in runbook
-    assert "chunk and embedding totals pending" in runbook
+    assert "140,339 is the source-record denominator" in normalized_runbook
+    assert "final chunk and embedding totals pending" in normalized_runbook

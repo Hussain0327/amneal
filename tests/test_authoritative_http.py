@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 import httpx
 import pytest
 
-from regwatch.sources.http import SourceTooLargeError, get_authoritative_bytes
+from regwatch.sources.http import (
+    SourceTooLargeError,
+    download_authoritative_file,
+    get_authoritative_bytes,
+)
 from regwatch.sources.policy import FdaSourceFamily, SourcePolicyError
 
 
@@ -62,3 +69,46 @@ def test_authoritative_fetch_rejects_redirect_outside_family() -> None:
             FdaSourceFamily.DRUGS_AT_FDA,
             max_bytes=100,
         )
+
+
+def test_authoritative_file_download_hashes_and_unlinks(tmp_path: Path) -> None:
+    requested = "https://www.fda.gov/media/89850/download"
+    body = b"%PDF-1.7\nstreamed FDA bytes"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=iter((body[:8], body[8:])), request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with download_authoritative_file(
+            client,
+            requested,
+            FdaSourceFamily.DRUGS_AT_FDA,
+            max_bytes=100,
+            directory=tmp_path,
+        ) as downloaded:
+            staged_path = downloaded.path
+            assert staged_path.read_bytes() == body
+            assert downloaded.byte_size == len(body)
+            assert downloaded.sha256 == hashlib.sha256(body).hexdigest()
+        assert not staged_path.exists()
+
+
+def test_authoritative_file_download_unlinks_partial_failure(tmp_path: Path) -> None:
+    requested = "https://www.fda.gov/media/89850/download"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * 11, request=request)
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(SourceTooLargeError),
+        download_authoritative_file(
+            client,
+            requested,
+            FdaSourceFamily.DRUGS_AT_FDA,
+            max_bytes=10,
+            directory=tmp_path,
+        ),
+    ):
+        raise AssertionError("oversized download unexpectedly yielded")
+    assert list(tmp_path.iterdir()) == []

@@ -609,16 +609,19 @@ activation.
 
 ## 8. Ingest and processing pipeline
 
-The replacement offline path is split into discovery, atomic document sync, and
-batched embeddings. It is run through the `regwatch` CLI; deployment migrations
-never fetch or backfill source data.
+The replacement offline path is split into exact-manifest discovery,
+document-at-a-time acquisition/chunking, and profile-scoped embeddings. Dagster
+orchestrates canaries, 512 deterministic shard backfills, retries, and blocking
+acceptance checks; Lakebase lifecycle rows remain the source of truth.
+Deployment migrations never fetch or backfill source data.
 
 ```
-official FDA snapshots/catalogs -> sorted manifest + snapshot fingerprints
-  -> family/path/redirect validation -> bounded artifact fetch
-  -> PDF / FDA HTML / inline-record parse -> deterministic page-aware chunks
-  -> per-document transaction: document + immutable version + current chunks
-  -> resumable profile-scoped embedding batches -> activation readiness gate
+official FDA snapshots/catalogs -> durable exact manifest + fingerprints
+  -> family/path/redirect validation -> one bounded streamed temporary artifact
+  -> SHA-256 + durable object upload -> acquired immutable version checkpoint
+  -> PDF text / sandboxed OCR / HTML / inline parse -> atomic page-aware chunks
+  -> unconditional temporary cleanup -> profile-scoped embedding shard
+  -> 512-shard acceptance + retrieval/citation evaluation -> manual cutover
 ```
 
 Key properties:
@@ -629,14 +632,17 @@ Key properties:
 - **Versioned, never overwritten.** A new content hash or processing fingerprint
   creates an immutable `fda_document_version`. Only current chunks remain
   searchable; version facts and content-addressed artifacts remain auditable.
-- **Per-document atomicity.** An advisory lock serializes one canonical document.
-  Its version, chunk set, provenance, and inline vectors commit together or roll
-  back together.
+- **Auditable two-stage publication.** An advisory lock serializes one canonical
+  document. Acquisition first commits checksum/artifact provenance and pending
+  state; one later transaction publishes the complete chunk set or records a
+  bounded parse failure. Partial chunks are never searchable.
 - **Bounded work.** Downloads, redirects, archive expansion, PDF bytes/pages/time,
-  workers, in-flight futures, and embedding batches are finite. Request starts
-  remain paced per FDA host across threads.
-- **Resumable phases.** Sync defaults to deferred embeddings. Both sync and
-  embedding commands restart from durable committed state and skip ready work.
+  OCR pixels/CPU/memory/output, Dagster runs, and embedding batches are finite.
+  Each shard processes one document at a time and every temporary artifact is
+  unlinked in `finally`; request starts remain paced per FDA host.
+- **Resumable phases.** Chunk and per-profile embedding states checkpoint
+  independently. Both backfills restart from durable committed state and skip
+  ready work even when Dagster itself restarts.
 - **Safe reconciliation.** Documents missing from discovery are retired only
   after a zero-error, unfiltered complete-universe run. A developer's scoped or
   limited run cannot retire production data.
@@ -661,12 +667,12 @@ history for that design.)
 
 Production runs on Databricks Lakebase in us-east-2, database
 `databricks_postgres`, app role `regwatch_app`, with pgvector in the same
-database. Rows, vectors and audit all live in one Postgres. As of 2026-08-11 the
-serving legacy PSG corpus was 5,494 chunks and the live Alembic head was
-`0020_eval_run`. Current `main` contains migrations through
-`0022_deficiency_run_source`; this branch adds `0023_authoritative_fda_corpus`.
-The corpus migration and replacement backfill are not claimed as deployed by
-this document.
+database. Rows, vectors and audit all live in one Postgres. Fly release 135
+deployed migration `0023_authoritative_fda_corpus`; this follow-up adds
+`0024_fda_streaming_lifecycle`. The partial canary increased the corpus from
+5,494 to 5,841 chunks, all embedded on the active Qwen profile (5,841 / 5,841
+verified 2026-08-14); the worker release and the 21 / 21 canary rerun for the
+three unparsed documents precede the full backfill.
 
 - `store/vector_store.py` is a thin wrapper over `store/pgvector_store.py`. Every
   public function (`similarity_search`, `add_chunks`, `collection_size`,
@@ -828,9 +834,12 @@ Output is markdown plus structured sections plus a refusal flag.
   Watch UI. The run history doubles as INV-4 evidence: nothing was fabricated,
   here is the run log.
 
-Scheduling: the GitHub Actions cron `.github/workflows/watch-daily.yml` is the
-only scheduler. It runs `regwatch watch` against the live database each day.
-There is no local scheduler daemon; the Dagster package was deleted in R5.
+Scheduling has two deliberately separate control planes. GitHub Actions cron
+`.github/workflows/watch-daily.yml` remains the sole scheduler for daily Watch
+alerts. The private Dagster worker owns only the authoritative FDA replacement
+corpus: canary, manifest, chunk shards, embedding shards, and acceptance. Its
+weekly manifest schedule ships stopped and it has no automatic full-backfill or
+retrieval-cutover schedule.
 
 > **Operator action required, as of 2026-08-12.** The workflow is wired for the
 > named Qwen profile and fails before checkout/crawl unless all six settings are

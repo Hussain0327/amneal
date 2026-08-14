@@ -147,11 +147,9 @@ The canonical system design is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 ## Status
 
 regwatch runs as a **limited internal pilot**, not a generally available product.
-The deployed-system numbers below were checked on 2026-08-11. The new corpus
-discovery was checked independently against official FDA snapshots on
-2026-08-13.
+The deployed-system and corpus counters below were checked on 2026-08-13.
 
-- **Deployed.** The API runs on Fly.io (app `amneal`, release v104). The frontend
+- **Deployed.** The API runs on Fly.io (app `amneal`, release v135). The frontend
   runs on Vercel. Postgres and pgvector are on **Databricks Lakebase**, in the
   company's own Databricks tenant. Rows, vectors, and the audit log all live in
   that one database. The currently serving legacy PSG corpus is 5,494 chunks.
@@ -159,18 +157,21 @@ discovery was checked independently against official FDA snapshots on
   activated.** A complete read-only discovery found **140,339 source records**:
   99,190 Drugs@FDA, 10,156 action-package, 1,795 PSG, 5 FDA BE-guidance, and
   29,193 Orange Book records. Those are documents, not chunks or embeddings.
-  The full download/parse/chunk/embed backfill has not run, so its measured
-  chunk and embedding totals remain pending. The serving namespace stays on
-  `legacy` until a successful complete run reaches 100% profile coverage and
-  the activation gate passes. See
+  A first production canary indexed 18 / 21 records into 347 chunks and stopped
+  on three parse failures. This follow-up adds streamed temporary files,
+  durable object storage, sandboxed OCR, independent chunk/vector lifecycle,
+  and 512-shard Dagster orchestration. The serving namespace stays on `legacy`
+  until the canary reaches 21 / 21 and a successful full run reaches 100%
+  profile coverage plus the activation gate. See
   [`docs/AUTHORITATIVE_FDA_CORPUS.md`](docs/AUTHORITATIVE_FDA_CORPUS.md).
 - **Both model roles run on Databricks Model Serving**, in the same tenant.
   Generation is `gpt-oss-120b` (served id `gpt-oss-120b-080525`) behind the
   serving alias `workspace.default.regwatch`, and that one open-weight model
   handles every LLM role (`LLM_PROVIDER=databricks`). Embeddings are Qwen3 on
   `workspace.default.regwatch-embed`, 1024-dim, profile
-  `ep_2e7368b354d911ea3a013c3125e276c2`, with all 5,494 chunks embedded on it
-  since 2026-07-30. The interactive app sends no model traffic to OpenAI; its
+  `ep_2e7368b354d911ea3a013c3125e276c2`. It covers all 5,841 chunks -- the
+  5,494 serving legacy chunks plus the 347 canary chunks (5,841 / 5,841,
+  verified against the production database on 2026-08-14). The interactive app sends no model traffic to OpenAI; its
   provider remains a tested LLM rollback. Scheduled Watch still uses its scoped
   OpenAI key for public-document change summaries and extraction, never for
   embeddings. The legacy OpenAI embedding arm is no longer refreshed by Watch
@@ -246,11 +247,12 @@ uv run regwatch seed
 # discover the complete FDA-only replacement corpus without writing the DB
 uv run regwatch authoritative-corpus-plan
 
-# operator-only full build; chunks are committed first, embeddings are a
-# separate resumable batch phase. Read the runbook before starting this.
-uv run regwatch authoritative-corpus-sync --defer-embeddings --workers 4
-uv run regwatch authoritative-corpus-embed --batch-size 128
+# diagnostics remain available while a profile is incomplete
 uv run regwatch authoritative-corpus-status
+
+# production corpus builds use the dedicated OCR/Dagster worker and exact
+# 512-shard runbook; do not launch the 140k build from an API machine
+docker build -f Dockerfile.corpus-worker -t regwatch-corpus-worker .
 
 # create a login (password is prompted, never passed as an argument)
 uv run regwatch create-user analyst@example.com --name "Analyst"

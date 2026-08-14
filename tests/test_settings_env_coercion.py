@@ -111,3 +111,17 @@ def test_whole_provider_block_blank_constructs(monkeypatch: pytest.MonkeyPatch) 
     assert s.qwen_embedding_dimension == 1536
     assert s.qwen_embedding_base_url is None
     assert s.databricks_llm_base_url is None
+
+
+def test_blank_artifact_credentials_preserve_workload_identity() -> None:
+    s = _settings(
+        fda_artifact_s3_access_key_id="",
+        fda_artifact_s3_secret_access_key="   ",
+        fda_artifact_s3_session_token="",
+        fda_artifact_s3_endpoint_url="",
+    )
+
+    assert s.fda_artifact_s3_access_key_id is None
+    assert s.fda_artifact_s3_secret_access_key is None
+    assert s.fda_artifact_s3_session_token is None
+    assert s.fda_artifact_s3_endpoint_url is None

@@ -121,6 +121,10 @@ class FdaDocument(SQLModel, table=True):
             "'fda_be_guidance', 'orange_book')",
             name="ck_fda_document_source_family",
         ),
+        CheckConstraint(
+            "shard_id IS NULL OR (shard_id >= 0 AND shard_id < 512)",
+            name="ck_fda_document_shard_id",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -136,6 +140,7 @@ class FdaDocument(SQLModel, table=True):
     brand_name: str | None = None
     dosage_form: str | None = None
     route: str | None = None
+    shard_id: int | None = Field(default=None, index=True)
     is_active: bool = Field(default=True, index=True)
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
     first_seen_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -157,6 +162,10 @@ class FdaDocumentVersion(SQLModel, table=True):
         CheckConstraint("byte_size >= 0", name="ck_fda_document_version_byte_size"),
         CheckConstraint("page_count >= 0", name="ck_fda_document_version_page_count"),
         CheckConstraint("chunk_count >= 0", name="ck_fda_document_version_chunk_count"),
+        CheckConstraint(
+            "chunk_status IN ('pending', 'complete', 'failed')",
+            name="ck_fda_document_version_chunk_status",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -169,9 +178,74 @@ class FdaDocumentVersion(SQLModel, table=True):
     byte_size: int
     page_count: int
     chunk_count: int
+    artifact_uri: str | None = None
+    artifact_retained: bool = False
+    acquired_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
+    chunk_status: str = Field(default="pending", index=True)
+    chunked_at: datetime | None = Field(default=None, index=True)
+    chunk_error: str | None = None
+    # Deprecated compatibility field from migration 0023. New workers write
+    # artifact_uri, which may be file://, s3://, or discard://.
     artifact_path: str | None = None
     parse_engine: str | None = None
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
+
+
+class FdaVersionEmbeddingState(SQLModel, table=True):
+    """Per-profile lifecycle for one immutable FDA document version."""
+
+    __tablename__ = "fda_version_embedding_state"
+    __table_args__ = (
+        Index(
+            "uq_fda_version_embedding_state_version_profile",
+            "fda_version_id",
+            "profile_id",
+            unique=True,
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'complete', 'failed')",
+            name="ck_fda_version_embedding_state_status",
+        ),
+        CheckConstraint(
+            "expected_chunks >= 0",
+            name="ck_fda_version_embedding_state_expected_chunks",
+        ),
+        CheckConstraint(
+            "embedded_chunks >= 0 AND embedded_chunks <= expected_chunks",
+            name="ck_fda_version_embedding_state_embedded_chunks",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    fda_version_id: int = Field(foreign_key="fda_document_version.id", index=True)
+    profile_id: str = Field(index=True)
+    expected_chunks: int = 0
+    embedded_chunks: int = 0
+    status: str = Field(default="pending", index=True)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    last_error: str | None = None
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
+
+
+class FdaCorpusManifest(SQLModel, table=True):
+    """Durable pointer and discovery facts for one exact corpus manifest."""
+
+    __tablename__ = "fda_corpus_manifest"
+    __table_args__ = (
+        CheckConstraint("document_count >= 0", name="ck_fda_corpus_manifest_document_count"),
+    )
+
+    sha256: str = Field(primary_key=True, min_length=64, max_length=64)
+    schema_version: int = 1
+    artifact_uri: str
+    artifact_sha256: str = Field(min_length=64, max_length=64)
+    artifact_retained: bool = True
+    document_count: int
+    complete_universe: bool = False
+    source_snapshots_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
+    counts_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
 
 
 class FdaCorpusRun(SQLModel, table=True):
