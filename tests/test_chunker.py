@@ -132,3 +132,92 @@ def test_sliding_window_never_splits_mid_word() -> None:
         toks = c.text.split()
         assert toks[0] in vocab, f"chunk starts mid-word: {toks[0]!r}"
         assert toks[-1] in vocab, f"chunk ends mid-word: {toks[-1]!r}"
+
+
+def test_genus_species_line_is_not_promoted_to_a_section_header() -> None:
+    """`E. coli` at the start of a line must stay prose, not become a section.
+
+    `[A-Z]\\.` matched the genus abbreviation opening a species name, so a line
+    beginning "E. coli is the primary pathogen of interest." parsed as marker
+    "E." plus a heading made of the rest of the sentence -- prose promoted into
+    section_path, the field INV-1 citations resolve against. Anti-infective
+    labelling routinely wraps so species names open lines, hence the multi-line
+    fixture below.
+    """
+    # BOTH paragraphs must clear MIN_SECTION_CHARS on their own. A short real
+    # section would forward-merge into the false species section and claim it
+    # via the carry-attribution rule, and a short false section would merge away
+    # entirely -- either way the bogus path disappears and the regex defect this
+    # test pins goes undetected.
+    intro_paragraph = (
+        "The indication covers complicated urinary tract infections in adult\n"
+        "patients with limited or no alternative treatment options, including\n"
+        "pyelonephritis, and the clinical program enrolled subjects across\n"
+        "forty sites in twelve countries with stratification by baseline renal\n"
+        "function and prior antibacterial exposure within thirty days.\n"
+    )
+    species_paragraph = (
+        "E. coli is the primary pathogen of interest.\n"
+        "Susceptibility testing should follow current CLSI breakpoints for each\n"
+        "organism listed in the approved labelling, and isolates should be\n"
+        "characterised by pulsed-field gel electrophoresis where available.\n"
+        "Resistance rates observed in the pivotal studies were below five\n"
+        "percent for all organisms tested across both treatment arms.\n"
+    )
+    pages = ["II. Microbiology\n" + intro_paragraph + species_paragraph]
+    base = {"doc_id": 1, "version_id": 1, "normalized_name": "x", "source_url": "u"}
+    chunks = chunk_pdf(pages, base_metadata=base)
+
+    paths = [c.section_path for c in chunks if c.section_path]
+    assert paths, "expected the real II. Microbiology heading to survive"
+    for path in paths:
+        assert "coli" not in path, path
+        assert "aureus" not in path, path
+        assert "pylori" not in path, path
+    assert any(path.startswith("II Microbiology") for path in paths)
+
+
+def test_real_lettered_headings_still_parse_after_the_species_guard() -> None:
+    """The guard must not cost us genuine headers, colon subtitles included."""
+    filler = "Additional protocol detail follows in this paragraph. " * 5
+    pages = [f"II. Recommendations\nA. Type of Study: Two studies\n{filler}"]
+    base = {"doc_id": 1, "version_id": 1, "normalized_name": "x", "source_url": "u"}
+    chunks = chunk_pdf(pages, base_metadata=base)
+
+    paths = [c.section_path for c in chunks if c.section_path]
+    assert any("Type of Study" in path for path in paths), paths
+
+
+def test_forward_merged_chunk_keeps_the_section_its_text_starts_in() -> None:
+    """A chunk whose text opens in section A must not be cited as section B.
+
+    The merge unconditionally preferred the section being merged INTO, so a
+    chunk beginning "A. Dissolution ..." was labelled with B's path. An answer
+    citing that chunk would name a section the quoted sentence is not in.
+    """
+    a_prose = "USP Apparatus 2 at 50 RPM in 900 mL of dissolution medium."
+    b_filler = "Conduct a fasting single-dose bioequivalence study. " * 6
+    pages = [f"A. Dissolution\n{a_prose}\nB. Study design\n{b_filler}"]
+    base = {"doc_id": 1, "version_id": 1, "normalized_name": "x", "source_url": "u"}
+    chunks = chunk_pdf(pages, base_metadata=base)
+
+    opening = next(c for c in chunks if "Apparatus 2" in c.text)
+    assert opening.section_path is not None
+    assert opening.section_path.startswith("A Dissolution"), opening.section_path
+
+
+def test_a_stranded_heading_does_not_claim_the_section_it_introduces() -> None:
+    """A heading with no prose beneath it has nothing to cite, so it must not win.
+
+    This is the case the forward merge exists for, and the attribution fix must
+    leave it intact: the bare heading travels as the first line of the chunk it
+    introduces while that chunk keeps its own identity.
+    """
+    b_filler = "Conduct a fasting single-dose bioequivalence study. " * 6
+    pages = [f"A. Dissolution\nB. Study design\n{b_filler}"]
+    base = {"doc_id": 1, "version_id": 1, "normalized_name": "x", "source_url": "u"}
+    chunks = chunk_pdf(pages, base_metadata=base)
+
+    merged = next(c for c in chunks if "Study design" in c.text)
+    assert merged.section_path is not None
+    assert merged.section_path.startswith("B Study design"), merged.section_path
