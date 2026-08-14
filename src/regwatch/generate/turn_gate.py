@@ -302,7 +302,10 @@ CORRECTION_OVERLAP_MARGIN = 0.2
 PARTIAL_DROP_DISCLOSURE = (
     "Some statements were omitted because their supporting citations " "could not be verified."
 )
-MATERIAL_DROP_TEXT = "I could not produce a fully supported answer from the available evidence."
+MATERIAL_DROP_TEXT = (
+    "This guidance states what is required, not why. I can tell you what it "
+    "requires for this product."
+)
 
 # Said to the user when a completion breached the pathological-output bounds
 # and the one repair attempt did not recover it (issue #183). Deliberately

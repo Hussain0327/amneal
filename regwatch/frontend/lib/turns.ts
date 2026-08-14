@@ -127,7 +127,7 @@ const REASON_COPY: Record<string, string> = {
   upstream_error: "The answer service could not be reached.",
   audit_error: "The answer could not be safely recorded.",
   malformed_structure: "The model response could not be validated.",
-  material_drop: "The draft omitted a material qualifier, so it was withheld.",
+  material_drop: "A rationale question meets a guidance that documents requirements, not reasoning.",
   model_refusal:
     "The retrieved passages didn't support a confident answer — try rephrasing or naming the product.",
   no_valid_citations: "The draft could not be verified against the retrieved passages.",
