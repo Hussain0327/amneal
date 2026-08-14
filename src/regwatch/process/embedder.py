@@ -12,8 +12,10 @@ import hashlib
 import math
 import random
 import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from functools import lru_cache
+from threading import Lock
 from typing import Any, ClassVar, Protocol
 
 import httpx
@@ -81,22 +83,93 @@ class EmbeddingProvider(Protocol):
     def embed_documents(self, texts: list[str]) -> list[list[float]]: ...
 
 
+# Process-wide memo for embed_query results. Deterministic follow-up rewrites
+# ("why?") re-embed the exact same canonical query string, and embedding is the
+# serial step before synthesis (issue #221), so a repeat should skip the HTTP
+# round-trip. Keyed by provider VALUES, not object identity: retrieve() builds
+# a fresh provider instance per call, so an instance-level cache would never
+# hit. Values are immutable tuples so a caller mutating a returned list cannot
+# poison later hits. 256 entries of 1024 float64s is roughly 2 MB.
+_QUERY_EMBEDDING_CACHE_LOCK = Lock()
+_QUERY_EMBEDDING_CACHE: OrderedDict[tuple[str, ...], tuple[float, ...]] = OrderedDict()
+_QUERY_EMBEDDING_CACHE_MAX_SIZE = 256
+
+
+def _query_embedding_cache_key(provider: Any, query: str) -> tuple[str, ...] | None:
+    """Value-based identity of everything that determines a query vector.
+
+    Returns None -- which bypasses the cache -- unless the provider exposes its
+    full geometry: name, model, dim, query instruction text and version. Of the
+    in-repo providers only Qwen3EmbeddingProvider (the production Ask path)
+    does; echo is compute-only and has no instruction fields. A provider whose
+    geometry cannot be read here must never share entries with one whose
+    geometry can.
+    """
+    name = getattr(provider, "name", None)
+    model = getattr(provider, "model", None)
+    dim = getattr(provider, "dim", None)
+    instruction = getattr(provider, "query_instruction", None)
+    version = getattr(provider, "query_instruction_version", None)
+    if not (isinstance(name, str) and name):
+        return None
+    if not (isinstance(model, str) and model):
+        return None
+    if not isinstance(dim, int):
+        return None
+    if not (isinstance(instruction, str) and instruction):
+        return None
+    if not (isinstance(version, str) and version):
+        return None
+    base_url = getattr(provider, "base_url", None)
+    return (name, model, str(dim), str(base_url or ""), instruction, version, query)
+
+
+def reset_query_embedding_cache_for_tests() -> None:
+    """Clears the process-wide query-embedding cache (test isolation only)."""
+    with _QUERY_EMBEDDING_CACHE_LOCK:
+        _QUERY_EMBEDDING_CACHE.clear()
+
+
 def embed_query(provider: Any, query: str) -> list[float]:
     """Embed one retrieval query, with a legacy ``embed`` fallback.
 
     The fallback preserves compatibility with test doubles and third-party
     providers that predate the asymmetric contract. New providers should
     implement ``embed_query`` directly.
+
+    Successful results are memoized process-wide for providers that expose
+    their full geometry (see _query_embedding_cache_key); errors are never
+    cached. The provider call runs OUTSIDE the cache lock so a slow embedding
+    request never serializes unrelated queries; two threads racing the same
+    cold key may therefore both embed it, which is harmless (both compute the
+    same vector, last write wins).
     """
+    key = None
+    if getattr(get_settings(), "query_embedding_cache_enabled", True):
+        key = _query_embedding_cache_key(provider, query)
+    if key is not None:
+        with _QUERY_EMBEDDING_CACHE_LOCK:
+            cached = _QUERY_EMBEDDING_CACHE.get(key)
+            if cached is not None:
+                _QUERY_EMBEDDING_CACHE.move_to_end(key)
+                return list(cached)
     method = getattr(provider, "embed_query", None)
     if callable(method):
-        return method(query)
-    vectors = provider.embed([query])
-    if len(vectors) != 1:
-        raise RuntimeError(
-            f"embedding provider returned {len(vectors)} query vectors for one query"
-        )
-    return vectors[0]
+        vector = method(query)
+    else:
+        vectors = provider.embed([query])
+        if len(vectors) != 1:
+            raise RuntimeError(
+                f"embedding provider returned {len(vectors)} query vectors for one query"
+            )
+        vector = vectors[0]
+    if key is not None:
+        with _QUERY_EMBEDDING_CACHE_LOCK:
+            _QUERY_EMBEDDING_CACHE[key] = tuple(vector)
+            _QUERY_EMBEDDING_CACHE.move_to_end(key)
+            while len(_QUERY_EMBEDDING_CACHE) > _QUERY_EMBEDDING_CACHE_MAX_SIZE:
+                _QUERY_EMBEDDING_CACHE.popitem(last=False)
+    return vector
 
 
 def embed_documents(provider: Any, texts: list[str]) -> list[list[float]]:

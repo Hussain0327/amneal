@@ -27,6 +27,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 
 from regwatch.common import ratelimit
+from regwatch.process import embedder as embedder_module
 from regwatch.store import db as db_module
 from regwatch.store import vector_store as vs_module
 
@@ -276,6 +277,9 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     # traffic cannot 429 the next test. (The login limiter moved to the Go
     # proxy with the step-4 auth cutover.)
     ratelimit.reset_for_tests()
+    # The query-embedding memo is process-global; clear it so one test's cached
+    # vector can never satisfy another test's look-alike provider fake.
+    embedder_module.reset_query_embedding_cache_for_tests()
     yield
     vs_module.reset_for_tests()
 

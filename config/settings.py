@@ -135,6 +135,14 @@ class Settings(BaseSettings):
     )
     qwen_embedding_query_instruction_version: str = "regwatch-regulatory-retrieval-v1"
     qwen_embedding_revision: str = "5cf2132abc99cad020ac570b19d031efec650f2b"
+    # Process-wide LRU over embed_query results (process/embedder.py): repeated
+    # canonical Ask queries skip the serial pre-synthesis embedding round-trip
+    # (issue #221). Bounded at 256 entries (~2 MB); successes only, errors are
+    # never cached. Aliased so an emergency off-flip reads as a REGWATCH_* Fly
+    # secret like the flags below.
+    query_embedding_cache_enabled: bool = Field(
+        default=True, validation_alias="REGWATCH_QUERY_EMBED_CACHE"
+    )
     # This is what picks the embedder on the query path. "legacy" keeps the
     # chunk.embedding column and is the only arm that reads embedding_provider.
     # A non-legacy profile must already have complete coverage and a compatible
