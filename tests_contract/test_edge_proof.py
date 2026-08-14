@@ -1,11 +1,13 @@
-"""S1 / S2 / S21b: proof the suite is running THROUGH the Go edge.
+"""S1 / S1b / S2 / S21b: proof the suite is running THROUGH the Go edge.
 
 Every other scenario inherits its meaning from these: if the harness were
 accidentally pointed at uvicorn, the relayed paths would still 200 and the
 whole matrix would pass vacuously. /healthz and POST /auth/login exist ONLY
 in Go (the Python handlers were deleted in step 4/B2), so a working login
 through the edge plus a 404 from uvicorn for the same call is the
-cross-runtime proof itself.
+cross-runtime proof itself. S1b is the mirror image: /livez exists only in
+FastAPI, so both doors must reach the SAME handler -- the property fly.toml's
+rotation check depends on.
 """
 
 from __future__ import annotations
@@ -34,6 +36,24 @@ def test_s1_healthz_splits_the_runtimes(base_stack: Stack) -> None:
 
     upstream = httpx.get(f"{base_stack.uvicorn_url}/healthz", timeout=CLIENT_TIMEOUT)
     assert upstream.status_code == 404
+
+
+def test_s1b_livez_reaches_the_same_handler_through_both_doors(base_stack: Stack) -> None:
+    """EDGE /livez and uvicorn /livez are the SAME FastAPI handler.
+
+    The mirror image of S1: /healthz splits the runtimes because Go answers it
+    locally, while /livez must NOT split -- the Fly rotation check probes the
+    edge, and its entire value is that the request traverses the proxy to
+    uvicorn. Byte-identical bodies from both doors is what proves nothing
+    answered it short of the app.
+    """
+    edge = httpx.get(f"{base_stack.edge_url}/livez", timeout=CLIENT_TIMEOUT)
+    upstream = httpx.get(f"{base_stack.uvicorn_url}/livez", timeout=CLIENT_TIMEOUT)
+
+    assert edge.status_code == 200
+    assert upstream.status_code == edge.status_code
+    assert edge.json() == {"status": "ok"}
+    assert edge.text == upstream.text
 
 
 def test_s2_login_exists_only_in_go(harness: Harness, base_stack: Stack) -> None:

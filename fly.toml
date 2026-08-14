@@ -110,29 +110,40 @@ kill_timeout = 30
   # always leaves one machine serving while the other is replaced -- instead of
   # stopping the single machine and booting a new one with NOTHING serving
   # during the grace+init window. This is a floor against autostop, not a
-  # creator. The /health check below gates each machine back into rotation
+  # creator. The /livez check below gates each machine back into rotation
   # before the next is touched.
   min_machines_running = 2
 
-  # /healthz is answered by the proxy itself (go/internal/proxy/proxy.go:61)
-  # and touches no dependency. It replaced the END-TO-END /health check
-  # (edge -> proxy -> 6PN -> uvicorn -> DB), which fired every 30s per
-  # machine and was a standing source of Lakebase activity: the Autoscaling
-  # instance never reached its scale-to-zero window, measured at 94 of 94
-  # non-zero hourly billing buckets over four days.
+  # /livez is the APP's process-liveness route (src/regwatch/api/main.py): it
+  # returns {"status": "ok"} and touches no dependency -- no DB session, no
+  # provider, no profile registry. That DB-free body is what keeps the fix in
+  # 35102e1 intact: the END-TO-END /health check this path used to carry fired
+  # every 30s per machine and was a standing source of Lakebase activity, so
+  # the Autoscaling instance never reached its scale-to-zero window (94 of 94
+  # non-zero hourly billing buckets over four days).
   #
-  # TRADEOFF: a proxy whose upstream is dead now stays in rotation and serves
-  # 502s "healthily" -- exactly what the end-to-end check was for. The app
-  # group's own [checks.app_health] below still gates deploys against uvicorn
-  # directly, so a broken upstream still fails the roll; what is lost is
-  # continuous rotation gating between deploys. Revert this path to "/health"
-  # if that gap ever matters more than the idle burn.
+  # DB-free but NOT proxy-local. Unlike /healthz (answered by the proxy itself,
+  # go/internal/proxy/proxy.go), this request still runs edge -> proxy -> 6PN
+  # -> uvicorn, so a proxy whose upstream is dead FAILS its check and leaves
+  # rotation instead of serving 502s "healthily" -- proxies doing exactly that
+  # are what made the 2026-08-13 outage last 3h35m.
+  #
+  # TRADEOFF, stated as plainly as 35102e1 stated its own: this re-couples a
+  # proxy machine's rotation to app-group reachability, the coupling 35102e1
+  # removed. While no app machine answers -- overlapping rolls of the two
+  # groups, or an app-wide boot failure -- healthy proxy machines fail this
+  # check too and leave rotation. Accepted: a proxy with no reachable upstream
+  # serves nothing but 502s, so pulling it costs no working capacity, while
+  # leaving it in rotation is precisely the outage this reverses.
+  # [checks.app_health] below is unchanged and still gates the app group's own
+  # roll. Revert this path to "/healthz" if the coupling ever costs more than
+  # the outage it prevents.
   [[http_service.checks]]
     interval = "30s"
     timeout = "10s"
     grace_period = "30s"
     method = "GET"
-    path = "/healthz"
+    path = "/livez"
 
 # The app group loses its public service with the flip, and with it the only
 # health check gating its rolling replacement -- an unchecked group rolls on

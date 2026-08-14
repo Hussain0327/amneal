@@ -26,6 +26,7 @@ Endpoints (per spec §10.16):
     GET    /psg/documents/{id}/content - one PSG as studio blocks (auth)
     GET    /psg/documents/{id}/docx - the same PSG as a Word download (auth)
     GET    /psg/documents/{id}/requirements - what this PSG requires (auth)
+    GET    /livez          - process liveness only, touches no dependency (open)
     GET    /health         — liveness + component diagnostics (open)
     GET    /ready          - readiness: db + vector store + LLM constructable (open)
     GET    /metrics        - Prometheus counters from the query_log audit
@@ -220,7 +221,9 @@ app = FastAPI(
         "it never authors submission content or renders regulatory judgment."
     ),
     lifespan=_lifespan,
-    # The contract opens exactly one unauthenticated endpoint (GET /health).
+    # The contract opens a fixed set of unauthenticated operational probes
+    # (GET /livez, /health, /ready, /metrics) and nothing else -- every product
+    # route sits behind the `protected` router below.
     # FastAPI's default docs routes register at app level — outside the
     # `protected` router — so they would disclose the full API surface (every
     # route, schema, and the session-cookie name) to anonymous visitors via
@@ -283,13 +286,40 @@ def _register_upstream_error_handlers(target: FastAPI) -> None:
 _register_upstream_error_handlers(app)
 
 # Single authorization chokepoint: every endpoint except the app-level open
-# probes (GET /health, /ready, /metrics) is registered on this router, so its
-# router-level dependency makes an accidentally-unauthenticated route
+# probes (GET /livez, /health, /ready, /metrics) is registered on this router,
+# so its router-level dependency makes an accidentally-unauthenticated route
 # impossible. The /auth + /sessions surface lives in the Go proxy now
 # (go/internal/api, step 4 of docs/POLYGLOT_TARGET_2026-07-10.md); Python
 # keeps only the VERIFY side of the auth contract (require_user ->
 # resolve_token over the same auth_session rows the Go binary mints).
 protected = APIRouter(dependencies=[Depends(require_user)])
+
+
+# ---------- /livez ----------
+class LivezResponse(BaseModel):
+    status: Literal["ok"]
+
+
+# On `app`, not `protected`: the platform probe carries no session cookie.
+# include_in_schema=False for the same reason as /internal/query/compute -- no
+# client calls this, so it stays out of the frozen OpenAPI snapshot the TS
+# codegen consumes. `async def` keeps it off the shared anyio worker pool that
+# every sync-def endpoint borrows from (see _ASK_LIMITER): a liveness answer
+# that can queue behind slow request work is not a liveness answer.
+@app.get("/livez", response_model=LivezResponse, include_in_schema=False)
+async def livez() -> dict[str, str]:
+    """Process liveness only: this process is up and running handlers.
+
+    Deliberately blind to DB, vector store, LLM provider, and embedding-profile
+    state -- it touches no dependency at all, and that is the entire contract.
+    It exists so the proxy's Fly rotation check can traverse edge -> proxy ->
+    6PN -> uvicorn (proving the upstream is actually reachable) WITHOUT waking
+    Lakebase: the end-to-end /health check it replaces held a DB session open
+    every 30s per machine, so the Autoscaling instance never reached its
+    scale-to-zero window (commit 35102e1). Component diagnostics stay on
+    /health; dependency readiness stays on /ready.
+    """
+    return {"status": "ok"}
 
 
 # ---------- /health ----------

@@ -328,6 +328,69 @@ func TestHealthzIndependentOfUpstream(t *testing.T) {
 	}
 }
 
+func TestLivezIsRelayedNotAnsweredLocally(t *testing.T) {
+	// The inverse of TestHealthzIndependentOfUpstream, and the reason fly.toml's
+	// [[http_service.checks]] can point at /livez at all: this path has NO local
+	// handler, so the app's own answer must come back verbatim. Guards against a
+	// well-meaning /livez handler being added next to /healthz in NewHandler --
+	// that would make the rotation check pass with the upstream dead again.
+	seen := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"ok"}`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	p := newProxyServer(t, upstream.URL)
+	resp, err := testClient.Get(p.URL + "/livez")
+	if err != nil {
+		t.Fatalf("GET /livez: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	// A local handler would answer with the proxy's own "ok\n" /healthz body.
+	if string(body) != `{"status":"ok"}` {
+		t.Errorf("body = %q, want the upstream's own %q", body, `{"status":"ok"}`)
+	}
+	select {
+	case path := <-seen:
+		if path != "/livez" {
+			t.Errorf("upstream saw path %q, want /livez", path)
+		}
+	case <-time.After(waitFor):
+		t.Fatalf("/livez never reached the upstream within %s (answered locally?)", waitFor)
+	}
+}
+
+func TestLivezDeadUpstreamReturns502(t *testing.T) {
+	// The executable form of the 2026-08-13 outage gap: the Fly rotation check
+	// probes /livez, so a proxy whose upstream is dead must FAIL it (502) rather
+	// than report itself healthy while serving nothing but 502s to users.
+	p := newProxyServer(t, deadUpstreamURL(t))
+	resp, err := testClient.Get(p.URL + "/livez")
+	if err != nil {
+		t.Fatalf("GET /livez: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 with upstream down", resp.StatusCode)
+	}
+	if string(body) != "upstream unavailable\n" {
+		t.Errorf("body = %q, want %q", body, "upstream unavailable\n")
+	}
+}
+
 func TestDeadUpstreamReturns502(t *testing.T) {
 	p := newProxyServer(t, deadUpstreamURL(t))
 	resp, err := testClient.Get(p.URL + "/query")

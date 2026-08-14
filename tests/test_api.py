@@ -192,6 +192,42 @@ def test_health_unhealthy_when_db_unreachable(monkeypatch: pytest.MonkeyPatch) -
     assert body["components"]["db"]["ok"] is False
 
 
+def test_livez_answers_with_the_db_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The load-bearing property: /livez must not touch the database.
+
+    fly.toml aims the proxy's rotation check here, every 30s per machine, and a
+    single DB session on this path would restore the standing Lakebase activity
+    that kept the Autoscaling instance from ever idling (35102e1). Patching
+    get_engine to raise makes a direct touch surface as a 500; asserting it was
+    never CALLED also catches the subtler regression where a helper catches the
+    error and answers 200 anyway, having already opened the session.
+    """
+    from regwatch.api import main as api_main
+
+    calls = {"n": 0}
+
+    def _forbidden() -> object:
+        calls["n"] += 1
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(api_main, "get_engine", _forbidden)
+    r = _open().get("/livez")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
+    assert calls["n"] == 0
+
+
+def test_livez_requires_no_auth() -> None:
+    """The Fly health check carries no session cookie, so /livez is registered on
+    `app` rather than the `protected` router. The 401 from a protected route on
+    the SAME client is what proves this client is genuinely anonymous."""
+    c = _open()
+    assert c.get("/watch/latest").status_code == 401
+    r = c.get("/livez")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
+
+
 def test_cors_allowlist() -> None:
     c = _open()
     allowed_origin = get_settings().cors_allow_origins[0]

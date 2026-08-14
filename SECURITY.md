@@ -27,11 +27,13 @@ Known launch blockers:
   Since the polyglot step-4 cutover the **Go edge** owns cookie sessions
   (DB-backed opaque tokens, sha256 at rest, bcrypt passwords, per-user ownership
   of chat history), not FastAPI. The only unauthenticated routes are the
-  operational probes: `GET /health`, `GET /ready`, `GET /metrics` (bearer-gated
-  when `METRICS_TOKEN` is set, world-readable when it is not), and the Go edge's
-  own `GET /healthz`. Broad production exposure still needs an approved identity
-  boundary: enterprise SSO/OIDC in front of the app, or a formal decision
-  accepting the app-layer cookie sessions as the pilot boundary.
+  operational probes: `GET /health`, `GET /livez` (process liveness only: it
+  touches no dependency and discloses nothing but `{"status": "ok"}`),
+  `GET /ready`, `GET /metrics` (bearer-gated when `METRICS_TOKEN` is set,
+  world-readable when it is not), and the Go edge's own `GET /healthz`. Broad
+  production exposure still needs an approved identity boundary: enterprise
+  SSO/OIDC in front of the app, or a formal decision accepting the app-layer
+  cookie sessions as the pilot boundary.
 - Per-caller rate limits are enforced in-process for cost-bearing routes and
   login attempts. Both runtimes keep **separate** in-memory buckets and the proxy
   runs on more than one machine, so the effective fleet ceiling is a multiple of
