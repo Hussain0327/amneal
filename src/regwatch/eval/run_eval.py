@@ -8,11 +8,16 @@ Targets (POC):
   recall@8           ≥ 0.90
   citation_precision ≥ 0.95
   refusal_accuracy   ≥ 0.95
+
+Quality is not the only dimension: end-to-end p50/p95 per question are reported
+on every run, and p95 is gated against LATENCY_P95_CEILING_MS (exit 5), so a
+change that buys recall with latency cannot pass unseen.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from dataclasses import asdict
@@ -103,6 +108,40 @@ THRESHOLDS = {
     "citation_precision": 0.70,
 }
 
+# BLOCKING ceiling on END-TO-END p95 latency per gold question, milliseconds.
+# --check-thresholds exits EXIT_LATENCY_REGRESSION when a run sits above it.
+# Added because quality alone is not a verdict: a retrieval change that lifts
+# recall by 0.01 and doubles p95 is a regression the old gate could not see.
+#
+# PROVISIONAL, and unlike the floors above it is NOT a ratchet against a
+# measurement -- no eval run has ever recorded a latency, so there is nothing
+# to ratchet to yet. It is derived from the transport's own worst case instead:
+# llm_timeout_s (60s) x (1 attempt + llm_max_retries 2) = 180s is the longest a
+# synthesis chain can run before it gives up, so a p95 above that means several
+# turns each burned the full retry budget and STILL returned. That is an outage
+# or a regression, not noise. REPLACE this with "observed p95 + margin" once CI
+# has recorded a few runs, and record the measurement here the way the floors
+# above record theirs.
+#
+# Why it is this loose on purpose: the CI eval drives shared Databricks
+# endpoints, and concurrent PR evals collide on QPS -- the documented 2026-08-06
+# incident that MAX_UNMEASURED_FRACTION below exists for. A tight end-to-end
+# gate would go red on other people's traffic, and a gate that flakes is a gate
+# someone deletes. p50/p95 are REPORTED on every run, so the trend is visible
+# long before this ceiling has teeth.
+#
+# Retrieval-phase p95 would be the stable dimension to gate (it excludes the
+# synthesizer, which is where the QPS variance lives), but grounded_qa.ask()
+# returns one opaque QAResult with no phase timings, so the eval cannot split
+# the phases without changing that contract. End-to-end is what is measurable
+# today, which is why the ceiling is generous rather than tight.
+LATENCY_P95_CEILING_MS = 180_000.0
+
+# Env override for the ceiling, so a deliberately slower arm can be evaluated
+# without editing this file. Validated, never silently defaulted -- see
+# _latency_ceiling_ms.
+LATENCY_P95_CEILING_ENV = "REGWATCH_EVAL_LATENCY_P95_CEILING_MS"
+
 # ASPIRATIONAL targets. Reported beside each value, never blocking.
 #
 # These are the original 0.90/0.95/0.95 figures. They were written against echo
@@ -128,6 +167,79 @@ MAX_UNMEASURED_FRACTION = 0.10
 # missed) and 3 (the run could not measure) because the fix is different: 2 is a
 # regression, 3 is an outage, 4 is a misconfigured run.
 EXIT_WRONG_ARM = 4
+
+# The run's end-to-end p95 sat above the latency ceiling while every quality
+# floor cleared. Its own code rather than 2 for two reasons: the eval_run
+# ledger's `passed` column is computed from THRESHOLDS alone
+# (ledger.scorecard_passed), so folding a latency miss into 2 would print a red
+# gate beside a stored row that says passed=true; and it sends the reader
+# somewhere else -- 2 is retrieval or the prompt, 5 is the provider and the
+# retry budget.
+EXIT_LATENCY_REGRESSION = 5
+
+
+def _latency_ceiling_ms() -> float:
+    """The p95 ceiling this run gates on, environment override included.
+
+    A plain environment variable rather than a config.settings field: this is a
+    property of the GATE, like THRESHOLDS and MAX_UNMEASURED_FRACTION, not of
+    the system under test.
+
+    An unusable override RAISES rather than falling back to the default. The
+    operator asked for a specific ceiling; quietly gating (and printing)
+    against a different one is worse than stopping. Called at the top of run(),
+    before the corpus, the DB and the first provider call, so a typo costs no
+    LLM spend.
+
+    Returns:
+        The ceiling in milliseconds.
+
+    Raises:
+        SystemExit: The override is set but is not a positive, finite number.
+    """
+    raw = (os.environ.get(LATENCY_P95_CEILING_ENV) or "").strip()
+    if not raw:
+        return LATENCY_P95_CEILING_MS
+    try:
+        ceiling = float(raw)
+    except ValueError as exc:
+        raise SystemExit(
+            f"{LATENCY_P95_CEILING_ENV}={raw!r} is not a number of milliseconds"
+        ) from exc
+    if not math.isfinite(ceiling) or ceiling <= 0:
+        # inf would disable the gate while looking like it was configured, and
+        # a nan comparison is False, which is the same silent pass.
+        raise SystemExit(
+            f"{LATENCY_P95_CEILING_ENV}={raw!r} must be a positive, finite number "
+            "of milliseconds"
+        )
+    return ceiling
+
+
+def _latency_exceeds(sc: Scorecard, ceiling_ms: float) -> bool:
+    """Whether this run's end-to-end p95 sat above the ceiling.
+
+    False when nothing was timed: a run with no measured turn has no latency to
+    judge, and MAX_UNMEASURED_FRACTION already fails a run that could not
+    measure. The report and the exit code share this predicate so the printed
+    verdict can never disagree with the build's.
+    """
+    return sc.latency_p95_ms is not None and sc.latency_p95_ms > ceiling_ms
+
+
+def _latency_summary(sc: Scorecard, ceiling_ms: float) -> str:
+    """The reported latency line, as a string so it is assertable in tests."""
+    if sc.latency_p95_ms is None or sc.latency_p50_ms is None:
+        return "[yellow]latency: no turn was timed, so the p95 gate did not run[/yellow]"
+    verdict = "[red]FAIL[/red]" if _latency_exceeds(sc, ceiling_ms) else "[green]ok[/green]"
+    # Parentheses, not brackets: everything here goes through rich's markup
+    # parser, and a literal "[" is one grammar change away from being read as a
+    # tag.
+    return (
+        f"latency p50={sc.latency_p50_ms:.0f}ms  p95={sc.latency_p95_ms:.0f}ms  "
+        f"over {sc.latency_samples} measured turn(s)  "
+        f"(end-to-end p95 gate <= {ceiling_ms:.0f}ms: {verdict})"
+    )
 
 
 def _assert_prod_mode() -> None:
@@ -246,7 +358,7 @@ def _load_gold(path: Path) -> list[GoldItem]:
     return items
 
 
-def _print_scorecard(sc: Scorecard) -> None:
+def _print_scorecard(sc: Scorecard, ceiling_ms: float) -> None:
     console = Console()
     table = Table(title="REGWATCH eval scorecard")
     table.add_column("metric", style="bold")
@@ -290,6 +402,9 @@ def _print_scorecard(sc: Scorecard) -> None:
             status,
         )
     console.print(table)
+    # Outside the table on purpose: its "gate" column is a FLOOR, and a ceiling
+    # printed in that column would read as "must be at least 180000ms".
+    console.print(_latency_summary(sc, ceiling_ms))
     console.print(
         f"refused_correctly={sc.refused_correctly}  "
         f"clarified_correctly={sc.clarified_correctly}  "
@@ -467,6 +582,10 @@ def run(
         ),
     ] = False,
 ) -> None:
+    # First, and unconditionally: it is what the report PRINTS as the ceiling
+    # as well as what --check-thresholds enforces, so a run that cannot resolve
+    # it would misinform even without the gate.
+    latency_ceiling_ms = _latency_ceiling_ms()
     if assert_prod_mode:
         _assert_prod_mode()
     profile = _apply_profile(profile)
@@ -496,17 +615,22 @@ def run(
     # questions actually executed under, not one a later flip could rewrite.
     fingerprint = run_fingerprint.build(profile, THRESHOLDS)
     sc = evaluate(items, ask_callable=ask)
-    _print_scorecard(sc)
+    _print_scorecard(sc, latency_ceiling_ms)
     _print_fingerprint(fingerprint)
     # Both halves of the provenance story, neither dropped: the fingerprint
     # says which corpus/arm/config produced the run, the prompt manifest says
     # which prompts did. Built unconditionally now because the ledger stores it
     # too, so --out and --persist can never disagree about what this run was.
     artifact = {
-        "artifact_schema_version": 2,
+        # 3: the scorecard grew latency_p50_ms/latency_p95_ms/latency_samples
+        # and the artifact grew the ceiling they were judged against.
+        "artifact_schema_version": 3,
         "fingerprint": fingerprint.to_dict(),
         "prompts": generation_prompt_manifest(),
         "scorecard": asdict(sc),
+        # Recorded because the ceiling is env-overridable: without it a stored
+        # p95 cannot be read as a pass or a fail after the fact.
+        "latency_p95_ceiling_ms": latency_ceiling_ms,
     }
     if out:
         # default=str keeps non-JSON fingerprint values (paths, enums) from
@@ -541,6 +665,20 @@ def run(
         ]
         if violations:
             sys.exit(2)
+        # Checked LAST, so a run that regressed on both reports the quality
+        # regression: that is the more important finding, and exit 2 is the
+        # code CI and every runbook already know.
+        if _latency_exceeds(sc, latency_ceiling_ms):
+            console = Console()
+            console.print(
+                f"[red]end-to-end p95 {sc.latency_p95_ms:.0f}ms is above the "
+                f"{latency_ceiling_ms:.0f}ms ceiling, over {sc.latency_samples} "
+                "measured turn(s). Every quality floor cleared, so this is a "
+                "latency regression: look at the provider and the retry budget "
+                f"before the prompt. Override with {LATENCY_P95_CEILING_ENV} only "
+                "with a recorded reason.[/red]"
+            )
+            sys.exit(EXIT_LATENCY_REGRESSION)
 
 
 if __name__ == "__main__":
