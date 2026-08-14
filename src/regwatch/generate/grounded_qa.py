@@ -127,6 +127,7 @@ from regwatch.generate.route_shadow import (
 from regwatch.generate.turn_gate import AdmittedTurn, GateFailure, admit_claims, admit_turn
 from regwatch.generate.turn_schema import TURN_SCHEMA_MESSAGE
 from regwatch.generate.unresolved import classify_unresolved, is_social
+from regwatch.retrieve.diversity import mmr_select
 from regwatch.retrieve.mode import RetrievalPlan, RetrievalScope, default_mode_for_scope
 from regwatch.retrieve.reranker import rerank_passages
 from regwatch.retrieve.resolver import lookup_external_drug, resolve_product, suggest_products
@@ -2074,6 +2075,30 @@ def _pre_retrieval_route(
     return state
 
 
+def _trim_evidence(passages: list[RetrievedPassage], s: Settings) -> list[RetrievedPassage]:
+    """Stage 2's trim to the final evidence set.
+
+    Args:
+        passages: The wide net, already through the optional reranker.
+        s: Settings; carries the final k and the diversity flag.
+
+    Returns:
+        The passages synthesis may cite. With the diversity flag off this is
+        the plain first-``effective_rerank_top_k`` slice, unchanged.
+    """
+    if s.mmr_diversity_enabled:
+        # MMR may only spend slots on passages that can survive the INV-2
+        # threshold applied just below; a "diverse" sub-threshold pick would
+        # be dropped there, shrinking the evidence set below k and turning
+        # the diversity A/B into a count confound. When nothing clears the
+        # threshold, fall through to the plain slice so the refusal path
+        # (and its related-passages surface) is identical to flag-off.
+        eligible = [p for p in passages if p.score >= s.refusal_score_threshold]
+        if eligible:
+            return mmr_select(eligible, s.effective_rerank_top_k)
+    return passages[: s.effective_rerank_top_k]
+
+
 def _retrieve_and_group(
     state: TurnState,
     *,
@@ -2144,7 +2169,8 @@ def _retrieve_and_group(
     # -- the reranker scores relevance against the search intent, not the
     # literal keystrokes.
     passages = rerank_passages(search_query, passages)
-    passages = passages[: s.effective_rerank_top_k]
+    # Near-clones of one section are one piece of evidence dressed as k (DSA S33).
+    passages = _trim_evidence(passages, s)
 
     # INV-2: weak passages never enter grounded synthesis. The constrained
     # guidance model still sees the QUESTION and trusted route/options, but not
