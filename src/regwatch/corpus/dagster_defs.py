@@ -405,6 +405,39 @@ embedding_shards_job = dg.define_asset_job(
     "authoritative_fda_embedding_shards_job",
     selection=dg.AssetSelection.assets(authoritative_fda_embedding_shard),
 )
+# THE JOB A FULL BACKFILL SHOULD ACTUALLY USE. One partition of this job runs chunk
+# shard N and only then embedding shard N, so a shard is never left chunked but
+# unembedded for longer than its own run.
+#
+# WHY THIS EXISTS, and why draining chunk_shards_job before starting
+# embedding_shards_job is the wrong order at full-corpus scale: a chunk with no vector
+# on the active profile is not merely incomplete, it is FATAL TO A COLD BOOT.
+# store/embedding_profiles.py::assert_profile_ready_for_activation refuses to activate a
+# profile whose embedded_chunks != total_chunks, and store/db.py::init_db runs that
+# assertion at every process start. Running all 512 chunk partitions first therefore
+# parks production one machine restart away from refusing to boot, for as long as the
+# embedding phase takes -- days, at ~1.2M chunks. The 2026-08-13 outage was this exact
+# state reached with only 347 chunks. Interleaving bounds that window to one shard.
+#
+# The ordering is not advisory. authoritative_fda_embedding_shard declares
+# deps=[authoritative_fda_chunk_shard] and both carry FDA_SHARD_PARTITIONS, so Dagster
+# resolves the embedding node behind a BlockingAssetChecksDependencyDefinition on the
+# chunk node's blocking `all_manifest_documents_chunked` check: the shard's vectors are
+# not attempted unless that shard's documents all chunked. Per-shard fail-closed.
+#
+# The two single-asset jobs above are deliberately KEPT, for repair: re-embedding one
+# shard after a provider outage must not re-fetch and re-chunk its documents.
+shard_job = dg.define_asset_job(
+    "authoritative_fda_shard_job",
+    selection=dg.AssetSelection.assets(
+        authoritative_fda_chunk_shard,
+        authoritative_fda_embedding_shard,
+    ),
+    description=(
+        "Chunk then embed ONE manifest shard. Use this for full backfills: it keeps the "
+        "unembedded-chunk window to a single shard instead of the whole corpus."
+    ),
+)
 canary_job = dg.define_asset_job(
     "authoritative_fda_canary_job",
     selection=dg.AssetSelection.assets(authoritative_fda_canary),
@@ -431,6 +464,13 @@ defs = dg.Definitions(
         authoritative_fda_canary,
         authoritative_fda_acceptance,
     ],
-    jobs=[manifest_job, chunk_shards_job, embedding_shards_job, canary_job, acceptance_job],
+    jobs=[
+        manifest_job,
+        chunk_shards_job,
+        embedding_shards_job,
+        shard_job,
+        canary_job,
+        acceptance_job,
+    ],
     schedules=[manifest_schedule],
 )
