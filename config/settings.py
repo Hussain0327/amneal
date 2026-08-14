@@ -114,7 +114,14 @@ class Settings(BaseSettings):
     # embedding profile fingerprint, so changing it here would silently
     # invalidate a staged profile.
     qwen_embedding_dimension: int = 1536
-    qwen_embedding_batch_size: int = 128
+    # Bulk-embed request shaping. The serving endpoint's per-request cap
+    # behaves as a token budget, not an input count (measured 2026-08-13:
+    # ~140-token inputs passed at 24 per request, 429'd at 32), so the token
+    # budget is the primary guard and batch size is a maximum-item backstop.
+    # Defaults mirror QWEN3_DEFAULT_* in regwatch.process.embedder; a test
+    # pins the two together.
+    qwen_embedding_batch_size: int = 8
+    qwen_embedding_request_token_budget: int = 3000
     qwen_embedding_query_instruction: str = (
         "Given a pharmaceutical regulatory question, retrieve FDA "
         "product-specific guidance passages containing the evidence needed to answer it."
@@ -344,6 +351,13 @@ class Settings(BaseSettings):
     def _check_qwen_embedding_batch_size(cls, v: int) -> int:
         if not 1 <= v <= 512:
             raise ValueError("QWEN_EMBEDDING_BATCH_SIZE must be in [1, 512]")
+        return v
+
+    @field_validator("qwen_embedding_request_token_budget")
+    @classmethod
+    def _check_qwen_embedding_request_token_budget(cls, v: int) -> int:
+        if not 1 <= v <= 65536:
+            raise ValueError("QWEN_EMBEDDING_REQUEST_TOKEN_BUDGET must be in [1, 65536]")
         return v
 
     @field_validator("databricks_reasoning_effort")

@@ -49,6 +49,35 @@ _QWEN3_PROVIDER_NAMES = frozenset(
 )
 _QWEN3_PROFILE_PROVIDER_NAMES = _QWEN3_PROVIDER_NAMES | frozenset({"databricks", "vllm"})
 
+# Conservative bulk-embedding defaults, sized against the Databricks endpoint's
+# per-request cap measured live on 2026-08-13: ~140-token inputs passed at 24
+# per request and 429'd at 32. The cap behaves as a token budget, not an input
+# count, so token-aware packing is the primary guard and the item cap is a
+# backstop. config/settings.py mirrors these defaults for the env vars; a test
+# pins the two together.
+QWEN3_DEFAULT_BATCH_SIZE = 8
+QWEN3_DEFAULT_REQUEST_TOKEN_BUDGET = 3000
+
+
+class EmbeddingInputTooLargeError(RuntimeError):
+    """A single input exceeds the endpoint's per-request budget on its own.
+
+    Raised instead of a generic 429 so bulk callers can identify, shorten, or
+    skip the one poisonous chunk rather than losing the whole job to it. The
+    packer always isolates such an input into its own request first, so
+    neighboring chunks embed normally before this surfaces.
+    """
+
+    def __init__(self, index: int, estimated_tokens: int, budget: int) -> None:
+        super().__init__(
+            f"embedding input {index} is ~{estimated_tokens} estimated tokens, "
+            f"over the per-request budget of {budget}; shorten or split this "
+            "chunk before re-running"
+        )
+        self.index = index
+        self.estimated_tokens = estimated_tokens
+        self.budget = budget
+
 
 class EmbeddingProvider(Protocol):
     name: str
@@ -350,6 +379,21 @@ class Qwen3EmbeddingProvider:
     _backoff_base_s: ClassVar[float] = 1.0
     _backoff_cap_s: ClassVar[float] = 30.0
     _unit_norm_tolerance: ClassVar[float] = 1e-3
+    # Deliberately low chars-per-token divisor (English runs ~4): overestimating
+    # cost shrinks batches, which only costs extra requests, never a 429.
+    _chars_per_token_estimate: ClassVar[int] = 3
+    # The endpoint reports rate limiting and the size cap with the same bare
+    # 429, so an ambiguous 429 gets this many same-size attempts (with backoff
+    # between) before splitting is used as the probe that tells the two apart.
+    _split_after_attempts: ClassVar[int] = 2
+    _size_rejection_markers: ClassVar[tuple[str, ...]] = (
+        "token",
+        "too large",
+        "payload",
+        "context length",
+        "input length",
+        "input size",
+    )
 
     def __init__(
         self,
@@ -361,7 +405,8 @@ class Qwen3EmbeddingProvider:
         dim: int = 1536,
         query_instruction: str = QWEN3_QUERY_INSTRUCTION,
         query_instruction_version: str = QWEN3_QUERY_INSTRUCTION_VERSION,
-        batch_size: int = 128,
+        batch_size: int = QWEN3_DEFAULT_BATCH_SIZE,
+        request_token_budget: int = QWEN3_DEFAULT_REQUEST_TOKEN_BUDGET,
         timeout_s: float = 60.0,
     ) -> None:
         self._client = client
@@ -372,6 +417,7 @@ class Qwen3EmbeddingProvider:
         self.query_instruction = query_instruction.strip()
         self.query_instruction_version = query_instruction_version.strip()
         self.batch_size = int(batch_size)
+        self.request_token_budget = int(request_token_budget)
         self.timeout_s = float(timeout_s)
 
         if not self.model:
@@ -384,6 +430,8 @@ class Qwen3EmbeddingProvider:
             raise ValueError("Qwen query instruction version must not be empty")
         if not 1 <= self.batch_size <= 512:
             raise ValueError("Qwen embedding batch size must be in [1, 512]")
+        if not 1 <= self.request_token_budget <= 65536:
+            raise ValueError("Qwen embedding request token budget must be in [1, 65536]")
         if self.timeout_s <= 0:
             raise ValueError("Qwen embedding timeout must be positive")
 
@@ -437,16 +485,121 @@ class Qwen3EmbeddingProvider:
         response.raise_for_status()
         return response.json()
 
-    def _create_with_retry(self, client: Any, batch: list[str]) -> Any:
+    @classmethod
+    def _estimate_tokens(cls, text: str) -> int:
+        """Conservative token overestimate for request packing."""
+        divisor = cls._chars_per_token_estimate
+        return max(1, (len(text) + divisor - 1) // divisor)
+
+    def _pack_spans(self, texts: list[str]) -> list[tuple[int, int]]:
+        """Greedy consecutive packing under the token budget and item cap.
+
+        An input whose estimate alone exceeds the budget gets its own span, so
+        its rejection cannot poison neighboring chunks.
+        """
+        spans: list[tuple[int, int]] = []
+        start = 0
+        tokens = 0
+        for index, text in enumerate(texts):
+            cost = self._estimate_tokens(text)
+            if index > start and (
+                index - start >= self.batch_size or tokens + cost > self.request_token_budget
+            ):
+                spans.append((start, index))
+                start = index
+                tokens = 0
+            tokens += cost
+        spans.append((start, len(texts)))
+        return spans
+
+    @classmethod
+    def _rejection_text(cls, exc: Exception) -> str:
+        parts = [str(exc)]
+        body = getattr(exc, "body", None)
+        if body is not None:
+            parts.append(str(body))
+        response = getattr(exc, "response", None)
+        if response is not None:
+            try:
+                text = response.text
+            except Exception:  # an unread streamed body must not mask the original error
+                text = None
+            if isinstance(text, str):
+                parts.append(text)
+        return " ".join(parts).lower()
+
+    @classmethod
+    def _is_size_rejection(cls, exc: Exception) -> bool:
+        """Whether the endpoint rejected the request for its size, not its rate.
+
+        413 is unambiguous. Databricks reports both rate limits and the
+        per-request cap as 429 REQUEST_LIMIT_EXCEEDED, so 400/429 bodies are
+        sniffed for size/token wording; a bare 429 stays classified as rate.
+        """
+        status = cls._status_code(exc)
+        if status == 413:
+            return True
+        if status not in (400, 429):
+            return False
+        text = cls._rejection_text(exc)
+        return any(marker in text for marker in cls._size_rejection_markers)
+
+    def _should_split(self, exc: Exception, attempt: int, batch_len: int) -> bool:
+        if batch_len <= 1:
+            return False
+        if self._is_size_rejection(exc):
+            return True
+        return self._status_code(exc) == 429 and attempt >= self._split_after_attempts
+
+    def _embed_span(
+        self,
+        client: Any,
+        texts: list[str],
+        start: int,
+        stop: int,
+    ) -> list[list[float]]:
+        """Embed ``texts[start:stop]`` as one request, splitting on size rejections.
+
+        Rate-limit and transient errors back off and retry the same batch. A
+        size-classified rejection - or a 429 that survives backoff - splits the
+        batch in half instead of re-sending an identical oversized request. A
+        single input that is still rejected for size raises
+        ``EmbeddingInputTooLargeError`` naming its absolute index.
+        """
+        batch = list(texts[start:stop])
         for attempt in range(1, self._max_attempts + 1):
             try:
-                return self._request_once(client, batch)
+                response = self._request_once(client, batch)
             except Exception as exc:
+                if self._should_split(exc, attempt, len(batch)):
+                    mid = start + (len(batch) + 1) // 2
+                    left = self._embed_span(client, texts, start, mid)
+                    return left + self._embed_span(client, texts, mid, stop)
+                if len(batch) == 1 and self._is_size_rejection(exc):
+                    raise EmbeddingInputTooLargeError(
+                        start,
+                        self._estimate_tokens(batch[0]),
+                        self.request_token_budget,
+                    ) from exc
                 if attempt >= self._max_attempts or not self._is_retryable(exc):
+                    if (
+                        len(batch) == 1
+                        and self._status_code(exc) == 429
+                        and self._estimate_tokens(batch[0]) > self.request_token_budget
+                    ):
+                        # Isolated over-budget input that never cleared 429:
+                        # the size cap is the overwhelmingly likely cause.
+                        raise EmbeddingInputTooLargeError(
+                            start,
+                            self._estimate_tokens(batch[0]),
+                            self.request_token_budget,
+                        ) from exc
                     raise
                 time.sleep(
                     _full_jitter_delay_s(self._backoff_base_s, self._backoff_cap_s, attempt - 1)
                 )
+            else:
+                return self._validated_batch(response, len(batch))
         raise RuntimeError("unreachable")  # pragma: no cover
 
     @staticmethod
@@ -515,10 +668,8 @@ class Qwen3EmbeddingProvider:
             return []
         client = self._client_or_create()
         out: list[list[float]] = []
-        for start in range(0, len(texts), self.batch_size):
-            batch = list(texts[start : start + self.batch_size])
-            response = self._create_with_retry(client, batch)
-            out.extend(self._validated_batch(response, len(batch)))
+        for start, stop in self._pack_spans(texts):
+            out.extend(self._embed_span(client, texts, start, stop))
         return out
 
     def embed_query(self, query: str) -> list[float]:
@@ -604,7 +755,13 @@ def get_embedding_provider(name: str | None = None) -> EmbeddingProvider:
                 )
                 or QWEN3_QUERY_INSTRUCTION_VERSION
             ),
-            batch_size=int(getattr(settings, "qwen_embedding_batch_size", None) or 128),
+            batch_size=int(
+                getattr(settings, "qwen_embedding_batch_size", None) or QWEN3_DEFAULT_BATCH_SIZE
+            ),
+            request_token_budget=int(
+                getattr(settings, "qwen_embedding_request_token_budget", None)
+                or QWEN3_DEFAULT_REQUEST_TOKEN_BUDGET
+            ),
             timeout_s=float(getattr(settings, "llm_timeout_s", None) or 60.0),
         )
     raise ValueError(f"unknown embedding provider: {name}")
