@@ -497,6 +497,14 @@ function AskView() {
       // already read would "double-type" the turn: the draft stands until the
       // result swap instead, and token frames are ignored.
       let sawDraft = false;
+      // True once draft text actually reached the screen this run, over EITHER
+      // channel. Deliberately NOT sawDraft: that flag means "the live-draft
+      // channel owns this answer" and makes onToken bail, so setting it from
+      // onToken would swallow every token after the first. This one only gates
+      // the fallback notice -- a stream that dies before any text arrived
+      // withdrew nothing from the analyst, and the answer still lands over the
+      // plain-POST path, so claiming a dropped draft would be a lie.
+      let draftPainted = false;
       // Drafting-milestone throttle for the SR region: the draft row is
       // aria-hidden, so without these a screen-reader user hears nothing
       // between the ticker and the settle announcement. Milestones repeat no
@@ -544,12 +552,14 @@ function AskView() {
               setStatusFrames((prev) => [...prev, text]);
             },
             onToken: (delta) => {
+              draftPainted = true;
               if (runSeqRef.current !== seq) return;
               if (sawDraft) return; // live draft already painted this answer
               setDraft((prev) => (prev ?? "") + delta);
               announceDraftMilestone();
             },
             onDraft: (delta) => {
+              draftPainted = true;
               if (runSeqRef.current !== seq) return;
               sawDraft = true;
               pushDraftDelta(delta);
@@ -557,6 +567,9 @@ function AskView() {
             },
             onDraftReset: () => {
               if (runSeqRef.current !== seq) return;
+              // draftPainted deliberately survives a reset: the analyst DID read
+              // draft text before it was retroactively discarded, so a later
+              // fallback notice about a lost draft stays true.
               stopDraftDrain(true);
               setDraft(null);
             },
@@ -577,7 +590,11 @@ function AskView() {
           ...prev,
           assistantTurn(next, {
             statusLog: frames,
-            streamFellBack: fellBack,
+            // The notice speaks about a draft that vanished, so it needs BOTH
+            // halves: a fallback that happened before any text painted (a 502
+            // off the top, or the endpoint missing) withdrew nothing and gets
+            // no notice; the status log above still records the retry.
+            streamFellBack: fellBack && draftPainted,
             draftWithdrawn: next.draft_withdrawn ?? null,
           }),
         ]);
