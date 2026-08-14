@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
+import os
+import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
 from threading import Lock
+from typing import BinaryIO
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -20,6 +27,15 @@ _LAST_REQUEST_BY_HOST: dict[str, float] = {}
 
 class SourceTooLargeError(RuntimeError):
     """An FDA response exceeded its source-specific byte budget."""
+
+
+@dataclass(frozen=True)
+class DownloadedFile:
+    path: Path
+    final_url: str
+    headers: httpx.Headers
+    byte_size: int
+    sha256: str
 
 
 def build_fda_client() -> httpx.Client:
@@ -62,9 +78,85 @@ def get_authoritative_bytes(
         raise ValueError("attempts must be positive")
     if min_interval_s < 0:
         raise ValueError("min_interval_s must be non-negative")
+    sink = io.BytesIO()
+    final_url, headers, _, _ = _stream_authoritative_to(
+        client,
+        url,
+        family,
+        sink=sink,
+        max_bytes=max_bytes,
+        attempts=attempts,
+        min_interval_s=min_interval_s,
+    )
+    return final_url, sink.getvalue(), headers
+
+
+@contextmanager
+def download_authoritative_file(
+    client: httpx.Client,
+    url: str,
+    family: FdaSourceFamily,
+    *,
+    max_bytes: int,
+    directory: Path | None = None,
+    attempts: int = 3,
+    min_interval_s: float = 0.0,
+) -> Iterator[DownloadedFile]:
+    """Stream one bounded FDA response into a temporary file and always unlink it."""
+
+    if directory is not None:
+        directory.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix="regwatch-fda-", suffix=".part", dir=directory)
+    path = Path(name)
+    try:
+        with os.fdopen(fd, "w+b") as sink:
+            final_url, headers, byte_size, digest = _stream_authoritative_to(
+                client,
+                url,
+                family,
+                sink=sink,
+                max_bytes=max_bytes,
+                attempts=attempts,
+                min_interval_s=min_interval_s,
+            )
+            sink.flush()
+            os.fsync(sink.fileno())
+        yield DownloadedFile(
+            path=path,
+            final_url=final_url,
+            headers=headers,
+            byte_size=byte_size,
+            sha256=digest,
+        )
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def _stream_authoritative_to(
+    client: httpx.Client,
+    url: str,
+    family: FdaSourceFamily,
+    *,
+    sink: BinaryIO,
+    max_bytes: int,
+    attempts: int,
+    min_interval_s: float,
+) -> tuple[str, httpx.Headers, int, str]:
+    """Validated/retried FDA transport shared by memory and file consumers."""
+
+    if max_bytes <= 0:
+        raise ValueError("max_bytes must be positive")
+    if attempts <= 0:
+        raise ValueError("attempts must be positive")
+    if min_interval_s < 0:
+        raise ValueError("min_interval_s must be non-negative")
+
     requested = normalize_authoritative_url(url, family)
     last_error: Exception | None = None
     for attempt in range(attempts):
+        sink.seek(0)
+        sink.truncate(0)
+        digest = hashlib.sha256()
         try:
             current = requested
             retry_delay: float | None = None
@@ -97,7 +189,6 @@ def get_authoritative_bytes(
                         raise SourceTooLargeError(
                             f"FDA response declares {declared} bytes; limit is {max_bytes}"
                         )
-                    chunks: list[bytes] = []
                     received = 0
                     for chunk in response.iter_bytes():
                         received += len(chunk)
@@ -105,9 +196,15 @@ def get_authoritative_bytes(
                             raise SourceTooLargeError(
                                 f"FDA response exceeded {max_bytes} bytes while streaming"
                             )
-                        chunks.append(chunk)
+                        sink.write(chunk)
+                        digest.update(chunk)
                     final_url = normalize_authoritative_url(str(response.url), family)
-                    return final_url, b"".join(chunks), response.headers
+                    return (
+                        final_url,
+                        httpx.Headers(response.headers),
+                        received,
+                        digest.hexdigest(),
+                    )
             if retry_delay is not None:
                 time.sleep(min(retry_delay, 5.0))
                 continue

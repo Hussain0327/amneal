@@ -113,11 +113,10 @@ The Fly deploy is the single migration authority. `fly.toml` sets
 machine BEFORE the rolling replace, so a schema-advancing release migrates
 itself. There is no manual pre-migration step on the normal path.
 
-The last independently verified live DB head is `0020_eval_run`. Current
-`main` contains migrations through `0022_deficiency_run_source`; this branch
-adds `0023_authoritative_fda_corpus`, so its eventual release advances schema
-before any corpus backfill. Migration 0023 makes no network calls and
-intentionally writes no corpus rows.
+Fly release 135 deployed `0023_authoritative_fda_corpus`. This follow-up adds
+`0024_fda_streaming_lifecycle`, so its release advances lifecycle/manifest
+schema before ingestion resumes. Neither migration makes network calls or
+performs a corpus backfill.
 
 The boot guard is the other half. The entrypoint runs `regwatch init-db`, which
 compares the alembic stamp to the head this image expects and refuses to start on
@@ -142,26 +141,39 @@ The complete 2026-08-13 read-only discovery found 140,339 source records. This
 is a manifest denominator, not a chunk or embedding count. Do not switch serving
 retrieval during schema deployment.
 
-After the release is healthy, use a separately supervised worker environment
-with the same database, data volume, and active embedding profile:
+The first production canary indexed 18 / 21 records and 347 chunks before three
+parse failures. Those chunks changed the active profile from 5,494 / 5,494 to
+5,494 / 5,841 embedded. Existing Fly release-135 processes remain healthy, but
+any restart correctly fails the profile-readiness guard until the missing
+vectors are repaired. Do not add more production chunks from the old worker.
+
+After this release is healthy, deploy `Dockerfile.corpus-worker` on separately
+supervised compute. It uses bounded ephemeral scratch, durable S3-compatible raw
+artifacts, Postgres-backed Dagster state, Tesseract OCR, and the same application
+database and active embedding profile. Keep the Dagster webserver private.
+Preflight with:
 
 ```bash
-# read-only: reproduce the current official-source manifest
 uv run regwatch authoritative-corpus-plan
-
-# canary: bounded application-scoped write, incapable of retiring other docs
-uv run regwatch authoritative-corpus-sync \
-  --application NDA020503 --limit 25 --defer-embeddings --workers 4
-uv run regwatch authoritative-corpus-status
-
-# full build: resumable, per-document commits; no model traffic in this phase
-uv run regwatch authoritative-corpus-sync --defer-embeddings --workers 4
-
-# profile-scoped, durable embedding batches
-uv run regwatch authoritative-corpus-embed \
-  --profile-id "$ACTIVE_EMBEDDING_PROFILE" --batch-size 128
 uv run regwatch authoritative-corpus-status
 ```
+
+Then use the Dagster jobs in this exact order:
+
+1. `authoritative_fda_canary_job`: `NDA020503`, expected 21, chunk and embed to
+   21 / 21 with zero errors. This also repairs the current 347-vector gap.
+2. `authoritative_fda_manifest_job`: freeze one durable exact full manifest.
+3. `authoritative_fda_chunk_shards_job`: backfill partitions 000–511 with that
+   manifest SHA-256.
+4. `authoritative_fda_embedding_shards_job`: backfill the same partitions and
+   active profile.
+5. `authoritative_fda_acceptance_job`: require all 512 blocking checks and write
+   the complete-universe success ledger.
+
+The full schedule is intentionally absent, and weekly manifest discovery is
+stopped by default. See [`AUTHORITATIVE_FDA_CORPUS.md`](AUTHORITATIVE_FDA_CORPUS.md)
+for exact run configuration, retry semantics, storage/OCR limits, and evidence
+to retain.
 
 The final status must report `activation_ready: true`, zero policy violations,
 all five families, a successful complete-universe run, exact document parity,

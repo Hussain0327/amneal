@@ -9,7 +9,8 @@ set -eu
 mkdir -p "$DATA_DIR" "$RAW_PDF_DIR" "$PROCESSED_DIR" "$(dirname "$WHITEPAPER_TEMPLATE_PATH")"
 
 # Boot-time DB init runs the stamp guard (refuses if the live schema != the
-# build's alembic head) + idempotent ensures + RLS. Two commands must skip it:
+# build's alembic head) + idempotent ensures + RLS. Three command classes use
+# specialized handling:
 #   * alembic: the Fly release_command (`alembic upgrade head`, see fly.toml
 #     [deploy]) exists to MOVE the stamp to head; the guard would otherwise
 #     refuse and abort the whole deploy before the migration ever ran.
@@ -18,6 +19,9 @@ mkdir -p "$DATA_DIR" "$RAW_PDF_DIR" "$PROCESSED_DIR" "$(dirname "$WHITEPAPER_TEM
 #     2026-06-18/07-07 incident class, amplified from one API machine to the
 #     entire public edge. Staged for the phase-3 "proxy" process group
 #     (docs/GO_PROXY_ROLLOUT.md); no fly.toml group execs the binary today.
+#   * Dagster worker/webserver: run the maintenance-safe schema guard below;
+#     serving-profile coverage may be incomplete precisely because this worker
+#     has been started to repair it.
 # The real app boot (group "app") runs `regwatch serve`, so $1 is `regwatch`,
 # which matches no skip branch and takes the init-db default below -- the same
 # behaviour the pre-phase-2 `uvicorn ...` command had. Dispatch is on $1 alone,
@@ -25,6 +29,16 @@ mkdir -p "$DATA_DIR" "$RAW_PDF_DIR" "$PROCESSED_DIR" "$(dirname "$WHITEPAPER_TEM
 run_init_db="${REGWATCH_INIT_DB:-true}"
 case "${1:-}" in
   alembic|regwatch-proxy|*/regwatch-proxy) run_init_db="false" ;;
+  dagster-daemon|dagster-webserver)
+    # Corpus maintenance intentionally creates pending vectors, so the public
+    # serving-profile completeness gate cannot run before the daemon that
+    # repairs them starts. This still verifies the exact Alembic head, RLS, and
+    # database connectivity; each asset repeats the same maintenance-safe init.
+    if [ "$run_init_db" = "true" ]; then
+      regwatch authoritative-corpus-init-db
+    fi
+    run_init_db="false"
+    ;;
 esac
 if [ "$run_init_db" = "true" ]; then
   regwatch init-db

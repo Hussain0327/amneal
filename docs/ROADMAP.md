@@ -44,23 +44,23 @@ sections of [`PROD_READINESS.md`](PROD_READINESS.md).
 
 ### Build and validate the authoritative FDA corpus  (SHOULD-HAVE)
 
-The code portion is done: exact five-family policy, official snapshot adapters,
-document/version/run schema, bounded fetch and parsing, per-document atomic
-chunks, resumable embedding batches, exact coverage, a fail-closed activation
-gate, and reversible `legacy` / `authoritative_fda` retrieval selection. The
-full read-only discovery found **140,339 source records** on 2026-08-13.
+The code portion now includes the exact five-family policy, official snapshot
+adapters, bounded document streaming, durable content-addressed artifacts,
+sandboxed OCR, separately checkpointed chunk/embedding lifecycle, an exact
+manifest, 512 deterministic Dagster shards, blocking coverage checks, and a
+fail-closed reversible cutover. The full read-only discovery found **140,339
+source records** on 2026-08-13.
 
-The environment portion is open. Migration 0021 has not been claimed as
-deployed, and no production-scale download/parse/chunk/embed run was performed
-from this branch. Therefore the new corpus has no measured final chunk total or
-embedding-coverage result yet. Follow
-[`AUTHORITATIVE_FDA_CORPUS.md`](AUTHORITATIVE_FDA_CORPUS.md): deploy schema,
-reproduce discovery, run a scoped canary, complete the deferred full sync,
-backfill the active profile, pass retrieval/citation evaluation, verify
+Migration 0023 is deployed. The first production canary indexed 18 / 21 records
+and 347 chunks, then stopped on three parse failures; the active profile is
+therefore 5,494 / 5,841 embedded. The follow-up migration 0024 and worker image
+must be released before ingestion resumes. Then rerun the OCR-enabled canary to
+21 / 21, freeze the exact full manifest, run chunk and embedding partition
+backfills, pass 512-shard acceptance plus retrieval/citation evaluation, verify
 `activation_ready=true`, smoke the cutover, and rehearse rollback.
 
-- Where: `src/regwatch/corpus/`, `src/regwatch/sources/policy.py`, migration
-  0021, and the corpus runbook.
+- Where: `src/regwatch/corpus/`, `src/regwatch/sources/policy.py`, migrations
+  0023–0024, `Dockerfile.corpus-worker`, and the corpus runbook.
 - Done when: the target environment processes the full current manifest with
   zero document errors, searchable document parity, zero policy violations,
   100% selected-profile chunk coverage, a passing eval, and tested cutover plus

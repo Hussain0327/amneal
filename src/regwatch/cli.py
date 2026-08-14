@@ -140,6 +140,15 @@ def cmd_init_db() -> None:
     rprint("[green]ok[/green] postgres schema at head")
 
 
+@app.command("authoritative-corpus-init-db", hidden=True)
+def cmd_authoritative_corpus_init_db() -> None:
+    """Verify worker schema without requiring already-complete embeddings."""
+    s = get_settings()
+    s.ensure_dirs()
+    init_db(assert_provider=False)
+    rprint("[green]ok[/green] corpus worker schema at head")
+
+
 @app.command("status")
 def cmd_status() -> None:
     """Print provider + path settings (no secrets)."""
@@ -247,7 +256,10 @@ def cmd_authoritative_corpus_sync(
     from regwatch.corpus.discovery import discover_authoritative_manifest
     from regwatch.corpus.sync import stats_dict, sync_manifest
 
-    init_db()
+    # A corpus build intentionally creates pending vectors. Requiring the
+    # serving profile to be complete here would deadlock the very command that
+    # repairs that state on its next invocation.
+    init_db(assert_provider=False)
     selected_workers = workers or get_settings().crawl_concurrency
     manifest = discover_authoritative_manifest(
         families=_corpus_families(families),
@@ -278,7 +290,9 @@ def cmd_authoritative_corpus_status() -> None:
     """Print exact document/chunk/embedding coverage for the FDA-only corpus."""
     from regwatch.corpus.status import authoritative_corpus_coverage
 
-    init_db()
+    # Status must remain available precisely when profile coverage is
+    # incomplete; it performs no vector search or embedding call.
+    init_db(assert_provider=False)
     coverage = authoritative_corpus_coverage()
     rprint(coverage.as_dict())
 
@@ -303,32 +317,20 @@ def cmd_authoritative_corpus_embed(
 
     from regwatch.corpus.embeddings import (
         corpus_embedding_counts,
-        pending_corpus_chunks,
-        write_corpus_embeddings,
+        embed_pending_corpus,
     )
-    from regwatch.process.embedder import (
-        embed_documents,
-        get_embedding_provider,
-        get_embedding_provider_for_profile,
-    )
-    from regwatch.store.vector_store import get_embedding_profile
 
-    init_db()
+    # The selected immutable profile is validated when its embedder is built.
+    # The global serving-readiness assertion cannot run before a backfill whose
+    # purpose is to restore that readiness.
+    init_db(assert_provider=False)
     selected = (profile_id or get_settings().active_embedding_profile or "legacy").strip()
-    if selected == "legacy":
-        provider = get_embedding_provider()
-    else:
-        provider = get_embedding_provider_for_profile(get_embedding_profile(selected))
-    processed = 0
-    while limit == 0 or processed < limit:
-        page_size = batch_size if limit == 0 else min(batch_size, limit - processed)
-        pending = pending_corpus_chunks(selected, limit=page_size)
-        if not pending:
-            break
-        embeddings = embed_documents(provider, [chunk.text for chunk in pending])
-        write_corpus_embeddings(selected, pending, embeddings)
-        processed += len(pending)
-        rprint({"profile_id": selected, "embedded_this_run": processed})
+    processed = embed_pending_corpus(
+        selected,
+        batch_size=batch_size,
+        limit=limit,
+        on_batch=lambda count: rprint({"profile_id": selected, "embedded_this_run": count}),
+    )
     rprint({"processed": processed, "coverage": asdict(corpus_embedding_counts(selected))})
 
 

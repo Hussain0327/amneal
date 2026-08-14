@@ -79,7 +79,9 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: sync deps
-        run: uv sync --extra dev --extra llm --extra local-embeddings
+        run: >-
+          uv sync --extra dev --extra llm --extra local-embeddings
+          --extra corpus-worker
 
       # scripts/ is included so the flake8-bandit ("S") rules added to
       # pyproject actually cover it -- the export/codegen helpers there run in
@@ -129,17 +131,15 @@ jobs:
           version: "latest"
           enable-cache: true
 
-      # Audit the SHIPPED production closure: the slim image installs llm only
-      # (Dockerfile defaults INSTALL_LOCAL_EMBEDDINGS=false; Fly embeds through
-      # the in-tenant Databricks Qwen3 endpoint, EMBEDDING_PROVIDER=qwen3, since
-      # the D1 residency closure), so torch/transformers from `local-embeddings`
-      # never reach prod and are intentionally out of scope here: gating prod CI
-      # on their noisy, slow-to-fix CVE cadence would add churn with no prod
-      # exposure. --frozen also asserts uv.lock matches pyproject.
-      - name: export runtime dependency set
+      # Audit the union of both shipped Python closures: the public API (`llm`)
+      # and the private corpus worker (`llm` + `corpus-worker`). Torch and
+      # transformers remain absent because neither production image installs
+      # `local-embeddings`; both use the Databricks Qwen profile. --frozen also
+      # asserts uv.lock matches pyproject.
+      - name: export shipped runtime dependency set
         run: >-
           uv export --frozen --no-emit-project --no-dev
-          --extra llm
+          --extra llm --extra corpus-worker
           --format requirements-txt --output-file requirements-audit.txt
 
       - name: pip-audit (python deps)
@@ -174,6 +174,16 @@ jobs:
           # cache" under quota pressure) must NOT fail the build -- the cache is
           # an optimization, not a gate.
           cache-to: type=gha,mode=max,scope=api,ignore-error=true
+
+      - name: docker build (corpus worker image)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: .
+          file: Dockerfile.corpus-worker
+          load: true
+          tags: regwatch-corpus-worker:ci
+          cache-from: type=gha,scope=corpus-worker
+          cache-to: type=gha,mode=max,scope=corpus-worker,ignore-error=true
 
       - name: compose config
         run: docker compose config --quiet
@@ -237,6 +247,17 @@ jobs:
             --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
             --ignorefile /root/.trivyignore \
             --scanners vuln,secret regwatch:ci
+
+      - name: trivy scan (corpus worker image)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            -v "$GITHUB_WORKSPACE/.trivyignore:/root/.trivyignore" \
+            aquasec/trivy:0.72.0 image \
+            --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
+            --ignorefile /root/.trivyignore \
+            --scanners vuln,secret regwatch-corpus-worker:ci
 
       - name: trivy scan (web image)
         run: |

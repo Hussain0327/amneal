@@ -1,0 +1,24 @@
+# Shared Dagster control-plane state. Use a dedicated Postgres database or
+# schema/role; this is intentionally not SQLite on an ephemeral worker disk.
+storage:
+  postgres:
+    postgres_url:
+      env: DAGSTER_POSTGRES_URL
+
+run_coordinator:
+  module: dagster.core.run_coordinator
+  class: QueuedRunCoordinator
+  config: {}
+
+# Every FDA asset is assigned to a named pool. Run granularity means a shard
+# consumes one slot for its whole process, matching the one-document-at-a-time
+# memory/disk contract inside that shard.
+concurrency:
+  runs:
+    max_concurrent_runs: 4
+  pools:
+    default_limit: 4
+    granularity: run
+
+telemetry:
+  enabled: false
