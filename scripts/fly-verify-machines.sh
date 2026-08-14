@@ -60,12 +60,33 @@ MAX_ATTEMPTS="${FLY_VERIFY_MAX_ATTEMPTS:-18}"
 PROCESS_GROUP="app"
 
 # Selector for machines in that group within `flyctl machine list --json`
-# output; the group lives at .config.metadata.fly_process_group. The
-# `// "app"` default is load-bearing: a machine carrying no such metadata
-# predates process groups and IS served by Fly's default group, whose name
-# fly.toml pins to this very string -- defaulting it OUT of the selection would
-# let the gate silently skip a real serving machine.
-MACHINES_IN_GROUP='.[] | select((.config.metadata.fly_process_group // "app") == $group)'
+# output; the group lives at .config.metadata.fly_process_group.
+#
+# Three cases, because "no fly_process_group" means two opposite things:
+#   1. group set          -> gate it iff it equals $group. An explicit
+#                            declaration is always honoured.
+#   2. no group, but the machine carries RELEASE provenance
+#      (.config.metadata.fly_release_id, written by every `fly deploy`)
+#      -> gate it as the default group. This is the original `// "app"`
+#         default and it stays load-bearing: a release machine predating
+#         process groups IS served by Fly's default group, whose name
+#         fly.toml pins to this very string, and dropping it from the
+#         selection would let the gate silently skip a real serving machine.
+#   3. no group AND no release provenance -> a ONE-OFF from `fly machine run`
+#      (empty .config.metadata, restart policy "no"), never part of a release.
+#      IGNORE it.
+#
+# Case 3 is why this is not a plain `// "app"`. On 2026-08-14 deploy #413 rolled
+# all four release machines green, then failed this gate on two stopped one-off
+# embedding-backfill machines left over from the 2026-08-13 recovery: empty
+# metadata, so the old default swept them into the app group, where `wait`
+# demands "started" and `check` pages on "stopped". A finished one-off is
+# SUPPOSED to be stopped. That reported prod down while prod was serving --
+# and a monitor that cries wolf every 10 minutes is how a real page gets
+# ignored, which is the exact failure this script exists to prevent.
+MACHINES_IN_GROUP='.[] | select(if .config.metadata.fly_process_group != null'
+MACHINES_IN_GROUP="${MACHINES_IN_GROUP}"' then .config.metadata.fly_process_group == $group'
+MACHINES_IN_GROUP="${MACHINES_IN_GROUP}"' else .config.metadata.fly_release_id != null and $group == "app" end)'
 
 # One TSV row (id, state, group) per machine whose state is unacceptable under
 # $mode; empty output means healthy. Assembled in appends (one clause per line)

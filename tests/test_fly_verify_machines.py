@@ -202,20 +202,39 @@ def test_other_process_groups_are_ignored(tmp_path: Path, mode: str) -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
-def test_machine_without_group_metadata_is_gated_as_app(tmp_path: Path) -> None:
-    """Fly's default process group IS named "app" (fly.toml pins that name), so a machine
-    carrying no group metadata is served by the app group. Skipping it would let the gate
-    ignore a real serving machine."""
-    stray: Machine = {
+def test_release_machine_without_group_metadata_is_gated_as_app(tmp_path: Path) -> None:
+    """Fly's default process group IS named "app" (fly.toml pins that name), so a RELEASE
+    machine carrying no group metadata is served by the app group. Skipping it would let the
+    gate ignore a real serving machine."""
+    legacy: Machine = {
         "id": "old1",
         "name": "regwatch-old1",
         "state": "stopped",
         "region": "iad",
-        "config": {"metadata": {}},
+        "config": {"metadata": {"fly_platform_version": "v2", "fly_release_id": "rel_1"}},
     }
-    proc, _ = _run(tmp_path, "check", [[_machine("aaa", "started"), stray]])
+    proc, _ = _run(tmp_path, "check", [[_machine("aaa", "started"), legacy]])
     assert proc.returncode == 1
     assert "old1" in proc.stdout
+
+
+@pytest.mark.parametrize("mode", ["wait", "check"])
+def test_one_off_machine_with_no_release_metadata_is_ignored(tmp_path: Path, mode: str) -> None:
+    """A `fly machine run` one-off carries EMPTY metadata and restart policy "no": it belongs
+    to no release and no process group, and being stopped is its finished state, not an
+    outage. Deploy #413 failed on exactly this -- two leftover embedding-backfill machines
+    from the 2026-08-13 recovery reported "prod is NOT serving" while all four release
+    machines were started and prod was answering."""
+    one_off: Machine = {
+        "id": "backfill1",
+        "name": "blue-firefly-1352",
+        "state": "stopped",
+        "region": "iad",
+        "config": {"metadata": {}, "restart": {"policy": "no"}},
+    }
+    proc, _ = _run(tmp_path, mode, [[_machine("aaa", "started"), one_off]])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "backfill1" not in proc.stdout
 
 
 @pytest.mark.parametrize("mode", ["wait", "check"])
