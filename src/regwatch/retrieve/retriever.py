@@ -9,6 +9,7 @@ Filters supported via the `filters` arg (passed through to the vector store):
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -225,10 +226,36 @@ def retrieve(
     else:
         profile = get_embedding_profile(profile_id)
         embedder = get_embedding_provider_for_profile(profile)
-    qv = embed_query(embedder, query)
-    filters = _fold_filter_casing(filters)
-    where = _build_where(filters)
     authoritative = getattr(s, "retrieval_corpus", "legacy") == "authoritative_fda"
+    # An explicit version_id filter (internal callers only -- the API whitelists
+    # it out of external input) targets one specific version, so the current-
+    # version scoping below would be contradictory; everything else is scoped.
+    # (_fold_filter_casing never touches version_id, so the raw filters answer
+    # this exactly like the folded ones would.)
+    current_version_ids: list[int] | None = None
+    if not authoritative and not (filters or {}).get("version_id"):
+        # The scoping DB round trips depend only on the filters, never on the
+        # query vector, so they overlap the embedding HTTP call in a worker
+        # thread. Error precedence matches the old serial order: an embed error
+        # propagates without ever consuming the scoping future, while a
+        # fold/scoping error surfaces only after a successful embed. The
+        # with-block joins the worker on every exit path, so no future outlives
+        # this call. The worker touches no shared session -- fold and scoping
+        # each open their own via session_scope, and the engine is thread-safe.
+        def _fold_and_scope(
+            raw: dict[str, Any] | None,
+        ) -> tuple[dict[str, Any] | None, list[int] | None]:
+            folded = _fold_filter_casing(raw)
+            return folded, _current_version_ids_for_filters(folded)
+
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="retrieve-scope") as pool:
+            scoping = pool.submit(_fold_and_scope, filters)
+            qv = embed_query(embedder, query)
+            filters, current_version_ids = scoping.result()
+    else:
+        qv = embed_query(embedder, query)
+        filters = _fold_filter_casing(filters)
+    where = _build_where(filters)
     if authoritative:
         # Namespace cutover: legacy PSG rows have NULL source_family, while
         # every 0021 corpus row carries one of these reviewed values. Filtering
@@ -238,15 +265,10 @@ def retrieve(
             where,
             {"source_family": {"$in": list(allowed_source_families())}},
         )
-    # An explicit version_id filter (internal callers only -- the API whitelists
-    # it out of external input) targets one specific version, so the current-
-    # version scoping below would be contradictory; everything else is scoped.
-    if not authoritative and not (filters or {}).get("version_id"):
-        current_version_ids = _current_version_ids_for_filters(filters)
-        if current_version_ids is not None:
-            if not current_version_ids:
-                return []
-            where = _and_where(where, {"version_id": {"$in": current_version_ids}})
+    if current_version_ids is not None:
+        if not current_version_ids:
+            return []
+        where = _and_where(where, {"version_id": {"$in": current_version_ids}})
     if profile_id == "legacy":
         hits: list[Hit] = similarity_search(qv, k=k, where=where)
     else:
