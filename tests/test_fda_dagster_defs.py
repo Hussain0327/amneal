@@ -26,9 +26,58 @@ def test_authoritative_fda_definitions_are_loadable_and_bounded() -> None:
         "authoritative_fda_manifest_job",
         "authoritative_fda_chunk_shards_job",
         "authoritative_fda_embedding_shards_job",
+        "authoritative_fda_shard_job",
         "authoritative_fda_canary_job",
         "authoritative_fda_acceptance_job",
     } <= job_names
+
+
+def test_shard_job_chunks_and_embeds_the_same_partition_in_one_run() -> None:
+    """The full-backfill job must carry BOTH shard assets over the SAME 512 partitions.
+
+    Draining every chunk partition before starting the embedding phase leaves the whole
+    corpus chunked-but-unembedded, and `assert_profile_ready_for_activation` turns that
+    state into a cold-boot failure for production. Interleaving is what bounds the window
+    to one shard, so a job that lost either asset would silently restore the hazard.
+    """
+    job = defs.resolve_job_def("authoritative_fda_shard_job")
+
+    assert {node.name for node in job.nodes} == {
+        "authoritative_fda_chunk_shard",
+        "authoritative_fda_embedding_shard",
+    }
+    assert job.partitions_def is not None
+    assert job.partitions_def.get_partition_keys() == FDA_SHARD_PARTITIONS.get_partition_keys()
+
+
+def test_shard_job_will_not_embed_a_shard_whose_documents_did_not_all_chunk() -> None:
+    """Embedding must sit behind the chunk asset's BLOCKING completeness check.
+
+    Embedding a shard whose documents failed to chunk would write vectors for a partial
+    shard and report the partition green, so the acceptance gate could pass over a corpus
+    that is quietly missing documents.
+    """
+    job = defs.resolve_job_def("authoritative_fda_shard_job")
+
+    embed = next(
+        invocation
+        for invocation, dependencies in job.dependencies.items()
+        if invocation.name == "authoritative_fda_embedding_shard" and dependencies
+    )
+    rendered = str(job.dependencies[embed])
+    assert "BlockingAssetChecksDependencyDefinition" in rendered
+    assert "all_manifest_documents_chunked" in rendered
+    assert "authoritative_fda_chunk_shard" in rendered
+
+
+def test_repair_jobs_survive_so_one_shard_can_be_re_embedded_alone() -> None:
+    """Re-embedding after a provider outage must not re-fetch and re-parse the PDFs.
+
+    The single-asset jobs are the repair path; deleting them in favour of the combined job
+    would make every embedding retry pay the full download and OCR cost again.
+    """
+    embed_only = defs.resolve_job_def("authoritative_fda_embedding_shards_job")
+    assert {node.name for node in embed_only.nodes} == {"authoritative_fda_embedding_shard"}
 
 
 def test_full_backfills_are_not_automatically_scheduled() -> None:

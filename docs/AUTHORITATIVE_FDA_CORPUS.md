@@ -275,23 +275,14 @@ Launch `authoritative_fda_manifest_job`. Record its logical
 snapshots, and document count. Every downstream run must use that exact logical
 hash; never rediscover separately inside each shard.
 
-In Dagster, launch a 512-partition backfill for
-`authoritative_fda_chunk_shards_job`, partitions `000` through `511`, with:
+In Dagster, launch a 512-partition backfill for `authoritative_fda_shard_job`,
+partitions `000` through `511`, with:
 
 ```yaml
 ops:
   authoritative_fda_chunk_shard:
     config:
       manifest_sha256: <recorded-logical-sha256>
-```
-
-Wait for every partition and its blocking `all_manifest_documents_chunked`
-check to pass. Retry only failed partitions; completed documents are immutable
-checkpoints. Then launch the same partition range for
-`authoritative_fda_embedding_shards_job`:
-
-```yaml
-ops:
   authoritative_fda_embedding_shard:
     config:
       manifest_sha256: <same-logical-sha256>
@@ -299,9 +290,61 @@ ops:
       batch_size: 128
 ```
 
+Each partition of that job chunks shard N and then embeds shard N. Wait for
+every partition and both blocking checks, `all_manifest_documents_chunked` and
+`all_manifest_chunks_embedded`, to pass. Retry only failed partitions; completed
+documents are immutable checkpoints.
+
 The embedding query is scoped to authoritative FDA chunks and that partition's
-canonical IDs. It cannot backfill unrelated legacy chunks. Each partition must
-pass `all_manifest_chunks_embedded`.
+canonical IDs. It cannot backfill unrelated legacy chunks.
+
+#### Why one interleaved job, and not chunk-all-then-embed-all
+
+Draining `authoritative_fda_chunk_shards_job` across all 512 partitions before
+starting `authoritative_fda_embedding_shards_job` is the obvious reading of this
+pipeline, and it is **wrong at full-corpus scale**.
+
+A chunk carrying no vector on the active profile is not merely incomplete. It
+makes a cold boot fail: `assert_profile_ready_for_activation` refuses a profile
+whose `embedded_chunks != total_chunks`, and `init_db` runs that assertion at
+every process start. Chunking the whole corpus first therefore parks production
+one machine restart away from refusing to boot, and holds it there for the
+entire embedding phase -- days, at roughly 1.2M chunks. The 2026-08-13 outage
+reached exactly this state with only 347 unembedded chunks.
+
+Interleaving bounds that window to a single shard. The ordering is structural
+rather than advisory: `authoritative_fda_embedding_shard` declares
+`deps=[authoritative_fda_chunk_shard]` and both assets carry
+`FDA_SHARD_PARTITIONS`, so Dagster places the embedding node behind a blocking
+dependency on the chunk node's `all_manifest_documents_chunked` check. A shard
+whose documents did not all chunk is never embedded.
+
+The two single-asset jobs are retained for repair. Re-embedding one shard after
+a provider outage must not re-fetch and re-parse that shard's PDFs.
+
+#### What interleaving does NOT fix: freeze deploys for the whole backfill
+
+Interleaving bounds the SIZE of the exposure, not its DURATION, and the
+difference matters operationally.
+
+`profile_embedding_coverage` counts `chunk` and `chunk_embedding` for the whole
+database, with no shard or corpus filter. So the guard does not care that only
+one shard is outstanding -- any single unembedded chunk anywhere fails it. Since
+each of the 512 partitions passes through a chunked-but-not-yet-embedded state,
+there is almost no instant during a multi-day backfill when the corpus is
+globally complete.
+
+The practical consequence: **while the backfill runs, an `amneal` app machine
+that restarts for any reason -- deploy, OOM, host migration, crash -- will fail
+its boot guard.** Interleaving means a repair is one shard of work rather than
+the whole corpus, which is the difference between minutes and days of recovery.
+It does not make a restart safe.
+
+Therefore, for the duration of the backfill: do not deploy the `amneal` app, and
+treat any unplanned machine restart as an incident requiring the in-flight shard
+to be embedded before the machine can boot. Scoping the guard to the active
+serving corpus, so an accumulating not-yet-cutover corpus cannot fail it, is the
+real fix and is not yet implemented.
 
 ### 4. Acceptance and cutover
 

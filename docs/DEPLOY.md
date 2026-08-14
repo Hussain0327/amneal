@@ -166,11 +166,13 @@ Then use the Dagster jobs in this exact order:
    21 / 21 with zero errors. The three previously unparseable documents retry
    through OCR; the 18 indexed documents and their embeddings are reused.
 2. `authoritative_fda_manifest_job`: freeze one durable exact full manifest.
-3. `authoritative_fda_chunk_shards_job`: backfill partitions 000–511 with that
-   manifest SHA-256.
-4. `authoritative_fda_embedding_shards_job`: backfill the same partitions and
-   active profile.
-5. `authoritative_fda_acceptance_job`: require all 512 blocking checks and write
+3. `authoritative_fda_shard_job`: backfill partitions 000–511 with that manifest
+   SHA-256 and the active profile. This one job chunks shard N and then embeds
+   shard N. Do NOT substitute the two single-asset jobs and run all chunking
+   before all embedding: a chunk without its vector fails a cold boot, so that
+   order parks prod one restart away from refusing to start for the whole
+   embedding phase. The single-asset jobs exist for per-shard repair only.
+4. `authoritative_fda_acceptance_job`: require all 512 blocking checks and write
    the complete-universe success ledger.
 
 The full schedule is intentionally absent, and weekly manifest discovery is
