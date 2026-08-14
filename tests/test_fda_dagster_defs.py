@@ -4,6 +4,7 @@ import importlib
 from pathlib import Path
 
 import dagster as dg
+import pytest
 import yaml
 
 from regwatch.corpus.dagster_defs import (
@@ -114,3 +115,49 @@ def test_instance_config_classes_are_importable() -> None:
         block = instance_config[section]
         module = importlib.import_module(block["module"])
         assert hasattr(module, block["class"]), (section, block)
+
+
+def test_chunk_shard_fetch_concurrency_comes_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shard's worker count must follow crawl_concurrency, not a literal 1.
+
+    workers=1 serializes fetch, parse, and DB time inside every shard run, so
+    the whole backfill pays sum-of-stages instead of overlapping them; the
+    politeness interval, not thread count, is what bounds FDA pressure.
+    """
+    import types
+
+    import config.settings as cs
+
+    from regwatch.corpus import dagster_defs as defs_mod
+
+    monkeypatch.setenv("CRAWL_CONCURRENCY", "7")
+    cs.get_settings.cache_clear()
+
+    seen: dict[str, object] = {}
+
+    def _fake_sync(manifest: object, **kwargs: object) -> object:
+        seen.update(kwargs)
+        return types.SimpleNamespace(succeeded=True, run_id=1, workers=kwargs["workers"])
+
+    readiness = types.SimpleNamespace(
+        chunked_documents=2, expected_documents=2, chunks=5, issues=[]
+    )
+    monkeypatch.setattr(defs_mod, "init_db", lambda **_: None)
+    monkeypatch.setattr(
+        defs_mod, "_configured_manifest", lambda _ctx: types.SimpleNamespace(sha256="x")
+    )
+    monkeypatch.setattr(defs_mod, "sync_manifest", _fake_sync)
+    monkeypatch.setattr(defs_mod, "shard_readiness", lambda _m, _s: readiness)
+    monkeypatch.setattr(defs_mod, "build_artifact_store", lambda: object())
+    monkeypatch.setattr(defs_mod, "stats_dict", lambda _s: {})
+
+    result = dg.materialize(
+        [defs_mod.authoritative_fda_chunk_shard],
+        partition_key="000",
+        run_config={"ops": {"authoritative_fda_chunk_shard": {"config": {"manifest_sha256": "x"}}}},
+    )
+    assert result.success
+    assert seen["workers"] == 7
+    cs.get_settings.cache_clear()

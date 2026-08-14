@@ -121,10 +121,15 @@ def authoritative_fda_chunk_shard(
     init_db(assert_provider=False)
     manifest = _configured_manifest(context)
     shard_id = parse_shard_partition_key(context.partition_key)
+    # crawl_concurrency, not a hardcoded 1: the shard's fetch/parse threads are
+    # what overlap network wait with CPU work inside one run. Request starts
+    # stay host-paced regardless (crawl_min_interval_ms; set crawl_pace_dir
+    # when running shards concurrently so the budget holds across processes),
+    # so raising this overlaps work without raising FDA pressure.
     stats = sync_manifest(
         manifest,
         defer_embeddings=True,
-        workers=1,
+        workers=get_settings().crawl_concurrency,
         artifact_store=build_artifact_store(),
         shard_id=shard_id,
     )

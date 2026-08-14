@@ -660,6 +660,15 @@ class Settings(BaseSettings):
     # time without turning into an unbounded FDA request fan-out.
     crawl_concurrency: int = 4
     crawl_min_interval_ms: int = 250
+    # Directory for the HOST-GLOBAL request-start limiter. Unset (the default)
+    # keeps pacing in-process, which is correct for a single worker process.
+    # Set it (one shared path per host) whenever MORE THAN ONE process crawls
+    # concurrently -- e.g. Dagster max_concurrent_runs > 1 -- because the
+    # in-process lock cannot see sibling runs: N runs each pacing themselves to
+    # crawl_min_interval_ms multiplies polite-crawl pressure on FDA by N. With
+    # this set, every process start-paces through one flock-serialized
+    # timestamp per FDA host, so the interval is a true host-wide budget.
+    crawl_pace_dir: Path | None = None
     # In-process cache-aside TTLs for the two official FDA data snapshots.
     # Drugs@FDA is refreshed on business days; Orange Book is monthly.  A
     # day-long cache keeps one process on one auditable snapshot while still

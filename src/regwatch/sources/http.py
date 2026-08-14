@@ -221,14 +221,64 @@ def _stream_authoritative_to(
 
 
 def _pace_request(url: str, min_interval_s: float) -> None:
-    """Globally pace request starts per FDA host across worker threads."""
+    """Pace request starts per FDA host: host-global when configured.
+
+    The in-process branch is complete only while ONE process crawls. The lock
+    and the last-start table are module state, so N concurrent worker processes
+    (Dagster max_concurrent_runs > 1) each pace themselves independently and
+    multiply pressure on FDA by N -- the politeness interval silently stops
+    being a budget. When ``crawl_pace_dir`` is set, every process serializes
+    request starts through one flock-guarded timestamp file per host instead,
+    making the interval a true host-wide budget regardless of process count.
+    """
 
     if min_interval_s <= 0:
         return
     host = (urlsplit(url).hostname or "").lower()
+    pace_dir = get_settings().crawl_pace_dir
+    if pace_dir is not None:
+        _pace_request_host_global(host, min_interval_s, pace_dir)
+        return
     with _PACE_LOCK:
         now = time.monotonic()
         remaining = min_interval_s - (now - _LAST_REQUEST_BY_HOST.get(host, 0.0))
         if remaining > 0:
             time.sleep(remaining)
         _LAST_REQUEST_BY_HOST[host] = time.monotonic()
+
+
+def _pace_request_host_global(host: str, min_interval_s: float, pace_dir: Path) -> None:
+    """Serialize request starts across PROCESSES via one flock'd file per host.
+
+    The sleep happens WHILE HOLDING the lock, deliberately: the contract is
+    "request starts are at least min_interval_s apart host-wide", so the next
+    contender must queue behind the wait, not race it. Wall-clock time (not
+    monotonic) because monotonic clocks are not comparable across processes;
+    the sleep is capped at min_interval_s so a backwards clock step can delay
+    one request by at most one interval, never wedge the crawl. flock is
+    POSIX-only, matching everywhere this crawler runs (Linux worker image,
+    macOS dev); it also serializes threads within one process, because each
+    call opens its own file description.
+    """
+    import fcntl
+
+    pace_dir.mkdir(parents=True, exist_ok=True)
+    path = pace_dir / f"pace-{host or 'unknown-host'}"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        raw = os.read(fd, 64)
+        try:
+            previous = float(raw.decode("ascii"))
+        except ValueError:
+            previous = 0.0
+        remaining = min_interval_s - (time.time() - previous)
+        if remaining > 0:
+            time.sleep(min(remaining, min_interval_s))
+        stamp = f"{time.time():.6f}".encode("ascii")
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, stamp)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
