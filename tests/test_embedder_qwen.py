@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 from regwatch.ingest import pipeline as pipeline_module
@@ -86,6 +87,30 @@ def _no_retry_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("regwatch.process.embedder.time.sleep", lambda _seconds: None)
 
 
+def _record_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[tuple[float, float]], list[float]]:
+    """Captures every jitter draw range and every sleep the retry loop makes.
+
+    The stub returns each draw's own upper bound so the recorded sleeps are
+    deterministic without a seeded RNG.
+
+    Returns:
+        (draws, slept): the (low, high) pairs passed to random.uniform, and
+        the delays handed to time.sleep, in retry order.
+    """
+    draws: list[tuple[float, float]] = []
+    slept: list[float] = []
+
+    def fake_uniform(low: float, high: float) -> float:
+        draws.append((low, high))
+        return high
+
+    monkeypatch.setattr("regwatch.process.embedder.random.uniform", fake_uniform)
+    monkeypatch.setattr("regwatch.process.embedder.time.sleep", slept.append)
+    return draws, slept
+
+
 def test_query_is_instructed_and_documents_stay_raw() -> None:
     api = _FakeEmbeddingsApi()
     provider = Qwen3EmbeddingProvider(
@@ -144,18 +169,77 @@ def test_nonempty_batch_requires_dedicated_endpoint_credentials() -> None:
         provider.embed_documents(["passage"])
 
 
-def test_retries_only_retryable_statuses() -> None:
+def test_retries_only_retryable_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    draws, _slept = _record_backoff(monkeypatch)
     api = _FakeEmbeddingsApi(errors=[_ApiError(429), _ApiError(503)])
     provider = Qwen3EmbeddingProvider(client=_fake_client(api), dim=DIM)
 
     assert provider.embed_documents(["passage"]) == [_unit_vector(DIM)]
     assert len(api.calls) == 3
 
+    draws.clear()
     bad_request_api = _FakeEmbeddingsApi(errors=[_ApiError(400)])
     provider = Qwen3EmbeddingProvider(client=_fake_client(bad_request_api), dim=DIM)
     with pytest.raises(_ApiError):
         provider.embed_documents(["passage"])
     assert len(bad_request_api.calls) == 1
+    # A 400 is not waited on at all, jitter or otherwise.
+    assert draws == []
+
+
+def test_backoff_is_full_jitter_from_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Full jitter: every wait is drawn from [0, min(cap, base * 2**retry)], so
+    # the callers one 429 burst rejected together stop waking up together.
+    # This is the production path: the served endpoint 429s above roughly 24
+    # inputs per request, so bulk embeds trip it in waves.
+    draws, slept = _record_backoff(monkeypatch)
+    errors: list[Exception] = [
+        _ApiError(429),
+        _ApiError(503),
+        _ApiError(429),
+        _ApiError(500),
+        _ApiError(429),
+    ]
+    api = _FakeEmbeddingsApi(errors=errors)
+    provider = Qwen3EmbeddingProvider(client=_fake_client(api), dim=DIM)
+
+    assert provider.embed_documents(["passage"]) == [_unit_vector(DIM)]
+    assert draws == [(0, 1.0), (0, 2.0), (0, 4.0), (0, 8.0), (0, 16.0)]
+    assert slept == [1.0, 2.0, 4.0, 8.0, 16.0]
+
+
+def test_backoff_ceiling_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    draws, _slept = _record_backoff(monkeypatch)
+    monkeypatch.setattr(Qwen3EmbeddingProvider, "_backoff_cap_s", 3.0)
+    api = _FakeEmbeddingsApi(errors=[_ApiError(429)] * 5)
+    provider = Qwen3EmbeddingProvider(client=_fake_client(api), dim=DIM)
+
+    assert provider.embed_documents(["passage"]) == [_unit_vector(DIM)]
+    assert [high for _low, high in draws] == [1.0, 2.0, 3.0, 3.0, 3.0]
+
+
+def test_transport_errors_retry_with_full_jitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A dropped connection carries no status code, and this provider retries it.
+    draws, _slept = _record_backoff(monkeypatch)
+    api = _FakeEmbeddingsApi(errors=[httpx.ConnectError("connection refused")])
+    provider = Qwen3EmbeddingProvider(client=_fake_client(api), dim=DIM)
+
+    assert provider.embed_documents(["passage"]) == [_unit_vector(DIM)]
+    assert draws == [(0, 1.0)]
+
+
+def test_exhausted_retries_sleep_once_per_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+    draws, _slept = _record_backoff(monkeypatch)
+    api = _FakeEmbeddingsApi(errors=[_ApiError(429)] * 10)
+    provider = Qwen3EmbeddingProvider(client=_fake_client(api), dim=DIM)
+
+    with pytest.raises(_ApiError):
+        provider.embed_documents(["passage"])
+    # The last attempt raises instead of waiting on a retry that never comes.
+    assert len(api.calls) == Qwen3EmbeddingProvider._max_attempts
+    assert len(draws) == Qwen3EmbeddingProvider._max_attempts - 1
 
 
 @pytest.mark.parametrize(
