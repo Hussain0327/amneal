@@ -166,7 +166,6 @@ forbidden_modules = ["openai"]
 allow_indirect_imports = "true"
 ignore_imports = [
     "regwatch.common.llm_clients -> openai",
-    "regwatch.generate.llm -> openai",
     "regwatch.api.main -> openai",
 ]
 
