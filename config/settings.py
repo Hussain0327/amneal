@@ -694,6 +694,11 @@ class Settings(BaseSettings):
     # disables a guard.
     fda_corpus_canary_documents: int = Field(default=5, ge=0)
     fda_corpus_max_consecutive_failures: int = Field(default=10, ge=0)
+    # A source record can become a formally handled terminal outcome only
+    # after this many durable observations of the same missing URL or parser
+    # version. Dagster currently permits the initial attempt plus three
+    # retries, so four preserves the full retry budget before terminalization.
+    fda_corpus_terminal_attempts: int = Field(default=4, ge=2, le=20)
     # Corpus documents are always staged one-at-a-time under this directory and
     # unlinked in a finally block. None delegates placement to the operating
     # system temp directory. The full corpus must never accumulate below

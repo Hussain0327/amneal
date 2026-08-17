@@ -36,16 +36,29 @@ from regwatch.corpus.lifecycle import (
     upsert_embedding_state,
 )
 from regwatch.corpus.manifest import CorpusArtifact, CorpusManifest
+from regwatch.corpus.resolution import (
+    SOURCE_BYTES_HASH_KIND,
+    TERMINAL_OBSERVATION_HASH_KIND,
+    TERMINAL_OBSERVATION_MIME_TYPE,
+    TERMINAL_RESOLUTION_STATUSES,
+    ResolutionStatus,
+    missing_observation_content_hash,
+    missing_observation_fingerprint,
+)
 from regwatch.corpus.sharding import corpus_shard_id
 from regwatch.ingest.embedding_writer import (
     legacy_document_embeddings,
     profile_document_embeddings,
     write_profile_batches,
 )
-from regwatch.ingest.pdf_parser import ParsedPdf, parse_pdf_path
+from regwatch.ingest.pdf_parser import ParsedPdf, PdfParseError, parse_pdf_path
 from regwatch.process.chunker import CHUNKING_VERSION, Chunk, chunk_document_pages, chunk_pdf
 from regwatch.process.embedder import get_embedding_provider
-from regwatch.sources.http import download_authoritative_file, owned_fda_client
+from regwatch.sources.http import (
+    SourceMissingError,
+    download_authoritative_file,
+    owned_fda_client,
+)
 from regwatch.sources.policy import FdaSourceFamily
 from regwatch.store.db import session_scope
 from regwatch.store.models import (
@@ -116,6 +129,7 @@ class CorpusSyncStats:
     added_documents: int = 0
     revised_documents: int = 0
     unchanged_documents: int = 0
+    terminal_documents: int = 0
     error_documents: int = 0
     retired_documents: int = 0
     chunks_written: int = 0
@@ -185,6 +199,7 @@ def sync_manifest(
         with owned_fda_client(client) as active_client:
             for artifact, outcome in _sync_artifacts(
                 artifacts,
+                manifest_sha256=manifest.sha256,
                 client=active_client,
                 defer_embeddings=defer_embeddings,
                 workers=workers,
@@ -289,6 +304,7 @@ def _abort_reason(
 def _sync_artifacts(
     artifacts: list[CorpusArtifact],
     *,
+    manifest_sha256: str,
     client: httpx.Client,
     defer_embeddings: bool,
     workers: int,
@@ -311,6 +327,7 @@ def _sync_artifacts(
             try:
                 status, chunks = sync_artifact(
                     artifact,
+                    manifest_sha256=manifest_sha256,
                     client=client,
                     defer_embeddings=defer_embeddings,
                     artifact_store=artifact_store,
@@ -360,65 +377,95 @@ def _sync_artifacts(
 def sync_artifact(
     artifact: CorpusArtifact,
     *,
+    manifest_sha256: str,
     client: httpx.Client,
     defer_embeddings: bool = False,
     artifact_store: ArtifactStore | None = None,
 ) -> tuple[str, int]:
     """Stage, retain, parse, and publish one document with durable checkpoints."""
 
-    selected_store = artifact_store or build_artifact_store()
     spec = _processing_spec()
     fingerprint = _processing_fingerprint(spec)
-    with fetch_artifact(artifact, client=client) as payload:
-        reference = selected_store.put_file(
-            payload.path,
-            content_hash=payload.content_hash,
-            namespace=f"documents/{artifact.source_family.value}",
-            suffix=_artifact_suffix(payload.mime_type),
-        )
-        acquired = _record_acquired_version(
-            artifact,
-            payload,
-            reference,
-            processing_fingerprint=fingerprint,
-            processing_spec=spec,
-        )
-        if acquired.indexed and (defer_embeddings or acquired.embedding_ready):
-            _touch_document(artifact, payload.source_url)
-            return "unchanged", 0
-        if acquired.indexed:
-            try:
-                _embed_existing_version(acquired.version_id)
-            except Exception as exc:
-                _mark_active_embedding_failed(acquired.version_id, exc)
-                raise
-            return "unchanged", 0
-
-        try:
-            parsed = parse_artifact(payload)
-            chunks = _chunk_artifact(artifact, parsed, payload.source_url)
-            if not chunks:
-                raise RuntimeError(
-                    f"artifact produced no citable text chunks: {artifact.canonical_id}"
-                )
-            status, ids, texts = _publish_chunks(
+    if _already_complete(
+        artifact,
+        processing_fingerprint=fingerprint,
+        defer_embeddings=defer_embeddings,
+    ):
+        _touch_document(artifact, source_url=None)
+        return "unchanged", 0
+    selected_store = artifact_store or build_artifact_store()
+    try:
+        with fetch_artifact(artifact, client=client) as payload:
+            reference = selected_store.put_file(
+                payload.path,
+                content_hash=payload.content_hash,
+                namespace=f"documents/{artifact.source_family.value}",
+                suffix=_artifact_suffix(payload.mime_type),
+            )
+            acquired = _record_acquired_version(
                 artifact,
                 payload,
-                parsed,
-                chunks,
-                acquired,
+                reference,
+                processing_fingerprint=fingerprint,
+                processing_spec=spec,
             )
-        except Exception as exc:
-            _mark_chunk_failed(acquired.version_id, exc)
-            raise
+            if acquired.indexed and (defer_embeddings or acquired.embedding_ready):
+                _touch_document(artifact, source_url=payload.source_url)
+                return "unchanged", 0
+            if acquired.indexed:
+                try:
+                    _embed_existing_version(acquired.version_id)
+                except Exception as exc:
+                    _mark_active_embedding_failed(acquired.version_id, exc)
+                    raise
+                return "unchanged", 0
 
-        if not defer_embeddings:
+            _begin_resolution_attempt(
+                acquired.version_id,
+                manifest_sha256=manifest_sha256,
+            )
             try:
-                _embed_chunk_rows(acquired.version_id, ids, texts)
-            except Exception as exc:
-                _mark_active_embedding_failed(acquired.version_id, exc)
+                parsed = parse_artifact(payload)
+                chunks = _chunk_artifact(artifact, parsed, payload.source_url)
+                if not chunks:
+                    raise RuntimeError(
+                        f"artifact produced no citable text chunks: {artifact.canonical_id}"
+                    )
+                status, ids, texts = _publish_chunks(
+                    artifact,
+                    payload,
+                    parsed,
+                    chunks,
+                    acquired,
+                )
+            except PdfParseError as exc:
+                if _mark_unparseable_failure(
+                    acquired.version_id,
+                    artifact,
+                    manifest_sha256=manifest_sha256,
+                    exc=exc,
+                ):
+                    return "terminal", 0
                 raise
-        return status, len(chunks)
+            except Exception as exc:
+                _mark_chunk_failed(acquired.version_id, exc)
+                raise
+
+            if not defer_embeddings:
+                try:
+                    _embed_chunk_rows(acquired.version_id, ids, texts)
+                except Exception as exc:
+                    _mark_active_embedding_failed(acquired.version_id, exc)
+                    raise
+            return status, len(chunks)
+    except SourceMissingError as exc:
+        if _record_missing_source_attempt(
+            artifact,
+            manifest_sha256=manifest_sha256,
+            exc=exc,
+        ):
+            return "terminal", 0
+        raise
 
 
 @contextmanager
@@ -566,6 +613,7 @@ def _record_acquired_version(
             version = FdaDocumentVersion(
                 fda_document_id=document.id,
                 content_hash=payload.content_hash,
+                content_hash_kind=SOURCE_BYTES_HASH_KIND,
                 processing_fingerprint=processing_fingerprint,
                 source_updated_at=artifact.source_updated_at,
                 fetched_at=payload.fetched_at,
@@ -577,6 +625,7 @@ def _record_acquired_version(
                 artifact_uri=reference.uri,
                 artifact_retained=reference.retained,
                 chunk_status="pending",
+                resolution_status=ResolutionStatus.PENDING.value,
                 metadata_json={
                     **payload.response_metadata,
                     "processing_spec": processing_spec,
@@ -585,14 +634,24 @@ def _record_acquired_version(
             session.add(version)
             session.flush()
         else:
-            if version.byte_size != payload.byte_size or version.mime_type != payload.mime_type:
+            if (
+                version.byte_size != payload.byte_size
+                or version.mime_type != payload.mime_type
+                or version.content_hash_kind != SOURCE_BYTES_HASH_KIND
+            ):
                 raise RuntimeError("immutable FDA version acquisition metadata changed")
             if reference.retained or not version.artifact_uri:
                 version.artifact_uri = reference.uri
                 version.artifact_retained = reference.retained
-            if version.chunk_status != "complete":
+            if (
+                version.chunk_status != "complete"
+                and version.resolution_status not in TERMINAL_RESOLUTION_STATUSES
+            ):
                 version.chunk_status = "pending"
                 version.chunk_error = None
+                version.resolution_status = ResolutionStatus.PENDING.value
+                version.resolution_error = None
+                version.resolved_at = None
             version.metadata_json = {
                 **(version.metadata_json or {}),
                 **payload.response_metadata,
@@ -602,11 +661,22 @@ def _record_acquired_version(
         if version.id is None:
             raise RuntimeError("fda_document_version insert did not produce an id")
 
+        _make_version_current(session, document.id, version.id)
         _apply_document_fields(document, artifact, payload.source_url)
         session.add(document)
         indexed = version.chunk_status == "complete" and _version_indexed_in_session(
             session, version
         )
+        if indexed and version.resolution_status == ResolutionStatus.PENDING.value:
+            # A worker running pre-0025 code can complete a version while the
+            # ledger columns hold their ADD COLUMN defaults; migration 0025's
+            # one-time backfill cannot cover rows written after it commits.
+            # Credit the proven-searchable row here, or it stays 'pending'
+            # forever and permanently blocks its shard's readiness.
+            version.resolution_status = ResolutionStatus.INDEXED.value
+            version.resolved_at = version.chunked_at or datetime.now(UTC)
+            version.resolution_error = None
+            session.add(version)
         embedding_ready = indexed and _version_ready_in_session(session, version)
         return AcquiredVersion(
             version_id=version.id,
@@ -637,6 +707,14 @@ def _publish_chunks(
             raise RuntimeError("acquired FDA version no longer belongs to its document")
 
         if version.chunk_status == "complete" and _version_indexed_in_session(session, version):
+            if version.resolution_status == ResolutionStatus.PENDING.value:
+                # Same pre-0025-writer self-heal as _record_acquired_version,
+                # reachable when a concurrent worker completed this version
+                # between acquisition and publish.
+                version.resolution_status = ResolutionStatus.INDEXED.value
+                version.resolved_at = version.chunked_at or datetime.now(UTC)
+                version.resolution_error = None
+                session.add(version)
             rows = session.connection().execute(
                 sa_text(
                     "SELECT id, text FROM chunk WHERE fda_version_id = :version_id ORDER BY id"
@@ -669,6 +747,11 @@ def _publish_chunks(
         version.chunk_status = "complete"
         version.chunked_at = datetime.now(UTC)
         version.chunk_error = None
+        version.is_current = True
+        version.resolution_status = ResolutionStatus.INDEXED.value
+        version.resolved_at = version.chunked_at
+        version.resolution_error = None
+        version.resolution_evidence_json = {}
         session.add(version)
         for profile_id in _target_embedding_profile_ids():
             upsert_embedding_state(
@@ -734,6 +817,179 @@ def _embed_existing_version(version_id: int) -> None:
     )
 
 
+def _begin_resolution_attempt(version_id: int, *, manifest_sha256: str) -> None:
+    """Durably count one exact-manifest parser invocation before it begins."""
+
+    with session_scope() as session:
+        version = session.get(FdaDocumentVersion, version_id)
+        if version is None:
+            raise RuntimeError("FDA version vanished before its resolution attempt")
+        evidence = version.resolution_evidence_json or {}
+        prior_manifest = evidence.get("manifest_sha256") or evidence.get("attempt_manifest_sha256")
+        if version.resolution_attempts and prior_manifest != manifest_sha256:
+            version.resolution_attempts = 0
+        # A retry reopens a terminal row while work is in flight. Acceptance
+        # must never count stale terminal evidence from another attempt or
+        # manifest as a current resolution.
+        version.resolution_status = ResolutionStatus.PENDING.value
+        version.resolved_at = None
+        version.resolution_error = None
+        version.resolution_attempts += 1
+        version.last_resolution_attempt_at = datetime.now(UTC)
+        version.resolution_evidence_json = {
+            "schema_version": 1,
+            "attempt_manifest_sha256": manifest_sha256,
+            "attempts": version.resolution_attempts,
+        }
+        session.add(version)
+
+
+def _record_missing_source_attempt(
+    artifact: CorpusArtifact,
+    *,
+    manifest_sha256: str,
+    exc: SourceMissingError,
+) -> bool:
+    """Record an exact 404 and terminalize only after the durable retry budget."""
+
+    now = datetime.now(UTC)
+    error = f"{type(exc).__name__}: {exc}"[:2_000]
+    with session_scope() as session:
+        _lock_document(session, artifact.canonical_id)
+        document = session.exec(
+            select(FdaDocument).where(FdaDocument.canonical_id == artifact.canonical_id)
+        ).first()
+        if document is None:
+            document = FdaDocument(
+                canonical_id=artifact.canonical_id,
+                source_family=artifact.source_family.value,
+                document_type=artifact.document_type.value,
+                title=artifact.title,
+                source_url=artifact.source_url,
+            )
+            session.add(document)
+            session.flush()
+        if document.id is None:
+            raise RuntimeError("fda_document insert did not produce an id")
+
+        content_hash = missing_observation_content_hash(artifact)
+        fingerprint = missing_observation_fingerprint()
+        version = session.exec(
+            select(FdaDocumentVersion).where(
+                FdaDocumentVersion.fda_document_id == document.id,
+                FdaDocumentVersion.content_hash == content_hash,
+                FdaDocumentVersion.processing_fingerprint == fingerprint,
+            )
+        ).first()
+        if version is None:
+            version = FdaDocumentVersion(
+                fda_document_id=document.id,
+                content_hash=content_hash,
+                content_hash_kind=TERMINAL_OBSERVATION_HASH_KIND,
+                processing_fingerprint=fingerprint,
+                source_updated_at=artifact.source_updated_at,
+                fetched_at=now,
+                acquired_at=now,
+                mime_type=TERMINAL_OBSERVATION_MIME_TYPE,
+                byte_size=0,
+                page_count=0,
+                chunk_count=0,
+                artifact_uri=None,
+                artifact_retained=False,
+                chunk_status="failed",
+                chunk_error=error,
+                resolution_status=ResolutionStatus.PENDING.value,
+                metadata_json={"observation_schema_version": 1},
+            )
+            session.add(version)
+            session.flush()
+        elif version.content_hash_kind != TERMINAL_OBSERVATION_HASH_KIND:
+            raise RuntimeError("missing-source observation collided with captured FDA bytes")
+        if version.id is None:
+            raise RuntimeError("FDA source observation did not produce a version id")
+
+        _make_version_current(session, document.id, version.id)
+        _apply_document_fields(document, artifact, artifact.source_url)
+        prior_evidence = version.resolution_evidence_json or {}
+        if version.resolution_attempts and prior_evidence.get("manifest_sha256") != manifest_sha256:
+            version.resolution_attempts = 0
+        version.resolution_attempts += 1
+        version.last_resolution_attempt_at = now
+        version.chunk_status = "failed"
+        version.chunk_count = 0
+        version.chunked_at = None
+        version.chunk_error = error
+        version.resolution_error = error
+        version.resolution_evidence_json = {
+            "schema_version": 1,
+            "canonical_id": artifact.canonical_id,
+            "source_url": artifact.source_url,
+            "observed_url": str(exc.response.url),
+            "http_status": 404,
+            "manifest_sha256": manifest_sha256,
+            "attempts": version.resolution_attempts,
+        }
+        terminal = version.resolution_attempts >= get_settings().fda_corpus_terminal_attempts
+        if terminal:
+            delete_chunks_for_fda_document(document.id, conn=session.connection())
+            version.resolution_status = ResolutionStatus.MISSING_AT_SOURCE.value
+            version.resolved_at = now
+        else:
+            version.resolution_status = ResolutionStatus.PENDING.value
+            version.resolved_at = None
+        session.add(document)
+        session.add(version)
+        return terminal
+
+
+def _mark_unparseable_failure(
+    version_id: int,
+    artifact: CorpusArtifact,
+    *,
+    manifest_sha256: str,
+    exc: PdfParseError,
+) -> bool:
+    """Persist parser evidence and return whether this version is now terminal."""
+
+    now = datetime.now(UTC)
+    error = f"{type(exc).__name__}: {exc}"[:2_000]
+    with session_scope() as session:
+        version = session.get(FdaDocumentVersion, version_id)
+        if version is None:
+            raise RuntimeError("FDA version vanished while recording parser failure")
+        document = session.get(FdaDocument, version.fda_document_id)
+        if document is None or document.id is None:
+            raise RuntimeError("FDA document vanished while recording parser failure")
+
+        version.chunk_status = "failed"
+        version.chunk_count = 0
+        version.chunked_at = None
+        version.chunk_error = error
+        version.resolution_error = error
+        version.resolution_evidence_json = {
+            "schema_version": 1,
+            "canonical_id": artifact.canonical_id,
+            "source_url": artifact.source_url,
+            "manifest_sha256": manifest_sha256,
+            "error_type": type(exc).__name__,
+            "attempts": version.resolution_attempts,
+        }
+        terminal = (
+            version.artifact_retained
+            and bool(version.artifact_uri)
+            and version.resolution_attempts >= get_settings().fda_corpus_terminal_attempts
+        )
+        if terminal:
+            delete_chunks_for_fda_document(document.id, conn=session.connection())
+            version.resolution_status = ResolutionStatus.UNPARSEABLE.value
+            version.resolved_at = now
+        else:
+            version.resolution_status = ResolutionStatus.PENDING.value
+            version.resolved_at = None
+        session.add(version)
+        return terminal
+
+
 def _mark_chunk_failed(version_id: int, exc: Exception) -> None:
     with session_scope() as session:
         version = session.get(FdaDocumentVersion, version_id)
@@ -741,6 +997,10 @@ def _mark_chunk_failed(version_id: int, exc: Exception) -> None:
             return
         version.chunk_status = "failed"
         version.chunk_error = f"{type(exc).__name__}: {exc}"[:2_000]
+        if version.resolution_status not in TERMINAL_RESOLUTION_STATUSES:
+            version.resolution_status = ResolutionStatus.PENDING.value
+            version.resolved_at = None
+            version.resolution_error = version.chunk_error
         session.add(version)
 
 
@@ -834,13 +1094,67 @@ def _version_ready_in_session(session: Session, version: FdaDocumentVersion) -> 
     return embedding_complete_in_session(session, version, profile_id)
 
 
-def _touch_document(artifact: CorpusArtifact, source_url: str) -> None:
+def _already_complete(
+    artifact: CorpusArtifact,
+    *,
+    processing_fingerprint: str,
+    defer_embeddings: bool,
+) -> bool:
+    """Whether a paced FDA fetch for this artifact cannot produce new work.
+
+    Mirrors the post-fetch ``acquired.indexed and (defer_embeddings or
+    acquired.embedding_ready)`` unchanged check, evaluated from the lifecycle
+    tables alone so an already-complete document costs one read transaction
+    instead of a politeness-paced download (~5s each on every driver resume).
+
+    Only versions the resolution ledger already credits as INDEXED may skip:
+    a chunk-complete row still marked pending (written by pre-0025 worker
+    code) must take the fetch path so _record_acquired_version's self-heal
+    can credit it, or its shard's readiness would never recover.
+
+    Content drift is deliberately not detected here: the backfill processes a
+    frozen manifest snapshot, and reconciling live-URL drift is the watch
+    pipeline's job. Any uncertainty (missing document, other fingerprint,
+    partial chunks, missing embeddings) returns False and takes the fetch
+    path unchanged.
+    """
+    if artifact.inline_text is not None:
+        # Inline artifacts carry their content in the manifest: staging them
+        # costs no FDA request, and their content hash is how revisions are
+        # detected, so skipping would trade correctness for nothing.
+        return False
+    with session_scope() as session:
+        document = session.exec(
+            select(FdaDocument).where(FdaDocument.canonical_id == artifact.canonical_id)
+        ).first()
+        if document is None or document.id is None:
+            return False
+        versions = session.exec(
+            select(FdaDocumentVersion).where(
+                FdaDocumentVersion.fda_document_id == document.id,
+                FdaDocumentVersion.processing_fingerprint == processing_fingerprint,
+                FdaDocumentVersion.chunk_status == "complete",
+                FdaDocumentVersion.resolution_status == ResolutionStatus.INDEXED.value,
+            )
+        ).all()
+        for version in versions:
+            if not _version_indexed_in_session(session, version):
+                continue
+            if defer_embeddings or _version_ready_in_session(session, version):
+                return True
+        return False
+
+
+def _touch_document(artifact: CorpusArtifact, *, source_url: str | None) -> None:
+    """Refresh manifest-sourced document fields; ``source_url=None`` keeps the
+    redirect-resolved URL the last real fetch established (the skip path has no
+    payload, and the manifest URL may be the pre-redirect form)."""
     with session_scope() as session:
         _lock_document(session, artifact.canonical_id)
         doc = session.exec(
             select(FdaDocument).where(FdaDocument.canonical_id == artifact.canonical_id)
         ).one()
-        _apply_document_fields(doc, artifact, source_url)
+        _apply_document_fields(doc, artifact, doc.source_url if source_url is None else source_url)
         session.add(doc)
 
 
@@ -864,6 +1178,39 @@ def _apply_document_fields(
     doc.is_active = True
     doc.metadata_json = dict(artifact.metadata)
     doc.last_seen_at = datetime.now(UTC)
+
+
+def _make_version_current(session: Session, document_id: int, version_id: int) -> None:
+    """Select one exact current lifecycle row under the document advisory lock."""
+
+    # Flush first so a newly acquired target row exists before the direct SQL
+    # updates.  Keep the target out of the clearing update: on a retry the ORM
+    # identity map may still hold ``is_current=True`` while direct SQL has
+    # changed the database value, in which case assigning True again would not
+    # be detected as a dirty attribute and the current marker would be lost.
+    session.flush()
+    session.connection().execute(
+        sa_text(
+            "UPDATE fda_document_version SET is_current = false "
+            "WHERE fda_document_id = :document_id "
+            "AND id <> :version_id AND is_current"
+        ),
+        {"document_id": document_id, "version_id": version_id},
+    )
+    session.connection().execute(
+        sa_text(
+            "UPDATE fda_document_version SET is_current = true "
+            "WHERE fda_document_id = :document_id "
+            "AND id = :version_id AND NOT is_current"
+        ),
+        {"document_id": document_id, "version_id": version_id},
+    )
+    version = session.get(FdaDocumentVersion, version_id)
+    if version is None:
+        raise RuntimeError("FDA version vanished while selecting the current version")
+    session.expire(version, ["is_current"])
+    if not version.is_current:
+        raise RuntimeError("FDA version could not be selected as current")
 
 
 def _lock_document(session: Session, canonical_id: str) -> None:
@@ -925,6 +1272,7 @@ def _copy_stats(run: FdaCorpusRun, stats: CorpusSyncStats) -> None:
     run.added_documents = stats.added_documents
     run.revised_documents = stats.revised_documents
     run.unchanged_documents = stats.unchanged_documents
+    run.terminal_documents = stats.terminal_documents
     run.error_documents = stats.error_documents
     run.chunks_written = stats.chunks_written
     complete_universe = bool((run.stats_json or {}).get("complete_universe"))

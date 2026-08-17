@@ -18,6 +18,9 @@ class CorpusCoverage:
     embedding_profile: str
     documents: int
     versions: int
+    terminal_documents: int
+    missing_at_source_documents: int
+    unparseable_documents: int
     chunks: int
     embedded_chunks: int
     pending_chunks: int
@@ -51,6 +54,21 @@ def authoritative_corpus_coverage() -> CorpusCoverage:
         versions = int(
             conn.execute(sa_text("SELECT count(*) FROM fda_document_version")).scalar() or 0
         )
+        terminal_rows = {
+            str(row[0]): int(row[1])
+            for row in conn.execute(
+                sa_text(
+                    "SELECT v.resolution_status, count(*) "
+                    "FROM fda_document_version v "
+                    "JOIN fda_document d ON d.id = v.fda_document_id "
+                    "WHERE d.is_active AND v.is_current AND v.resolution_status IN "
+                    "('missing_at_source', 'unparseable') GROUP BY v.resolution_status"
+                )
+            )
+        }
+        missing_at_source = terminal_rows.get("missing_at_source", 0)
+        unparseable = terminal_rows.get("unparseable", 0)
+        terminal_documents = missing_at_source + unparseable
         chunks = int(
             conn.execute(
                 sa_text("SELECT count(*) FROM chunk WHERE fda_document_id IS NOT NULL")
@@ -91,7 +109,8 @@ def authoritative_corpus_coverage() -> CorpusCoverage:
         run_columns = (
             "id, status, manifest_sha256, started_at, completed_at, "
             "expected_documents, discovered_documents, added_documents, "
-            "revised_documents, unchanged_documents, error_documents, chunks_written, "
+            "revised_documents, unchanged_documents, terminal_documents, "
+            "error_documents, chunks_written, "
             "stats_json"
         )
         latest = (
@@ -123,6 +142,7 @@ def authoritative_corpus_coverage() -> CorpusCoverage:
     activation_blockers = _activation_blockers(
         complete=complete,
         documents=documents,
+        terminal_documents=terminal_documents,
         by_family=by_family,
         complete_run=dict(latest_complete) if latest_complete is not None else None,
     )
@@ -131,6 +151,9 @@ def authoritative_corpus_coverage() -> CorpusCoverage:
         embedding_profile=profile_id,
         documents=documents,
         versions=versions,
+        terminal_documents=terminal_documents,
+        missing_at_source_documents=missing_at_source,
+        unparseable_documents=unparseable,
         chunks=chunks,
         embedded_chunks=embedded,
         pending_chunks=pending,
@@ -160,6 +183,7 @@ def _activation_blockers(
     *,
     complete: bool,
     documents: int,
+    terminal_documents: int,
     by_family: dict[str, dict[str, int]],
     complete_run: dict[str, Any] | None,
 ) -> list[str]:
@@ -180,15 +204,25 @@ def _activation_blockers(
     discovered = int(complete_run.get("discovered_documents") or 0)
     processed = sum(
         int(complete_run.get(key) or 0)
-        for key in ("added_documents", "revised_documents", "unchanged_documents")
+        for key in (
+            "added_documents",
+            "revised_documents",
+            "unchanged_documents",
+            "terminal_documents",
+        )
     )
     if expected <= 0 or expected != discovered or processed != expected:
         blockers.append("latest complete-universe run did not process its full manifest")
     if int(complete_run.get("error_documents") or 0) != 0:
         blockers.append("latest complete-universe run recorded document errors")
-    if documents != discovered:
+    recorded_terminal = int(complete_run.get("terminal_documents") or 0)
+    if terminal_documents != recorded_terminal:
+        blockers.append("current terminal-outcome ledger does not match the accepted complete run")
+    expected_searchable = discovered - recorded_terminal
+    if documents != expected_searchable:
         blockers.append(
-            f"searchable document count {documents} does not match full manifest {discovered}"
+            f"searchable document count {documents} does not match resolved manifest "
+            f"expectation {expected_searchable} ({recorded_terminal} terminal)"
         )
     return blockers
 

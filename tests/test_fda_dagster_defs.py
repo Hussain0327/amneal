@@ -142,7 +142,14 @@ def test_chunk_shard_fetch_concurrency_comes_from_settings(
         return types.SimpleNamespace(succeeded=True, run_id=1, workers=kwargs["workers"])
 
     readiness = types.SimpleNamespace(
-        chunked_documents=2, expected_documents=2, chunks=5, issues=[]
+        chunked_documents=2,
+        terminal_documents=0,
+        missing_at_source_documents=0,
+        unparseable_documents=0,
+        resolved_documents=2,
+        expected_documents=2,
+        chunks=5,
+        issues=[],
     )
     monkeypatch.setattr(defs_mod, "init_db", lambda **_: None)
     monkeypatch.setattr(

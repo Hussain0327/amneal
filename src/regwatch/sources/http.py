@@ -29,6 +29,15 @@ class SourceTooLargeError(RuntimeError):
     """An FDA response exceeded its source-specific byte budget."""
 
 
+class SourceMissingError(httpx.HTTPStatusError):
+    """An exact authoritative source URL returned HTTP 404.
+
+    This remains an ``HTTPStatusError`` for transport callers, but gives the
+    corpus lifecycle one narrow, auditable signal it may terminalize after its
+    durable retry budget. Other 4xx responses remain ordinary hard failures.
+    """
+
+
 @dataclass(frozen=True)
 class DownloadedFile:
     path: Path
@@ -212,6 +221,12 @@ def _stream_authoritative_to(
         except (httpx.TransportError, httpx.HTTPStatusError) as exc:
             last_error = exc
             status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            if status == 404 and isinstance(exc, httpx.HTTPStatusError):
+                raise SourceMissingError(
+                    str(exc),
+                    request=exc.request,
+                    response=exc.response,
+                ) from exc
             if attempt + 1 >= attempts or (status is not None and status not in _RETRYABLE_STATUS):
                 raise
             time.sleep(0.25 * (2**attempt))

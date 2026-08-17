@@ -147,22 +147,22 @@ The canonical system design is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 ## Status
 
 regwatch runs as a **limited internal pilot**, not a generally available product.
-The deployed-system and corpus counters below were checked on 2026-08-13.
+The deployed-system counters below were checked on 2026-08-13; the corpus
+manifest facts were updated from the 2026-08-17 operator handoff.
 
 - **Deployed.** The API runs on Fly.io (app `amneal`, release v135). The frontend
   runs on Vercel. Postgres and pgvector are on **Databricks Lakebase**, in the
   company's own Databricks tenant. Rows, vectors, and the audit log all live in
   that one database. The currently serving legacy PSG corpus is 5,494 chunks.
-- **The replacement authoritative FDA corpus pipeline is implemented but not
-  activated.** A complete read-only discovery found **140,339 source records**:
-  99,190 Drugs@FDA, 10,156 action-package, 1,795 PSG, 5 FDA BE-guidance, and
-  29,193 Orange Book records. Those are documents, not chunks or embeddings.
-  A first production canary indexed 18 / 21 records into 347 chunks and stopped
-  on three parse failures. This follow-up adds streamed temporary files,
-  durable object storage, sandboxed OCR, independent chunk/vector lifecycle,
-  and 512-shard Dagster orchestration. The serving namespace stays on `legacy`
-  until the canary reaches 21 / 21 and a successful full run reaches 100%
-  profile coverage plus the activation gate. See
+- **The replacement authoritative FDA corpus is building but not activated.**
+  The frozen production manifest contains **140,438 source records**: 99,198
+  Drugs@FDA, 10,156 action-package, 1,795 PSG, 5 FDA BE-guidance, and 29,284
+  Orange Book records. Those are source records, not chunks or embeddings. The
+  corrected canary passed 21 / 21 and produced 499 chunks. The full backfill is
+  running document-at-a-time while the serving namespace remains `legacy`.
+  Acceptance requires every frozen-manifest record to resolve to either a
+  searchable indexed version or a narrowly evidence-backed terminal outcome;
+  every searchable chunk must then have the selected-profile vector. See
   [`docs/AUTHORITATIVE_FDA_CORPUS.md`](docs/AUTHORITATIVE_FDA_CORPUS.md).
 - **Both model roles run on Databricks Model Serving**, in the same tenant.
   Generation is `gpt-oss-120b` (served id `gpt-oss-120b-080525`) behind the
@@ -478,7 +478,7 @@ points:
 
 - [Architecture](docs/ARCHITECTURE.md): canonical system design.
 - [Authoritative FDA corpus](docs/AUTHORITATIVE_FDA_CORPUS.md): exact source
-  boundary, 140,339-record snapshot, counts, checksums, runbook, activation, and
+  boundary, 140,438-record snapshot, counts, checksums, runbook, activation, and
   rollback.
 - [Non-technical guide](docs/NON_TECH_GUIDE.md): plain English for business and
   regulatory readers.

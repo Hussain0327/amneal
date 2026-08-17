@@ -11,6 +11,11 @@ from config.settings import get_settings
 from sqlalchemy import text as sa_text
 
 from regwatch.corpus.manifest import CorpusManifest
+from regwatch.corpus.resolution import (
+    TERMINAL_RESOLUTION_STATUSES,
+    ResolutionStatus,
+    terminal_evidence_issues,
+)
 from regwatch.corpus.sharding import FDA_CORPUS_SHARD_COUNT, corpus_shard_id
 from regwatch.corpus.sync import reconcile_active_manifest
 from regwatch.sources.policy import allowed_source_families
@@ -23,17 +28,24 @@ class ShardReadiness:
     shard_id: int
     expected_documents: int
     chunked_documents: int
+    terminal_documents: int
+    missing_at_source_documents: int
+    unparseable_documents: int
     embedded_documents: int
     chunks: int
     embedded_chunks: int
     issues: tuple[str, ...]
 
     @property
+    def resolved_documents(self) -> int:
+        return self.chunked_documents + self.terminal_documents
+
+    @property
     def ready(self) -> bool:
         return (
             not self.issues
-            and self.chunked_documents == self.expected_documents
-            and self.embedded_documents == self.expected_documents
+            and self.resolved_documents == self.expected_documents
+            and self.embedded_documents == self.chunked_documents
         )
 
 
@@ -43,6 +55,9 @@ class ManifestReadiness:
     profile_id: str
     expected_documents: int
     chunked_documents: int
+    terminal_documents: int
+    missing_at_source_documents: int
+    unparseable_documents: int
     embedded_documents: int
     chunks: int
     embedded_chunks: int
@@ -107,6 +122,11 @@ def manifest_readiness(
         profile_id=selected,
         expected_documents=len(manifest.artifacts),
         chunked_documents=sum(result.chunked_documents for result in shard_results),
+        terminal_documents=sum(result.terminal_documents for result in shard_results),
+        missing_at_source_documents=sum(
+            result.missing_at_source_documents for result in shard_results
+        ),
+        unparseable_documents=sum(result.unparseable_documents for result in shard_results),
         embedded_documents=sum(result.embedded_documents for result in shard_results),
         chunks=sum(result.chunks for result in shard_results),
         embedded_chunks=sum(result.embedded_chunks for result in shard_results),
@@ -138,7 +158,8 @@ def finalize_orchestrated_manifest(
             session.connection()
             .execute(
                 sa_text(
-                    "SELECT id FROM fda_corpus_run WHERE manifest_sha256 = :manifest_sha256 "
+                    "SELECT id, unchanged_documents, terminal_documents, stats_json "
+                    "FROM fda_corpus_run WHERE manifest_sha256 = :manifest_sha256 "
                     "AND status = 'succeeded' "
                     "AND stats_json->>'complete_universe' = 'true' "
                     "AND stats_json->>'orchestrated' = 'true' "
@@ -146,10 +167,20 @@ def finalize_orchestrated_manifest(
                 ),
                 {"manifest_sha256": manifest.sha256},
             )
-            .scalar()
+            .mappings()
+            .first()
         )
     if existing is not None and retired == 0:
-        return str(existing), readiness
+        existing_stats = existing["stats_json"] or {}
+        same_resolution = (
+            int(existing["unchanged_documents"] or 0) == readiness.chunked_documents
+            and int(existing["terminal_documents"] or 0) == readiness.terminal_documents
+            and str(existing_stats.get("embedding_profile") or "") == readiness.profile_id
+            and int(existing_stats.get("chunks") or 0) == readiness.chunks
+            and int(existing_stats.get("embedded_chunks") or 0) == readiness.embedded_chunks
+        )
+        if same_resolution:
+            return str(existing["id"]), readiness
 
     run_id = str(uuid.uuid4())
     now = datetime.now(UTC)
@@ -164,15 +195,26 @@ def finalize_orchestrated_manifest(
                 completed_at=now,
                 expected_documents=len(manifest.artifacts),
                 discovered_documents=len(manifest.artifacts),
-                unchanged_documents=len(manifest.artifacts),
+                unchanged_documents=readiness.chunked_documents,
+                terminal_documents=readiness.terminal_documents,
                 chunks_written=0,
                 stats_json={
                     "errors": [],
                     "complete_universe": True,
                     "orchestrated": True,
                     "embedding_profile": readiness.profile_id,
+                    "indexed_documents": readiness.chunked_documents,
+                    "chunks": readiness.chunks,
+                    "embedded_chunks": readiness.embedded_chunks,
                     "retired_documents": retired,
                     "shards": FDA_CORPUS_SHARD_COUNT,
+                    "terminal_documents": readiness.terminal_documents,
+                    "terminal_by_status": {
+                        ResolutionStatus.MISSING_AT_SOURCE.value: (
+                            readiness.missing_at_source_documents
+                        ),
+                        ResolutionStatus.UNPARSEABLE.value: (readiness.unparseable_documents),
+                    },
                 },
             )
         )
@@ -188,13 +230,26 @@ def _shard_readiness_with_connection(
 ) -> ShardReadiness:
     if not 0 <= shard_id < FDA_CORPUS_SHARD_COUNT:
         raise ValueError("shard_id must be between 0 and 511")
-    canonical_ids = [
-        artifact.canonical_id
+    selected_artifacts = [
+        artifact
         for artifact in manifest.artifacts
         if corpus_shard_id(artifact.canonical_id) == shard_id
     ]
+    canonical_ids = [artifact.canonical_id for artifact in selected_artifacts]
+    artifact_by_canonical = {artifact.canonical_id: artifact for artifact in selected_artifacts}
     if not canonical_ids:
-        return ShardReadiness(shard_id, 0, 0, 0, 0, 0, ())
+        return ShardReadiness(
+            shard_id=shard_id,
+            expected_documents=0,
+            chunked_documents=0,
+            terminal_documents=0,
+            missing_at_source_documents=0,
+            unparseable_documents=0,
+            embedded_documents=0,
+            chunks=0,
+            embedded_chunks=0,
+            issues=(),
+        )
 
     if profile_id == "legacy":
         embedded_expression = "count(c.embedding)"
@@ -209,13 +264,17 @@ def _shard_readiness_with_connection(
     rows = connection.execute(
         sa_text(
             "SELECT d.canonical_id, d.shard_id, v.id AS version_id, "  # noqa: S608
-            "v.chunk_status, v.chunk_count, count(c.id) AS chunks, "
+            "v.is_current, v.content_hash_kind, v.chunk_status, v.chunk_count, "
+            "v.resolution_status, v.resolution_attempts, v.resolved_at, "
+            "v.resolution_error, v.resolution_evidence_json, "
+            "v.artifact_retained, v.artifact_uri, count(c.id) AS chunks, "
             f"{embedded_expression} AS embedded "
-            "FROM fda_document d JOIN chunk c ON c.fda_document_id = d.id "
-            "JOIN fda_document_version v ON v.id = c.fda_version_id "
+            "FROM fda_document d LEFT JOIN fda_document_version v "
+            "ON v.fda_document_id = d.id AND v.is_current "
+            "LEFT JOIN chunk c ON c.fda_version_id = v.id "
             f"{profile_join}"
             "WHERE d.canonical_id = ANY(CAST(:canonical_ids AS text[])) "
-            "GROUP BY d.canonical_id, d.shard_id, v.id, v.chunk_status, v.chunk_count "
+            "GROUP BY d.canonical_id, d.shard_id, v.id "
             "ORDER BY d.canonical_id"
         ),
         parameters,
@@ -226,6 +285,9 @@ def _shard_readiness_with_connection(
 
     issues: list[str] = []
     chunked_documents = 0
+    terminal_documents = 0
+    missing_at_source_documents = 0
+    unparseable_documents = 0
     embedded_documents = 0
     chunks = 0
     embedded_chunks = 0
@@ -237,13 +299,45 @@ def _shard_readiness_with_connection(
             )
             continue
         row = matches[0]
+        if row["version_id"] is None or not bool(row["is_current"]):
+            issues.append(f"shard {shard_id:03d} {canonical_id}: current version missing")
+            continue
         actual_chunks = int(row["chunks"])
         actual_embedded = int(row["embedded"])
         expected_chunks = int(row["chunk_count"])
         chunks += actual_chunks
         embedded_chunks += actual_embedded
+        resolution_status = str(row["resolution_status"] or "")
+        shard_matches = row["shard_id"] is not None and int(row["shard_id"]) == shard_id
+        if resolution_status in TERMINAL_RESOLUTION_STATUSES:
+            terminal_issues = list(
+                terminal_evidence_issues(
+                    row,
+                    artifact_by_canonical[canonical_id],
+                    manifest_sha256=manifest.sha256,
+                    minimum_attempts=get_settings().fda_corpus_terminal_attempts,
+                )
+            )
+            if not shard_matches:
+                terminal_issues.append("terminal document has incorrect shard ownership")
+            if row["chunk_status"] != "failed" or expected_chunks != 0:
+                terminal_issues.append("terminal document has an invalid chunk lifecycle")
+            if actual_chunks != 0 or actual_embedded != 0:
+                terminal_issues.append("terminal document still has searchable rows or vectors")
+            if terminal_issues:
+                issues.extend(
+                    f"shard {shard_id:03d} {canonical_id}: {issue}" for issue in terminal_issues
+                )
+                continue
+            terminal_documents += 1
+            if resolution_status == ResolutionStatus.MISSING_AT_SOURCE.value:
+                missing_at_source_documents += 1
+            else:
+                unparseable_documents += 1
+            continue
         chunk_complete = (
-            int(row["shard_id"]) == shard_id
+            shard_matches
+            and resolution_status == ResolutionStatus.INDEXED.value
             and row["chunk_status"] == "complete"
             and expected_chunks > 0
             and actual_chunks == expected_chunks
@@ -260,6 +354,9 @@ def _shard_readiness_with_connection(
         shard_id=shard_id,
         expected_documents=len(canonical_ids),
         chunked_documents=chunked_documents,
+        terminal_documents=terminal_documents,
+        missing_at_source_documents=missing_at_source_documents,
+        unparseable_documents=unparseable_documents,
         embedded_documents=embedded_documents,
         chunks=chunks,
         embedded_chunks=embedded_chunks,

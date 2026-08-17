@@ -3,8 +3,8 @@
 One list of everything that is NOT done yet. If another doc disagrees with this
 file or with [`PROD_READINESS.md`](PROD_READINESS.md), these two win.
 
-Last updated: 2026-08-13 for the authoritative FDA corpus implementation. Live
-app, database and Fly values were last checked 2026-08-11.
+Last updated: 2026-08-17 for the authoritative FDA corpus rollout. Unrelated
+live app, database and Fly values were last checked 2026-08-11.
 
 Labels: **BLOCKER** stops external exposure. **SHOULD-HAVE** before launch.
 **DECISION** needs a person to choose. **LATER** is optional.
@@ -49,25 +49,25 @@ sections of [`PROD_READINESS.md`](PROD_READINESS.md).
 The code portion now includes the exact five-family policy, official snapshot
 adapters, bounded document streaming, durable content-addressed artifacts,
 sandboxed OCR, separately checkpointed chunk/embedding lifecycle, an exact
-manifest, 512 deterministic Dagster shards, blocking coverage checks, and a
-fail-closed reversible cutover. The full read-only discovery found **140,339
-source records** on 2026-08-13.
+manifest, 512 deterministic Dagster shards, blocking coverage checks, an
+evidence-backed terminal outcome ledger, and a fail-closed reversible cutover.
+The frozen production manifest contains **140,438 source records**.
 
-Migration 0023 is deployed. The first production canary indexed 18 / 21 records
-and 347 chunks, then stopped on three parse failures; all 347 chunks are
-embedded on the active profile (5,841 / 5,841 verified 2026-08-14). The
-follow-up migration 0024 and worker image
-must be released before ingestion resumes. Then rerun the OCR-enabled canary to
-21 / 21, freeze the exact full manifest, run chunk and embedding partition
-backfills, pass 512-shard acceptance plus retrieval/citation evaluation, verify
-`activation_ready=true`, smoke the cutover, and rehearse rollback.
+Migrations 0023 and 0024 plus the worker are deployed. The corrected production
+canary passed 21 / 21 and produced 499 chunks with complete active-profile
+embeddings. The full 512-shard backfill is operator-owned and retrieval remains
+on `legacy`. Release migration 0025 without disturbing that sweep, resolve its
+retry-exhausted tail into indexed versions or validated terminal outcomes, pass
+exact-manifest acceptance plus retrieval/citation evaluation, verify
+`activation_ready=true`, smoke the cutover, and rehearse rollback. Never freeze
+a second manifest beneath the running backfill.
 
 - Where: `src/regwatch/corpus/`, `src/regwatch/sources/policy.py`, migrations
-  0023–0024, `Dockerfile.corpus-worker`, and the corpus runbook.
-- Done when: the target environment processes the full current manifest with
-  zero document errors, searchable document parity, zero policy violations,
-  100% selected-profile chunk coverage, a passing eval, and tested cutover plus
-  rollback.
+  0023–0025, `Dockerfile.corpus-worker`, and the corpus runbook.
+- Done when: the target environment resolves every frozen-manifest record as
+  indexed or evidence-backed terminal, has zero unresolved document errors and
+  policy violations, reaches 100% selected-profile coverage for indexed chunks,
+  passes evaluation, and rehearses cutover plus rollback.
 
 ### Provision and validate the Watch embedding profile  (SHOULD-HAVE)
 

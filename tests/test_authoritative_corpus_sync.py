@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Barrier
@@ -21,9 +22,11 @@ from regwatch.corpus.embeddings import (
     write_corpus_embeddings,
 )
 from regwatch.corpus.manifest import CorpusArtifact, CorpusManifest
+from regwatch.corpus.resolution import terminal_evidence_issues
 from regwatch.corpus.sharding import corpus_shard_id
 from regwatch.corpus.status import authoritative_corpus_coverage
 from regwatch.corpus.sync import ArtifactPayload, parse_artifact, sync_manifest
+from regwatch.ingest.pdf_parser import ParsedPdf, PdfParseError
 from regwatch.process.embedder import embed_documents, get_embedding_provider
 from regwatch.sources.policy import FdaDocumentType, FdaSourceFamily
 from regwatch.store.db import get_engine
@@ -66,6 +69,19 @@ def _inline_artifact(
         active_ingredient="ALBUTEROL SULFATE",
         normalized_name="albuterol sulfate",
         inline_text=text_value,
+    )
+
+
+def _network_artifact(canonical_id: str, source_url: str) -> CorpusArtifact:
+    return CorpusArtifact(
+        canonical_id=canonical_id,
+        source_family=FdaSourceFamily.ACTION_PACKAGE,
+        document_type=FdaDocumentType.CLINICAL_REVIEW,
+        title=f"Test network artifact {canonical_id}",
+        source_url=source_url,
+        application_number="NDA020503",
+        active_ingredient="ALBUTEROL SULFATE",
+        normalized_name="albuterol sulfate",
     )
 
 
@@ -216,6 +232,184 @@ def test_parse_failure_retains_raw_artifact_and_unlinks_staging(
     assert str(version[2]).startswith("file://")
 
 
+def test_missing_source_becomes_terminal_only_after_retry_exhaustion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import config.settings as settings_module
+
+    monkeypatch.setenv("FDA_CORPUS_TERMINAL_ATTEMPTS", "2")
+    settings_module.get_settings.cache_clear()
+    artifact = _network_artifact(
+        "drugs-at-fda:application-doc:missing",
+        "https://www.accessdata.fda.gov/drugsatfda_docs/nda/2026/missing.pdf",
+    )
+    stale_manifest = _manifest(artifact)
+    manifest = CorpusManifest(
+        artifacts=(artifact,),
+        source_snapshots={"fixture": "sha256:new-manifest"},
+        complete_universe=False,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, request=request)
+
+    try:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            stale = sync_manifest(stale_manifest, defer_embeddings=True, client=client)
+            first = sync_manifest(manifest, defer_embeddings=True, client=client)
+            second = sync_manifest(manifest, defer_embeddings=True, client=client)
+
+        assert stale.error_documents == 1
+        assert stale.terminal_documents == 0
+        assert first.error_documents == 1
+        assert first.terminal_documents == 0
+        assert first.succeeded is False
+        assert second.error_documents == 0
+        assert second.terminal_documents == 1
+        assert second.succeeded is True
+
+        readiness = shard_readiness(
+            manifest,
+            corpus_shard_id(artifact.canonical_id),
+            profile_id="legacy",
+        )
+        assert readiness.ready is True
+        assert readiness.chunked_documents == 0
+        assert readiness.terminal_documents == 1
+        assert readiness.missing_at_source_documents == 1
+
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT is_current, content_hash_kind, chunk_status, "
+                    "resolution_status, resolution_attempts, "
+                    "resolution_evidence_json->>'http_status' "
+                    "FROM fda_document_version"
+                )
+            ).one()
+        assert tuple(row) == (
+            True,
+            "terminal_observation",
+            "failed",
+            "missing_at_source",
+            2,
+            "404",
+        )
+
+        with get_engine().begin() as conn:
+            conn.execute(
+                text("UPDATE fda_document_version SET resolution_evidence_json = '{}'::jsonb")
+            )
+        invalid = shard_readiness(
+            manifest,
+            corpus_shard_id(artifact.canonical_id),
+            profile_id="legacy",
+        )
+        assert invalid.ready is False
+        assert any("not bound to this exact manifest" in issue for issue in invalid.issues)
+    finally:
+        settings_module.get_settings.cache_clear()
+
+
+def test_unparseable_terminal_requires_retained_bytes_and_can_recover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import config.settings as settings_module
+
+    monkeypatch.setenv("FDA_CORPUS_TERMINAL_ATTEMPTS", "2")
+    settings_module.get_settings.cache_clear()
+    artifact = _network_artifact(
+        "drugs-at-fda:application-doc:unparseable",
+        "https://www.accessdata.fda.gov/drugsatfda_docs/nda/2026/unparseable.pdf",
+    )
+    manifest = _manifest(artifact)
+    body = b"%PDF-1.7\nretained parser fixture"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "application/pdf"},
+            request=request,
+        )
+
+    def fail_parse(_payload: ArtifactPayload) -> ParsedPdf:
+        raise PdfParseError("synthetic exhausted parser")
+
+    store = FilesystemArtifactStore(tmp_path / "durable")
+    monkeypatch.setattr(sync_module, "parse_artifact", fail_parse)
+    try:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            first = sync_manifest(
+                manifest,
+                defer_embeddings=True,
+                client=client,
+                artifact_store=store,
+            )
+            second = sync_manifest(
+                manifest,
+                defer_embeddings=True,
+                client=client,
+                artifact_store=store,
+            )
+
+            assert first.error_documents == 1
+            assert first.terminal_documents == 0
+            assert second.error_documents == 0
+            assert second.terminal_documents == 1
+            readiness = shard_readiness(
+                manifest,
+                corpus_shard_id(artifact.canonical_id),
+                profile_id="legacy",
+            )
+            assert readiness.ready is True
+            assert readiness.unparseable_documents == 1
+
+            with get_engine().connect() as conn:
+                terminal = conn.execute(
+                    text(
+                        "SELECT content_hash_kind, artifact_retained, resolution_status, "
+                        "resolution_attempts FROM fda_document_version"
+                    )
+                ).one()
+            assert tuple(terminal) == ("source_bytes", True, "unparseable", 2)
+
+            monkeypatch.setattr(
+                sync_module,
+                "parse_artifact",
+                lambda _payload: ParsedPdf(
+                    text="Recovered authoritative FDA text.",
+                    pages=["Recovered authoritative FDA text."],
+                    engine="recovery-fixture",
+                ),
+            )
+            recovered = sync_manifest(
+                manifest,
+                defer_embeddings=True,
+                client=client,
+                artifact_store=store,
+            )
+
+        assert recovered.added_documents == 1
+        assert recovered.terminal_documents == 0
+        with get_engine().connect() as conn:
+            current = conn.execute(
+                text(
+                    "SELECT resolution_status, chunk_status, resolution_attempts, "
+                    "resolution_error, resolution_evidence_json "
+                    "FROM fda_document_version WHERE is_current"
+                )
+            ).one()
+        assert current[0] == "indexed"
+        assert current[1] == "complete"
+        assert current[2] == 3
+        assert current[3] is None
+        assert current[4] == {}
+    finally:
+        settings_module.get_settings.cache_clear()
+
+
 def test_failed_chunk_publish_preserves_acquisition_without_partial_chunks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -244,6 +438,38 @@ def test_failed_chunk_publish_preserves_acquisition_without_partial_chunks(
     assert "synthetic chunk write failure" in str(version[1])
 
 
+def test_non_parser_failures_never_enter_the_terminal_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import config.settings as settings_module
+
+    monkeypatch.setenv("FDA_CORPUS_TERMINAL_ATTEMPTS", "2")
+    settings_module.get_settings.cache_clear()
+    artifact = _inline_artifact("orange-book:product:n:088888")
+
+    def fail_chunk_write(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("database publication failed")
+
+    monkeypatch.setattr(sync_module, "add_chunks", fail_chunk_write)
+    try:
+        with _offline_client() as client:
+            first = sync_manifest(_manifest(artifact), client=client)
+            second = sync_manifest(_manifest(artifact), client=client)
+        assert first.error_documents == 1
+        assert second.error_documents == 1
+        assert second.terminal_documents == 0
+        with get_engine().connect() as conn:
+            resolution = conn.execute(
+                text(
+                    "SELECT resolution_status, resolution_attempts "
+                    "FROM fda_document_version WHERE is_current"
+                )
+            ).one()
+        assert tuple(resolution) == ("pending", 2)
+    finally:
+        settings_module.get_settings.cache_clear()
+
+
 def test_sync_uses_bounded_parallel_document_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -253,11 +479,12 @@ def test_sync_uses_bounded_parallel_document_workers(
     def synchronized_sync(
         artifact: CorpusArtifact,
         *,
+        manifest_sha256: str,
         client: httpx.Client,
         defer_embeddings: bool,
         artifact_store: object,
     ) -> tuple[str, int]:
-        del artifact, client, defer_embeddings, artifact_store
+        del artifact, manifest_sha256, client, defer_embeddings, artifact_store
         rendezvous.wait()
         return "added", 1
 
@@ -336,6 +563,145 @@ def test_activation_requires_all_families_and_a_full_covered_run() -> None:
     assert coverage.activation_blockers == ()
 
 
+def test_activation_accepts_only_audited_terminal_manifest_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import config.settings as settings_module
+
+    monkeypatch.setenv("FDA_CORPUS_TERMINAL_ATTEMPTS", "2")
+    settings_module.get_settings.cache_clear()
+    indexed = (
+        _inline_artifact(
+            "drugs-at-fda:application:nda020503",
+            family=FdaSourceFamily.DRUGS_AT_FDA,
+            document_type=FdaDocumentType.APPLICATION_METADATA,
+        ),
+        _inline_artifact(
+            "drugs-at-fda:application-doc:review-1",
+            family=FdaSourceFamily.ACTION_PACKAGE,
+            document_type=FdaDocumentType.CLINICAL_REVIEW,
+        ),
+        _inline_artifact(
+            "psg:020503",
+            family=FdaSourceFamily.PSG,
+            document_type=FdaDocumentType.PRODUCT_SPECIFIC_GUIDANCE,
+        ),
+        _inline_artifact(
+            "fda-be-guidance:test",
+            family=FdaSourceFamily.FDA_BE_GUIDANCE,
+            document_type=FdaDocumentType.BIOEQUIVALENCE_GUIDANCE,
+        ),
+        _inline_artifact("orange-book:product:n:020503"),
+    )
+    missing = _network_artifact(
+        "drugs-at-fda:application-doc:missing-review",
+        "https://www.accessdata.fda.gov/drugsatfda_docs/nda/2026/missing-review.pdf",
+    )
+    manifest = _manifest(*indexed, missing, complete=True)
+
+    source_available = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal source_available
+        assert str(request.url) == missing.source_url
+        if source_available:
+            return httpx.Response(
+                200,
+                content=b"%PDF-1.7\nrecovered source fixture",
+                headers={"content-type": "application/pdf"},
+                request=request,
+            )
+        return httpx.Response(404, request=request)
+
+    try:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            first = sync_manifest(manifest, client=client)
+            second = sync_manifest(manifest, client=client)
+
+        assert first.succeeded is False
+        assert second.succeeded is True
+        assert second.unchanged_documents == len(indexed)
+        assert second.terminal_documents == 1
+        coverage = authoritative_corpus_coverage()
+        assert coverage.documents == len(indexed)
+        assert coverage.terminal_documents == 1
+        assert coverage.missing_at_source_documents == 1
+        assert coverage.unparseable_documents == 0
+        assert coverage.activation_ready is True
+        assert coverage.activation_blockers == ()
+        with get_engine().connect() as conn:
+            run = conn.execute(
+                text(
+                    "SELECT expected_documents, unchanged_documents, terminal_documents, "
+                    "error_documents FROM fda_corpus_run WHERE id = :id"
+                ),
+                {"id": second.run_id},
+            ).one()
+        assert tuple(run) == (len(indexed) + 1, len(indexed), 1, 0)
+
+        terminal_run_id, terminal_readiness = finalize_orchestrated_manifest(
+            manifest,
+            profile_id="legacy",
+        )
+        assert terminal_readiness.terminal_documents == 1
+
+        # A later complete manifest may retire a terminal record. Coverage and
+        # activation count only active documents, not its retained audit row.
+        with _offline_client() as client:
+            retired = sync_manifest(_manifest(*indexed, complete=True), client=client)
+        assert retired.retired_documents == 1
+        retired_coverage = authoritative_corpus_coverage()
+        assert retired_coverage.terminal_documents == 0
+        assert retired_coverage.activation_ready is True
+
+        # Reintroducing the original exact manifest can recover the source. A
+        # fresh acceptance run must replace the prior terminal counts instead
+        # of reusing its now-stale orchestrated run.
+        source_available = True
+        monkeypatch.setattr(
+            sync_module,
+            "parse_artifact",
+            lambda _payload: ParsedPdf(
+                text="Recovered authoritative FDA review.",
+                pages=["Recovered authoritative FDA review."],
+                engine="recovery-fixture",
+            ),
+        )
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            recovered = sync_manifest(manifest, client=client)
+        assert recovered.succeeded is True
+        assert recovered.terminal_documents == 0
+
+        recovered_run_id, recovered_readiness = finalize_orchestrated_manifest(
+            manifest,
+            profile_id="legacy",
+        )
+        assert recovered_run_id != terminal_run_id
+        assert recovered_readiness.chunked_documents == len(indexed) + 1
+        assert recovered_readiness.terminal_documents == 0
+        recovered_coverage = authoritative_corpus_coverage()
+        assert recovered_coverage.terminal_documents == 0
+        assert recovered_coverage.activation_ready is True
+        with get_engine().connect() as conn:
+            accepted = conn.execute(
+                text(
+                    "SELECT id, unchanged_documents, terminal_documents "
+                    "FROM fda_corpus_run WHERE id IN (:terminal_id, :recovered_id) "
+                    "ORDER BY terminal_documents DESC"
+                ),
+                {
+                    "terminal_id": terminal_run_id,
+                    "recovered_id": recovered_run_id,
+                },
+            ).all()
+        assert [tuple(row) for row in accepted] == [
+            (terminal_run_id, len(indexed), 1),
+            (recovered_run_id, len(indexed) + 1, 0),
+        ]
+    finally:
+        settings_module.get_settings.cache_clear()
+
+
 def test_sharded_sync_embedding_and_acceptance_form_one_full_run() -> None:
     artifacts = (
         _inline_artifact(
@@ -394,6 +760,12 @@ def test_sharded_sync_embedding_and_acceptance_form_one_full_run() -> None:
             {"id": run_id},
         ).one()
     assert tuple(run) == ("succeeded", len(artifacts), len(artifacts), "true")
+    repeated_run_id, repeated_readiness = finalize_orchestrated_manifest(
+        manifest,
+        profile_id="legacy",
+    )
+    assert repeated_run_id == run_id
+    assert repeated_readiness == readiness
 
 
 def test_html_pages_are_reduced_to_visible_main_content(tmp_path: Path) -> None:
@@ -432,6 +804,7 @@ def _stub_sync_artifact(monkeypatch: pytest.MonkeyPatch, fail_ids: set[str]) -> 
     def stub(
         artifact: CorpusArtifact,
         *,
+        manifest_sha256: str,
         client: httpx.Client,
         defer_embeddings: bool = False,
         artifact_store: object = None,
@@ -583,3 +956,390 @@ def test_embed_pending_corpus_preflights_the_target_space(
     monkeypatch.setattr(pgvector_store, "get_embedding_provider", lambda: _Stub384Provider())
     with pytest.raises(RuntimeError, match="384"):
         embed_pending_corpus("legacy")
+
+
+def test_pre_ledger_writer_rows_self_heal_instead_of_blocking_their_shard() -> None:
+    """A version completed by pre-0025 worker code must not freeze its shard.
+
+    Migration 0025's backfill is a one-time statement: workers still running
+    the previous code write completed versions whose ledger columns hold the
+    ADD COLUMN defaults (resolution_status='pending', is_current=false).
+    Without the self-heal in _record_acquired_version, the next sync reports
+    such a document "unchanged" while readiness demands resolution_status=
+    'indexed', so the shard fails forever with no repair path.
+    """
+    artifact = _inline_artifact("orange-book:product:n:910001")
+    manifest = _manifest(artifact)
+    with _offline_client() as client:
+        first = sync_manifest(manifest, client=client)
+    assert first.added_documents == 1
+
+    with get_engine().begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE fda_document_version SET resolution_status = 'pending', "
+                "resolved_at = NULL, is_current = false"
+            )
+        )
+
+    with _offline_client() as client:
+        resumed = sync_manifest(manifest, client=client)
+    assert resumed.unchanged_documents == 1
+    assert resumed.error_documents == 0
+
+    readiness = shard_readiness(
+        manifest,
+        corpus_shard_id(artifact.canonical_id),
+        profile_id="legacy",
+    )
+    assert readiness.issues == ()
+    assert readiness.ready is True
+    assert readiness.chunked_documents == 1
+
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT resolution_status, is_current, resolved_at IS NOT NULL FROM fda_document_version"
+            )
+        ).one()
+    assert tuple(row) == ("indexed", True, True)
+
+
+def test_every_terminal_evidence_field_is_independently_validated() -> None:
+    """Each check in terminal_evidence_issues must fail on its own.
+
+    The acceptance gate trusts this function to revalidate terminal rows; a
+    silently deleted check would let unaudited rows stand in for indexed
+    documents, so every field gets its own corruption and its own assertion.
+    """
+    artifact = _network_artifact(
+        "drugs-at-fda:application-doc:evidence",
+        "https://www.accessdata.fda.gov/drugsatfda_docs/nda/2026/evidence.pdf",
+    )
+    sha = "a" * 64
+    resolved_at = datetime.now(UTC)
+
+    def missing_row() -> dict[str, object]:
+        return {
+            "resolution_status": "missing_at_source",
+            "resolution_attempts": 2,
+            "resolved_at": resolved_at,
+            "resolution_error": "HTTP 404 after retry exhaustion",
+            "content_hash_kind": "terminal_observation",
+            "resolution_evidence_json": {
+                "manifest_sha256": sha,
+                "canonical_id": artifact.canonical_id,
+                "source_url": artifact.source_url,
+                "attempts": 2,
+                "http_status": 404,
+            },
+        }
+
+    def unparseable_row() -> dict[str, object]:
+        return {
+            "resolution_status": "unparseable",
+            "resolution_attempts": 2,
+            "resolved_at": resolved_at,
+            "resolution_error": "PdfParseError: exhausted parser",
+            "content_hash_kind": "source_bytes",
+            "artifact_retained": True,
+            "artifact_uri": "s3://bucket/documents/sha256/ab/cd/abcd",
+            "resolution_evidence_json": {
+                "manifest_sha256": sha,
+                "canonical_id": artifact.canonical_id,
+                "source_url": artifact.source_url,
+                "attempts": 2,
+                "error_type": "PdfParseError",
+            },
+        }
+
+    def issues(row: dict[str, object]) -> tuple[str, ...]:
+        return terminal_evidence_issues(row, artifact, manifest_sha256=sha, minimum_attempts=2)
+
+    assert issues(missing_row()) == ()
+    assert issues(unparseable_row()) == ()
+
+    def corrupted(base: dict[str, object], **changes: object) -> dict[str, object]:
+        row = dict(base)
+        base_evidence = row["resolution_evidence_json"]
+        assert isinstance(base_evidence, dict)
+        evidence: dict[str, object] = dict(base_evidence)
+        for key, value in changes.items():
+            if key in evidence or key in ("http_status", "error_type"):
+                evidence[key] = value
+            else:
+                row[key] = value
+        row["resolution_evidence_json"] = evidence
+        return row
+
+    cases: list[tuple[dict[str, object], str]] = [
+        (corrupted(missing_row(), resolution_status="pending"), "unsupported terminal"),
+        (corrupted(missing_row(), resolution_attempts=1), "requires 2"),
+        (corrupted(missing_row(), resolved_at=None), "missing resolved_at"),
+        (corrupted(missing_row(), resolution_error="  "), "missing its error summary"),
+        (corrupted(missing_row(), manifest_sha256="b" * 64), "not bound to this exact manifest"),
+        (corrupted(missing_row(), canonical_id="other:id"), "canonical_id does not match"),
+        (
+            corrupted(missing_row(), source_url="https://www.fda.gov/other"),
+            "source_url does not match",
+        ),
+        (corrupted(missing_row(), attempts=3), "attempt count does not match"),
+        (corrupted(missing_row(), content_hash_kind="source_bytes"), "not an observation hash"),
+        (corrupted(missing_row(), http_status=403), "lacks an exact HTTP 404"),
+        (
+            corrupted(unparseable_row(), content_hash_kind="terminal_observation"),
+            "not tied to captured source bytes",
+        ),
+        (corrupted(unparseable_row(), artifact_retained=False), "lacks a retained source artifact"),
+        (corrupted(unparseable_row(), artifact_uri="  "), "lacks a retained source artifact"),
+        (
+            corrupted(unparseable_row(), error_type="ValueError"),
+            "not produced by a reviewed parser error",
+        ),
+    ]
+    for row, expected in cases:
+        found = issues(row)
+        assert any(expected in issue for issue in found), (expected, found)
+
+
+def test_unparseable_attempts_reset_when_the_manifest_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parse-failure attempts must be manifest-scoped, like missing-source ones.
+
+    Attempts accumulated against a stale manifest must not count toward
+    terminalizing a record under a new manifest; otherwise one pre-freeze
+    failure plus one post-freeze failure terminalizes a document the new
+    manifest was never given a full retry budget for.
+    """
+    import config.settings as settings_module
+
+    monkeypatch.setenv("FDA_CORPUS_TERMINAL_ATTEMPTS", "2")
+    settings_module.get_settings.cache_clear()
+    artifact = _network_artifact(
+        "drugs-at-fda:application-doc:unparseable-reset",
+        "https://www.accessdata.fda.gov/drugsatfda_docs/nda/2026/unparseable-reset.pdf",
+    )
+    stale_manifest = _manifest(artifact)
+    manifest = CorpusManifest(
+        artifacts=(artifact,),
+        source_snapshots={"fixture": "sha256:new-manifest"},
+        complete_universe=False,
+    )
+    body = b"%PDF-1.7\nretained parser fixture"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "application/pdf"},
+            request=request,
+        )
+
+    def fail_parse(_payload: ArtifactPayload) -> ParsedPdf:
+        raise PdfParseError("synthetic exhausted parser")
+
+    store = FilesystemArtifactStore(tmp_path / "durable")
+    monkeypatch.setattr(sync_module, "parse_artifact", fail_parse)
+    try:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            stale = sync_manifest(
+                stale_manifest, defer_embeddings=True, client=client, artifact_store=store
+            )
+            first = sync_manifest(
+                manifest, defer_embeddings=True, client=client, artifact_store=store
+            )
+            second = sync_manifest(
+                manifest, defer_embeddings=True, client=client, artifact_store=store
+            )
+        assert stale.error_documents == 1
+        assert stale.terminal_documents == 0
+        assert first.error_documents == 1
+        assert first.terminal_documents == 0
+        assert second.error_documents == 0
+        assert second.terminal_documents == 1
+    finally:
+        settings_module.get_settings.cache_clear()
+
+
+def _url_artifact(template: CorpusArtifact) -> CorpusArtifact:
+    """The same document identity, reachable only by a network download."""
+    return dataclasses.replace(template, inline_text=None)
+
+
+def test_complete_document_skips_the_paced_fda_fetch_entirely() -> None:
+    """A fully indexed+embedded document must not cost an FDA request again.
+
+    Every driver resume re-walks its incomplete shards; without the pre-fetch
+    completeness check each already-done document burns a politeness-paced
+    download (~5s) just to conclude "unchanged", which taxes every restart
+    and wastes the global FDA request budget.
+    """
+    original = _inline_artifact("orange-book:product:n:900001")
+    with _offline_client() as client:
+        first = sync_manifest(_manifest(original), client=client)
+        assert first.added_documents == 1
+
+        resumed = sync_manifest(_manifest(_url_artifact(original)), client=client)
+
+    assert resumed.unchanged_documents == 1
+    assert resumed.error_documents == 0
+    assert resumed.chunks_written == 0
+
+
+def test_unknown_document_is_never_skipped() -> None:
+    """The skip must fail closed: an unseen document still takes the fetch path."""
+    fresh = _url_artifact(_inline_artifact("orange-book:product:n:900002"))
+    with _offline_client() as client:
+        stats = sync_manifest(_manifest(fresh), client=client)
+    assert stats.error_documents == 1
+    assert stats.unchanged_documents == 0
+
+
+def test_chunked_but_unembedded_skips_only_when_embeddings_are_deferred() -> None:
+    """Skip parity with the post-fetch check's embedding leg.
+
+    The chunk shard (defer_embeddings=True) may skip a chunk-complete version
+    outright, but a non-deferred sync must still fetch so the existing-version
+    embed repair path can run; skipping there would strand the version without
+    vectors while reporting it unchanged.
+    """
+    original = _inline_artifact("orange-book:product:n:900003")
+    with _offline_client() as client:
+        first = sync_manifest(_manifest(original), client=client, defer_embeddings=True)
+        assert first.added_documents == 1
+
+        deferred = sync_manifest(
+            _manifest(_url_artifact(original)), client=client, defer_embeddings=True
+        )
+        not_deferred = sync_manifest(_manifest(_url_artifact(original)), client=client)
+
+    assert deferred.unchanged_documents == 1
+    assert deferred.error_documents == 0
+    assert not_deferred.unchanged_documents == 0
+    assert not_deferred.error_documents == 1
+
+
+def test_processing_fingerprint_change_defeats_the_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bumping CHUNKING_VERSION must force a re-fetch, not a silent skip."""
+    original = _inline_artifact("orange-book:product:n:900004")
+    with _offline_client() as client:
+        sync_manifest(_manifest(original), client=client)
+
+    monkeypatch.setattr(sync_module, "_processing_fingerprint", lambda spec: "chunker-v-next")
+    with _offline_client() as client:
+        stats = sync_manifest(_manifest(_url_artifact(original)), client=client)
+    assert stats.unchanged_documents == 0
+    assert stats.error_documents == 1
+
+
+def test_skip_refreshes_metadata_but_preserves_the_resolved_source_url() -> None:
+    """The skip must keep FDA metadata current without regressing the URL.
+
+    Discovery rebuilds the manifest between resumes, so titles and Orange Book
+    fields can change while the document content has not; the skip still has to
+    apply those. But the stored source_url is the redirect-RESOLVED URL from the
+    last real fetch, and the manifest carries the pre-redirect form -- a skip has
+    no payload, so it must leave the resolved URL alone.
+    """
+    original = _inline_artifact("orange-book:product:n:900005")
+    with _offline_client() as client:
+        sync_manifest(_manifest(original), client=client)
+
+    resolved = "https://www.accessdata.fda.gov/scripts/cder/ob/results_product.cfm?resolved=1"
+    with get_engine().connect() as conn:
+        conn.execute(
+            text("UPDATE fda_document SET source_url = :u WHERE canonical_id = :c"),
+            {"u": resolved, "c": original.canonical_id},
+        )
+        conn.commit()
+
+    renamed = dataclasses.replace(_url_artifact(original), title="Renamed by a rebuilt manifest")
+    with _offline_client() as client:
+        stats = sync_manifest(_manifest(renamed), client=client)
+    assert stats.unchanged_documents == 1
+
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            text("SELECT title, source_url FROM fda_document WHERE canonical_id = :c"),
+            {"c": original.canonical_id},
+        ).one()
+    assert row[0] == "Renamed by a rebuilt manifest"
+    assert row[1] == resolved
+
+
+def test_unknown_document_takes_the_fetch_path_not_some_other_failure() -> None:
+    """Isolate the fail-closed guard: the unknown doc must actually be REQUESTED.
+
+    Asserting only on error counts cannot tell a correct fetch attempt apart
+    from a wrongly-taken skip branch blowing up later (e.g. _touch_document's
+    ``.one()`` on a missing row); the offline client's error text is the
+    observable that only the fetch path produces.
+    """
+    fresh = _url_artifact(_inline_artifact("orange-book:product:n:900006"))
+    with _offline_client() as client:
+        stats = sync_manifest(_manifest(fresh), client=client)
+    assert stats.error_documents == 1
+    assert "unexpectedly requested" in stats.errors[0]["error"]
+
+
+def test_complete_version_with_deleted_chunks_defeats_the_skip() -> None:
+    """A complete version whose chunk rows are gone must be re-fetched.
+
+    ``reconcile_active_manifest`` deletes a retired document's chunks while its
+    version row keeps chunk_status='complete'; if that document reappears in a
+    manifest, skipping it would leave a permanently chunkless document that
+    still reports unchanged forever.
+    """
+    original = _inline_artifact("orange-book:product:n:900007")
+    with _offline_client() as client:
+        sync_manifest(_manifest(original), client=client, defer_embeddings=True)
+
+    with get_engine().connect() as conn:
+        conn.execute(
+            text(
+                "DELETE FROM chunk WHERE fda_document_id = "
+                "(SELECT id FROM fda_document WHERE canonical_id = :c)"
+            ),
+            {"c": original.canonical_id},
+        )
+        conn.commit()
+
+    with _offline_client() as client:
+        stats = sync_manifest(
+            _manifest(_url_artifact(original)), client=client, defer_embeddings=True
+        )
+    assert stats.unchanged_documents == 0
+    assert stats.error_documents == 1
+    assert "unexpectedly requested" in stats.errors[0]["error"]
+
+
+def test_ledger_pending_rows_are_never_skipped_before_the_fetch() -> None:
+    """The pre-fetch skip must defer to the resolution ledger's self-heal.
+
+    A chunk-complete version still marked resolution_status='pending' (written
+    by pre-0025 worker code) is only credited as INDEXED inside the fetch
+    path's _record_acquired_version; skipping it pre-fetch would strand it
+    pending forever and re-open the permanently-blocked-shard defect the
+    self-heal exists to close.
+    """
+    original = _inline_artifact("orange-book:product:n:900008")
+    with _offline_client() as client:
+        sync_manifest(_manifest(original), client=client)
+
+    with get_engine().begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE fda_document_version SET resolution_status = 'pending', "
+                "resolved_at = NULL"
+            )
+        )
+
+    with _offline_client() as client:
+        stats = sync_manifest(_manifest(_url_artifact(original)), client=client)
+    assert stats.unchanged_documents == 0
+    assert stats.error_documents == 1
+    assert "unexpectedly requested" in stats.errors[0]["error"]

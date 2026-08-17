@@ -789,3 +789,28 @@ alone does not certify this residual.
   databricks-eval legacy OpenAI arm is removed;
   the INV-1 real-geometry test now targets the live Qwen 1024-dim profile
   space behind `RUN_LIVE_QWEN_GEOMETRY=1`.
+## Exact-manifest acceptance recognizes only audited terminal resolutions (Aug 17 2026)
+
+- **The production denominator is now 140,438.** The owned backfill is pinned to
+  complete-manifest SHA-256
+  `fae78c8eb6c5b601a5a52539ec7b62444d1eb7c745879d04ce1d031fa75c0c84`.
+  The earlier 140,339 figure remains above as the historical Aug 13 discovery;
+  it is not the acceptance denominator for this run.
+- **Resolved does not mean silently skipped.** Every manifest record must have
+  exactly one current lifecycle version. It is resolved only when that version
+  is indexed or carries a terminal outcome whose evidence is revalidated by
+  acceptance against the exact manifest.
+- **There are exactly two automatic terminal outcomes.** An exact HTTP 404 may
+  become `missing_at_source`. A reviewed PDF parser error may become
+  `unparseable` only while its content-hashed source artifact remains durably
+  retained. Both require four durable attempts by default, an error summary,
+  resolution time, canonical ID, source URL, manifest hash, and matching attempt
+  count. Storage, database, chunk-publication, embedding, and other HTTP errors
+  never terminalize.
+- **Terminal is recoverable and non-searchable.** Publishing a terminal current
+  version removes older chunks for that document. A later successful parse
+  publishes chunks and changes the same source-byte version back to `indexed`.
+- **The canary remains strict.** A terminal result cannot satisfy 21 / 21.
+  Full-manifest parity is `indexed + validated terminal = 140438`; vector parity
+  applies to every indexed chunk. The serving namespace remains `legacy` until
+  that gate and the retrieval/citation evaluation pass.
