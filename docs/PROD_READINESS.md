@@ -1,7 +1,7 @@
 # Production readiness checklist
 
-Last updated: 2026-08-13 for the authoritative FDA corpus implementation.
-Live app, database and Fly values were last checked 2026-08-11; repository
+Last updated: 2026-08-17 for the authoritative FDA corpus rollout. Unrelated
+live app, database and Fly values were last checked 2026-08-11; repository
 implementation status is intentionally separate from deployed state.
 
 The system is deployed and running. The Fly app `amneal` (release v104) runs a Go
@@ -64,13 +64,12 @@ Two of these are now done. The numbers are kept because other docs cite them.
 - **In place:** production Postgres is Databricks Lakebase
   (`ep-super-hat-d8wkrjd9.database.us-east-2.cloud.databricks.com`, database
   `databricks_postgres`, app role `regwatch_app`), with pgvector in the same
-  database. Rows, vectors and audit all live together. Fly release 135 deployed
-  `0023_authoritative_fda_corpus`; this follow-up adds
-  `0024_fda_streaming_lifecycle`. The first production canary added 347 chunks,
-  all embedded on the active profile: 5,841 / 5,841 verified against the
-  production database on 2026-08-14, so fresh serving boots pass the
-  profile-readiness guard. The OCR-enabled 21 / 21 canary rerun still owes the
-  three unparsed documents. R5 deleted the SQLite and Chroma dual-mode, so `DATABASE_URL` is
+  database. Rows, vectors and audit all live together. Corpus migrations 0023
+  and 0024 are deployed; this follow-up adds the evidence-backed terminal ledger
+  in `0025_fda_terminal_resolution`. The corrected production canary passed
+  21 / 21 and produced 499 chunks with complete active-profile embeddings. The
+  full 140,438-record backfill is operator-owned and retrieval remains on
+  `legacy`. R5 deleted the SQLite and Chroma dual-mode, so `DATABASE_URL` is
   unconditionally required and the app refuses to boot without it. pgvector
   dimension checks fail fast.
   - Note on history: the earlier call
@@ -250,27 +249,29 @@ Two of these are now done. The numbers are kept because other docs cite them.
 ### 9. Structured-source layer
 
 - **Where:** [`src/regwatch/sources/`](../src/regwatch/sources/) handlers,
-  [`src/regwatch/corpus/`](../src/regwatch/corpus/) pipeline, migrations 0023–0024,
+  [`src/regwatch/corpus/`](../src/regwatch/corpus/) pipeline, migrations 0023–0025,
   and [`AUTHORITATIVE_FDA_CORPUS.md`](AUTHORITATIVE_FDA_CORPUS.md).
 - **Have:** an exact five-family source policy; official Drugs@FDA and Orange
   Book ZIP adapters; action-package, PSG, and reviewed FDA BE-guidance discovery;
   versioned documents; bounded streamed fetch; durable content-addressed raw
   artifacts and exact manifests; sandboxed OCR; atomic chunk publication;
   separately checkpointed embedding state; 512 deterministic Dagster shards;
-  blocking acceptance checks; exact coverage; and a fail-closed reversible
-  activation gate. A complete 2026-08-13 discovery found 140,339 source records.
+  blocking acceptance checks; exact coverage; an evidence-backed terminal
+  outcome ledger; and a fail-closed reversible activation gate. The frozen
+  production manifest contains 140,438 source records.
   Approved Drugs@FDA labeling now supplies White Paper and Assemble label evidence.
 - **Policy closure:** retired public API configuration/endpoints are removed.
   DailyMed, NDC, shortage, and REMS acquisition paths are not routable and fail
   closed if an old caller reaches their compatibility shims.
-- **Gap:** release migration 0024 and the dedicated worker; repeat the production
-  canary from its current 18 / 21 state (embeddings complete) to 21 / 21;
-  complete both 512-shard backfills; then run acceptance, new-corpus
-  retrieval/citation evaluation, serving smoke, and rollback rehearsal.
-- **Done when:** all 140,339 source records (or an explained newer manifest) are
-  processed with zero document errors, authoritative chunks have 100% selected-
-  profile coverage, status reports `activation_ready=true`, evaluation passes,
-  and cutover plus rollback are rehearsed.
+- **Gap:** release migration 0025 without disturbing the owned live sweep;
+  complete the 512-shard backfill; resolve its retry-exhausted tail into indexed
+  versions or validated terminal outcomes; then run acceptance, new-corpus
+  retrieval/citation evaluation, serving smoke, and rollback rehearsal. Do not
+  freeze a second manifest under the active backfill.
+- **Done when:** all 140,438 frozen source records resolve as
+  `indexed + evidence-backed terminal`, authoritative indexed chunks have 100%
+  selected-profile coverage, status reports `activation_ready=true`, evaluation
+  passes, and cutover plus rollback are rehearsed.
 
 ### 10. Secrets management
 

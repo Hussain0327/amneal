@@ -1,7 +1,7 @@
 # DEPLOY - Lakebase + Fly.io + Vercel runbook
 
-Last updated: 2026-08-13 for the authoritative FDA corpus implementation; live
-production values were last checked 2026-08-11.
+Last updated: 2026-08-17 for the authoritative FDA corpus rollout; unrelated
+live production values were last checked 2026-08-11.
 
 This is the production runbook. Read it top to bottom the first time; after that
 jump to the section you need. Section numbers are stable, other files link to
@@ -113,10 +113,11 @@ The Fly deploy is the single migration authority. `fly.toml` sets
 machine BEFORE the rolling replace, so a schema-advancing release migrates
 itself. There is no manual pre-migration step on the normal path.
 
-Fly release 135 deployed `0023_authoritative_fda_corpus`. This follow-up adds
-`0024_fda_streaming_lifecycle`, so its release advances lifecycle/manifest
-schema before ingestion resumes. Neither migration makes network calls or
-performs a corpus backfill.
+The deployed corpus schema includes `0023_authoritative_fda_corpus` and
+`0024_fda_streaming_lifecycle`. This follow-up adds
+`0025_fda_terminal_resolution`, so its release advances only the lifecycle and
+run ledgers before terminal-tail repair and acceptance. No corpus migration
+makes network calls or performs a corpus backfill.
 
 The boot guard is the other half. The entrypoint runs `regwatch init-db`, which
 compares the alembic stamp to the head this image expects and refuses to start on
@@ -137,17 +138,17 @@ the running API machines.
 
 ### 2.1 Authoritative FDA corpus rollout
 
-The complete 2026-08-13 read-only discovery found 140,339 source records. This
-is a manifest denominator, not a chunk or embedding count. Do not switch serving
-retrieval during schema deployment.
+The frozen production manifest contains 140,438 source records under logical
+SHA-256
+`fae78c8eb6c5b601a5a52539ec7b62444d1eb7c745879d04ce1d031fa75c0c84`.
+This is a manifest denominator, not a chunk or embedding count. Do not switch
+serving retrieval during schema deployment.
 
-The first production canary indexed 18 / 21 records and 347 chunks before three
-parse failures. All 347 canary chunks carry active-profile embeddings, so
-coverage is 5,841 / 5,841 (verified against the production database on
-2026-08-14) and fresh boots pass the profile-readiness guard. Any future
-deferred-embedding run reopens that gap until its embedding phase completes,
-and a fresh boot then fails closed. Do not add more production chunks from the
-old worker.
+The corrected production canary passed 21 / 21 and produced 499 chunks with
+complete active-profile embeddings. The full backfill is now owned by a
+supervised operator session. Do not run production Dagster jobs, change its
+worker environment, or freeze a second manifest from a parallel session.
+Retrieval remains on `legacy` throughout the build.
 
 After this release is healthy, deploy `Dockerfile.corpus-worker` on separately
 supervised compute. It uses bounded ephemeral scratch, durable S3-compatible raw
@@ -160,12 +161,13 @@ uv run regwatch authoritative-corpus-plan
 uv run regwatch authoritative-corpus-status
 ```
 
-Then use the Dagster jobs in this exact order:
+The rollout ledger is now at these stages:
 
-1. `authoritative_fda_canary_job`: `NDA020503`, expected 21, chunk and embed to
-   21 / 21 with zero errors. The three previously unparseable documents retry
-   through OCR; the 18 indexed documents and their embeddings are reused.
-2. `authoritative_fda_manifest_job`: freeze one durable exact full manifest.
+1. `authoritative_fda_canary_job`: complete at 21 / 21 with zero errors and 499
+   chunks. Terminal outcomes never satisfy this strict canary gate.
+2. `authoritative_fda_manifest_job`: complete. Do not rerun it while the
+   backfill is active; the driver reads the newest complete-universe row, so a
+   second freeze can swap the manifest under the owned run.
 3. `authoritative_fda_shard_job`: backfill partitions 000–511 with that manifest
    SHA-256 and the active profile. This one job chunks shard N and then embeds
    shard N. Do NOT substitute the two single-asset jobs and run all chunking
@@ -175,8 +177,9 @@ Then use the Dagster jobs in this exact order:
    Production deploys stay safe throughout: the boot guard counts only the
    ACTIVE serving namespace (see AUTHORITATIVE_FDA_CORPUS.md), so backfill rows
    cannot fail an app boot until `REGWATCH_RETRIEVAL_CORPUS` flips.
-4. `authoritative_fda_acceptance_job`: require all 512 blocking checks and write
-   the complete-universe success ledger.
+4. `authoritative_fda_acceptance_job`: after migration 0025 and backfill
+   completion, require all 512 blocking checks and write indexed and audited
+   terminal counts to the complete-universe success ledger.
 
 The full schedule is intentionally absent, and weekly manifest discovery is
 stopped by default. See [`AUTHORITATIVE_FDA_CORPUS.md`](AUTHORITATIVE_FDA_CORPUS.md)
@@ -184,9 +187,10 @@ for exact run configuration, retry semantics, storage/OCR limits, and evidence
 to retain.
 
 The final status must report `activation_ready: true`, zero policy violations,
-all five families, a successful complete-universe run, exact document parity,
-and `embedded_chunks == chunks`. Run the new-namespace retrieval/citation eval
-and a serving canary before changing:
+all five families, a successful complete-universe run, exact
+`indexed + evidence-backed terminal == 140438` parity, and
+`embedded_chunks == chunks` for the indexed corpus. Run the new-namespace
+retrieval/citation eval and a serving canary before changing:
 
 ```bash
 REGWATCH_RETRIEVAL_CORPUS=authoritative_fda

@@ -52,7 +52,10 @@ _MANIFEST_CONFIG = {
 _CHUNK_CHECK = dg.AssetCheckSpec(
     name="all_manifest_documents_chunked",
     asset="authoritative_fda_chunk_shard",
-    description="Every document assigned to this shard has one complete indexed version.",
+    description=(
+        "Every document assigned to this shard has one indexed version or an "
+        "evidence-backed terminal resolution."
+    ),
     blocking=True,
 )
 _EMBED_CHECK = dg.AssetCheckSpec(
@@ -134,7 +137,7 @@ def authoritative_fda_chunk_shard(
         shard_id=shard_id,
     )
     readiness = shard_readiness(manifest, shard_id)
-    if not stats.succeeded or readiness.chunked_documents != readiness.expected_documents:
+    if not stats.succeeded or readiness.resolved_documents != readiness.expected_documents:
         raise dg.Failure(
             description=f"FDA chunk shard {shard_id:03d} is incomplete",
             metadata={
@@ -147,6 +150,8 @@ def authoritative_fda_chunk_shard(
             "manifest_sha256": manifest.sha256,
             "shard_id": shard_id,
             "documents": readiness.expected_documents,
+            "indexed_documents": readiness.chunked_documents,
+            "terminal_documents": readiness.terminal_documents,
             "chunks": readiness.chunks,
             "sync_run_id": stats.run_id,
         },
@@ -157,6 +162,9 @@ def authoritative_fda_chunk_shard(
                 metadata={
                     "expected_documents": readiness.expected_documents,
                     "chunked_documents": readiness.chunked_documents,
+                    "terminal_documents": readiness.terminal_documents,
+                    "missing_at_source_documents": (readiness.missing_at_source_documents),
+                    "unparseable_documents": readiness.unparseable_documents,
                 },
             )
         ],
@@ -302,7 +310,12 @@ def authoritative_fda_canary(
         )
     ]
     ready_documents = sum(result.embedded_documents for result in readiness)
-    if ready_documents != expected or any(not result.ready for result in readiness):
+    terminal_documents = sum(result.terminal_documents for result in readiness)
+    if (
+        ready_documents != expected
+        or terminal_documents != 0
+        or any(not result.ready for result in readiness)
+    ):
         issues = [issue for result in readiness for issue in result.issues]
         raise dg.Failure(
             description=f"FDA canary reached only {ready_documents}/{expected}",
@@ -360,6 +373,10 @@ def authoritative_fda_acceptance(
             "manifest_sha256": manifest.sha256,
             "acceptance_run_id": run_id,
             "documents": readiness.expected_documents,
+            "indexed_documents": readiness.chunked_documents,
+            "terminal_documents": readiness.terminal_documents,
+            "missing_at_source_documents": readiness.missing_at_source_documents,
+            "unparseable_documents": readiness.unparseable_documents,
             "chunks": readiness.chunks,
             "profile_id": profile_id,
             "coverage_percent": coverage.coverage_percent,
@@ -371,6 +388,8 @@ def authoritative_fda_acceptance(
                 check_name=_ACCEPTANCE_CHECK.name,
                 metadata={
                     "documents": readiness.expected_documents,
+                    "indexed_documents": readiness.chunked_documents,
+                    "terminal_documents": readiness.terminal_documents,
                     "chunks": readiness.chunks,
                     "embedded_chunks": readiness.embedded_chunks,
                 },

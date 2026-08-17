@@ -620,15 +620,16 @@ official FDA snapshots/catalogs -> durable exact manifest + fingerprints
   -> family/path/redirect validation -> one bounded streamed temporary artifact
   -> SHA-256 + durable object upload -> acquired immutable version checkpoint
   -> PDF text / sandboxed OCR / HTML / inline parse -> atomic page-aware chunks
+     or exact-manifest, evidence-backed terminal resolution after retry exhaustion
   -> unconditional temporary cleanup -> profile-scoped embedding shard
   -> 512-shard acceptance + retrieval/citation evaluation -> manual cutover
 ```
 
 Key properties:
 
-- **Discovery is read-only and reproducible.** The complete 2026-08-13 manifest
-  has 140,339 source records and SHA-256
-  `4e5c3708cb309489d9056580a7578b3047560f32aca0345df6ee26c3cd2a7c5e`.
+- **Discovery is read-only and reproducible.** The frozen production manifest
+  has 140,438 source records and SHA-256
+  `fae78c8eb6c5b601a5a52539ec7b62444d1eb7c745879d04ce1d031fa75c0c84`.
 - **Versioned, never overwritten.** A new content hash or processing fingerprint
   creates an immutable `fda_document_version`. Only current chunks remain
   searchable; version facts and content-addressed artifacts remain auditable.
@@ -643,13 +644,18 @@ Key properties:
 - **Resumable phases.** Chunk and per-profile embedding states checkpoint
   independently. Both backfills restart from durable committed state and skip
   ready work even when Dagster itself restarts.
+- **Terminal means formally resolved, not ignored.** Only exact 404 drift and a
+  retained PDF that still fails a reviewed parser after four durable attempts
+  may become terminal. Acceptance revalidates its manifest-bound evidence;
+  every other failure remains blocking. A later successful parse recovers the
+  same current version to indexed state.
 - **Safe reconciliation.** Documents missing from discovery are retired only
   after a zero-error, unfiltered complete-universe run. A developer's scoped or
   limited run cannot retire production data.
 - **Reversible cutover.** `REGWATCH_RETRIEVAL_CORPUS=legacy` remains the default.
   `authoritative_fda` is accepted at API boot only when all five families, a
-  successful full run, exact document parity, zero policy violations, and 100%
-  embedding coverage are present.
+  successful full run, exact `indexed + terminal` manifest parity, zero policy
+  violations, and 100% embedding coverage for indexed chunks are present.
 
 The earlier PSG watch pipeline still drives daily change alerts. The replacement
 corpus generalizes the searchable evidence store; its full backfill and schedule
@@ -667,12 +673,11 @@ history for that design.)
 
 Production runs on Databricks Lakebase in us-east-2, database
 `databricks_postgres`, app role `regwatch_app`, with pgvector in the same
-database. Rows, vectors and audit all live in one Postgres. Fly release 135
-deployed migration `0023_authoritative_fda_corpus`; this follow-up adds
-`0024_fda_streaming_lifecycle`. The partial canary increased the corpus from
-5,494 to 5,841 chunks, all embedded on the active Qwen profile (5,841 / 5,841
-verified 2026-08-14); the worker release and the 21 / 21 canary rerun for the
-three unparsed documents precede the full backfill.
+database. Rows, vectors and audit all live in one Postgres. Corpus migrations
+0023 and 0024 are deployed; migration 0025 adds the current-version and terminal
+resolution ledger. The corrected canary passed 21 / 21 with 499 chunks. The
+full 140,438-record backfill is operator-owned while serving remains on
+`legacy`.
 
 - `store/vector_store.py` is a thin wrapper over `store/pgvector_store.py`. Every
   public function (`similarity_search`, `add_chunks`, `collection_size`,

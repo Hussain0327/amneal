@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, CheckConstraint, Column, Index, UniqueConstraint
+from sqlalchemy import JSON, CheckConstraint, Column, Index, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -159,6 +159,13 @@ class FdaDocumentVersion(SQLModel, table=True):
             "processing_fingerprint",
             unique=True,
         ),
+        Index(
+            "uq_fda_document_version_current",
+            "fda_document_id",
+            unique=True,
+            postgresql_where=text("is_current"),
+            sqlite_where=text("is_current"),
+        ),
         CheckConstraint("byte_size >= 0", name="ck_fda_document_version_byte_size"),
         CheckConstraint("page_count >= 0", name="ck_fda_document_version_page_count"),
         CheckConstraint("chunk_count >= 0", name="ck_fda_document_version_chunk_count"),
@@ -166,11 +173,33 @@ class FdaDocumentVersion(SQLModel, table=True):
             "chunk_status IN ('pending', 'complete', 'failed')",
             name="ck_fda_document_version_chunk_status",
         ),
+        CheckConstraint(
+            "content_hash_kind IN ('source_bytes', 'terminal_observation')",
+            name="ck_fda_document_version_content_hash_kind",
+        ),
+        CheckConstraint(
+            "resolution_status IN ('pending', 'indexed', " "'missing_at_source', 'unparseable')",
+            name="ck_fda_document_version_resolution_status",
+        ),
+        CheckConstraint(
+            "resolution_attempts >= 0",
+            name="ck_fda_document_version_resolution_attempts",
+        ),
+        CheckConstraint(
+            "(resolution_status = 'pending') OR "
+            "(resolution_status = 'indexed' AND chunk_status = 'complete' "
+            "AND chunk_count > 0 AND resolved_at IS NOT NULL) OR "
+            "(resolution_status IN ('missing_at_source', 'unparseable') "
+            "AND chunk_status = 'failed' AND chunk_count = 0 "
+            "AND resolved_at IS NOT NULL)",
+            name="ck_fda_document_version_resolution_lifecycle",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
     fda_document_id: int = Field(foreign_key="fda_document.id", index=True)
     content_hash: str = Field(index=True, min_length=64, max_length=64)
+    content_hash_kind: str = "source_bytes"
     processing_fingerprint: str = Field(index=True, min_length=64, max_length=64)
     source_updated_at: str | None = None
     fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
@@ -184,6 +213,16 @@ class FdaDocumentVersion(SQLModel, table=True):
     chunk_status: str = Field(default="pending", index=True)
     chunked_at: datetime | None = Field(default=None, index=True)
     chunk_error: str | None = None
+    is_current: bool = False
+    resolution_status: str = Field(default="pending", index=True)
+    resolution_attempts: int = 0
+    last_resolution_attempt_at: datetime | None = None
+    resolved_at: datetime | None = None
+    resolution_error: str | None = None
+    resolution_evidence_json: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=_json_column(),
+    )
     # Deprecated compatibility field from migration 0023. New workers write
     # artifact_uri, which may be file://, s3://, or discard://.
     artifact_path: str | None = None
@@ -258,6 +297,10 @@ class FdaCorpusRun(SQLModel, table=True):
             "status IN ('running', 'succeeded', 'failed')",
             name="ck_fda_corpus_run_status",
         ),
+        CheckConstraint(
+            "terminal_documents >= 0",
+            name="ck_fda_corpus_run_terminal_documents",
+        ),
     )
 
     id: str = Field(primary_key=True)
@@ -271,6 +314,7 @@ class FdaCorpusRun(SQLModel, table=True):
     added_documents: int = 0
     revised_documents: int = 0
     unchanged_documents: int = 0
+    terminal_documents: int = 0
     error_documents: int = 0
     chunks_written: int = 0
     stats_json: dict[str, Any] = Field(default_factory=dict, sa_column=_json_column())

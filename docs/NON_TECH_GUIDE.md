@@ -59,10 +59,12 @@ Today it can:
 - Log every question and answer for auditability.
 
 The currently serving PSG corpus held 5,494 searchable text pieces when it was
-measured on 2026-08-11. A replacement FDA-only pipeline is implemented but not
-yet activated. Its complete 2026-08-13 discovery found 140,339 source records;
-those are documents, not chunks or embeddings. The final searchable-piece and
-embedding totals will be reported only after the full backfill runs.
+measured on 2026-08-11. A replacement FDA-only corpus is building but is not yet
+activated. Its frozen production manifest contains 140,438 source records;
+those are source records, not chunks or embeddings. Every record must end as a
+searchable indexed document or a narrowly evidenced terminal outcome, and every
+searchable chunk must be embedded before cutover. Final totals will be reported
+only after full acceptance.
 
 ## The FDA Sources
 

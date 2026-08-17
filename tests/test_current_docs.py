@@ -109,7 +109,10 @@ def test_discovery_denominator_is_not_claimed_as_chunks_or_embeddings() -> None:
     runbook = (ROOT / "docs/AUTHORITATIVE_FDA_CORPUS.md").read_text(encoding="utf-8")
     normalized_runbook = " ".join(runbook.split())
 
-    assert "140,339 source records" in readme
-    assert "Those are documents, not chunks or embeddings" in readme
-    assert "140,339 is the source-record denominator" in normalized_runbook
-    assert "final chunk and embedding totals pending" in normalized_runbook
+    assert "140,438 source records" in readme
+    assert "Those are source records, not chunks or embeddings" in readme
+    assert "140,438 frozen source records" in normalized_runbook
+    assert "final resolved, chunk, and embedding totals pending" in normalized_runbook
+    for false_claim in ("140,438 chunks", "140438 chunks", "140,438 embeddings"):
+        assert false_claim not in readme
+        assert false_claim not in normalized_runbook

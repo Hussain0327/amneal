@@ -1,6 +1,6 @@
 # Authoritative FDA corpus
 
-Last updated: 2026-08-13
+Last updated: 2026-08-17
 
 This is the source-of-truth contract and runbook for RegWatch's replacement FDA
 corpus. It admits exactly five source families:
@@ -18,41 +18,41 @@ them.
 
 ## Current state
 
-The FDA-only schema through migration `0023` is deployed on Fly release 135.
-The first `NDA020503` production canary discovered 21 records, indexed 18 of
-them into 347 chunks, and exposed three image-only/otherwise unparseable PDFs;
-the run is recorded as `failed` with those three errors. All 5,841 chunks
-carry active-profile embeddings (5,841 / 5,841, zero pending, verified
-directly against the production database on 2026-08-14), so fresh serving
-boots pass the profile-readiness guard. The outstanding canary work is the
-three unparsed documents, not a vector gap.
+The document-at-a-time worker, durable raw artifacts and manifests, sandboxed
+OCR, separate chunk/embedding lifecycle, and Dagster orchestration are deployed.
+The corrected `NDA020503` canary passed 21 / 21 and produced 499 chunks. The
+full production backfill is now owned by a supervised operator session and is
+running against one frozen complete-universe manifest. Retrieval remains on
+`legacy`; neither an accumulating authoritative namespace nor this release
+authorizes cutover.
 
-This follow-up release adds migration `0024`, document-at-a-time temporary
-storage, durable raw artifacts and exact manifests, sandboxed OCR, separate
-chunk/embedding lifecycle state, and Dagster orchestration. It must be merged
-and deployed before production ingestion resumes. Therefore 140,339 is the
-source-record denominator; it is not a chunk count and it is not an embedding
-count.
+Migration `0025_fda_terminal_resolution` adds the missing acceptance ledger for
+the inevitable tail. A manifest record is not silently skipped: it must resolve
+to an indexed current version or, after the durable retry budget is exhausted,
+to one of two narrowly validated terminal outcomes. An exact HTTP 404 may become
+`missing_at_source`; a reviewed PDF parser error may become `unparseable` only
+when the exact source bytes remain in durable artifact storage. Other download,
+storage, database, chunk-publication, and embedding failures remain unresolved
+errors and continue to block acceptance.
 
-The 2026-08-13 discovery produced:
+The frozen production manifest contains:
 
 | Measure | Count |
 | --- | ---: |
-| Authoritative source records | 140,339 |
-| Drugs@FDA | 99,190 |
+| Authoritative source records | 140,438 |
+| Drugs@FDA | 99,198 |
 | SBOA / action packages | 10,156 |
 | PSGs | 1,795 |
 | FDA BE guidance | 5 |
-| Orange Book | 29,193 |
-| Rejected out-of-policy or malformed Drugs@FDA links | 711 |
+| Orange Book | 29,284 |
 
 Document-type distribution:
 
 | Document type | Count |
 | --- | ---: |
-| Application/product metadata | 29,268 |
-| Approved label | 31,068 |
-| Approval letter | 37,159 |
+| Application/product metadata | 29,270 |
+| Approved label | 31,069 |
+| Approval letter | 37,164 |
 | Regulatory action | 1,695 |
 | Clinical review | 573 |
 | Statistical review | 367 |
@@ -63,9 +63,9 @@ Document-type distribution:
 | Other action-package review | 8,712 |
 | Product-Specific Guidance | 1,795 |
 | FDA BE guidance | 5 |
-| Orange Book product | 27,258 |
-| Orange Book patent | 1,323 |
-| Orange Book exclusivity | 612 |
+| Orange Book product | 27,333 |
+| Orange Book patent | 1,332 |
+| Orange Book exclusivity | 619 |
 
 Zero is an observed category count, not a parser claim that FDA has never
 published that review type. Reviews that cannot be classified confidently stay
@@ -75,12 +75,11 @@ in `other_review`; the pipeline does not invent a more specific type.
 
 | Snapshot | SHA-256 |
 | --- | --- |
-| Complete manifest | `4e5c3708cb309489d9056580a7578b3047560f32aca0345df6ee26c3cd2a7c5e` |
-| Drugs@FDA data ZIP | `5ad28811f52a08d951e7d9262871bb17d204d06ea030348d32cdf65dedb2feb9` |
-| Drugs@FDA rejected-link ledger | `99c1b7c0b6776e681cdd7f183b0d0d26bef7759f7448a97e6cf7c3cf0347295c` |
-| Orange Book ZIP | `a50c72e98297a9957a85986f7a60bf4f549de430d2ea8cce282ee6c1e6195d2c` |
-| PSG discovery | `a4f475c88ae4ec57c93d8c29e29b2560d4baa703ce009869ef6f1321e6be6b8f` |
-| Reviewed BE guidance manifest | `769bd0eb8be5d2dd3fcefe6c57a45aca7a1cfd60343537bd36589f31be30bbdb` |
+| Frozen complete manifest | `fae78c8eb6c5b601a5a52539ec7b62444d1eb7c745879d04ce1d031fa75c0c84` |
+
+The component snapshot fingerprints remain in that durable manifest's
+`source_snapshots_json`; operators must use the recorded row instead of copying
+fingerprints from the superseded 2026-08-13 discovery.
 
 Discovery is deterministic for the same official snapshots: artifacts are
 sorted by canonical ID, duplicate canonical IDs are rejected, inline snapshot
@@ -93,6 +92,10 @@ RegWatch reports these counters independently:
 - `source records`: canonical documents in the discovered manifest;
 - `documents`: manifest records with a searchable indexed version;
 - `versions`: immutable `(document, content hash, processing fingerprint)` rows;
+- `terminal documents`: current manifest-bound `missing_at_source` or
+  `unparseable` versions whose evidence passes acceptance validation;
+- `resolved records`: `documents + terminal documents`, which must equal the
+  frozen source-record denominator;
 - `chunks`: citable passages written for current document versions;
 - `embedded chunks`: those passages covered by the selected embedding profile;
 - `pending chunks`: `chunks - embedded chunks`;
@@ -101,16 +104,19 @@ RegWatch reports these counters independently:
 An operational display should read like this:
 
 ```text
-Authoritative FDA source records: 140,339
-Indexed documents:               <documents> / 140,339
+Authoritative FDA source records: 140,438
+Resolved records:                <documents + terminal> / 140,438
+Indexed documents:               <documents>
+Terminal outcomes:               <terminal>
 Chunks:                          <chunks>
 Embeddings (<profile>):          <embedded_chunks> / <chunks>
 Activation ready:                true | false
 ```
 
-Until the full sync runs, the correct statement is **140,339 discovered source
-records; final chunk and embedding totals pending**. Partial canary counters may
-be reported separately but must not be presented as full-corpus coverage.
+Until full acceptance passes, the correct statement is **140,438 frozen source
+records; final resolved, chunk, and embedding totals pending**. Moving backfill
+counters and the completed canary may be reported separately but must not be
+presented as full-corpus coverage.
 
 ## Source boundary
 
@@ -149,8 +155,13 @@ flowchart LR
     F --> A[SHA-256 + durable object upload]
     A --> P[Text parse + sandboxed OCR fallback]
     P --> C[Atomic chunk publication]
+    F -- exact 404 after retry budget --> T[Evidence-backed terminal ledger]
+    P -- retained PDF fails retry budget --> T
     C --> X[Unconditional local unlink]
-    X --> E[Profile-scoped embedding shard]
+    T --> X
+    X --> I{Indexed version?}
+    I -- yes --> E[Profile-scoped embedding shard]
+    I -- terminal --> G
     E --> G{512-shard acceptance gate}
     G -- ready --> R[Authoritative retrieval namespace]
     G -- blocked --> L[Legacy retrieval remains active]
@@ -173,6 +184,17 @@ The durability contract is:
   with page, pixel, CPU, wall-clock, output, file-descriptor, and Linux memory
   limits and no shell invocation;
 - unchanged `(content hash, processing fingerprint)` versions are reused;
+- one partial unique index selects exactly one current lifecycle version for a
+  document, and terminal publication atomically removes any older searchable
+  chunks for that document;
+- parser and exact-404 attempts are durably counted. The default terminal
+  threshold is four attempts: the initial shard attempt plus its three Dagster
+  retries. Attempt budgets reset when the exact manifest SHA-256 changes, so
+  observations from an older freeze cannot exhaust a newer run's budget;
+- every terminal row is bound to the exact manifest SHA-256, canonical ID,
+  source URL, attempt count, error, and resolution time. Missing-source rows
+  require an exact 404 observation; unparseable rows require retained source
+  bytes and a reviewed parser error type;
 - `chunk_status` and profile-keyed embedding lifecycle rows checkpoint the two
   phases separately;
 - each run records expected, discovered, added, revised, unchanged, failed,
@@ -199,15 +221,24 @@ Migration `0024_fda_streaming_lifecycle` adds:
 - per-version, per-profile embedding state; and
 - the durable exact-manifest pointer and checksum ledger.
 
-Both migrations perform no network calls or backfill. They are bounded by a
-lock timeout, preserve the serving corpus, enable RLS on new public tables, and
-are reversible.
+Migration `0025_fda_terminal_resolution` adds:
+
+- one explicitly current version per FDA document;
+- `pending`, `indexed`, `missing_at_source`, and `unparseable` resolution state;
+- durable attempt, error, timestamp, hash-kind, and JSON evidence fields; and
+- terminal-document counts on the corpus run ledger.
+
+The migration marks only already searchable versions as `indexed` and chooses
+their current lifecycle row. It does not infer terminal outcomes from historical
+failures. All three migrations perform no network calls or corpus backfill. They
+are bounded by a lock timeout, preserve the serving corpus, enable RLS on new
+public tables, and are reversible.
 
 ## Operating runbook
 
 ### 1. Release and preflight
 
-Deploy schema and code before resuming the canary:
+Deploy schema and code before terminal-tail repair or acceptance:
 
 ```bash
 uv run alembic upgrade head
@@ -243,9 +274,9 @@ fingerprints before creating a Dagster manifest:
 uv run regwatch authoritative-corpus-plan
 ```
 
-### 2. Repair and repeat the canary
+### 2. Preserve the completed canary gate
 
-Launch `authoritative_fda_canary_job` with:
+The already-passed canary used this contract:
 
 ```yaml
 ops:
@@ -257,12 +288,13 @@ ops:
       batch_size: 128
 ```
 
-The job must report exactly 21 / 21 documents, zero errors, non-zero chunks,
-and complete active-profile embeddings. It is safe to rerun: the 18 existing
-versions are reused (their 347 chunks are already embedded), and the three
-failed documents retry through OCR. Do not start the full manifest until this
-gate passes. Check the application-owned counters at any time—even while the serving
-profile is incomplete—with:
+The production canary has already reported exactly 21 / 21 documents, zero
+errors, 499 chunks, and complete active-profile embeddings. This remains a
+strict indexed-document gate: a terminal outcome never counts toward 21 / 21.
+Do not rerun it or any other production Dagster job from a second operator
+session while the full backfill is owned elsewhere. Check the application-owned
+counters from the owning session—even while the building profile is
+incomplete—with:
 
 ```bash
 uv run regwatch authoritative-corpus-status
@@ -270,10 +302,20 @@ uv run regwatch authoritative-corpus-status
 
 ### 3. Freeze and process the full universe
 
-Launch `authoritative_fda_manifest_job`. Record its logical
-`manifest_sha256`, durable artifact URI, compressed artifact SHA-256, source
-snapshots, and document count. Every downstream run must use that exact logical
-hash; never rediscover separately inside each shard.
+The production manifest is already frozen. **Do not launch
+`authoritative_fda_manifest_job` again while its backfill is running.** The
+driver resolves the newest complete-universe row, so a second freeze could swap
+the manifest beneath an in-flight sweep. The owned run's exact contract is:
+
+```text
+manifest_sha256: fae78c8eb6c5b601a5a52539ec7b62444d1eb7c745879d04ce1d031fa75c0c84
+document_count:  140438
+```
+
+For a future clean run, launch the manifest job once and record its logical
+SHA-256, durable artifact URI, compressed artifact SHA-256, source snapshots,
+and document count. Every downstream run must use that exact logical hash;
+never rediscover separately inside each shard.
 
 In Dagster, launch a 512-partition backfill for `authoritative_fda_shard_job`,
 partitions `000` through `511`, with:
@@ -345,11 +387,15 @@ than a corpus-wide reconciliation at acceptance time.
 
 ### 4. Acceptance and cutover
 
-Launch `authoritative_fda_acceptance_job` with the same manifest hash and active
-profile. Acceptance re-reads all 512 shards from Lakebase, requires exact
-document/chunk/vector parity, all five families, zero errors, a complete-universe
-manifest, and then performs retirement reconciliation. The job records one
-successful full orchestrated run and must pass
+After the owning backfill session finishes and migration 0025 is deployed,
+launch `authoritative_fda_acceptance_job` with the same manifest hash and active
+profile. Acceptance re-reads all 512 shards from Lakebase. For every manifest
+record it requires exactly one current version that is either indexed or has a
+valid terminal ledger entry. It revalidates terminal evidence against the exact
+manifest, requires vector parity for every indexed chunk, all five families,
+zero unresolved errors, and a complete-universe manifest, then performs
+retirement reconciliation. The job records indexed and terminal counts
+separately in one successful full orchestrated run and must pass
 `full_manifest_activation_gate`.
 
 Do not set `REGWATCH_RETRIEVAL_CORPUS=authoritative_fda` until status reports:
@@ -358,8 +404,10 @@ Do not set `REGWATCH_RETRIEVAL_CORPUS=authoritative_fda` until status reports:
 - zero policy violations;
 - zero pending chunks for the selected profile;
 - a successful complete-universe run;
-- processed documents equal the run's expected and discovered counts;
-- searchable documents equal the complete manifest count.
+- indexed plus terminal documents equal the run's expected and discovered
+  counts;
+- current terminal counts match the accepted run; and
+- searchable documents equal `complete manifest count - terminal documents`.
 
 Run the new-namespace evidence-page/span retrieval and end-to-end citation
 evaluation before cutover. A passing document hit rate alone is insufficient.
@@ -394,7 +442,7 @@ This implementation maps those principles to concrete controls:
 | --- | --- | --- |
 | Operational excellence | exact manifests, partitioned backfills, explicit lifecycle/run ledgers, blocking checks, documented runbook and rollback | manifest hashes, shard/run IDs, asset checks, status output |
 | Security, privacy, compliance | exact FDA source allowlist, manual redirect validation, no retired API key/path, sandboxed OCR, encrypted raw storage, RLS | policy/runtime/OCR tests, image scan, migration review |
-| Reliability | immutable acquired versions, atomic chunk publication, independent vector checkpoints, retries, exact-manifest reconciliation, fail-closed activation | cleanup/idempotency/shard/acceptance tests |
+| Reliability | immutable acquired versions, one current lifecycle row, atomic chunk publication, independent vector checkpoints, bounded retries, evidence-backed terminal resolution, exact-manifest reconciliation, fail-closed activation | cleanup/idempotency/terminal-recovery/shard/acceptance tests |
 | Performance | four run-granularity pools, one-document shard workers, bounded bytes/pages/OCR, per-host pacing, batched vectors | Dagster config test, duration and saturation logs |
 | Cost optimization | discovery-only plan, deferred embeddings by default, unchanged-version skip, batch and run limits | zero model calls during plan; pending counters |
 | Sustainability | avoid redundant downloads, parses, and embeddings; reuse content-addressed artifacts and immutable versions | content and processing fingerprints |
@@ -405,15 +453,18 @@ equivalents of the four golden signals:
 - latency: per-document `duration_ms` and run start/completion times;
 - traffic: discovered/expected documents, workers, chunks written, embedded
   batches;
-- errors: failed document count, typed bounded error samples, failed run state;
+- errors: unresolved document count, typed bounded error samples, validated
+  terminal-outcome count, failed run state;
 - saturation: queued/running shard counts, pool utilization, pending chunks, and
   embedding coverage.
 
 Alerts should be based on user-visible objectives, not raw noise. Recommended
-release objectives are: zero policy violations; zero document errors in a
-complete run; 100% selected-profile coverage; no missing family; and activation
-readiness true. Page on a failed complete run or serving startup rejection;
-ticket on a growing pending-embedding backlog or abnormal latency trend.
+release objectives are: zero policy violations; zero unresolved document errors
+in a complete run; indexed plus evidence-backed terminal parity with the exact
+manifest; 100% selected-profile coverage for indexed chunks; no missing family;
+and activation readiness true. Page on a failed complete run or serving startup
+rejection; ticket on a new terminal outcome, a growing pending-embedding
+backlog, or abnormal latency trend.
 
 ## Acceptance gate
 
@@ -425,7 +476,8 @@ target environment:
    snapshot;
 3. the application canary reaches exactly 21 / 21 with zero document errors;
 4. all 512 chunk partitions and blocking checks pass against one exact manifest;
-5. indexed documents equal the full manifest denominator;
+5. indexed plus evidence-backed terminal documents equal the full manifest
+   denominator, with every terminal row revalidated against the exact manifest;
 6. all 512 embedding partitions reach `embedded_chunks == chunks` on the serving
    profile;
 7. authoritative status reports no source-policy violations and
@@ -435,7 +487,8 @@ target environment:
 10. rollback to `legacy` is rehearsed without data loss.
 
 Discovery alone satisfies none of steps 3 through 10. The honest current
-handoff is: **140,339 authoritative source records discovered; the first canary
-is 18 / 21 with 347 chunks, all embedded on the active profile; deploy this
-worker upgrade, repair the canary to 21 / 21, then launch the production
-backfills.**
+handoff is: **140,438 authoritative source records are frozen under manifest
+`fae78c8e...75c0c84`; the corrected canary passed 21 / 21 with 499 chunks; the
+full production backfill is operator-owned and remains on the legacy serving
+namespace; deploy migration 0025 before resolving its terminal tail and running
+acceptance.**

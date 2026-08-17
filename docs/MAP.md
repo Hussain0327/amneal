@@ -96,7 +96,7 @@ This is the only index of `docs/`. Every living doc appears exactly once below.
 **Models and data**
 
 - [Authoritative FDA corpus](AUTHORITATIVE_FDA_CORPUS.md) - exact five-family
-  boundary, 140,339-record discovery, fingerprints, atomic ingest, embedding
+  boundary, 140,438-record manifest, fingerprints, atomic ingest, embedding
   coverage, activation, rollback, and Google engineering alignment
 - [Databricks adoption](DATABRICKS_ADOPTION_2026-07-28.md) - the inference-plane decision, cost model, incident log, and rollout state
 - [Evaluation status](EVAL_STATUS.md) - current gold-set counts, CI and live evidence, and the 0.917 correction
