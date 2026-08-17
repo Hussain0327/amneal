@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Barrier
@@ -994,3 +995,185 @@ def test_unparseable_attempts_reset_when_the_manifest_changes(
         assert second.terminal_documents == 1
     finally:
         settings_module.get_settings.cache_clear()
+
+
+def _url_artifact(template: CorpusArtifact) -> CorpusArtifact:
+    """The same document identity, reachable only by a network download."""
+    return dataclasses.replace(template, inline_text=None)
+
+
+def test_complete_document_skips_the_paced_fda_fetch_entirely() -> None:
+    """A fully indexed+embedded document must not cost an FDA request again.
+
+    Every driver resume re-walks its incomplete shards; without the pre-fetch
+    completeness check each already-done document burns a politeness-paced
+    download (~5s) just to conclude "unchanged", which taxes every restart
+    and wastes the global FDA request budget.
+    """
+    original = _inline_artifact("orange-book:product:n:900001")
+    with _offline_client() as client:
+        first = sync_manifest(_manifest(original), client=client)
+        assert first.added_documents == 1
+
+        resumed = sync_manifest(_manifest(_url_artifact(original)), client=client)
+
+    assert resumed.unchanged_documents == 1
+    assert resumed.error_documents == 0
+    assert resumed.chunks_written == 0
+
+
+def test_unknown_document_is_never_skipped() -> None:
+    """The skip must fail closed: an unseen document still takes the fetch path."""
+    fresh = _url_artifact(_inline_artifact("orange-book:product:n:900002"))
+    with _offline_client() as client:
+        stats = sync_manifest(_manifest(fresh), client=client)
+    assert stats.error_documents == 1
+    assert stats.unchanged_documents == 0
+
+
+def test_chunked_but_unembedded_skips_only_when_embeddings_are_deferred() -> None:
+    """Skip parity with the post-fetch check's embedding leg.
+
+    The chunk shard (defer_embeddings=True) may skip a chunk-complete version
+    outright, but a non-deferred sync must still fetch so the existing-version
+    embed repair path can run; skipping there would strand the version without
+    vectors while reporting it unchanged.
+    """
+    original = _inline_artifact("orange-book:product:n:900003")
+    with _offline_client() as client:
+        first = sync_manifest(_manifest(original), client=client, defer_embeddings=True)
+        assert first.added_documents == 1
+
+        deferred = sync_manifest(
+            _manifest(_url_artifact(original)), client=client, defer_embeddings=True
+        )
+        not_deferred = sync_manifest(_manifest(_url_artifact(original)), client=client)
+
+    assert deferred.unchanged_documents == 1
+    assert deferred.error_documents == 0
+    assert not_deferred.unchanged_documents == 0
+    assert not_deferred.error_documents == 1
+
+
+def test_processing_fingerprint_change_defeats_the_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bumping CHUNKING_VERSION must force a re-fetch, not a silent skip."""
+    original = _inline_artifact("orange-book:product:n:900004")
+    with _offline_client() as client:
+        sync_manifest(_manifest(original), client=client)
+
+    monkeypatch.setattr(sync_module, "_processing_fingerprint", lambda spec: "chunker-v-next")
+    with _offline_client() as client:
+        stats = sync_manifest(_manifest(_url_artifact(original)), client=client)
+    assert stats.unchanged_documents == 0
+    assert stats.error_documents == 1
+
+
+def test_skip_refreshes_metadata_but_preserves_the_resolved_source_url() -> None:
+    """The skip must keep FDA metadata current without regressing the URL.
+
+    Discovery rebuilds the manifest between resumes, so titles and Orange Book
+    fields can change while the document content has not; the skip still has to
+    apply those. But the stored source_url is the redirect-RESOLVED URL from the
+    last real fetch, and the manifest carries the pre-redirect form -- a skip has
+    no payload, so it must leave the resolved URL alone.
+    """
+    original = _inline_artifact("orange-book:product:n:900005")
+    with _offline_client() as client:
+        sync_manifest(_manifest(original), client=client)
+
+    resolved = "https://www.accessdata.fda.gov/scripts/cder/ob/results_product.cfm?resolved=1"
+    with get_engine().connect() as conn:
+        conn.execute(
+            text("UPDATE fda_document SET source_url = :u WHERE canonical_id = :c"),
+            {"u": resolved, "c": original.canonical_id},
+        )
+        conn.commit()
+
+    renamed = dataclasses.replace(_url_artifact(original), title="Renamed by a rebuilt manifest")
+    with _offline_client() as client:
+        stats = sync_manifest(_manifest(renamed), client=client)
+    assert stats.unchanged_documents == 1
+
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            text("SELECT title, source_url FROM fda_document WHERE canonical_id = :c"),
+            {"c": original.canonical_id},
+        ).one()
+    assert row[0] == "Renamed by a rebuilt manifest"
+    assert row[1] == resolved
+
+
+def test_unknown_document_takes_the_fetch_path_not_some_other_failure() -> None:
+    """Isolate the fail-closed guard: the unknown doc must actually be REQUESTED.
+
+    Asserting only on error counts cannot tell a correct fetch attempt apart
+    from a wrongly-taken skip branch blowing up later (e.g. _touch_document's
+    ``.one()`` on a missing row); the offline client's error text is the
+    observable that only the fetch path produces.
+    """
+    fresh = _url_artifact(_inline_artifact("orange-book:product:n:900006"))
+    with _offline_client() as client:
+        stats = sync_manifest(_manifest(fresh), client=client)
+    assert stats.error_documents == 1
+    assert "unexpectedly requested" in stats.errors[0]["error"]
+
+
+def test_complete_version_with_deleted_chunks_defeats_the_skip() -> None:
+    """A complete version whose chunk rows are gone must be re-fetched.
+
+    ``reconcile_active_manifest`` deletes a retired document's chunks while its
+    version row keeps chunk_status='complete'; if that document reappears in a
+    manifest, skipping it would leave a permanently chunkless document that
+    still reports unchanged forever.
+    """
+    original = _inline_artifact("orange-book:product:n:900007")
+    with _offline_client() as client:
+        sync_manifest(_manifest(original), client=client, defer_embeddings=True)
+
+    with get_engine().connect() as conn:
+        conn.execute(
+            text(
+                "DELETE FROM chunk WHERE fda_document_id = "
+                "(SELECT id FROM fda_document WHERE canonical_id = :c)"
+            ),
+            {"c": original.canonical_id},
+        )
+        conn.commit()
+
+    with _offline_client() as client:
+        stats = sync_manifest(
+            _manifest(_url_artifact(original)), client=client, defer_embeddings=True
+        )
+    assert stats.unchanged_documents == 0
+    assert stats.error_documents == 1
+    assert "unexpectedly requested" in stats.errors[0]["error"]
+
+
+def test_ledger_pending_rows_are_never_skipped_before_the_fetch() -> None:
+    """The pre-fetch skip must defer to the resolution ledger's self-heal.
+
+    A chunk-complete version still marked resolution_status='pending' (written
+    by pre-0025 worker code) is only credited as INDEXED inside the fetch
+    path's _record_acquired_version; skipping it pre-fetch would strand it
+    pending forever and re-open the permanently-blocked-shard defect the
+    self-heal exists to close.
+    """
+    original = _inline_artifact("orange-book:product:n:900008")
+    with _offline_client() as client:
+        sync_manifest(_manifest(original), client=client)
+
+    with get_engine().begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE fda_document_version SET resolution_status = 'pending', "
+                "resolved_at = NULL"
+            )
+        )
+
+    with _offline_client() as client:
+        stats = sync_manifest(_manifest(_url_artifact(original)), client=client)
+    assert stats.unchanged_documents == 0
+    assert stats.error_documents == 1
+    assert "unexpectedly requested" in stats.errors[0]["error"]
