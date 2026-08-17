@@ -17,6 +17,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DAGSTER_HOME=/app/dagster
 
 RUN apt-get update \
+    # Keep inherited Debian packages current even when the reviewed base-image
+    # digest predates a security publication.
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \

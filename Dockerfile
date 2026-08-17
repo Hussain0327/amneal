@@ -61,6 +61,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     WHITEPAPER_TEMPLATE_PATH=/app/data/templates/cra_white_paper_template.docx
 
 RUN apt-get update \
+    # The digest-pinned base can lag a Debian security publication. Upgrade
+    # inherited packages before installing runtime/build dependencies so the
+    # final image carries every fix available from the configured stable repos.
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
