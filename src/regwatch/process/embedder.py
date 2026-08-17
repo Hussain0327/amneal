@@ -9,24 +9,15 @@ surface for older providers and callers.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import math
 import random
 import time
-from collections import OrderedDict
 from collections.abc import Mapping
 from functools import lru_cache
-from threading import Lock
 from typing import Any, ClassVar, Protocol
 
 import httpx
 from config.settings import get_settings
-
-# Guards LocalBgeSmallProvider's process-wide model load and shared LRU cache.
-# FastAPI runs the sync /query endpoint in a threadpool, so embed() executes
-# concurrently across threads; unsynchronized OrderedDict mutation would raise
-# (mirrors retrieve/reranker.py's _RERANKER_LOCK).
-_LOCAL_CACHE_LOCK = Lock()
 
 # The served Databricks endpoint (`workspace.default.regwatch-embed`, served
 # entity `qwen3-embedding-0-6b-112025`), not a HuggingFace repo id: the old
@@ -116,78 +107,6 @@ def embed_documents(provider: Any, texts: list[str]) -> list[list[float]]:
     return provider.embed(texts)
 
 
-class LocalBgeSmallProvider:
-    """sentence-transformers BAAI/bge-small-en-v1.5, runs locally."""
-
-    name = "local-bge-small"
-    dim = 384
-
-    _model: ClassVar[object | None] = None
-    _cache: ClassVar[OrderedDict[str, list[float]]] = OrderedDict()
-    _cache_max_size: ClassVar[int] = 4096
-
-    def _ensure_model(self) -> None:
-        if self._model is not None:
-            return
-        with _LOCAL_CACHE_LOCK:  # double-checked: only one thread loads the model
-            if self._model is not None:
-                return
-            try:
-                from sentence_transformers import SentenceTransformer
-            except ModuleNotFoundError as exc:
-                raise RuntimeError(
-                    "EMBEDDING_PROVIDER=local-bge-small requires installing "
-                    "`regwatch[local-embeddings]` or running "
-                    "`uv sync --extra local-embeddings`."
-                ) from exc
-
-            LocalBgeSmallProvider._model = SentenceTransformer("BAAI/bge-small-en-v1.5")
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        if not texts:
-            return []
-        out: list[list[float]] = []
-        misses: list[tuple[int, str]] = []
-        # Cache reads/writes are guarded: the shared OrderedDict is mutated
-        # (move_to_end / __setitem__ / popitem) and would corrupt under the
-        # concurrent threadpool /query path without the lock.
-        with _LOCAL_CACHE_LOCK:
-            for i, t in enumerate(texts):
-                key = hashlib.sha256(t.encode("utf-8")).hexdigest()
-                cached = self._cache.get(key)
-                if cached is not None:
-                    self._cache.move_to_end(key)
-                out.append(cached if cached is not None else [])
-                if cached is None:
-                    misses.append((i, key))
-        if misses:
-            self._ensure_model()
-            if self._model is None:
-                raise RuntimeError("local embedding model failed to initialize")
-            batch_texts = [texts[i] for i, _ in misses]
-            # Model inference runs OUTSIDE the lock so concurrent callers are not
-            # serialized on the slow encode; only the cache mutation is guarded.
-            vecs = self._model.encode(  # type: ignore[attr-defined]
-                batch_texts,
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-            ).tolist()
-            with _LOCAL_CACHE_LOCK:
-                for (i, key), v in zip(misses, vecs, strict=False):
-                    self._cache[key] = v
-                    self._cache.move_to_end(key)
-                    while len(self._cache) > self._cache_max_size:
-                        self._cache.popitem(last=False)
-                    out[i] = v
-        return out
-
-    def embed_query(self, query: str) -> list[float]:
-        return self.embed([query])[0]
-
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return self.embed(texts)
-
-
 class EchoEmbeddingProvider:
     """Deterministic, network-free provider for tests.
 
@@ -243,99 +162,6 @@ def _full_jitter_delay_s(base_s: float, cap_s: float, retry_index: int) -> float
     ceiling = min(cap_s, base_s * (2**retry_index))
     # Retry jitter, not a cryptographic draw.
     return random.uniform(0, ceiling)  # noqa: S311
-
-
-class OpenAIEmbeddingProvider:
-    """OpenAI `text-embedding-3-small` (1536 dims, unit-norm vectors).
-
-    Batches up to 512 inputs per API call and retries 429/5xx responses with
-    full-jitter exponential backoff. The chunk table in Postgres mode stores
-    `vector(1536)`, so `dim` must stay in lockstep with it (the pgvector
-    store asserts this at startup — see store/pgvector_store.py).
-
-    `client` is injectable for tests, mirroring generate/llm.OpenAIProvider.
-    """
-
-    name = "openai"
-    dim = 1536
-    model = "text-embedding-3-small"
-
-    _max_batch_size: ClassVar[int] = 512
-    _max_attempts: ClassVar[int] = 6
-    _backoff_base_s: ClassVar[float] = 1.0
-    _backoff_cap_s: ClassVar[float] = 30.0
-
-    def __init__(self, *, client: Any = None) -> None:
-        self._client = client
-
-    def _client_or_create(self) -> Any:
-        if self._client is None:
-            api_key = get_settings().openai_api_key
-            if not api_key:
-                raise RuntimeError("EMBEDDING_PROVIDER=openai requires OPENAI_API_KEY to be set")
-            from regwatch.common.llm_clients import shared_openai_client
-
-            try:
-                # max_retries=0: _create_with_retry below owns the retry loop, so
-                # SDK retries would stack on top of it (B3). The timeout still
-                # bounds each attempt.
-                self._client = shared_openai_client(
-                    api_key, timeout=get_settings().llm_timeout_s, max_retries=0
-                )
-            except ModuleNotFoundError as exc:
-                raise RuntimeError(
-                    "EMBEDDING_PROVIDER=openai requires installing `regwatch[llm]` "
-                    "or running `uv sync --extra llm`."
-                ) from exc
-        return self._client
-
-    @staticmethod
-    def _is_retryable(exc: Exception) -> bool:
-        """Retry only rate limits (429) and server errors (5xx)."""
-        status = getattr(exc, "status_code", None)
-        if not isinstance(status, int):
-            return False
-        return status == 429 or status >= 500
-
-    def _create_with_retry(self, client: Any, batch: list[str]) -> Any:
-        for attempt in range(1, self._max_attempts + 1):
-            try:
-                return client.embeddings.create(model=self.model, input=batch)
-            except Exception as exc:
-                if attempt >= self._max_attempts or not self._is_retryable(exc):
-                    raise
-                time.sleep(
-                    _full_jitter_delay_s(self._backoff_base_s, self._backoff_cap_s, attempt - 1)
-                )
-        raise RuntimeError("unreachable")  # pragma: no cover
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        if not texts:
-            return []
-        client = self._client_or_create()
-        out: list[list[float]] = []
-        for start in range(0, len(texts), self._max_batch_size):
-            batch = list(texts[start : start + self._max_batch_size])
-            resp = self._create_with_retry(client, batch)
-            data = sorted(resp.data, key=lambda d: int(d.index))
-            if len(data) != len(batch):
-                raise RuntimeError(
-                    f"openai embeddings returned {len(data)} vectors for {len(batch)} inputs"
-                )
-            for item in data:
-                vec = [float(x) for x in item.embedding]
-                if len(vec) != self.dim:
-                    raise RuntimeError(
-                        f"openai embedding has {len(vec)} dims, expected {self.dim} ({self.model})"
-                    )
-                out.append(vec)
-        return out
-
-    def embed_query(self, query: str) -> list[float]:
-        return self.embed([query])[0]
-
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return self.embed(texts)
 
 
 @lru_cache(maxsize=8)
@@ -684,36 +510,39 @@ class Qwen3EmbeddingProvider:
         return self.embed_documents(texts)
 
 
-def _module_available(module: str) -> bool:
-    """Cheap importability probe (no actual import — torch never loads here)."""
-    return importlib.util.find_spec(module) is not None
+def _require_provider_name(name: str | None) -> str:
+    """Resolve a provider name from the argument or settings, or refuse.
+
+    EMBEDDING_PROVIDER deliberately has no default. The 2026-08-14 backfill
+    outage was a worker booted without it silently falling back to a local
+    384-dim model: every fresh document paid its fetch/parse/OCR cost and then
+    failed the same 1536-dim write. A missing provider is a configuration
+    error, and configuration errors refuse at resolution time, before any
+    document work is spent.
+    """
+    resolved = (name or get_settings().embedding_provider or "").strip().lower()
+    if not resolved:
+        raise RuntimeError(
+            "EMBEDDING_PROVIDER is not set and has no default. Set "
+            "EMBEDDING_PROVIDER=qwen3 (the Databricks serving endpoint, prod) "
+            "or EMBEDDING_PROVIDER=echo (tests only); this process refuses to "
+            "guess an embedding space."
+        )
+    return resolved
 
 
 def assert_embedding_runtime_available(name: str | None = None) -> None:
-    """Boot-time fail-fast: the configured provider's runtime deps must exist.
+    """Boot-time fail-fast: the configured provider must be fully usable.
 
-    Providers import their heavy dependencies lazily on first ``embed()``, so a
-    slim image (``INSTALL_LOCAL_EMBEDDINGS=false``) configured with
-    ``EMBEDDING_PROVIDER=local-bge-small`` would otherwise boot cleanly,
-    report healthy, and then 500 on every query/ingest at embed time. The API
-    lifespan calls this so that misconfiguration refuses to start with the
-    same remediation message the lazy path would raise.
+    The Qwen provider reads its endpoint credentials lazily on first
+    ``embed()``, so a process missing QWEN_EMBEDDING_BASE_URL/TOKEN would
+    otherwise boot cleanly, report healthy, and then fail every query/ingest
+    at embed time. The API lifespan and the corpus preflight call this so the
+    misconfiguration refuses to start with the same remediation message the
+    lazy path would raise. An unset EMBEDDING_PROVIDER refuses here too.
     """
-    name = (name or get_settings().embedding_provider).strip().lower()
-    if name == "local-bge-small" and not _module_available("sentence_transformers"):
-        raise RuntimeError(
-            "EMBEDDING_PROVIDER=local-bge-small requires installing "
-            "`regwatch[local-embeddings]` or running "
-            "`uv sync --extra local-embeddings` (Docker: build with "
-            "INSTALL_LOCAL_EMBEDDINGS=true), or set EMBEDDING_PROVIDER=openai "
-            "for the slim image."
-        )
-    if name == "openai" and not _module_available("openai"):
-        raise RuntimeError(
-            "EMBEDDING_PROVIDER=openai requires installing `regwatch[llm]` "
-            "or running `uv sync --extra llm`."
-        )
-    if name in _QWEN3_PROVIDER_NAMES:
+    resolved = _require_provider_name(name)
+    if resolved in _QWEN3_PROVIDER_NAMES:
         settings = get_settings()
         if not str(getattr(settings, "qwen_embedding_base_url", "") or "").strip():
             raise RuntimeError(
@@ -721,17 +550,15 @@ def assert_embedding_runtime_available(name: str | None = None) -> None:
             )
         if not str(getattr(settings, "qwen_embedding_token", "") or "").strip():
             raise RuntimeError("EMBEDDING_PROVIDER=qwen3 requires QWEN_EMBEDDING_TOKEN to be set")
+        return
+    if resolved != "echo":
+        raise ValueError(f"unknown embedding provider: {resolved}")
 
 
 def get_embedding_provider(name: str | None = None) -> EmbeddingProvider:
-    """Factory. Falls back to settings if no name provided."""
+    """Factory. Falls back to settings; refuses when nothing is configured."""
     settings = get_settings()
-    name = name or settings.embedding_provider
-    name = name.strip().lower()
-    if name == "local-bge-small":
-        return LocalBgeSmallProvider()
-    if name == "openai":
-        return OpenAIEmbeddingProvider()
+    name = _require_provider_name(name)
     if name == "echo":
         return EchoEmbeddingProvider()
     if name in _QWEN3_PROVIDER_NAMES:

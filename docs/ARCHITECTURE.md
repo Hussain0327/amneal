@@ -161,13 +161,13 @@ failed `::1` attempt on every request.
 | LLM | `echo` test provider | Databricks `gpt-oss-120b` at `workspace.default.regwatch`, one endpoint for every role |
 | `DATABASE_URL` | required, `TEST_DATABASE_URL` for tests | required |
 
-The interactive app uses OpenAI only as a tested rollback; no analyst turn goes
-there in current state. Scheduled Watch separately retains a scoped OpenAI key
-for public-document change summaries and extraction, not embeddings.
-`EMBEDDING_PROVIDER=openai` is still in `fly.toml` and is now dead weight on the
-query path: retrieval picks its arm from
-`ACTIVE_EMBEDDING_PROFILE`, and only the `legacy` arm ever reads
-`EMBEDDING_PROVIDER` (section 9).
+The OpenAI-API and Anthropic provider paths were removed on 2026-08-17: no
+turn — interactive or scheduled — can reach OpenAI. Scheduled Watch runs its
+change summaries and extraction on a watch-scoped Databricks endpoint
+(`WATCH_DATABRICKS_LLM_*` secrets). `EMBEDDING_PROVIDER` is required-explicit
+(no default; an unset value refuses to boot — the 2026-08-14 postmortem) and
+`fly.toml` sets it to `qwen3`; retrieval itself picks its arm from
+`ACTIVE_EMBEDDING_PROFILE` (section 9).
 
 ---
 
@@ -707,9 +707,9 @@ full 140,438-record backfill is operator-owned while serving remains on
   no longer affects the query path.
 
 - **Provider and dimension are paired.** Startup fails fast on a provider/table
-  mismatch (the `K6` assert in `assert_embedding_provider_dim`), which is why
-  `local-bge-small` (384-dim) is rejected against the app datastore and stays
-  available for offline and eval tooling only.
+  mismatch (the `K6` assert in `assert_embedding_provider_dim`), and the corpus
+  workers run the same geometry check as a preflight
+  (`assert_embedding_write_config`) before any document work is spent.
 
 - **pgvector index strategy.** Per-drug queries, the common path, use a B-tree
   filter on `normalized_name` plus exact distance. That beats HNSW for filtered
@@ -992,8 +992,8 @@ items, closing the loop.
 ## 18. Configuration
 
 One Pydantic `Settings` object (`config/settings.py`), fully `.env` driven.
-Providers are pluggable (LLM: `databricks | openai | anthropic | echo`;
-embeddings: `openai | qwen3 | local-bge-small | echo`). See
+Providers are required-explicit with NO defaults (LLM: `databricks | echo`;
+embeddings: `qwen3 | echo`; a process without them refuses to boot). See
 [`.env.example`](../.env.example) for the annotated surface. The load-bearing
 knobs:
 
@@ -1001,14 +1001,13 @@ knobs:
 |---|---|
 | `DATABASE_URL` | **Mandatory.** Postgres plus pgvector connection string; the app refuses to boot without it |
 | `ACTIVE_EMBEDDING_PROFILE` / `EMBEDDING_SHADOW_PROFILE` | Which named profile serves retrieval, and which one is being populated for a blue/green re-embed. Prod runs `ep_2e7368b354d911ea3a013c3125e276c2` (Qwen3, 1024-dim) |
-| `EMBEDDING_PROVIDER` | Only read on the `legacy` arm, so it no longer affects the production query path. `openai` (1536-dim) \| `qwen3` (OpenAI-compatible private endpoint) \| `local-bge-small` (384-dim, offline and eval tooling only) \| `echo` (test only) |
+| `EMBEDDING_PROVIDER` | Required-explicit, no default: an unset value refuses to boot. `qwen3` (OpenAI-compatible private endpoint; the only production value) \| `echo` (test only) |
 | `QWEN_EMBEDDING_BASE_URL` / `_TOKEN` / `_MODEL` / `_DIMENSION` / `_REVISION` | The in-tenant embedding endpoint the active profile calls |
-| `LLM_PROVIDER` | `databricks` (prod: ONE endpoint, `DATABRICKS_LLM_MODEL`, serving every role) \| `openai` (role models below, the rollback path) \| `anthropic` \| `echo` (test only) |
+| `LLM_PROVIDER` | Required-explicit, no default. `databricks` (prod: ONE endpoint, `DATABRICKS_LLM_MODEL`, serving every role) \| `echo` (test only) |
 | `DATABRICKS_LLM_BASE_URL` / `_TOKEN` / `_MODEL` | The in-tenant Model Serving endpoint. `_MODEL` has no default, because a placeholder would 404 every synthesis. Prod points at `workspace.default.regwatch`, which currently serves `gpt-oss-120b-080525` |
 | `DATABRICKS_REASONING_EFFORT` (`low`) | Reasoning budget sent on every role. Prod runs `low` |
 | `D1_ENFORCED` / `D1_ALLOWED_LLM_MODELS` | Residency tripwires: a boot guard against half-migrated config, plus a per-response served-model check. List BOTH the Unity Catalog alias and the served model id |
 | `REGWATCH_PROSE_SYNTHESIS` / `REGWATCH_LIVE_DRAFT` / `REGWATCH_SELECTIVE_CITATION` | The v6 prose format, live draft streaming over SSE, and the v7 selective-citation policy. All three are on in prod |
-| `ROUTER_MODEL` / `SYNTHESIZER_MODEL` / `EXTRACTOR_MODEL` | OpenAI role-specific models, used only on the OpenAI rollback path |
 | `SYNTHESIZER_MAX_TOKENS` (3000) | Synthesis output cap, buffered and streamed alike. A reasoning model's thinking and its answer share it |
 | `REGWATCH_ROUTE_CALL` (`off`) | Route and scope observation. `shadow` records one advisory call; `live` is reserved and still behaves as shadow |
 | `REGWATCH_ROUTE_MAX_TOKENS` (1200) | Route-call budget. Probe the served reasoning floor before enabling shadow and keep the cap above it |

@@ -95,8 +95,8 @@ The job picks its arm at run time:
    arm that matters: it embeds with Databricks-hosted Qwen3, the same geometry
    production serves. Per [`EVAL_STATUS.md`](EVAL_STATUS.md) it has been
    configured since 2026-08-05 and runs on the same profile id prod uses.
-2. Legacy OpenAI arm, if only `OPENAI_API_KEY` is set.
-3. Otherwise the job logs a warning and skips the eval.
+2. Otherwise the job fails loudly ("eval could not run"). The legacy OpenAI
+   arm was removed with the OpenAI provider on 2026-08-17.
 
 The Databricks arm does four steps in a fixed order: register the embedding
 profile (content-addressed, so it is idempotent), build the HNSW index, seed the
@@ -244,15 +244,16 @@ regenerating the Go side.
 ```bash
 # needs a FRESH disposable pgvector Postgres on localhost:5432
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres \
-  EMBEDDING_PROVIDER=openai uv run regwatch init-db
+  EMBEDDING_PROVIDER=echo uv run regwatch init-db
 bash scripts/gen-store-schema.sh \
   'postgresql://postgres:postgres@localhost:5432/postgres' /tmp/schema.live.sql
 diff -u go/internal/store/schema.sql /tmp/schema.live.sql
 ```
 
-`EMBEDDING_PROVIDER=openai` there is a bootstrap trick, not a statement about
-prod. The legacy `chunk.embedding` column is `vector(1536)`, and naming a
-1536-dim provider satisfies the dimension assert without needing an API key.
+`EMBEDDING_PROVIDER=echo` there is a bootstrap trick, not a statement about
+prod. The legacy `chunk.embedding` column is `vector(1536)`, and naming the
+1536-dim test provider satisfies the dimension assert without any credentials
+(there is no default provider; an unset value refuses to boot).
 
 CI runs `pg_dump` from the `pgvector/pgvector:pg17` image so the client lineage
 matches the server. Do the same locally if your `pg_dump` is older than 17. On

@@ -26,12 +26,19 @@ name: watch-daily
 #                       database the API serves, or the run writes alerts
 #                       nobody reads. A stale value here is what broke this
 #                       cron from 2026-08-07 to 2026-08-10.
-#   WATCH_OPENAI_API_KEY  required for change-summary generation, optional BE
-#                       extraction, and the advisory threshold sweep's
-#                       synthesizer. It is NOT used for embeddings: those run
-#                       through the named Qwen3 profile below. Watch-scoped (NOT
-#                       the repo-wide OPENAI_API_KEY) so ci.yml's live-eval gate
-#                       stays skipped.
+#   DATABRICKS_LLM_BASE_URL
+#   DATABRICKS_LLM_TOKEN  (repo secrets, shared with databricks-eval.yml) plus
+#                       the DATABRICKS_LLM_MODEL repo VARIABLE: the private
+#                       Databricks OpenAI-compatible serving endpoint used for
+#                       change-summary generation, optional BE extraction, and
+#                       the advisory threshold sweep's synthesizer (the
+#                       OpenAI-API provider path was removed 2026-08-17). NOT
+#                       used for embeddings: those run through the named Qwen3
+#                       profile below. Deliberately the SAME names the eval
+#                       workflow reads -- they were already provisioned
+#                       (verified 2026-08-17), so this cron needs no new
+#                       secrets; unlike the old WATCH_OPENAI_API_KEY split,
+#                       nothing gates other paid work on these names.
 #   WATCH_ACTIVE_EMBEDDING_PROFILE
 #                       the exact named profile prod serves (never `legacy`).
 #   WATCH_QWEN_EMBEDDING_BASE_URL
@@ -88,9 +95,10 @@ jobs:
       DATABASE_URL: ${{ secrets.WATCH_DATABASE_URL }}
       REQUIRE_DATABASE_URL: "true"
       EMBEDDING_PROVIDER: "qwen3"
-      # Watch change summaries/extraction still use the OpenAI LLM. Keep that
-      # provider boundary explicit while embeddings use Qwen below.
-      LLM_PROVIDER: "openai"
+      # Watch change summaries/extraction use the same Databricks serving
+      # endpoint family as prod. Keep that provider boundary explicit while
+      # embeddings use the Qwen values below.
+      LLM_PROVIDER: "databricks"
       # All six values are required when DATABASE_URL is configured. Missing
       # provisioning fails before checkout/crawl. Registered fingerprint drift
       # fails in the validation step before any ingest write.
@@ -100,11 +108,12 @@ jobs:
       QWEN_EMBEDDING_MODEL: ${{ secrets.WATCH_QWEN_EMBEDDING_MODEL }}
       QWEN_EMBEDDING_REVISION: ${{ secrets.WATCH_QWEN_EMBEDDING_REVISION }}
       QWEN_EMBEDDING_DIMENSION: ${{ secrets.WATCH_QWEN_EMBEDDING_DIMENSION }}
-      # Watch-scoped OpenAI key, NOT the repo-wide OPENAI_API_KEY. ci.yml gates
-      # provider-backed seed/eval on the separately configured repo-wide name.
-      # This key serves change summaries, extraction and the advisory sweep,
-      # never embeddings.
-      OPENAI_API_KEY: ${{ secrets.WATCH_OPENAI_API_KEY }}
+      # The Databricks LLM endpoint (same repo secrets/variable the eval
+      # workflow reads). Serves change summaries, extraction and the advisory
+      # sweep, never embeddings.
+      DATABRICKS_LLM_BASE_URL: ${{ secrets.DATABRICKS_LLM_BASE_URL }}
+      DATABRICKS_LLM_TOKEN: ${{ secrets.DATABRICKS_LLM_TOKEN }}
+      DATABRICKS_LLM_MODEL: ${{ vars.DATABRICKS_LLM_MODEL }}
       # entrypoint.sh runs init-db on boot; here we run alembic + watch directly,
       # so this is informational parity with the container only.
       SENTRY_ENVIRONMENT: "production"
@@ -119,14 +128,20 @@ jobs:
           echo "WATCH_DATABASE_URL secret not set - skipping the daily watch run."
           echo "Set it to the prod Databricks Lakebase DIRECT endpoint URL with ?sslmode=require (never a -pooler host)."
 
-      # Fail fast on a missing/empty OpenAI key. Change summaries and BE
-      # extraction only exercise it on change days (the advisory sweep uses it
-      # later), so a lost key could otherwise stay green through quiet crawls.
-      - name: preflight WATCH_OPENAI_API_KEY
+      # Fail fast on missing/empty Databricks LLM config. Change summaries and
+      # BE extraction only exercise it on change days (the advisory sweep uses
+      # it later), so lost secrets could otherwise stay green through quiet
+      # crawls.
+      - name: preflight Databricks LLM config
         if: env.DATABASE_URL != ''
         run: |
-          if [ -z "${OPENAI_API_KEY}" ]; then
-            echo "::error::WATCH_OPENAI_API_KEY secret is unset/empty. Change summaries and extraction use OpenAI when an FDA change lands. Restore the secret."
+          is_blank() { [[ -z "$1" || "$1" =~ ^[[:space:]]+$ ]]; }
+          missing=""
+          is_blank "${DATABRICKS_LLM_BASE_URL}" && missing="${missing} secret:DATABRICKS_LLM_BASE_URL"
+          is_blank "${DATABRICKS_LLM_TOKEN}" && missing="${missing} secret:DATABRICKS_LLM_TOKEN"
+          is_blank "${DATABRICKS_LLM_MODEL}" && missing="${missing} variable:DATABRICKS_LLM_MODEL"
+          if [ -n "${missing}" ]; then
+            echo "::error::Databricks LLM configuration is unset/empty:${missing}. Change summaries and extraction use the Databricks endpoint when an FDA change lands. Restore the repo secret/variable."
             exit 1
           fi
 
@@ -287,9 +302,9 @@ jobs:
       # a refusal cutoff. See docs/DEPLOY.md section "Refusal-threshold
       # revalidation".
       #
-      # This now inherits the same active Qwen profile as serving and ingest, so
-      # once the six WATCH profile secrets are provisioned its score distribution
-      # is from the production geometry rather than the legacy OpenAI arm.
+      # This inherits the same active Qwen profile as serving and ingest, so
+      # its score distribution comes from the production geometry (the legacy
+      # OpenAI arm no longer exists).
       #
       # It is calibration OBSERVABILITY, NOT a gate. The sweep is read-only with
       # respect to the safety path: it never changes REFUSAL_SCORE_THRESHOLD or

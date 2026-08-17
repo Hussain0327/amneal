@@ -160,10 +160,8 @@ def test_dedicated_client_cache_keys_every_databricks_transport_input(
             calls.append(kwargs)
 
     monkeypatch.setattr(openai, "OpenAI", _FakeOpenAI)
-    llm_clients.shared_openai_client.cache_clear()
     llm_clients.shared_databricks_openai_client.cache_clear()
     try:
-        ordinary = llm_clients.shared_openai_client("openai-key", timeout=30.0, max_retries=2)
         first = llm_clients.shared_databricks_openai_client(
             "https://db.example/serving-endpoints",
             "db-token",
@@ -182,15 +180,19 @@ def test_dedicated_client_cache_keys_every_databricks_transport_input(
             timeout=45.0,
             max_retries=1,
         )
+        other_endpoint = llm_clients.shared_databricks_openai_client(
+            "https://other.example/serving-endpoints",
+            "db-token",
+            timeout=45.0,
+            max_retries=1,
+        )
     finally:
-        llm_clients.shared_openai_client.cache_clear()
         llm_clients.shared_databricks_openai_client.cache_clear()
 
     assert first is cached
     assert first is not rotated
-    assert ordinary is not first
+    assert first is not other_endpoint
     assert calls == [
-        {"api_key": "openai-key", "timeout": 30.0, "max_retries": 2},
         {
             "api_key": "db-token",
             "base_url": "https://db.example/serving-endpoints",
@@ -200,6 +202,12 @@ def test_dedicated_client_cache_keys_every_databricks_transport_input(
         {
             "api_key": "rotated-token",
             "base_url": "https://db.example/serving-endpoints",
+            "timeout": 45.0,
+            "max_retries": 1,
+        },
+        {
+            "api_key": "db-token",
+            "base_url": "https://other.example/serving-endpoints",
             "timeout": 45.0,
             "max_retries": 1,
         },

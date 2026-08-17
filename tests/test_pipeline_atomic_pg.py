@@ -60,7 +60,7 @@ def _pg_pipeline_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     import config.settings as cs
 
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
     cs.get_settings.cache_clear()
     cs.settings = cs.get_settings()
     db_module.reset_for_tests()

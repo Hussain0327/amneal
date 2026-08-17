@@ -161,9 +161,9 @@ def _guard_test_providers(s: Settings) -> None:
         "Test-grade 'echo' provider configured "
         f"(EMBEDDING_PROVIDER={s.embedding_provider}, LLM_PROVIDER={s.llm_provider}) "
         "against a non-empty vector corpus — retrieval quality would silently degrade. "
-        "Fix: set EMBEDDING_PROVIDER=local-bge-small (for Docker also "
-        "INSTALL_LOCAL_EMBEDDINGS=true) and a real LLM_PROVIDER, or set "
-        "REGWATCH_ALLOW_TEST_PROVIDERS=1 to explicitly allow test providers."
+        "Fix: set EMBEDDING_PROVIDER=qwen3 and LLM_PROVIDER=databricks (the "
+        "production providers), or set REGWATCH_ALLOW_TEST_PROVIDERS=1 to "
+        "explicitly allow test providers."
     )
 
 
@@ -206,8 +206,8 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         from regwatch.corpus.status import assert_authoritative_corpus_ready_for_activation
 
         assert_authoritative_corpus_ready_for_activation()
-    # A provider whose runtime deps are missing (slim image + local-bge-small)
-    # must refuse to boot, not 500 on the first embed call.
+    # An unset EMBEDDING_PROVIDER, or one whose endpoint credentials are
+    # missing, must refuse to boot -- not 500 on the first embed call.
     assert_embedding_runtime_available(s.embedding_provider)
     yield
 
@@ -260,27 +260,18 @@ async def _handle_upstream_error(_request: Request, exc: Exception) -> JSONRespo
 
 
 def _register_upstream_error_handlers(target: FastAPI) -> None:
-    """Register the 503 handler for whichever LLM SDK base errors are importable.
+    """Register the 503 handler for the LLM SDK base error when importable.
 
-    Registering the SDK's base error class catches all of its subclasses
-    (timeout / connection / rate-limit / 5xx status). Kept lazy so the API does
-    not hard-depend on the LLM SDKs in echo-only environments (tests/CI).
+    The Databricks provider speaks the OpenAI-compatible SDK, so registering
+    that SDK's base error class catches all of its subclasses (timeout /
+    connection / rate-limit / 5xx status). Kept lazy so the API does not
+    hard-depend on the SDK in echo-only environments (tests/CI).
     """
-    bases: list[type[Exception]] = []
     try:
         from openai import APIError as _OpenAIAPIError
-
-        bases.append(_OpenAIAPIError)
     except Exception:  # SDK not installed in this environment
-        pass
-    try:
-        from anthropic import APIError as _AnthropicAPIError
-
-        bases.append(_AnthropicAPIError)
-    except Exception:
-        pass
-    for base in bases:
-        target.add_exception_handler(base, _handle_upstream_error)
+        return
+    target.add_exception_handler(_OpenAIAPIError, _handle_upstream_error)
 
 
 _register_upstream_error_handlers(app)
@@ -366,7 +357,7 @@ def _embedding_component() -> dict[str, Any]:
     s = get_settings()
     profile_id = (s.active_embedding_profile or "legacy").strip()
     if profile_id == "legacy":
-        return {"provider": s.embedding_provider, "profile": "legacy"}
+        return {"provider": s.embedding_provider or "unset", "profile": "legacy"}
     try:
         from regwatch.store.embedding_profiles import get_embedding_profile
 
@@ -382,15 +373,13 @@ def _embedding_component() -> dict[str, Any]:
 
 
 def _llm_key_present(s: Settings) -> bool:
-    if s.llm_provider == "openai":
-        return bool(s.openai_api_key)
-    if s.llm_provider == "anthropic":
-        return bool(s.anthropic_api_key)
     if s.llm_provider == "databricks":
         # Both values are required to construct the private OpenAI-compatible
         # client. Do not expose either value; health reports only this boolean.
         return bool(s.databricks_llm_base_url and s.databricks_llm_token)
-    return True  # echo needs no key
+    # echo needs no key; an UNSET provider is a misconfiguration, not a
+    # keyless-but-healthy state, and must not read as ok on /health.
+    return s.llm_provider == "echo"
 
 
 # /health and /ready predate their response models and their wire contract is

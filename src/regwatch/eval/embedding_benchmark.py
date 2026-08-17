@@ -1,4 +1,4 @@
-"""Raw embedding diagnostic: legacy vector column vs a named embedding profile.
+"""Raw embedding diagnostic for named embedding profiles (optionally A/B two).
 
 NOT A RELEASE GATE, and deliberately not production-equivalent. This measures
 embedding geometry in isolation: a bare vector search at a fixed k, with no
@@ -17,15 +17,15 @@ The release gate is `run_eval --profile <arm>`, which runs the real pipeline
 end to end and records a per-question trace and a run fingerprint. Use this
 tool to explain a result that gate produced, not to decide a flip.
 
-Compares:
+Measures per profile arm (and A/Bs two arms when --baseline-profile is given):
 
   - hit_rate@k / MRR on the human gold set, page-level match (short_name, page)
   - hit_rate@k / MRR on an auto-generated doc-level set (question templated
     from structured metadata only -- never chunk text, so neither embedding
     arm sees its own corpus phrasing in the query)
   - top-1 score distribution on must_refuse items vs answerable items, next
-    to REFUSAL_SCORE_THRESHOLD (the 0.30 threshold was calibrated on legacy
-    geometry; this shows whether the profile's geometry moves it)
+    to REFUSAL_SCORE_THRESHOLD (the 0.30 threshold was calibrated on the
+    retired legacy geometry; this shows whether a profile's geometry moves it)
   - per-query embed and search latency p50/p95, for UNFILTERED k queries;
     production issues a filtered k=50 query against a partial index, which is a
     different plan, so these numbers do not predict production latency
@@ -145,8 +145,8 @@ class Comparison:
     degenerate_reason: str = ""
 
 
-def compare_arms(legacy: dict[str, Any], profile: dict[str, Any]) -> Comparison:
-    """Describe how the profile arm differs from the legacy arm.
+def compare_arms(baseline: dict[str, Any], candidate: dict[str, Any]) -> Comparison:
+    """Describe how the candidate arm differs from the baseline arm.
 
     Reports; does not judge. A metric moving here says something about embedding
     geometry and nothing about whether the product got worse -- production
@@ -162,34 +162,34 @@ def compare_arms(legacy: dict[str, Any], profile: dict[str, Any]) -> Comparison:
     # Degenerate runs first. A wiped or partial corpus, a gold set whose pages
     # went stale after a re-chunk, or --doc-limit 0 with a refuse-only gold file
     # all drive every delta to 0, which is indistinguishable from "unchanged".
-    if int(legacy.get("gold_n") or 0) == 0 and int(legacy.get("doc_n") or 0) == 0:
+    if int(baseline.get("gold_n") or 0) == 0 and int(baseline.get("doc_n") or 0) == 0:
         return Comparison(
             degenerate=True,
             degenerate_reason="no questions evaluated: this run measured nothing",
         )
-    if float(legacy.get("gold_hit_rate") or 0.0) == 0.0 and (
-        float(legacy.get("doc_hit_rate") or 0.0) == 0.0
+    if float(baseline.get("gold_hit_rate") or 0.0) == 0.0 and (
+        float(baseline.get("doc_hit_rate") or 0.0) == 0.0
     ):
         return Comparison(
             degenerate=True,
             degenerate_reason=(
-                "the legacy baseline retrieved nothing on every question set: the "
+                "the baseline arm retrieved nothing on every question set: the "
                 "corpus or the expected sources are wrong, so the deltas are noise"
             ),
         )
     for metric, n_key in checks:
-        n = int(legacy.get(n_key) or 0)
+        n = int(baseline.get(n_key) or 0)
         if n == 0:
             continue
         # One item's worth of swing; 1e-9 absorbs float rounding so an
         # exactly-one-item move is not reported as more than one item.
         noise = 1.0 / n
-        delta = float(profile[metric]) - float(legacy[metric])
+        delta = float(candidate[metric]) - float(baseline[metric])
         if abs(delta) > noise + 1e-9:
             direction = "lower" if delta < 0 else "higher"
             observations.append(
-                f"{metric}: profile {profile[metric]:.3f} vs legacy "
-                f"{legacy[metric]:.3f} ({direction} by more than 1/{n})"
+                f"{metric}: candidate {candidate[metric]:.3f} vs baseline "
+                f"{baseline[metric]:.3f} ({direction} by more than 1/{n})"
             )
     return Comparison(observations=observations)
 
@@ -322,19 +322,10 @@ def _preflight(profile_id: str) -> None:
 
     with get_engine().connect() as conn:
         total_chunks = int(conn.execute(sa_text("SELECT count(*) FROM chunk")).scalar() or 0)
-        null_legacy = int(
-            conn.execute(sa_text("SELECT count(*) FROM chunk WHERE embedding IS NULL")).scalar()
-            or 0
-        )
     # Coverage is a ratio: 0/0 reports "complete". An empty corpus therefore
     # clears every downstream check while retrieving nothing.
     if total_chunks == 0:
         raise SystemExit("chunk table is empty: nothing to benchmark")
-    if null_legacy:
-        raise SystemExit(
-            f"legacy arm incomplete: {null_legacy} chunk(s) missing legacy embeddings; "
-            "re-run `regwatch rechunk` first"
-        )
     coverage = profile_embedding_coverage(profile_id)
     if not coverage.complete:
         raise SystemExit(
@@ -350,7 +341,12 @@ def _preflight(profile_id: str) -> None:
 
 @app.command()
 def run(
-    profile: str = typer.Option(..., "--profile", help="Embedding profile id to benchmark."),
+    profile: str = typer.Option(..., "--profile", help="Candidate embedding profile id."),
+    baseline_profile: str = typer.Option(
+        "",
+        "--baseline-profile",
+        help="Optional second profile to A/B against; empty benchmarks the candidate alone.",
+    ),
     k: int = typer.Option(8, "--k", min=1, help="Retrieval depth (prod uses 8)."),
     gold: Path = typer.Option(
         Path(__file__).parent / "gold_set.jsonl", "--gold", help="Gold set JSONL."
@@ -362,21 +358,20 @@ def run(
 ) -> None:
     from config.settings import get_settings
 
-    from regwatch.process.embedder import (
-        get_embedding_provider,
-        get_embedding_provider_for_profile,
-    )
+    from regwatch.process.embedder import get_embedding_provider_for_profile
     from regwatch.retrieve.mode import RetrievalMode
     from regwatch.store.db import init_db
     from regwatch.store.embedding_profiles import (
         get_embedding_profile,
         similarity_search_profile,
     )
-    from regwatch.store.vector_store import similarity_search
 
     console = Console()
     init_db()
+    baseline_id = baseline_profile.strip()
     _preflight(profile)
+    if baseline_id:
+        _preflight(baseline_id)
 
     gold_items, refuse_questions = load_gold_items(gold)
     doc_items = build_doc_items(doc_limit) if doc_limit else []
@@ -385,37 +380,39 @@ def run(
         f"+ {len(doc_items)} doc-level questions, k={k}[/cyan]"
     )
 
-    profile_row = get_embedding_profile(profile)
-    legacy = run_arm(
-        "legacy",
-        get_embedding_provider("openai"),
-        similarity_search,
-        gold_items,
-        refuse_questions,
-        doc_items,
-        k,
-    )
-    prof = run_arm(
-        profile,
-        get_embedding_provider_for_profile(profile_row),
-        # Unfiltered by design (see this module's header). Naming EXACT_CORPUS
-        # makes that explicit: the arm is compared on exact search rather than
-        # on whichever plan the approximate index happened to produce.
-        lambda vec, k: similarity_search_profile(
-            profile, vec, k=k, mode=RetrievalMode.EXACT_CORPUS
-        ),
-        gold_items,
-        refuse_questions,
-        doc_items,
-        k,
-    )
+    def _profile_arm(profile_id: str) -> ArmResult:
+        row = get_embedding_profile(profile_id)
+        return run_arm(
+            profile_id,
+            get_embedding_provider_for_profile(row),
+            # Unfiltered by design (see this module's header). Naming
+            # EXACT_CORPUS makes that explicit: the arm is compared on exact
+            # search rather than on whichever plan the approximate index
+            # happened to produce.
+            lambda vec, k, _pid=profile_id: similarity_search_profile(
+                _pid, vec, k=k, mode=RetrievalMode.EXACT_CORPUS
+            ),
+            gold_items,
+            refuse_questions,
+            doc_items,
+            k,
+        )
 
-    legacy_summary = legacy.summary()
+    prof = _profile_arm(profile)
+    base = _profile_arm(baseline_id) if baseline_id else None
+
+    baseline_summary = base.summary() if base is not None else None
     prof_summary = prof.summary()
-    table = Table(title=f"Retrieval A/B: legacy vs {profile} (k={k})")
+    title = (
+        f"Retrieval A/B: {baseline_id} vs {profile} (k={k})"
+        if base is not None
+        else f"Retrieval diagnostic: {profile} (k={k})"
+    )
+    table = Table(title=title)
     table.add_column("metric", style="bold")
-    table.add_column("legacy", justify="right")
-    table.add_column("profile", justify="right")
+    if base is not None:
+        table.add_column("baseline", justify="right")
+    table.add_column("candidate", justify="right")
     for key in (
         "gold_hit_rate",
         "gold_mrr",
@@ -430,7 +427,10 @@ def run(
         "search_p50_ms",
         "search_p95_ms",
     ):
-        table.add_row(key, f"{legacy_summary[key]:.3f}", f"{prof_summary[key]:.3f}")
+        if baseline_summary is not None:
+            table.add_row(key, f"{baseline_summary[key]:.3f}", f"{prof_summary[key]:.3f}")
+        else:
+            table.add_row(key, f"{prof_summary[key]:.3f}")
     console.print(table)
 
     threshold = get_settings().refusal_score_threshold
@@ -441,9 +441,14 @@ def run(
         "production path scores a filtered, reranked set."
     )
 
-    comparison = compare_arms(legacy_summary, prof_summary)
+    # Single-arm mode compares the candidate with itself: observations are
+    # vacuously empty, but the degeneracy detection (measured nothing /
+    # retrieved nothing) still applies to the one arm that ran.
+    comparison = compare_arms(baseline_summary or prof_summary, prof_summary)
     if comparison.degenerate:
         console.print(f"[red]diagnostic did not measure anything: {comparison.degenerate_reason}")
+    elif baseline_summary is None:
+        pass  # Nothing to compare against.
     elif comparison.observations:
         console.print("[yellow]observations (embedding geometry only, not a verdict):[/yellow]")
         for note in comparison.observations:
@@ -467,13 +472,19 @@ def run(
                     ),
                     "k": k,
                     "refusal_score_threshold": threshold,
-                    "legacy": legacy_summary,
-                    "profile": prof_summary,
+                    "baseline": baseline_summary,
+                    "candidate": prof_summary,
                     "observations": comparison.observations,
                     "degenerate": comparison.degenerate,
                     "degenerate_reason": comparison.degenerate_reason,
-                    "gold_ranks": {"legacy": legacy.ranks, "profile": prof.ranks},
-                    "doc_ranks": {"legacy": legacy.doc_ranks, "profile": prof.doc_ranks},
+                    "gold_ranks": {
+                        "baseline": base.ranks if base is not None else None,
+                        "candidate": prof.ranks,
+                    },
+                    "doc_ranks": {
+                        "baseline": base.doc_ranks if base is not None else None,
+                        "candidate": prof.doc_ranks,
+                    },
                 },
                 indent=2,
             )

@@ -1,7 +1,10 @@
-"""LLMProvider interface + concrete providers (openai, databricks, anthropic, echo).
+"""LLMProvider interface + concrete providers (databricks, echo).
 
 Business logic NEVER hard-codes a model name. It calls `get_llm_provider()`
-and uses the protocol below.
+and uses the protocol below. The OpenAI-API and Anthropic provider paths were
+removed 2026-08-17: prod generation is gpt-oss-120b on a Databricks serving
+endpoint (the OpenAI SDK remains as its wire transport only), and echo is the
+test provider.
 """
 
 from __future__ import annotations
@@ -103,9 +106,9 @@ def _buffered_stream(
 ) -> Iterator[LLMStreamChunk]:
     """Degrade streaming to one buffered chunk built from complete().
 
-    Shared by providers/modes with no real token streaming (OpenAI chat mode,
-    Anthropic) so they still honor the stream() contract: deltas, then the
-    terminal chunk carrying the fully-validated response.
+    Used by the Databricks provider's no-SSE fallback paths so they still
+    honor the stream() contract: deltas, then the terminal chunk carrying the
+    fully-validated response.
     """
     resp = provider.complete(messages, temperature=temperature, max_tokens=max_tokens)
     if resp.text:
@@ -401,232 +404,6 @@ class EchoLLMProvider:
             if part:
                 yield LLMStreamChunk(delta=part)
         yield LLMStreamChunk(done=True, response=resp)
-
-
-# ---------- openai provider ----------
-class OpenAIProvider:
-    """OpenAI provider.
-
-    Defaults to the Responses API (`client.responses.create`), the native surface
-    for GPT-5.x models. `mode="chat"` keeps the legacy Chat Completions path. The
-    `complete()` interface is identical either way, so the rest of the app is
-    agnostic. `client` is injectable for tests.
-    """
-
-    name = "openai"
-
-    def __init__(
-        self,
-        model: str,
-        api_key: str | None,
-        *,
-        mode: str = "responses",
-        client: Any = None,
-    ) -> None:
-        self.model = model
-        self.api_key = api_key
-        self.mode = mode
-        self._client = client
-
-    def _client_or_create(self) -> Any:
-        if self._client is None:
-            from regwatch.common.llm_clients import shared_openai_client
-
-            s = get_settings()
-            self._client = shared_openai_client(
-                self.api_key, timeout=s.llm_timeout_s, max_retries=s.llm_max_retries
-            )
-        return self._client
-
-    @staticmethod
-    def _split_messages(
-        messages: list[LLMMessage],
-    ) -> tuple[str, list[dict[str, str]]]:
-        """Responses API shape: system messages -> ``instructions``, the rest ->
-        ``input`` items. Shared by complete() and stream() so the two prompt
-        assemblies can never drift."""
-        instructions = "\n\n".join(m.content for m in messages if m.role == "system")
-        input_items = [
-            {"role": m.role, "content": m.content} for m in messages if m.role != "system"
-        ]
-        return instructions, input_items
-
-    def complete(
-        self,
-        messages: list[LLMMessage],
-        *,
-        temperature: float = 0.0,
-        max_tokens: int = 1024,
-        response_format: str | None = None,
-    ) -> LLMResponse:
-        if self.mode == "chat":
-            return self._complete_chat(
-                messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                response_format=response_format,
-            )
-        return self._complete_responses(
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format=response_format,
-        )
-
-    def _responses_kwargs(
-        self,
-        messages: list[LLMMessage],
-        *,
-        max_tokens: int,
-        response_format: str | None = None,
-    ) -> dict[str, Any]:
-        """Responses-API request kwargs, shared by complete() and stream().
-
-        ``response_format`` stays a complete()-only concern: streaming is the
-        synthesizer's prose path and never requests JSON mode.
-        """
-        instructions, input_items = self._split_messages(messages)
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "input": input_items,
-            "max_output_tokens": max_tokens,
-        }
-        if instructions:
-            kwargs["instructions"] = instructions
-        if response_format == "json":
-            # Responses API JSON object mode (compatibility bridge for the extractor).
-            kwargs["text"] = {"format": {"type": "json_object"}}
-        return kwargs
-
-    def _create_responses(
-        self, kwargs: dict[str, Any], *, temperature: float, stream: bool = False
-    ) -> Any:
-        """One responses.create call with the reasoning-model temperature retry.
-
-        Single home for the quirk workaround so complete() and stream() can
-        never drift: reasoning models (e.g. gpt-5-nano) reject ``temperature``
-        via a structured BadRequestError param; retry once without it. Any
-        other BadRequestError re-raises unchanged.
-        """
-        import openai
-
-        client = self._client_or_create()
-        if stream:
-            kwargs = {**kwargs, "stream": True}
-        try:
-            return client.responses.create(temperature=temperature, **kwargs)
-        except openai.BadRequestError as exc:
-            if getattr(exc, "param", None) == "temperature":
-                return client.responses.create(**kwargs)
-            raise
-
-    def _complete_responses(
-        self,
-        messages: list[LLMMessage],
-        *,
-        temperature: float,
-        max_tokens: int,
-        response_format: str | None,
-    ) -> LLMResponse:
-        kwargs = self._responses_kwargs(
-            messages, max_tokens=max_tokens, response_format=response_format
-        )
-        resp = self._create_responses(kwargs, temperature=temperature)
-        # A failed or incomplete (max_output_tokens truncation) response must
-        # raise so the caller degrades to an audited refusal: a silently
-        # truncated answer would pass citation validation and ship as if
-        # complete, which is worse than a refusal. stream() applies the same
-        # rule via its terminal-event check, so the two paths agree.
-        status = getattr(resp, "status", None)
-        if status in ("failed", "incomplete"):
-            detail = getattr(resp, "error", None) or getattr(resp, "incomplete_details", None)
-            raise RuntimeError(f"openai response status {status}: {detail}")
-        text = (getattr(resp, "output_text", "") or "").strip()
-        raw = resp.model_dump() if hasattr(resp, "model_dump") else {}
-        return LLMResponse(
-            text=text,
-            model=getattr(resp, "model", self.model),
-            raw=raw,
-            usage=_usage_from(resp, "input_tokens", "output_tokens"),
-        )
-
-    def _complete_chat(
-        self,
-        messages: list[LLMMessage],
-        *,
-        temperature: float,
-        max_tokens: int,
-        response_format: str | None,
-    ) -> LLMResponse:
-        client = self._client_or_create()
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "messages": [{"role": m.role, "content": m.content} for m in messages],
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-        if response_format == "json":
-            kwargs["response_format"] = {"type": "json_object"}
-        resp = client.chat.completions.create(**kwargs)
-        text = (resp.choices[0].message.content or "").strip()
-        return LLMResponse(
-            text=text,
-            model=self.model,
-            raw=resp.model_dump(),
-            usage=_usage_from(resp, "prompt_tokens", "completion_tokens"),
-        )
-
-    def stream(
-        self,
-        messages: list[LLMMessage],
-        *,
-        temperature: float = 0.0,
-        max_tokens: int = 1024,
-    ) -> Iterator[LLMStreamChunk]:
-        # Real token streaming is the Responses path (the prod synthesizer). In
-        # chat mode we degrade to one buffered chunk so the caller still works.
-        if self.mode == "chat":
-            yield from _buffered_stream(
-                self, messages, temperature=temperature, max_tokens=max_tokens
-            )
-            return
-
-        kwargs = self._responses_kwargs(messages, max_tokens=max_tokens)
-        events = self._create_responses(kwargs, temperature=temperature, stream=True)
-        parts: list[str] = []
-        final: Any = None
-        for event in events:
-            etype = getattr(event, "type", "")
-            if etype == "response.output_text.delta":
-                delta = getattr(event, "delta", "") or ""
-                if delta:
-                    parts.append(delta)
-                    yield LLMStreamChunk(delta=delta)
-            elif etype == "response.completed":
-                final = getattr(event, "response", None)
-            elif etype in ("response.failed", "response.incomplete", "error"):
-                # A failed or truncated (max_output_tokens) stream must raise --
-                # matching the buffered path, whose caller degrades to an
-                # audited refusal -- never launder the partial deltas into a
-                # normal-looking terminal chunk that would be validated and
-                # cited as if generation finished.
-                ev_resp = getattr(event, "response", None)
-                detail = (
-                    getattr(ev_resp, "error", None)
-                    or getattr(ev_resp, "incomplete_details", None)
-                    or getattr(event, "message", None)
-                )
-                raise RuntimeError(f"openai stream terminal event {etype}: {detail}")
-        text = "".join(parts).strip()
-        model = getattr(final, "model", self.model) if final is not None else self.model
-        usage = (
-            _usage_from(final, "input_tokens", "output_tokens") if final is not None else LLMUsage()
-        )
-        raw = final.model_dump() if (final is not None and hasattr(final, "model_dump")) else {}
-        yield LLMStreamChunk(
-            done=True,
-            response=LLMResponse(text=text, model=model, raw=raw, usage=usage),
-        )
 
 
 # ---------- Databricks provider ----------
@@ -939,7 +716,7 @@ class DatabricksProvider:
 
         Appends to the LAST user turn rather than adding one, so turn structure
         is unchanged; only a caller that sends no user turn at all gets a new
-        one. AnthropicProvider does the same thing for the same reason.
+        one.
         """
         if any("json" in m.get("content", "").lower() for m in request if m["role"] == "user"):
             return request
@@ -1203,87 +980,21 @@ class DatabricksProvider:
         )
 
 
-# ---------- anthropic provider ----------
-class AnthropicProvider:
-    name = "anthropic"
-
-    def __init__(self, model: str, api_key: str) -> None:
-        self.model = model
-        self.api_key = api_key
-
-    def complete(
-        self,
-        messages: list[LLMMessage],
-        *,
-        temperature: float = 0.0,
-        max_tokens: int = 1024,
-        response_format: str | None = None,
-    ) -> LLMResponse:
-        from regwatch.common.llm_clients import shared_anthropic_client
-
-        s = get_settings()
-        client = shared_anthropic_client(
-            self.api_key, timeout=s.llm_timeout_s, max_retries=s.llm_max_retries
-        )
-        system = "\n\n".join(m.content for m in messages if m.role == "system")
-        convo = [
-            {"role": m.role, "content": m.content}
-            for m in messages
-            if m.role in ("user", "assistant")
-        ]
-        prompt_suffix = ""
-        if response_format == "json":
-            prompt_suffix = "\n\nReturn ONLY a valid JSON object. No prose, no markdown fences."
-            if convo:
-                convo[-1] = {**convo[-1], "content": convo[-1]["content"] + prompt_suffix}
-        resp = client.messages.create(
-            model=self.model,
-            system=system or None,  # type: ignore[arg-type]
-            messages=convo,  # type: ignore[arg-type]
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        text = "".join(
-            block.text  # type: ignore[union-attr]
-            for block in resp.content
-            if getattr(block, "type", None) == "text"
-        ).strip()
-        return LLMResponse(
-            text=text,
-            model=self.model,
-            raw=resp.model_dump(),
-            usage=_usage_from(resp, "input_tokens", "output_tokens"),
-        )
-
-    def stream(
-        self,
-        messages: list[LLMMessage],
-        *,
-        temperature: float = 0.0,
-        max_tokens: int = 1024,
-    ) -> Iterator[LLMStreamChunk]:
-        # Anthropic is the fallback provider; serve streaming as one buffered
-        # chunk (prod uses OpenAI for real token-by-token). Keeps the Protocol
-        # total so callers can feature-detect uniformly.
-        yield from _buffered_stream(self, messages, temperature=temperature, max_tokens=max_tokens)
-
-
-def _model_for_role(s: Any, role: str) -> str:
-    """Resolve the model for a call's purpose, falling back to llm_model.
-
-    role ∈ {"router", "synthesizer", "extractor", "default"}.
-    """
-    by_role = {
-        "router": s.router_model,
-        "synthesizer": s.synthesizer_model,
-        "extractor": s.extractor_model,
-    }
-    return by_role.get(role) or s.llm_model
-
-
 def get_llm_provider(name: str | None = None, *, role: str = "default") -> LLMProvider:
+    """Build the configured LLM provider, refusing when none is configured.
+
+    LLM_PROVIDER deliberately has no default: a process whose generation
+    provider is implicit is the same configuration hazard as an implicit
+    embedding provider (see the 2026-08-14 backfill postmortem), so an unset
+    value refuses loudly here instead of guessing.
+    """
     s = get_settings()
-    name = (name or s.llm_provider).lower()
+    name = (name or s.llm_provider or "").strip().lower()
+    if not name:
+        raise RuntimeError(
+            "LLM_PROVIDER is not set and has no default. Set "
+            "LLM_PROVIDER=databricks (prod) or LLM_PROVIDER=echo (tests only)."
+        )
     if name == "echo":
         return EchoLLMProvider()
     if name == "databricks":
@@ -1330,23 +1041,21 @@ def get_llm_provider(name: str | None = None, *, role: str = "default") -> LLMPr
             d1_enforced=bool(getattr(s, "d1_enforced", False)),
             d1_allowed_models=tuple(getattr(s, "d1_allowed_llm_models", ()) or ()),
         )
-    model = _model_for_role(s, role)
-    if name == "openai":
-        if not s.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY not set; configure or use LLM_PROVIDER=echo")
-        return OpenAIProvider(model=model, api_key=s.openai_api_key, mode=s.openai_api_mode)
-    if name == "anthropic":
-        if not s.anthropic_api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY not set; configure or use LLM_PROVIDER=echo")
-        return AnthropicProvider(model=model, api_key=s.anthropic_api_key)
     raise ValueError(f"unknown LLM provider: {name}")
 
 
 def current_model_name(role: str = "default") -> str:
+    """Best-effort model label for audit rows; never raises.
+
+    Audit stamping must not be the thing that fails a turn, so a
+    misconfigured provider yields the honest label "unconfigured" here and
+    the turn itself fails at get_llm_provider with the real remediation.
+    """
+    del role  # The Databricks path serves one model for every role.
     s = get_settings()
-    provider = s.llm_provider.lower()
+    provider = (s.llm_provider or "").strip().lower()
     if provider == "echo":
         return "echo"
     if provider == "databricks":
-        return getattr(s, "databricks_llm_model", None) or _model_for_role(s, role)
-    return _model_for_role(s, role)
+        return getattr(s, "databricks_llm_model", None) or "unconfigured"
+    return "unconfigured"

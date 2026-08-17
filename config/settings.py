@@ -92,8 +92,15 @@ class Settings(BaseSettings):
     )
 
     # ---------- Providers ----------
-    embedding_provider: str = "local-bge-small"
-    llm_provider: str = "openai"
+    # DELIBERATELY UNSET. There is no safe implicit provider: the 2026-08-14
+    # backfill outage was a worker booted without EMBEDDING_PROVIDER silently
+    # falling back to a local 384-dim model and failing the write on all 295
+    # fresh documents AFTER paying their fetch/parse/OCR cost. Every resolution
+    # point now refuses loudly instead of guessing. Prod sets qwen3 (fly.toml
+    # [env]); tests set echo (conftest). The same posture applies to
+    # llm_provider: prod sets databricks (gpt-oss-120b), tests set echo.
+    embedding_provider: str | None = None
+    llm_provider: str | None = None
     # Private Qwen3 embedding endpoint. This is deliberately a separate
     # OpenAI-compatible client from the LLM client: pointing the shared OpenAI
     # base URL at Databricks would also misroute generation requests.
@@ -217,16 +224,6 @@ class Settings(BaseSettings):
     selective_citation_enabled: bool = Field(
         default=False, validation_alias="REGWATCH_SELECTIVE_CITATION"
     )
-    # OpenAI call surface: "responses" (default, GPT-5.x native) or "chat" (legacy
-    # Chat Completions). The LLMProvider.complete() interface is identical either way.
-    openai_api_mode: str = "responses"
-    # Role-specific models. Cheap reasoning model for routing/classification; a more
-    # capable one for grounded synthesis and BE extraction. Each falls back to
-    # llm_model when unset. llm_model is the legacy single-model fallback.
-    llm_model: str = "gpt-5.4-nano"
-    router_model: str = "gpt-5-nano"
-    synthesizer_model: str = "gpt-5.4-nano"
-    extractor_model: str = "gpt-5.4-nano"
     # Output cap for the SYNTHESIZER role only (see generate/grounded_qa.py). A
     # setting rather than a constant because a reasoning model needs headroom
     # the gpt-5.4-nano tuning never did, and an operator must be able to give it
@@ -258,12 +255,10 @@ class Settings(BaseSettings):
     # Must stay strictly below SYNTH_MAX_TOKENS_CEILING (enforced at boot by
     # _check_synthesizer_max_tokens) or the truncation retry stops working.
     synthesizer_max_tokens: int = 3000
-    openai_api_key: str | None = None
-    anthropic_api_key: str | None = None
     # ---------- LLM client transport (B3) ----------
-    # The OpenAI/Anthropic SDKs default to a 600s read timeout with 2 retries,
-    # so a stalled provider would pin a sync-route worker for 10-20 min. Bound
-    # it.
+    # The OpenAI-compatible SDK (the Databricks transport) defaults to a 600s
+    # read timeout with 2 retries, so a stalled provider would pin a sync-route
+    # worker for 10-20 min. Bound it.
     # The embedder owns its own retry loop, so it constructs the shared client
     # with max_retries=0 to avoid stacking SDK retries on top of that loop.
     llm_timeout_s: float = 60.0
@@ -275,6 +270,8 @@ class Settings(BaseSettings):
     )
 
     @field_validator(
+        "embedding_provider",
+        "llm_provider",
         "qwen_embedding_base_url",
         "qwen_embedding_token",
         "databricks_llm_base_url",
@@ -470,15 +467,11 @@ class Settings(BaseSettings):
 
     # ---------- LLM pricing (H3) ----------
     # USD per 1M tokens, keyed by model name. Env-overridable as JSON, e.g.
-    #   LLM_MODEL_PRICES='{"gpt-5.4-nano": {"input": 0.05, "output": 0.40}}'
-    # Defaults cover the gpt-5 nano family the app actually runs. An unknown
-    # model yields cost_usd NULL in the audit log, never a guessed price.
-    llm_model_prices: dict[str, dict[str, float]] = Field(
-        default_factory=lambda: {
-            "gpt-5-nano": {"input": 0.05, "output": 0.40},
-            "gpt-5.4-nano": {"input": 0.05, "output": 0.40},
-        }
-    )
+    #   LLM_MODEL_PRICES='{"gpt-oss-120b-080525": {"input": 0.15, "output": 0.60}}'
+    # EMPTY by default: the served model is a Databricks endpoint whose rate
+    # only the operator knows, and a guessed price is worse than none. An
+    # unknown model yields cost_usd NULL in the audit log, never a guess.
+    llm_model_prices: dict[str, dict[str, float]] = Field(default_factory=dict)
 
     def price_for_model(self, model: str) -> dict[str, float] | None:
         """Per-1M-token prices for a model, or None when unknown (cost stays NULL).
@@ -691,6 +684,16 @@ class Settings(BaseSettings):
     fda_corpus_pdf_max_bytes: int = 200 * 1024 * 1024
     fda_corpus_pdf_max_pages: int = 3_000
     fda_corpus_pdf_parse_timeout_s: float = 180.0
+    # Corpus-sync blast-radius guards (2026-08-14 postmortem: 295 documents
+    # paid fetch/parse/OCR and then all failed the SAME downstream embedding
+    # write). The canary rule aborts a run whose first N processed documents
+    # ALL failed -- the signature of systemic misconfiguration, not of one bad
+    # document. The consecutive rule catches a systemic failure that starts
+    # mid-run. Isolated per-document failures trip neither guard, and an
+    # aborted run stays resumable (per-document commits are durable). 0
+    # disables a guard.
+    fda_corpus_canary_documents: int = Field(default=5, ge=0)
+    fda_corpus_max_consecutive_failures: int = Field(default=10, ge=0)
     # A source record can become a formally handled terminal outcome only
     # after this many durable observations of the same missing URL or parser
     # version. Dagster currently permits the initial attempt plus three

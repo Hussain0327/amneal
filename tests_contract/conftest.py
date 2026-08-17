@@ -27,7 +27,8 @@ budget (GAP-5).
 
 Five stack flavors exist because the scenario matrix needs boot-time env
 differences (settings are lru_cached in the app): base, low_score
-(REFUSAL_SCORE_THRESHOLD=1.0), dead_provider (real openai SDK pointed at a
+(REFUSAL_SCORE_THRESHOLD=1.0), dead_provider (the OpenAI-compatible SDK's
+Databricks transport pointed at a
 reserved closed port), rate_limited (RATE_LIMIT_PER_MINUTE=1), forced_refusal
 (REGWATCH_ECHO_FORCE_REFUSAL=1: echo emits a NO_EVIDENCE turn, making the
 synthesis-time model decline wire-reachable). Each flavor is its own uvicorn +
@@ -272,8 +273,6 @@ def pytest_configure(config: pytest.Config) -> None:
             "LLM_PROVIDER": "echo",
             "REGWATCH_ALLOW_TEST_PROVIDERS": "1",
             "RATE_LIMIT_PER_MINUTE": "0",
-            "OPENAI_API_KEY": "",
-            "ANTHROPIC_API_KEY": "",
             "REGWATCH_RETRIEVAL_CORPUS": "legacy",
             "SENTRY_DSN": "",
             "SENTRY_ENVIRONMENT": "dev",
@@ -582,7 +581,11 @@ _FLAVOR_OVERRIDES: dict[str, dict[str, str]] = {
     # that is not verbatim-identical to a seeded chunk scores < 1.0, so every
     # retrieval refuses with low_top_score while resolution still succeeds.
     "low_score": {"REFUSAL_SCORE_THRESHOLD": "1.0"},
-    "dead_provider": {"LLM_PROVIDER": "openai", "OPENAI_API_KEY": "sk-test-dead"},
+    "dead_provider": {
+        "LLM_PROVIDER": "databricks",
+        "DATABRICKS_LLM_TOKEN": "dapi-test-dead",
+        "DATABRICKS_LLM_MODEL": "gpt-oss-test",
+    },
     # LANDMINE: TRUNCATE ... RESTART IDENTITY reuses user id 1 for every test's
     # first seeded user while the in-app query limiter (keyed "user:{id}") lives
     # for the uvicorn SESSION -- so only ONE test may use this flavor per
@@ -624,7 +627,7 @@ _FLAVOR_OVERRIDES: dict[str, dict[str, str]] = {
 # The relay has NO response timeout by design (a hung upstream would hang an
 # unbounded client forever), so every harness HTTP call carries this.
 CLIENT_TIMEOUT = 30.0
-# The dead-provider flavor eats the openai SDK's 2 connection-refused retries
+# The dead-provider flavor eats the OpenAI-compatible SDK's 2 connection-refused retries
 # (~4s observed; the SDK does not honor a max-retries env var) -- give those
 # calls extra headroom without unbounding them.
 DEAD_PROVIDER_TIMEOUT = 60.0
@@ -746,8 +749,6 @@ class Harness:
                 # this suite seeds from a SEPARATE process, so a near-zero TTL
                 # keeps the app reading fresh state each request.
                 "METADATA_CACHE_TTL_S": "0.01",
-                "OPENAI_API_KEY": "",
-                "ANTHROPIC_API_KEY": "",
                 "REGWATCH_RETRIEVAL_CORPUS": "legacy",
                 "SENTRY_DSN": "",
                 "SENTRY_ENVIRONMENT": "dev",
@@ -803,9 +804,10 @@ class Harness:
         overrides = dict(_FLAVOR_OVERRIDES[flavor])
         if flavor == "dead_provider":
             # Connection-refused on a reserved closed port: deterministic,
-            # network-free provider death. The SDK honors OPENAI_BASE_URL from
-            # env (verified for the pinned openai release).
-            overrides["OPENAI_BASE_URL"] = f"http://127.0.0.1:{self.closed_port}"
+            # network-free provider death. The https scheme satisfies the
+            # settings TLS validator; the TCP connect fails before any TLS
+            # handshake, so no certificate is ever needed.
+            overrides["DATABRICKS_LLM_BASE_URL"] = f"https://127.0.0.1:{self.closed_port}"
 
         uvicorn_port = self._free_port()
         edge_port = self._free_port()

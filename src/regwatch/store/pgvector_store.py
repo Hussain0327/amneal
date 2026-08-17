@@ -329,7 +329,8 @@ def assert_embedding_provider_dim() -> None:
         raise RuntimeError(
             f"EMBEDDING_PROVIDER={provider.name!r} produces {provider.dim}-dim vectors, "
             f"but the Postgres chunk table stores vector({EMBEDDING_DIM}). "
-            "Set EMBEDDING_PROVIDER=openai (text-embedding-3-small) in Postgres mode."
+            "The legacy vector space is retired: serve retrieval through a "
+            "named embedding profile (ACTIVE_EMBEDDING_PROFILE) instead."
         )
     if active_profile_id != "legacy":
         from regwatch.store.embedding_profiles import assert_profile_ready_for_activation
@@ -343,6 +344,52 @@ def assert_embedding_provider_dim() -> None:
 
         shadow_profile = get_embedding_profile(shadow_profile_id)
         get_embedding_provider_for_profile(shadow_profile)
+
+
+def assert_embedding_write_config(profile_id: str) -> Any:
+    """Preflight one embedding WRITE target and return its provider.
+
+    The geometry-and-config half of ``assert_embedding_provider_dim``, without
+    its coverage half: a backfill must be allowed to start against an
+    incomplete profile (completeness is the state it exists to repair), but it
+    must never be allowed to start against a provider that cannot possibly
+    write the target space. Run this before any document work is spent -- the
+    2026-08-14 backfill paid fetch/parse/OCR for 295 documents that all failed
+    this exact check at write time.
+
+    Args:
+      profile_id: ``legacy`` for the unversioned ``chunk.embedding`` column,
+        or a registered embedding profile id.
+
+    Returns:
+      The resolved embedding provider for the target space.
+
+    Raises:
+      RuntimeError: No provider is configured, the provider cannot write the
+        target geometry, or the profile's declared geometry does not match
+        the configured endpoint.
+    """
+    normalized = (profile_id or "").strip()
+    if not normalized:
+        raise RuntimeError("embedding write preflight requires a profile id")
+    if normalized == "legacy":
+        provider = get_embedding_provider()
+        if isinstance(provider, Qwen3EmbeddingProvider):
+            raise RuntimeError(
+                "Qwen3 cannot write directly into the unversioned legacy vector "
+                "space. Register/backfill a named embedding profile, then set "
+                "ACTIVE_EMBEDDING_PROFILE to that profile ID."
+            )
+        if int(provider.dim) != EMBEDDING_DIM:
+            raise RuntimeError(
+                f"EMBEDDING_PROVIDER={provider.name!r} produces {provider.dim}-dim "
+                f"vectors, but the Postgres chunk table stores vector({EMBEDDING_DIM}); "
+                "refusing before any document is fetched."
+            )
+        return provider
+    from regwatch.store.embedding_profiles import get_embedding_profile
+
+    return get_embedding_provider_for_profile(get_embedding_profile(normalized))
 
 
 def _ensure_ready() -> None:

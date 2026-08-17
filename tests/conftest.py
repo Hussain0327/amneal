@@ -237,8 +237,6 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     monkeypatch.setenv("REGWATCH_ALLOW_TEST_PROVIDERS", "1")
     # Pydantic-settings would otherwise load real keys from `.env`; clear them
     # so tests run from a clean slate regardless of the host's .env.
-    monkeypatch.setenv("OPENAI_API_KEY", "")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setenv("QWEN_EMBEDDING_BASE_URL", "")
     monkeypatch.setenv("QWEN_EMBEDDING_TOKEN", "")
     monkeypatch.setenv("DATABRICKS_LLM_BASE_URL", "")
@@ -284,7 +282,7 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
 
 @pytest.fixture
 def cleared_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Optional fixture to wipe optional API keys so tests can assert provider errors."""
-    for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+    """Optional fixture to wipe provider endpoint env so tests can assert provider errors."""
+    for k in ("DATABRICKS_LLM_BASE_URL", "DATABRICKS_LLM_TOKEN", "DATABRICKS_LLM_MODEL"):
         if k in os.environ:
             monkeypatch.delenv(k, raising=False)

@@ -185,7 +185,7 @@ def test_0014_dedupes_and_repoints_chunks_on_postgres(
 
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     # K6: init_db asserts provider dim == vector(1536) in Postgres mode.
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
     cs.get_settings.cache_clear()
     cs.settings = cs.get_settings()
     db_module.reset_for_tests()

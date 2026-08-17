@@ -9,7 +9,8 @@ var the model no longer reads. Either direction is silent config rot otherwise
 
 Policy: every Settings field that binds an env name must appear in .env.example,
 EXCEPT names in _ALLOWLIST below (each with a documented reason). Secrets are
-fine to document with an empty value (the file already does, e.g. OPENAI_API_KEY).
+fine to document with an empty value (the file already does, e.g.
+DATABRICKS_LLM_TOKEN).
 """
 
 from __future__ import annotations

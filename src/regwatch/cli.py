@@ -162,7 +162,6 @@ def cmd_status() -> None:
             "qwen_embedding_model": s.qwen_embedding_model,
             "qwen_embedding_dimension": s.qwen_embedding_dimension,
             "llm_provider": s.llm_provider,
-            "llm_model": s.llm_model,
             "databricks_llm_model": s.databricks_llm_model,
             "data_dir": str(s.data_dir),
             "database": "postgres" if s.database_url else "UNSET (refuses to boot)",
@@ -321,12 +320,11 @@ def cmd_authoritative_corpus_embed(
         embed_pending_corpus,
     )
 
-    # Same seam as embedding-profile-backfill: for a named profile the
-    # get_embedding_provider_for_profile call inside embed_pending_corpus is the
-    # real geometry guard, and requiring completeness before the backfill that
-    # creates it is circular. The legacy branch keeps its own guard --
-    # write_corpus_embeddings routes to update_legacy_chunk_embeddings, which
-    # asserts the provider dimension against vector(1536) at write time.
+    # Same seam as embedding-profile-backfill: embed_pending_corpus runs
+    # assert_embedding_write_config up front (the geometry half of the boot
+    # assert, for both the legacy and named-profile arms), and requiring
+    # COVERAGE completeness before the backfill that creates it is circular --
+    # hence assert_provider=False here.
     init_db(assert_provider=False)
     selected = (profile_id or get_settings().active_embedding_profile or "legacy").strip()
     processed = embed_pending_corpus(

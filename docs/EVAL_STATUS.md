@@ -43,11 +43,11 @@ artifacts upload as `dark-eval-scorecard` and `dark-eval-scorecard-v7`. That gap
 is real and worth closing.
 
 The arm is picked at runtime: Databricks when the Qwen3 embedding secrets and
-`DATABRICKS_SERVING_RUNTIME_VERSION` are present, the legacy OpenAI arm when
-only `OPENAI_API_KEY` is, and skipped with a warning when neither is. The
-Databricks arm is the one that matters, because production embeds queries with
-Databricks-hosted Qwen3 and a gate running on OpenAI's 1536-dim space never
-measured the geometry prod serves.
+`DATABRICKS_SERVING_RUNTIME_VERSION` are present, and a loud failure when they
+are not (the legacy OpenAI arm was removed with the OpenAI provider on
+2026-08-17). The Databricks arm is the one that matters, because production
+embeds queries with Databricks-hosted Qwen3 and a gate running on any other
+space never measured the geometry prod serves.
 
 ## First measured baseline
 

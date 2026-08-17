@@ -40,14 +40,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Serves ONLY the optional cross-encoder reranker (retrieve/reranker.py,
+# RERANKER_ENABLED). The local bge embedding provider this extra was named for
+# was removed 2026-08-17; the name stays to avoid churning build tooling.
 local-embeddings = [
     "sentence-transformers>=5.7.0",
     "torch>=2.13.0,<3",
     "transformers<6",
 ]
+# The OpenAI-compatible SDK is the Databricks serving-endpoint transport, not
+# an openai.com dependency; the OpenAI/Anthropic provider paths were removed
+# 2026-08-17.
 llm = [
     "openai>=2.53.0",
-    "anthropic>=0.121.0",
 ]
 corpus-worker = [
     "boto3>=1.40,<2",
@@ -161,7 +166,6 @@ forbidden_modules = ["openai"]
 allow_indirect_imports = "true"
 ignore_imports = [
     "regwatch.common.llm_clients -> openai",
-    "regwatch.generate.llm -> openai",
     "regwatch.api.main -> openai",
 ]
 

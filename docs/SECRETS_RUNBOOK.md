@@ -1,6 +1,6 @@
 # SECRETS_RUNBOOK - the GitHub Actions secret surface
 
-Last updated: 2026-08-12
+Last updated: 2026-08-17
 
 What this is: the inventory of every Actions secret the workflows read, what each
 one gates, and the exact commands to set them. Use it for rotation, a fork, or a
@@ -11,23 +11,25 @@ Five workflows read secrets: `ci.yml`, `deploy.yml`, `watch-daily.yml`,
 `uptime-eval.yml` and `databricks-eval.yml`. No workflow declares an
 `environment:`, so only **repository** secrets are in play.
 
-**Configured today (7 in-use names, checked 2026-08-12):**
+**Configured today (checked 2026-08-17 via `gh secret list`):**
 
 ```text
 DATABRICKS_LLM_BASE_URL   DATABRICKS_LLM_TOKEN   FLY_API_TOKEN
-QWEN_EMBEDDING_BASE_URL  QWEN_EMBEDDING_TOKEN
-WATCH_DATABASE_URL        WATCH_OPENAI_API_KEY
+QWEN_EMBEDDING_BASE_URL   QWEN_EMBEDDING_TOKEN
+WATCH_DATABASE_URL        WATCH_ACTIVE_EMBEDDING_PROFILE
+WATCH_QWEN_EMBEDDING_BASE_URL / _TOKEN / _MODEL / _REVISION / _DIMENSION
+WATCH_OPENAI_API_KEY      (dead since 2026-08-17; delete it)
 ```
 
 Everything else referenced in a workflow is unset. Section 1 says which, and what
 that costs.
 
 Current state in one paragraph: CD is live, `deploy.yml` ships every green `ci`
-run on `main` to the Fly app (release v104, 2026-08-10). The owner fixed
-`WATCH_DATABASE_URL` on 2026-08-10 and the observed Watch runs since then were
-green. The workflow now intentionally fails before crawl until all six Watch
-profile secrets are provisioned; none existed when checked on 2026-08-12. The
-live Databricks eval lane runs off `DATABRICKS_LLM_*` and
+run on `main` to the Fly app. The owner fixed `WATCH_DATABASE_URL` on
+2026-08-10, and all six Watch embedding-profile secrets were provisioned on
+2026-08-12 (verified present 2026-08-17). Watch's LLM work reads the repo-wide
+`DATABRICKS_LLM_*` names since 2026-08-17 (`WATCH_OPENAI_API_KEY` is dead).
+The live Databricks eval lane runs off the same `DATABRICKS_LLM_*` and
 `QWEN_EMBEDDING_*`.
 
 > **This runbook provisions secrets. It does NOT print, echo, or commit any secret
@@ -70,16 +72,15 @@ live Databricks eval lane runs off `DATABRICKS_LLM_*` and
 | Secret | What it gates | Value source | State |
 |---|---|---|---|
 | `WATCH_DATABASE_URL` | `watch-daily.yml` `env.DATABASE_URL`. Gates every real step: checkout, deps, `regwatch watch`, threshold sweep. Unset means the job skips cleanly. | `.env` key **`DATABASE_URL`**, the Lakebase DIRECT endpoint | **Set** |
-| `WATCH_OPENAI_API_KEY` | `watch-daily.yml`, mapped to the job's `OPENAI_API_KEY`. Used for change summaries, optional BE extraction, and advisory-sweep synthesis; never for Watch embeddings. A preflight hard-fails when empty. | `.env` key **`OPENAI_API_KEY`**, stored under the WATCH_ name | **Set** |
+| `DATABRICKS_LLM_BASE_URL` / `DATABRICKS_LLM_TOKEN` (secrets) + `DATABRICKS_LLM_MODEL` (variable) | `watch-daily.yml`, mapped to the job's `DATABRICKS_LLM_*` -- the SAME names `databricks-eval.yml` reads. Used for change summaries, optional BE extraction, and advisory-sweep synthesis; never for Watch embeddings. A preflight hard-fails when any is empty. Replaced `WATCH_OPENAI_API_KEY` on 2026-08-17 (the OpenAI provider was removed). | already provisioned for the eval workflow | **Set** (verified 2026-08-17) |
 | `FLY_API_TOKEN` | `deploy.yml`, the whole release path: docker build, Trivy re-scan, `scripts/fly-deploy.sh`. Unset means the deploy step fails and nothing ships. | `fly tokens create deploy` (mint fresh, not in `.env`) | **Set** |
 | `DATABRICKS_LLM_BASE_URL` / `DATABRICKS_LLM_TOKEN` | `databricks-eval.yml`, the live eval lane called by `ci.yml` and dispatchable by hand. | the Databricks workspace serving host and a token | **Set** |
 | `QWEN_EMBEDDING_BASE_URL` / `QWEN_EMBEDDING_TOKEN` | `databricks-eval.yml`. Both must be present or the eval resolves to a non-Qwen arm. | the `regwatch-embed` serving endpoint and a token | **Set** |
-| `OPENAI_API_KEY` (repo-wide) | `databricks-eval.yml` job env. Separate from the WATCH_ copy on purpose: setting it turns on paid provider-backed work whose result gates CD. | an OpenAI project key approved for CI | Not set |
 | `SLACK_WEBHOOK_URL` | `watch-daily.yml`: failure alert AND the success digest. A quiet day posts nothing. Unset means both steps no-op. | Slack incoming webhook, no `.env` key | Not set |
 | `WATCH_HEALTHCHECK_URL` | `watch-daily.yml`: success ping plus `/fail` ping. This is the dead-man's-switch for a cron that never STARTS, which the in-job failure step cannot catch. | healthchecks.io-style ping URL | Not set |
 | `PROD_HEALTH_URL` | `uptime-eval.yml` probe. Unset means the 30-minute uptime probe skips. | `https://amneal.fly.dev/health` | Not set |
-| `WATCH_ACTIVE_EMBEDDING_PROFILE` | `watch-daily.yml` `env.ACTIVE_EMBEDDING_PROFILE`. Must be prod's named `ep_...` profile; empty and `legacy` fail before crawl. | prod's `ACTIVE_EMBEDDING_PROFILE` | **Not set; provisioning required. See section 3.4.** |
-| `WATCH_QWEN_EMBEDDING_BASE_URL` / `_TOKEN` / `_MODEL` / `_REVISION` / `_DIMENSION` | `watch-daily.yml` Qwen provider configuration. All five are mandatory. The registered-profile gate checks fingerprint/readiness before crawl; post-ingest coverage must remain 100%. | mirror the Fly app's `QWEN_EMBEDDING_*` values exactly | **Not set; provisioning required.** |
+| `WATCH_ACTIVE_EMBEDDING_PROFILE` | `watch-daily.yml` `env.ACTIVE_EMBEDDING_PROFILE`. Must be prod's named `ep_...` profile; empty and `legacy` fail before crawl. | prod's `ACTIVE_EMBEDDING_PROFILE` | **Set** (2026-08-12, verified 2026-08-17) |
+| `WATCH_QWEN_EMBEDDING_BASE_URL` / `_TOKEN` / `_MODEL` / `_REVISION` / `_DIMENSION` | `watch-daily.yml` Qwen provider configuration. All five are mandatory. The registered-profile gate checks fingerprint/readiness before crawl; post-ingest coverage must remain 100%. | mirror the Fly app's `QWEN_EMBEDDING_*` values exactly | **Set** (2026-08-12, verified 2026-08-17) |
 
 Repository **variables** (not secrets, set under the same settings page) feed the
 eval lane: `DATABRICKS_LLM_MODEL`, `QWEN_EMBEDDING_MODEL`,
@@ -91,11 +92,9 @@ Other things worth knowing:
 
 - `watch-daily.yml` also hardcodes non-secret env:
   `REQUIRE_DATABASE_URL=true`, `EMBEDDING_PROVIDER=qwen3`,
-  `LLM_PROVIDER=openai`, and `SENTRY_ENVIRONMENT=production`.
-  `ACTIVE_EMBEDDING_PROFILE` chooses the named vector space; Qwen mode also
-  means scheduled revisions do not refresh the legacy OpenAI vector column.
-  The separate LLM setting keeps OpenAI limited to Watch change
-  summaries/extraction and the advisory sweep.
+  `LLM_PROVIDER=databricks`, and `SENTRY_ENVIRONMENT=production`.
+  `ACTIVE_EMBEDDING_PROFILE` chooses the named vector space; scheduled
+  revisions leave the retired legacy vector column NULL.
 - There is **no** `SENTRY_DSN` Actions secret. Sentry is a **Fly** secret on the
   app ([`DEPLOY.md`](DEPLOY.md) step 3.2). Do not add it here.
 - The Fly app carries a much larger secret surface: `LLM_PROVIDER`,
@@ -182,11 +181,9 @@ a secret.
 grep -E '^DATABASE_URL=' .env | head -1 | cut -d= -f2- \
   | gh secret set WATCH_DATABASE_URL -R Hussain0327/amneal
 
-# WATCH_OPENAI_API_KEY <- local OPENAI_API_KEY, stored under the watch-scoped
-# name. The repo-wide OPENAI_API_KEY is a separate decision: setting it turns on
-# the paid provider-backed eval arm.
-grep -E '^OPENAI_API_KEY=' .env | head -1 | cut -d= -f2- \
-  | gh secret set WATCH_OPENAI_API_KEY -R Hussain0327/amneal
+# Watch's LLM work reads the repo-wide DATABRICKS_LLM_BASE_URL/_TOKEN
+# secrets and the DATABRICKS_LLM_MODEL variable -- the same trio the eval
+# workflow uses, already provisioned (verified 2026-08-17). Nothing to set.
 ```
 
 > If your `.env` values are quoted, strip the quotes before piping (add
@@ -305,7 +302,7 @@ What a good run looks like:
 
 - The **"skipped (secret not configured)"** step did NOT run. If you still see
   "WATCH_DATABASE_URL secret not set", the secret did not land (3.1).
-- **"preflight WATCH_OPENAI_API_KEY"** passed. It hard-fails on an empty key.
+- **"preflight Databricks LLM config"** passed. It hard-fails on any empty value.
 - **"preflight Watch embedding profile"** passed, proving all six values were
   present and the profile ID/dimension had valid shapes.
 - **"validate registered embedding profile"** passed before crawl. This checks
@@ -355,7 +352,7 @@ gh secret delete FLY_API_TOKEN -R Hussain0327/amneal
 
 # Re-dormant the daily watch (job returns to the clean skip path):
 gh secret delete WATCH_DATABASE_URL -R Hussain0327/amneal
-gh secret delete WATCH_OPENAI_API_KEY -R Hussain0327/amneal
+gh secret delete WATCH_OPENAI_API_KEY -R Hussain0327/amneal  # dead since 2026-08-17
 
 # Silence alerting and uptime:
 gh secret delete SLACK_WEBHOOK_URL -R Hussain0327/amneal
@@ -369,7 +366,7 @@ gh secret delete PROD_HEALTH_URL -R Hussain0327/amneal
   an already-shipped release. For that use the levers in [`DEPLOY.md`](DEPLOY.md)
   section 6.1.
 - **Rotation.** `fly tokens revoke` the old deploy token, mint a new one, re-run
-  3.2. For `WATCH_OPENAI_API_KEY` and `WATCH_DATABASE_URL`, rotate the upstream
+  3.2. For `DATABRICKS_LLM_TOKEN` and `WATCH_DATABASE_URL`, rotate the upstream
   credential, update `.env`, re-run the matching 3.1 command. There is no
   in-place edit: setting the same name overwrites.
 

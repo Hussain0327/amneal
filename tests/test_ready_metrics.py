@@ -44,11 +44,13 @@ def test_ready_open_and_200_with_echo_provider() -> None:
 
 
 def test_ready_503_when_llm_not_constructable(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A real provider with no key cannot construct get_llm_provider() -> the LLM
-    # check fails and /ready 503s naming "llm". No paid call is made (construction
-    # raises before any request).
-    monkeypatch.setenv("LLM_PROVIDER", "openai")
-    monkeypatch.setenv("OPENAI_API_KEY", "")
+    # A real provider with no endpoint config cannot construct
+    # get_llm_provider() -> the LLM check fails and /ready 503s naming "llm".
+    # No paid call is made (construction raises before any request).
+    monkeypatch.setenv("LLM_PROVIDER", "databricks")
+    monkeypatch.setenv("DATABRICKS_LLM_BASE_URL", "")
+    monkeypatch.setenv("DATABRICKS_LLM_TOKEN", "")
+    monkeypatch.setenv("DATABRICKS_LLM_MODEL", "")
     cs.get_settings.cache_clear()
     r = _anon().get("/ready")
     assert r.status_code == 503
@@ -57,7 +59,7 @@ def test_ready_503_when_llm_not_constructable(monkeypatch: pytest.MonkeyPatch) -
     assert body["failed"] == "llm"
     assert body["checks"]["llm"] is False
     # The non-secret detail names the provider, never echoes a key/value.
-    assert "openai" in body["detail"]
+    assert "databricks" in body["detail"]
 
 
 def test_ready_503_names_db_when_db_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -6,14 +6,15 @@ the other builds the HNSW index that activation-readiness requires. Both call
 init_db purely to get the schema; neither embeds or searches.
 
 Before init_db grew `assert_provider`, both were unreachable in a default
-environment: with EMBEDDING_PROVIDER unset the provider is local-bge-small
-(384-dim) and the legacy vector(1536) branch of assert_embedding_provider_dim
-fires, and with EMBEDDING_PROVIDER=qwen3 the "Qwen3 cannot write into the legacy
-space" branch fires instead, because ACTIVE_EMBEDDING_PROFILE cannot yet name a
-profile that has not been registered.
+environment: with EMBEDDING_PROVIDER unset the provider resolution refuses
+outright (required-explicit since 2026-08-17; before that the silent
+local-bge-small fallback failed the legacy vector(1536) dim branch), and with
+EMBEDDING_PROVIDER=qwen3 the "Qwen3 cannot write into the legacy space" branch
+fires instead, because ACTIVE_EMBEDDING_PROFILE cannot yet name a profile that
+has not been registered.
 
-This went unnoticed because every real-DB fixture sets EMBEDDING_PROVIDER=openai
-to get past that same assert (tests/test_embedding_profiles.py), and because the
+This went unnoticed because every real-DB fixture sets a 1536-dim provider to
+get past that same assert (tests/test_embedding_profiles.py), and because the
 CI eval steps that call these commands had never once executed.
 
 The same flag now covers the REPAIR commands too (embedding-profile-list,
@@ -142,13 +143,14 @@ def test_bootstrap_call_is_memoized_across_repeat_bootstrap_calls(
 def test_register_succeeds_with_the_default_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     """The exact CI condition, end to end through the CLI.
 
-    local-bge-small (384-dim) against the legacy vector(1536) column with no
-    active profile is what a credential-free CI runner has, and what made
-    `prepare databricks eval arm` exit 1 on its first-ever execution.
+    NO EMBEDDING_PROVIDER at all is what a credential-free CI runner has (the
+    variable is required-explicit with no default), and an earlier form of this
+    state is what made `prepare databricks eval arm` exit 1 on its first-ever
+    execution. The bootstrap flag must keep these commands runnable there.
 
     Both values are set EXPLICITLY rather than deleted. pydantic-settings reads
     the repo `.env` as well as the process environment, so monkeypatch.delenv
-    would leave a developer's `.env` (EMBEDDING_PROVIDER=openai,
+    would leave a developer's `.env` (EMBEDDING_PROVIDER=qwen3,
     ACTIVE_EMBEDDING_PROFILE=ep_...) supplying the values and the test would
     silently exercise a different branch of the same guard locally than it does
     in CI. setenv wins over the file; delenv does not.
@@ -158,7 +160,7 @@ def test_register_succeeds_with_the_default_provider(monkeypatch: pytest.MonkeyP
     from regwatch.store import db, pgvector_store
 
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "local-bge-small")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "")
     monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", "legacy")
     cs.get_settings.cache_clear()
     db.reset_for_tests()
@@ -222,7 +224,7 @@ def test_empty_profile_with_a_built_index_is_activatable(monkeypatch: pytest.Mon
     from regwatch.store.vector_store import ensure_profile_hnsw_index, register_embedding_profile
 
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "local-bge-small")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "")
     monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", "legacy")
     cs.get_settings.cache_clear()
     db.reset_for_tests()
@@ -250,27 +252,27 @@ def test_empty_profile_with_a_built_index_is_activatable(monkeypatch: pytest.Mon
 
 
 @pytest.mark.skipif(not TEST_DATABASE_URL, reason="TEST_DATABASE_URL is not set")
-def test_serving_path_still_refuses_a_mismatched_provider(
+def test_serving_path_still_refuses_an_unset_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The K6 guard must survive this change on the path it actually protects.
+    """The startup guard must survive this change on the path it protects.
 
-    A fix that made the bootstrap work by weakening the startup check would pass
-    every test above while removing the thing that stops a 384-dim provider from
-    writing into a vector(1536) column.
+    A fix that made the bootstrap work by weakening the startup check would
+    pass every test above while removing the thing that stops an unconfigured
+    process from silently choosing an embedding space (2026-08-14 postmortem).
     """
     import config.settings as cs
 
     from regwatch.store import db, pgvector_store
 
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "local-bge-small")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "")
     monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", "legacy")
     cs.get_settings.cache_clear()
     db.reset_for_tests()
     pgvector_store.reset_for_tests()
     try:
-        with pytest.raises(RuntimeError, match="384-dim"):
+        with pytest.raises(RuntimeError, match="EMBEDDING_PROVIDER is not set"):
             db.init_db()
     finally:
         cs.get_settings.cache_clear()

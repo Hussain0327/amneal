@@ -100,18 +100,24 @@ def test_healthcheck_pings_use_failfast_curl() -> None:
         assert "--max-time" in run, f"{name}: curl must bound its runtime"
 
 
-def test_openai_key_preflight_fails_fast_before_watch() -> None:
-    # The OpenAI key is only exercised at embed/extract time, i.e. on the day a
-    # PSG actually changes; without a presence check a revoked key stays green
-    # through every no-change day and first errors on the run that mattered.
+def test_llm_secret_preflight_fails_fast_before_watch() -> None:
+    # The LLM endpoint is only exercised at summarize/extract time, i.e. on the
+    # day a PSG actually changes; without a presence check a revoked secret
+    # stays green through every no-change day and first errors on the run that
+    # mattered.
     steps = _steps()
     names = [s.get("name") for s in steps]
-    assert "preflight WATCH_OPENAI_API_KEY" in names, "fail-fast key check missing"
-    assert names.index("preflight WATCH_OPENAI_API_KEY") < names.index("regwatch watch")
-    step = _step("preflight WATCH_OPENAI_API_KEY")
+    assert "preflight Databricks LLM config" in names, "fail-fast secret check missing"
+    assert names.index("preflight Databricks LLM config") < names.index("regwatch watch")
+    step = _step("preflight Databricks LLM config")
     # Same skip contract as the pipeline: no DB secret => clean no-op (forks).
     assert "env.DATABASE_URL != ''" in step["if"]
-    assert "OPENAI_API_KEY" in step["run"]
+    for name in (
+        "DATABRICKS_LLM_BASE_URL",
+        "DATABRICKS_LLM_TOKEN",
+        "DATABRICKS_LLM_MODEL",
+    ):
+        assert name in step["run"]
     assert "exit 1" in step["run"]
 
 

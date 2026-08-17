@@ -59,7 +59,7 @@ def pg_db(monkeypatch: pytest.MonkeyPatch) -> Iterator[ModuleType]:
     # init_db asserts provider dim == vector(1536) in Postgres mode (K6), so
     # the bootstrap tests need the 1536-dim provider. No API key is required —
     # the assert reads `.dim` without instantiating a client.
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
     cs.get_settings.cache_clear()
     cs.settings = cs.get_settings()
     db_module.reset_for_tests()
@@ -686,10 +686,20 @@ def test_refuses_to_start_on_unstamped_nonempty_database(pg_db: ModuleType) -> N
 def test_init_db_fails_fast_on_embedding_dim_mismatch(
     pg_db: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """K6: a wrong-dim provider must refuse at startup, not 500 at first use."""
+    """K6: a wrong-dim provider must refuse at startup, not 500 at first use.
+
+    A stub stands in for the misconfigured provider: no shipped provider has a
+    non-1536 legacy dimension since local-bge was removed (2026-08-17).
+    """
     import config.settings as cs
 
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "local-bge-small")  # 384-dim
+    from regwatch.store import pgvector_store
+
+    class _Stub384:
+        name = "stub-384"
+        dim = 384
+
+    monkeypatch.setattr(pgvector_store, "get_embedding_provider", lambda: _Stub384())
     cs.get_settings.cache_clear()
     cs.settings = cs.get_settings()
     with pytest.raises(RuntimeError, match="384-dim"):

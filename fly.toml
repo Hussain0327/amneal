@@ -13,10 +13,6 @@ primary_region = "iad"
 # suffix.
 kill_timeout = 30
 
-[build]
-  [build.args]
-    INSTALL_LOCAL_EMBEDDINGS = "false"
-
 # Run pending Alembic migrations in a one-off machine BEFORE the rolling deploy
 # of the app machines. This moves the live schema to the build's head so the
 # app's boot guard (store/db.py::_init_postgres) passes instead of crash-looping
@@ -57,13 +53,13 @@ kill_timeout = 30
   proxy = "regwatch-proxy"
 
 [env]
-  # INERT ON THE QUERY PATH. Retrieval picks its embedder from
-  # ACTIVE_EMBEDDING_PROFILE, and only the "legacy" arm ever reads this key.
-  # Prod promoted a real Databricks Qwen3 profile (1024-dim) on 2026-07-30, so
-  # nothing on the live query path reads this line today. It is left in place
-  # as the rollback setting for the legacy arm; do not cite it as the current
-  # embedding provider.
-  EMBEDDING_PROVIDER = "openai"
+  # EMBEDDING_PROVIDER is REQUIRED-EXPLICIT since the 2026-08-14 backfill
+  # postmortem: a process without it refuses to boot instead of guessing.
+  # Retrieval itself picks its embedder from ACTIVE_EMBEDDING_PROFILE (the
+  # Databricks Qwen3 1024-dim profile promoted 2026-07-30); this line is what
+  # the boot assert and the legacy-arm skip logic read, and qwen3 is the only
+  # production value. The former "openai" rollback arm is removed.
+  EMBEDDING_PROVIDER = "qwen3"
   AUTH_COOKIE_SECURE = "true"
   CORS_ALLOW_ORIGINS_CSV = "https://amneal.vercel.app"
   SENTRY_ENVIRONMENT = "production"

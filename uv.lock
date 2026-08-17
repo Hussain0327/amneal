@@ -57,25 +57,6 @@ wheels = [
 ]
 
 [[package]]
-name = "anthropic"
-version = "0.121.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "anyio" },
-    { name = "distro" },
-    { name = "docstring-parser" },
-    { name = "httpx" },
-    { name = "jiter" },
-    { name = "pydantic" },
-    { name = "sniffio" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/0f/ca/3cb2c20ee729736fbd4546d5d8b67e818288529fe70cb7a80dbf80aef70b/anthropic-0.121.0.tar.gz", hash = "sha256:e79d6e08ab3376602fc9a70d4d5ea3540817c76cf7e16658bed790834e1833d6", size = 1013292, upload-time = "2026-08-07T17:11:07.241Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/fa/91/b3d41643f1f639927e8c5fb02c3bd8bffe6f1f29e219b3bd4c61e267b15c/anthropic-0.121.0-py3-none-any.whl", hash = "sha256:6048713fa441e59e1cba8363171cd2a86273b25bd213e9c7ac70a523af88b011", size = 1035493, upload-time = "2026-08-07T17:11:08.508Z" },
-]
-
-[[package]]
 name = "antlr4-python3-runtime"
 version = "4.13.2"
 source = { registry = "https://pypi.org/simple" }
@@ -3071,7 +3052,6 @@ dev = [
     { name = "types-requests" },
 ]
 llm = [
-    { name = "anthropic" },
     { name = "openai" },
 ]
 local-embeddings = [
@@ -3084,7 +3064,6 @@ local-embeddings = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.19.1" },
-    { name = "anthropic", marker = "extra == 'llm'", specifier = ">=0.121.0" },
     { name = "bcrypt", specifier = ">=5.0.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=24.10" },
     { name = "boto3", marker = "extra == 'corpus-worker'", specifier = ">=1.40,<2" },

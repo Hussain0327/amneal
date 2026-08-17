@@ -92,8 +92,7 @@ def test_health_reports_the_profile_arm_not_the_legacy_setting(
     monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", profile_id)
     # Non-echo LLM so the echo warning below can only come from the embedding
     # side -- otherwise the LLM arm masks what this test is checking.
-    monkeypatch.setenv("LLM_PROVIDER", "openai")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("LLM_PROVIDER", "databricks")
     cs.get_settings.cache_clear()
 
     class _Profile:
@@ -153,15 +152,16 @@ def test_health_no_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     # PRESENCE only, never a value.
     import config.settings as cs
 
-    monkeypatch.setenv("LLM_PROVIDER", "openai")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-secret-do-not-leak")
+    monkeypatch.setenv("LLM_PROVIDER", "databricks")
+    monkeypatch.setenv("DATABRICKS_LLM_BASE_URL", "https://dbx.example/serving-endpoints")
+    monkeypatch.setenv("DATABRICKS_LLM_TOKEN", "dapi-test-secret-do-not-leak")
     cs.get_settings.cache_clear()
     r = _open().get("/health")
     assert r.status_code == 200
     body = r.json()
-    assert body["components"]["llm"] == {"provider": "openai", "key_present": True}
-    assert "sk-test-secret-do-not-leak" not in r.text
-    assert "openai_api_key" not in r.text
+    assert body["components"]["llm"] == {"provider": "databricks", "key_present": True}
+    assert "dapi-test-secret-do-not-leak" not in r.text
+    assert "databricks_llm_token" not in r.text
 
 
 def test_health_unhealthy_when_vector_store_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:

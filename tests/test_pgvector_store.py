@@ -61,7 +61,7 @@ def _pg_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     # A 1536-dim provider so the pg store's fail-fast dim assert passes; no
     # API key is needed because these tests pass embeddings in directly.
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
     import config.settings as cs
 
     cs.get_settings.cache_clear()
@@ -238,13 +238,22 @@ def test_wrong_embedding_dim_rejected() -> None:
 
 
 def test_provider_dim_mismatch_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
-    """K6: a 384-dim provider (local-bge-small) must refuse to serve."""
+    """K6: a wrong-dim provider must refuse to serve.
+
+    No shipped provider has a non-1536 legacy dimension any more (local-bge
+    was removed 2026-08-17), so a stub stands in for a future misconfigured
+    one; the assert under test is unchanged.
+    """
     import config.settings as cs
 
     from regwatch.store import pgvector_store
     from regwatch.store import vector_store as vs
 
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "local-bge-small")
+    class _Stub384:
+        name = "stub-384"
+        dim = 384
+
+    monkeypatch.setattr(pgvector_store, "get_embedding_provider", lambda: _Stub384())
     cs.get_settings.cache_clear()
     pgvector_store.reset_for_tests()
     with pytest.raises(RuntimeError, match="vector\\(1536\\)"):

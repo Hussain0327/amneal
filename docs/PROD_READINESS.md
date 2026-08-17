@@ -145,12 +145,13 @@ Two of these are now done. The numbers are kept because other docs cite them.
     dim, profile `ep_2e7368b354d911ea3a013c3125e276c2`, 5,494 of 5,494 chunks
     covered since 2026-07-30.
   - the database: Lakebase, see #2.
-  No analyst question leaves for a third-party model API on the normal path.
-  The interactive OpenAI provider still ships, is tested and remains a rollback,
-  but no normal analyst turn uses it. Scheduled Watch separately retains a
-  scoped OpenAI key for public-document change summaries and extraction, never
-  embeddings. `EMBEDDING_PROVIDER` in `fly.toml` is dead weight on the query
-  path: only the `legacy` profile arm reads it, and prod runs a real profile.
+  No analyst question can leave for a third-party model API at all: the
+  OpenAI-API and Anthropic provider paths were removed on 2026-08-17
+  (`generate/llm.py` holds only the Databricks provider plus the test-only
+  echo), and scheduled Watch runs its change-summary/extraction LLM work on
+  the same Databricks endpoint family. `EMBEDDING_PROVIDER` is
+  required-explicit (no default; unset refuses to boot) and `fly.toml` sets it
+  to `qwen3`; retrieval itself serves from the named profile.
 - **Guardrails:** `D1_ALLOWED_LLM_MODELS` plus a runtime served-model check in
   `generate/llm.py` that rejects a reply served by a model outside the allowlist,
   and always rejects the partner-hosted families (`databricks-gpt*`,
@@ -160,9 +161,11 @@ Two of these are now done. The numbers are kept because other docs cite them.
   and defaults to `false`, so the check is inert today. `D1_ALLOWED_LLM_MODELS`
   is already set, so arming it is a one-secret change.
 - **Residual:** serving is on the profile. Scheduled Watch is now coded to use
-  that same Qwen profile and fail closed, but its six repository secrets have
-  not been provisioned or verified in a manual run. `WATCH_OPENAI_API_KEY`
-  remains for change-summary/extraction LLM work, not embeddings. See #7 and
+  that same Qwen profile and fail closed. Its change-summary/extraction LLM
+  work moved on 2026-08-17 (the OpenAI provider was removed) to the repo-wide
+  `DATABRICKS_LLM_BASE_URL`/`_TOKEN` secrets and `DATABRICKS_LLM_MODEL`
+  variable, which were already provisioned for the eval workflow (verified
+  2026-08-17) -- no new provisioning needed. See #7 and
   [`ROADMAP.md`](ROADMAP.md).
 
 ---
