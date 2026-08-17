@@ -16,9 +16,11 @@ Labels: **BLOCKER** stops external exposure. **SHOULD-HAVE** before launch.
   `gpt-oss-120b-080525`) behind `workspace.default.regwatch`. Query and corpus
   embeddings are Qwen3 behind `workspace.default.regwatch-embed`, 1024 dim,
   profile `ep_2e7368b354d911ea3a013c3125e276c2`, 5,494 of 5,494 chunks covered
-  since 2026-07-30. The database is Databricks Lakebase. No normal analyst turn
-  uses OpenAI; it remains the interactive LLM rollback, while scheduled Watch
-  retains a scoped key for public-document change summaries/extraction only.
+  since 2026-07-30. The database is Databricks Lakebase. No OpenAI provider
+  path exists any more (removed 2026-08-17; the OpenAI SDK survives only as
+  the Databricks wire transport), `LLM_PROVIDER`/`EMBEDDING_PROVIDER` are
+  required-explicit with no defaults, and scheduled Watch runs its
+  change-summary/extraction LLM work on the same Databricks endpoint.
   The D1 blocker that used to head this file is gone. History lives in
   [`archive/DATA_RESIDENCY_D1.md`](archive/DATA_RESIDENCY_D1.md).
 - **The answer rule changed.** "Cite or refuse" is dead as the headline rule. v7

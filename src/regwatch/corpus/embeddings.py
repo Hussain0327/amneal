@@ -15,6 +15,7 @@ from regwatch.corpus.lifecycle import (
 )
 from regwatch.store.db import get_engine
 from regwatch.store.vector_store import (
+    assert_embedding_write_config,
     get_embedding_profile,
     update_legacy_chunk_embeddings,
     upsert_profile_embeddings,
@@ -164,11 +165,7 @@ def embed_pending_corpus(
 ) -> int:
     """Embed a resumable scope and return the number of chunks written."""
 
-    from regwatch.process.embedder import (
-        embed_documents,
-        get_embedding_provider,
-        get_embedding_provider_for_profile,
-    )
+    from regwatch.process.embedder import embed_documents
 
     normalized = profile_id.strip()
     if not normalized:
@@ -177,10 +174,9 @@ def embed_pending_corpus(
         raise ValueError("batch_size must be positive")
     if limit < 0:
         raise ValueError("limit must be non-negative")
-    if normalized == "legacy":
-        provider = get_embedding_provider()
-    else:
-        provider = get_embedding_provider_for_profile(get_embedding_profile(normalized))
+    # Geometry preflight before the first pending page is read: a provider
+    # that cannot write the target space refuses here, once, not per-batch.
+    provider = assert_embedding_write_config(normalized)
 
     processed = 0
     while limit == 0 or processed < limit:

@@ -28,17 +28,15 @@ COPY go/cmd ./cmd
 COPY go/internal ./internal
 RUN go build -trimpath -ldflags "-s -w" -o /usr/local/bin/regwatch-proxy ./cmd/proxy
 
-# Two build flavors, gated by INSTALL_LOCAL_EMBEDDINGS:
-#   * slim (default, production): no torch/sentence-transformers. Run with
-#     EMBEDDING_PROVIDER=openai + OPENAI_API_KEY (+ DATABASE_URL for
-#     Postgres/pgvector). The openai SDK ships via the `llm` extra, so the slim
-#     image is fully embedding-capable. Production runs this flavor against
-#     Databricks Lakebase Postgres, and embeds through the active Qwen3 profile
-#     rather than through EMBEDDING_PROVIDER. See docs/DEPLOY.md.
-#   * local ingest: --build-arg INSTALL_LOCAL_EMBEDDINGS=true, then run with
-#     EMBEDDING_PROVIDER=local-bge-small.
-# The in-image EMBEDDING_PROVIDER=echo default below is for empty-corpus smoke
-# tests only; the API refuses to boot an echo provider against a seeded corpus.
+# One slim flavor: no torch/sentence-transformers. Run with
+# EMBEDDING_PROVIDER=qwen3 + QWEN_EMBEDDING_BASE_URL/TOKEN (+ DATABASE_URL for
+# Postgres/pgvector); the OpenAI-compatible SDK ships via the `llm` extra as
+# the Databricks serving-endpoint transport. Production runs this flavor
+# against Databricks Lakebase Postgres and embeds through the active Qwen3
+# profile. See docs/DEPLOY.md.
+# EMBEDDING_PROVIDER is deliberately NOT defaulted in the image (2026-08-14
+# postmortem): every process must be told its providers explicitly or refuse
+# to boot. Smoke tests pass EMBEDDING_PROVIDER=echo explicitly.
 # Digest-pinned base: the tag is mutable (Debian rebuilds republish 3.12-slim),
 # so pin the exact multi-arch index digest for a reproducible, tamper-evident
 # build. Bump the digest; resolve with:  docker manifest inspect python:3.12-slim
@@ -46,7 +44,6 @@ RUN go build -trimpath -ldflags "-s -w" -o /usr/local/bin/regwatch-proxy ./cmd/p
 # documentation only.
 ARG PYTHON_VERSION=3.12
 FROM python:3.12-slim@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e
-ARG INSTALL_LOCAL_EMBEDDINGS=false
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -57,7 +54,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DATA_DIR=/app/data \
     RAW_PDF_DIR=/app/data/raw \
     PROCESSED_DIR=/app/data/processed \
-    EMBEDDING_PROVIDER=echo \
     WHITEPAPER_TEMPLATE_PATH=/app/data/templates/cra_white_paper_template.docx
 
 RUN apt-get update \
@@ -81,11 +77,7 @@ RUN pip install --no-cache-dir uv
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
-# Word-splitting on $EXTRAS is intentional (POSIX sh flag accumulation); the
-# values are fixed literals, never user input.
-RUN EXTRAS="--extra llm" \
-    && if [ "$INSTALL_LOCAL_EMBEDDINGS" = "true" ]; then EXTRAS="$EXTRAS --extra local-embeddings"; fi \
-    && uv sync --frozen $EXTRAS --no-dev --no-install-project
+RUN uv sync --frozen --extra llm --no-dev --no-install-project
 
 COPY README.md alembic.ini ./
 COPY config ./config
@@ -98,9 +90,7 @@ COPY docker/entrypoint.sh /usr/local/bin/regwatch-entrypoint
 # runtime image shipped linux-libc-dev (and its fixable kernel CVEs) even though
 # neither the Python app nor the static Go proxy uses it.
 RUN chmod +x /usr/local/bin/regwatch-entrypoint \
-    && EXTRAS="--extra llm" \
-    && if [ "$INSTALL_LOCAL_EMBEDDINGS" = "true" ]; then EXTRAS="$EXTRAS --extra local-embeddings"; fi \
-    && uv sync --frozen $EXTRAS --no-dev \
+    && uv sync --frozen --extra llm --no-dev \
     && apt-get purge -y --auto-remove build-essential \
     && rm -rf /var/lib/apt/lists/*
 

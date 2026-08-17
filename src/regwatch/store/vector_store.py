@@ -108,6 +108,13 @@ def delete_chunks_for_fda_document(fda_document_id: int, *, conn: Connection) ->
     return pgvector_store.delete_chunks_for_fda_document(fda_document_id, conn=conn)
 
 
+def assert_embedding_write_config(profile_id: str) -> Any:
+    """Preflight one embedding write target; see pgvector_store for the contract."""
+    from regwatch.store import pgvector_store
+
+    return pgvector_store.assert_embedding_write_config(profile_id)
+
+
 def similarity_search(
     query_embedding: list[float],
     *,

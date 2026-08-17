@@ -44,26 +44,24 @@ def test_echo_with_seeded_corpus_boots_with_override() -> None:
         assert c.get("/health").status_code == 200
 
 
-def test_real_providers_with_seeded_corpus_boot(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Names only — the guard must not instantiate any model. openai is the
-    # 1536-dim provider the PG chunk table admits (K6); constructing it needs
-    # no API key, so this stays network-free.
+def test_real_providers_do_not_trip_the_echo_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Names only — the guard must not instantiate any model. Tested at the
+    # guard function directly: a full qwen3 boot additionally requires a named
+    # profile with complete coverage, which is separate machinery from what
+    # this guard decides.
+    from regwatch.api import main as api_main
+
+    # Seed under conftest's echo env FIRST: the store's lazy dim assert runs on
+    # first write, and qwen3-with-legacy would (correctly) refuse there. What
+    # is under test is only the echo guard's decision on real provider NAMES.
+    _seed_one_chunk()
     _reload_settings(
         monkeypatch,
         REGWATCH_ALLOW_TEST_PROVIDERS="0",
-        EMBEDDING_PROVIDER="openai",
-        LLM_PROVIDER="openai",
+        EMBEDDING_PROVIDER="qwen3",
+        LLM_PROVIDER="databricks",
     )
-    _seed_one_chunk()
-    with TestClient(app) as c:
-        r = c.get("/health")
-        assert r.status_code == 200
-        body = r.json()
-        # "legacy" is the only arm that actually reads EMBEDDING_PROVIDER, so
-        # the provider reported here is genuinely the one in use.
-        assert body["components"]["embedding"] == {"provider": "openai", "profile": "legacy"}
-        assert body["components"]["llm"]["key_present"] is False
-        assert "allow_test_providers" not in body
+    api_main._guard_test_providers(cs.get_settings())  # must not raise
 
 
 def test_echo_with_empty_corpus_boots(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -79,38 +77,84 @@ def test_echo_with_empty_corpus_boots(monkeypatch: pytest.MonkeyPatch) -> None:
         assert body["warnings"]
 
 
-def test_local_bge_without_sentence_transformers_refuses_to_boot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Slim image + local-bge-small must fail at boot, not 500 per request."""
-    from regwatch.process import embedder
+def test_unset_embedding_provider_refuses_to_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 2026-08-14 hazard: a worker with no EMBEDDING_PROVIDER must refuse.
 
-    _reload_settings(monkeypatch, EMBEDDING_PROVIDER="local-bge-small")
-    monkeypatch.setattr(embedder, "_module_available", lambda module: False)
-    with pytest.raises(RuntimeError, match="local-embeddings"), TestClient(app):
+    There is deliberately no default any more -- the silent local-bge fallback
+    is what let 295 backfill documents pay fetch/parse/OCR before failing.
+    """
+    from regwatch.store import db as db_module
+
+    _reload_settings(monkeypatch, EMBEDDING_PROVIDER="")
+    db_module.reset_for_tests()  # Force init_db to re-run the provider assert.
+    with pytest.raises(RuntimeError, match="EMBEDDING_PROVIDER is not set"), TestClient(app):
         pass
+    db_module.reset_for_tests()
 
 
-def test_local_bge_refuses_the_1536_dim_datastore(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Since R5 the only datastore is Postgres with a vector(1536) chunk table,
-    # so 384-dim local-bge-small must fail the K6 dim assert at boot rather
-    # than serve retrieval that can never write or match the corpus. (The
-    # runtime-importability probe still must not load the model.)
-    from regwatch.process import embedder
+def test_retired_provider_name_refuses_to_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+    # local-bge-small and openai were removed 2026-08-17; a machine still
+    # configured with one must refuse loudly, never fall back.
     from regwatch.store import db as db_module
 
     _reload_settings(monkeypatch, EMBEDDING_PROVIDER="local-bge-small")
-    monkeypatch.setattr(embedder, "_module_available", lambda module: True)
-    db_module.reset_for_tests()  # force init_db to re-run the dim assert
+    db_module.reset_for_tests()
+    with pytest.raises(ValueError, match="unknown embedding provider"), TestClient(app):
+        pass
+    db_module.reset_for_tests()
+
+
+def test_wrong_dim_provider_refuses_the_1536_dim_datastore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # K6: the datastore is Postgres with a vector(1536) chunk table, so a
+    # non-Qwen provider with any other dimension must fail the dim assert at
+    # boot rather than serve retrieval that can never write or match the
+    # corpus. No such provider ships any more, so a stub stands in for a
+    # future misconfigured one.
+    from regwatch.store import db as db_module
+    from regwatch.store import pgvector_store
+
+    class _Stub384:
+        name = "stub-384"
+        dim = 384
+
+    _reload_settings(monkeypatch)
+    monkeypatch.setattr(pgvector_store, "get_embedding_provider", lambda: _Stub384())
+    db_module.reset_for_tests()  # Force init_db to re-run the dim assert.
     with pytest.raises(RuntimeError, match="384"), TestClient(app):
         pass
     db_module.reset_for_tests()
 
 
-def test_openai_embeddings_without_sdk_refuses_to_boot(monkeypatch: pytest.MonkeyPatch) -> None:
-    from regwatch.process import embedder
+def test_qwen3_in_legacy_arm_refuses_to_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Qwen writes named profiles; pointing it at the unversioned legacy column
+    # would mix vector spaces, so the boot assert refuses the combination.
+    from regwatch.store import db as db_module
 
-    _reload_settings(monkeypatch, EMBEDDING_PROVIDER="openai")
-    monkeypatch.setattr(embedder, "_module_available", lambda module: False)
-    with pytest.raises(RuntimeError, match="extra llm"), TestClient(app):
+    _reload_settings(monkeypatch, EMBEDDING_PROVIDER="qwen3")
+    db_module.reset_for_tests()
+    with pytest.raises(RuntimeError, match="legacy vector space"), TestClient(app):
         pass
+    db_module.reset_for_tests()
+
+
+def test_qwen3_without_endpoint_config_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    from regwatch.process.embedder import assert_embedding_runtime_available
+
+    _reload_settings(
+        monkeypatch,
+        EMBEDDING_PROVIDER="qwen3",
+        QWEN_EMBEDDING_BASE_URL="",
+        QWEN_EMBEDDING_TOKEN="",
+    )
+    with pytest.raises(RuntimeError, match="QWEN_EMBEDDING_BASE_URL"):
+        assert_embedding_runtime_available()
+
+
+def test_unset_provider_refuses_at_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+    from regwatch.process.embedder import get_embedding_provider
+
+    _reload_settings(monkeypatch, EMBEDDING_PROVIDER="")
+    with pytest.raises(RuntimeError, match="EMBEDDING_PROVIDER is not set"):
+        get_embedding_provider()

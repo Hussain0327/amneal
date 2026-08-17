@@ -138,11 +138,16 @@ func ConfigFromEnv() (Config, error) {
 		TrustProxy:   trustProxy,
 		CORSOrigins:  origins,
 		Insecure:     insecure,
-		// Pydantic-default mirrors (config/settings.py); prod fly.toml [env]
-		// overrides EMBEDDING_PROVIDER to "openai", the rest ride defaults.
-		EmbeddingProvider:     envOrDefault("EMBEDDING_PROVIDER", "local-bge-small"),
-		LLMProvider:           envOrDefault("LLM_PROVIDER", "openai"),
-		LLMModel:              envOrDefault("LLM_MODEL", "gpt-5.4-nano"),
+		// Mirrors of config/settings.py's required-explicit providers
+		// (2026-08-14 postmortem: no implicit provider defaults anywhere).
+		// Empty means unset -- the Python app refuses to boot in that state,
+		// and /settings reports "" rather than a guessed provider. LLMModel
+		// mirrors DATABRICKS_LLM_MODEL, the one serving endpoint every role
+		// uses; the retired per-role LLM_MODEL default is gone with the
+		// OpenAI-API provider path.
+		EmbeddingProvider:     envOrDefault("EMBEDDING_PROVIDER", ""),
+		LLMProvider:           envOrDefault("LLM_PROVIDER", ""),
+		LLMModel:              envOrDefault("DATABRICKS_LLM_MODEL", ""),
 		RefusalScoreThreshold: 0.30,
 		CompanyName:           envOrDefault("COMPANY_NAME", "Amneal"),
 	}

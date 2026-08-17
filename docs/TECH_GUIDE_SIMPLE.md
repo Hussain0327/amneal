@@ -170,16 +170,16 @@ section path, and document metadata.
 
 - `qwen3`: Qwen3 over an OpenAI-compatible private endpoint. This is production,
   served by Databricks at 1024 dimensions.
-- `openai`: `text-embedding-3-small`, 1536-dim. Rollback path only.
-- `local-bge-small`: local sentence-transformers model, 384-dim, offline tooling
-  only. The dimension check rejects it against the app datastore.
 - `echo`: deterministic test provider, 1536-dim.
+
+(The `openai` and `local-bge-small` providers were removed on 2026-08-17.)
 
 How the switch actually works, because it trips people up: retrieval picks its
 provider from `ACTIVE_EMBEDDING_PROFILE`. Only the `legacy` value reads
-`EMBEDDING_PROVIDER`. Production runs a real profile, so the
-`EMBEDDING_PROVIDER=openai` line still sitting in `fly.toml` does nothing on the
-query path. Do not read it as the live setting.
+`EMBEDDING_PROVIDER`, but the variable itself is required-explicit — a process
+without it refuses to boot (the 2026-08-14 backfill postmortem), which is why
+`fly.toml` sets `EMBEDDING_PROVIDER=qwen3` even though production serves
+retrieval from a named profile.
 
 **`process/extractor.py`** uses the LLM to pull structured BE requirement fields
 out of a PSG. Every populated field needs a citation with a page and a verbatim
@@ -262,12 +262,10 @@ and `REGWATCH_SELECTIVE_CITATION` (the v7 policy above).
   at `system.ai.gpt-oss-20b` until 2026-08-05, when it was repointed to
   `system.ai.gpt-oss-120b`. The served id is pinned in
   `tests/test_d1_guards.py`.
-- **OpenAI**, rollback path. Uses the Responses API by default
-  (`OPENAI_API_MODE=responses`; `chat` falls back to Chat Completions) with
-  role-specific models: router `gpt-5-nano`, synthesizer and extractor
-  `gpt-5.4-nano`, each falling back to `LLM_MODEL`. Reasoning models that reject
-  `temperature` are retried without it.
-- **Anthropic**, and `echo` for tests.
+- **`echo`** for tests. (The OpenAI-API and Anthropic providers were removed on
+  2026-08-17: `get_llm_provider` accepts only `databricks` and `echo`,
+  `LLM_PROVIDER` is required-explicit with no default, and the role-specific
+  model settings went with the OpenAI path.)
 
 Business logic always calls `get_llm_provider(role=...)`. No model name is
 hard-coded.

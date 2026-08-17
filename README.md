@@ -225,13 +225,13 @@ White Paper before being generalized to Ask and Assemble.
 ## Quick start
 
 ```bash
-# install (dev tools + LLM clients + local embeddings)
-uv sync --extra dev --extra llm --extra local-embeddings
+# install (dev tools + the OpenAI-compatible SDK used as Databricks transport)
+uv sync --extra dev --extra llm
 
-# configure. For local dev, pick either OpenAI (set OPENAI_API_KEY) or the local
-# embedding model. Production uses NEITHER: it runs generation and embeddings on
-# Databricks Model Serving. The Databricks vars are in .env.example under
-# LLM_PROVIDER.
+# configure. Providers are REQUIRED-EXPLICIT (no defaults): production runs
+# generation and embeddings on Databricks Model Serving (LLM_PROVIDER=databricks,
+# EMBEDDING_PROVIDER=qwen3); offline tests use the echo providers. The
+# Databricks/Qwen vars are in .env.example under LLM_PROVIDER.
 cp .env.example .env && $EDITOR .env
 
 # initialize the DB and data directories
@@ -299,8 +299,8 @@ flowchart LR
 | Edge / control plane | **Go** proxy (`go/`, module `github.com/Hussain0327/amneal/go`) holds the public port. Since the step-4 polyglot cutover it serves auth, sessions, feedback, settings, and product CRUD natively (sqlc over the same Postgres) and applies rate limiting plus `Fly-Client-IP` handling. Since the step-5 cutover it also orchestrates `POST /query` natively (persists the audit row, calls Python's internal RAG compute endpoint) and relays the remaining endpoints to Python. Migration plan: [`docs/POLYGLOT_TARGET_2026-07-10.md`](docs/POLYGLOT_TARGET_2026-07-10.md) |
 | Backend (RAG core) | Python 3.11+ (managed by `uv`), FastAPI. The stateless retrieval, synthesis, and gating core behind the proxy: Ask, Assemble, White Paper, Watch, Deficiency, and query orchestration |
 | Frontend | Next.js 16 (App Router, TypeScript) plus React 18 in `regwatch/frontend/`. The five scoped surfaces render in one `(shell)` route group with one sidebar and one product-scope bar; the Compliance Studio (`/studio`) sits outside it and is fixture-backed. Talks to the API through a same-origin `/api` proxy |
-| LLM | **Databricks-hosted `gpt-oss-120b`** in prod (`LLM_PROVIDER=databricks`): served id `gpt-oss-120b-080525` on the Model Serving alias `workspace.default.regwatch`. One open-weight model serves ALL roles (router, synthesizer, extractor), which keeps analyst questions inside the company tenant (D1). A runtime served-model guard (`D1_ENFORCED` plus `D1_ALLOWED_LLM_MODELS`) rejects any response served by a model outside the allowlist once armed, and rejects partner-hosted families (`databricks-gpt*`, `databricks-claude*`, `databricks-gemini*`) even if someone allowlists them by hand. Pluggable behind `LLMProvider`: `openai` (Responses API; router `gpt-5-nano`, synthesizer and extractor `gpt-5.4-nano`) is the tested rollback path, and `anthropic` plus a test-only `echo` also ship |
-| Embeddings | Pluggable AND profile-versioned. Prod today: **Databricks-hosted Qwen3**, 1024-dim, endpoint `workspace.default.regwatch-embed`, profile `ep_2e7368b354d911ea3a013c3125e276c2`, with the whole corpus embedded on it. Retrieval picks its arm from `ACTIVE_EMBEDDING_PROFILE`; only the `legacy` arm reads `EMBEDDING_PROVIDER`, so the `EMBEDDING_PROVIDER=openai` line still sitting in `fly.toml` no longer affects the query path. Profile vectors live in the profile-keyed `chunk_embedding` table, written blue/green into a named profile and never in place. The older `legacy` arm is the `vector(1536)` column on `chunk` (OpenAI `text-embedding-3-small`), but Qwen-only Watch runs no longer refresh it; backfill it before using it as a current-corpus rollback. Local `BAAI/bge-small-en-v1.5` (384-dim) is for offline tooling only, and a dimension assert refuses it against the app datastore |
+| LLM | **Databricks-hosted `gpt-oss-120b`** in prod (`LLM_PROVIDER=databricks`): served id `gpt-oss-120b-080525` on the Model Serving alias `workspace.default.regwatch`. One open-weight model serves ALL roles (router, synthesizer, extractor), which keeps analyst questions inside the company tenant (D1). A runtime served-model guard (`D1_ENFORCED` plus `D1_ALLOWED_LLM_MODELS`) rejects any response served by a model outside the allowlist once armed, and rejects partner-hosted families (`databricks-gpt*`, `databricks-claude*`, `databricks-gemini*`) even if someone allowlists them by hand. `LLM_PROVIDER` has NO default (an unset value refuses; 2026-08-14 postmortem): `databricks` is the only production value and `echo` is test-only. The OpenAI-API and Anthropic provider paths were removed 2026-08-17 — the OpenAI SDK remains solely as the Databricks wire transport, and LLM rollback means repointing `DATABRICKS_LLM_MODEL` at another verified endpoint |
+| Embeddings | Profile-versioned and required-explicit. Prod today: **Databricks-hosted Qwen3**, 1024-dim, endpoint `workspace.default.regwatch-embed`, profile `ep_2e7368b354d911ea3a013c3125e276c2`, with the whole corpus embedded on it. Retrieval picks its arm from `ACTIVE_EMBEDDING_PROFILE`; `EMBEDDING_PROVIDER` has NO default (a process without it refuses to boot; 2026-08-14 postmortem) and `qwen3` is the only production value (`echo` is test-only). Profile vectors live in the profile-keyed `chunk_embedding` table, written blue/green into a named profile and never in place. The older `legacy` arm is the `vector(1536)` column on `chunk`; its OpenAI embedder was removed 2026-08-17, so it is a frozen historical space, not a rollback path — rollback is a previously promoted profile |
 | Vector store | **pgvector** in the same Postgres, everywhere (Lakebase in prod, a disposable local/CI Postgres otherwise). No other vector backend since R5 |
 | Structured store | **Postgres** via SQLModel (Lakebase in prod). `DATABASE_URL` is mandatory and the app refuses to boot without it. Schema changes ship as Alembic migrations |
 | Retrieval | Two-stage. Stage 1: vector top-k 50 (`VECTOR_TOP_K`). Stage 2: rerank to top-k 8 (`RERANK_TOP_K`); reranker off by default |
@@ -503,11 +503,12 @@ docker compose up api                      # API on http://localhost:8000
 docker compose up --build api web          # API + UI (http://localhost:3000)
 ```
 
-Compose mounts `./data` so raw and processed PDFs survive restarts, runs Postgres
-via its `db` service, and defaults to `EMBEDDING_PROVIDER=openai` so set
-`OPENAI_API_KEY` in `.env`. That default is for local dev on the `legacy` arm,
-where the pgvector chunk column is 1536-dim; production embeds on Databricks
-instead. See [`docs/DEPLOY.md`](docs/DEPLOY.md).
+Compose mounts `./data` so raw and processed PDFs survive restarts and runs
+Postgres via its `db` service. The compose stack defaults to the offline `echo`
+providers (smoke use only); for real embeddings/generation set
+`EMBEDDING_PROVIDER=qwen3` and `LLM_PROVIDER=databricks` with their endpoint
+values in `.env`. Production embeds and generates on Databricks.
+See [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## License
 

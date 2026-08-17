@@ -573,8 +573,9 @@ def _build_app() -> Any:
         if collection_size() == 0:
             Console().print(
                 "[red]Vector store is EMPTY — cannot revalidate the threshold. "
-                "Seed the prod embedding space first (e.g. `regwatch seed` or the "
-                "watch-daily ingest with EMBEDDING_PROVIDER=openai).[/red]"
+                "Seed the prod embedding space first (e.g. `regwatch seed` or "
+                "`regwatch authoritative-corpus-embed` against the active "
+                "profile).[/red]"
             )
             raise typer.Exit(code=2)
 

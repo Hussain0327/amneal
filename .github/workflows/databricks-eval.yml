@@ -91,9 +91,8 @@ jobs:
   eval:
     runs-on: ubuntu-latest
     env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      # Only what the "resolve live eval arm" step needs to decide which arm is
-      # available. Every one of these is a string where empty means "not
+      # Only what the "resolve live eval arm" step needs to decide whether the
+      # arm is available. Every one of these is a string where empty means "not
       # configured", so an absent secret cannot change behavior. The typed
       # provider settings (model names, dimension) are declared on the eval
       # steps that use them -- an empty value at job scope once broke pydantic
@@ -140,7 +139,7 @@ jobs:
         run: uv python install 3.12
 
       - name: sync deps
-        run: uv sync --extra dev --extra llm --extra local-embeddings
+        run: uv sync --extra dev --extra llm
 
       - name: guard selective requires prose
         if: ${{ inputs.selective && !inputs.prose }}
@@ -148,20 +147,17 @@ jobs:
           echo "::error::selective requires prose (v7 is a prose prompt); refusing to burn a live eval slot"
           exit 1
 
-      # Live eval. Two arms, and the Databricks one is the point: production
-      # embeds queries with Databricks-hosted Qwen3, so a gate that only ever
-      # ran on OpenAI's 1536-dim space never measured the geometry prod serves.
-      # REFUSAL_SCORE_THRESHOLD's behavior on real embeddings is gated NOWHERE
-      # else -- tests/test_eval_gate.py runs on hash-based echo embeddings with
-      # the threshold pinned to 0.0.
+      # Live eval. One arm since the OpenAI provider removal (2026-08-17):
+      # production embeds queries with Databricks-hosted Qwen3, and that is the
+      # only geometry worth gating on. REFUSAL_SCORE_THRESHOLD's behavior on
+      # real embeddings is gated NOWHERE else -- tests/test_eval_gate.py runs
+      # on hash-based echo embeddings with the threshold pinned to 0.0.
       - name: resolve live eval arm
         id: eval_arm
         run: |
           if [ -n "$QWEN_EMBEDDING_BASE_URL" ] && [ -n "$QWEN_EMBEDDING_TOKEN" ] \
              && [ -n "$DATABRICKS_SERVING_RUNTIME_VERSION" ]; then
             echo "arm=databricks" >> "$GITHUB_OUTPUT"
-          elif [ -n "$OPENAI_API_KEY" ]; then
-            echo "arm=legacy" >> "$GITHUB_OUTPUT"
           else
             echo "arm=none" >> "$GITHUB_OUTPUT"
           fi
@@ -247,23 +243,6 @@ jobs:
             --profile "$EVAL_PROFILE_ID" --check-thresholds --out eval-scorecard.json \
             ${{ inputs.assert_prod_mode && '--assert-prod-mode' || '' }}
 
-      - name: seed vector store (legacy arm)
-        if: steps.eval_arm.outputs.arm == 'legacy'
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-          EMBEDDING_PROVIDER: openai
-        run: uv run regwatch seed
-
-      - name: eval (legacy openai arm)
-        if: steps.eval_arm.outputs.arm == 'legacy'
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-          EMBEDDING_PROVIDER: openai
-        run: |
-          uv run python -m regwatch.eval.run_eval \
-            --check-thresholds --out eval-scorecard.json \
-            ${{ inputs.assert_prod_mode && '--assert-prod-mode' || '' }}
-
       # The scorecard is also written to the eval_run ledger, but that lands in
       # the CI Postgres service container, which is destroyed with the job. The
       # artifact is what survives for a human comparing two runs; the dark v6
@@ -287,7 +266,7 @@ jobs:
           echo "::error::Live eval could not run - no provider credentials configured."
           echo "Configure QWEN_EMBEDDING_BASE_URL + QWEN_EMBEDDING_TOKEN +"
           echo "DATABRICKS_SERVING_RUNTIME_VERSION for the Databricks arm (the"
-          echo "geometry production serves), or OPENAI_API_KEY for the rollback arm."
+          echo "geometry production serves; the OpenAI rollback arm was removed)."
           echo "pytest's offline eval gate does NOT exercise real embedding geometry"
           echo "or the refusal threshold, so it cannot stand in for this."
           exit 1

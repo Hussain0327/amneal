@@ -160,9 +160,9 @@ jobs:
       # load:true exports the built image into the local docker daemon so the
       # Trivy steps below scan it exactly as before. Separate cache scopes keep
       # the API and web images from evicting each other; mode=max caches the
-      # intermediate dependency-install layer (the dominant build cost). The
-      # default build args are unchanged (slim image, INSTALL_LOCAL_EMBEDDINGS
-      # false) -- this is purely a build-cache change, not a content change.
+      # intermediate dependency-install layer (the dominant build cost). There
+      # is one slim image flavor and no build args -- this is purely a
+      # build-cache configuration, not a content change.
       - name: docker build (API image)
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
         with:
@@ -490,12 +490,14 @@ jobs:
           version: "latest"
           enable-cache: true
 
-      # EMBEDDING_PROVIDER=openai satisfies the vector-dimension assert with
-      # no API key (same trick as tests/test_postgres_bootstrap.py).
+      # EMBEDDING_PROVIDER=echo: the 1536-dim test provider satisfies the
+      # vector-dimension assert with no credentials (same trick as
+      # tests/test_postgres_bootstrap.py). There is no default provider; an
+      # unset value refuses to boot.
       - name: bootstrap schema at alembic head
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-          EMBEDDING_PROVIDER: openai
+          EMBEDDING_PROVIDER: echo
         run: uv run regwatch init-db
 
       # pg_dump must come from the same pg17 lineage as the service (the

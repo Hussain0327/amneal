@@ -418,3 +418,168 @@ def test_html_pages_are_reduced_to_visible_main_content(tmp_path: Path) -> None:
     assert parsed.pages == ["FDA regulatory action\nAuthoritative safety text."]
     assert "navigation" not in parsed.text
     assert "do_not_index" not in parsed.text
+
+
+# ---------------------------------------------------------------------------
+# Blast-radius guards + write-config preflight (2026-08-14 postmortem)
+# ---------------------------------------------------------------------------
+
+
+def _stub_sync_artifact(monkeypatch: pytest.MonkeyPatch, fail_ids: set[str]) -> list[str]:
+    """Replace per-document work with a deterministic pass/fail stub."""
+    calls: list[str] = []
+
+    def stub(
+        artifact: CorpusArtifact,
+        *,
+        client: httpx.Client,
+        defer_embeddings: bool = False,
+        artifact_store: object = None,
+    ) -> tuple[str, int]:
+        calls.append(artifact.canonical_id)
+        if artifact.canonical_id in fail_ids:
+            raise RuntimeError("simulated systemic document failure")
+        return "added", 1
+
+    monkeypatch.setattr(sync_module, "sync_artifact", stub)
+    return calls
+
+
+def _guard_env(monkeypatch: pytest.MonkeyPatch, *, canary: int, consecutive: int) -> None:
+    import config.settings as cs
+
+    monkeypatch.setenv("FDA_CORPUS_CANARY_DOCUMENTS", str(canary))
+    monkeypatch.setenv("FDA_CORPUS_MAX_CONSECUTIVE_FAILURES", str(consecutive))
+    cs.get_settings.cache_clear()
+
+
+def _run_row(run_id: str) -> dict:
+    with get_engine().connect() as conn:
+        row = (
+            conn.execute(
+                text("SELECT status, stats_json FROM fda_corpus_run WHERE id = :id"),
+                {"id": run_id},
+            )
+            .mappings()
+            .one()
+        )
+    return dict(row)
+
+
+def test_canary_batch_all_failing_aborts_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """295 documents must never again pay fetch/parse/OCR for one shared bug."""
+    _guard_env(monkeypatch, canary=5, consecutive=10)
+    artifacts = [_inline_artifact(f"orange-book:product:fail:{i:03d}") for i in range(20)]
+    calls = _stub_sync_artifact(monkeypatch, {a.canonical_id for a in artifacts})
+    with _offline_client() as client:
+        stats = sync_manifest(_manifest(*artifacts), client=client, workers=1)
+
+    assert stats.aborted_reason is not None and "canary" in stats.aborted_reason
+    assert stats.error_documents == 5
+    assert not stats.succeeded
+    # Blast radius: the queue depth (workers * 4) bounds extra submissions.
+    assert len(calls) < len(artifacts)
+    row = _run_row(stats.run_id)
+    assert row["status"] == "failed"
+    assert row["stats_json"]["aborted_reason"] == stats.aborted_reason
+
+
+def test_isolated_failures_do_not_trip_either_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    _guard_env(monkeypatch, canary=5, consecutive=3)
+    artifacts = [_inline_artifact(f"orange-book:product:iso:{i:03d}") for i in range(10)]
+    _stub_sync_artifact(monkeypatch, {artifacts[2].canonical_id, artifacts[6].canonical_id})
+    with _offline_client() as client:
+        stats = sync_manifest(_manifest(*artifacts), client=client, workers=1)
+
+    assert stats.aborted_reason is None
+    assert stats.error_documents == 2
+    assert stats.added_documents == 8
+    assert _run_row(stats.run_id)["status"] == "failed"  # errors still fail the run
+
+
+def test_consecutive_failures_abort_a_run_that_breaks_mid_way(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _guard_env(monkeypatch, canary=2, consecutive=3)
+    # The manifest sorts artifacts by canonical_id, so the ids must sort the
+    # successes FIRST for the canary window to pass before the failures start.
+    ok = [_inline_artifact(f"orange-book:product:a-ok:{i:03d}") for i in range(2)]
+    bad = [_inline_artifact(f"orange-book:product:z-bad:{i:03d}") for i in range(10)]
+    _stub_sync_artifact(monkeypatch, {a.canonical_id for a in bad})
+    with _offline_client() as client:
+        stats = sync_manifest(_manifest(*ok, *bad), client=client, workers=1)
+
+    assert stats.aborted_reason is not None and "consecutive" in stats.aborted_reason
+    assert stats.added_documents == 2
+    assert stats.error_documents == 3
+    assert _run_row(stats.run_id)["stats_json"]["aborted_reason"] == stats.aborted_reason
+
+
+def test_zero_disables_both_guards(monkeypatch: pytest.MonkeyPatch) -> None:
+    _guard_env(monkeypatch, canary=0, consecutive=0)
+    artifacts = [_inline_artifact(f"orange-book:product:off:{i:03d}") for i in range(8)]
+    _stub_sync_artifact(monkeypatch, {a.canonical_id for a in artifacts})
+    with _offline_client() as client:
+        stats = sync_manifest(_manifest(*artifacts), client=client, workers=1)
+
+    assert stats.aborted_reason is None
+    assert stats.error_documents == 8
+
+
+class _Stub384Provider:
+    name = "stub-384"
+    dim = 384
+
+
+def test_embed_during_sync_preflights_before_any_document_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The startup compatibility test: refuse before fetch, not per document."""
+    from regwatch.store import pgvector_store
+
+    monkeypatch.setattr(sync_module, "get_embedding_provider", lambda: _Stub384Provider())
+    monkeypatch.setattr(pgvector_store, "get_embedding_provider", lambda: _Stub384Provider())
+
+    def no_document_work(*args: object, **kwargs: object) -> tuple[str, int]:
+        raise AssertionError("preflight must refuse before any document is processed")
+
+    monkeypatch.setattr(sync_module, "sync_artifact", no_document_work)
+    artifact = _inline_artifact("orange-book:product:preflight:001")
+    with get_engine().connect() as conn:
+        runs_before = int(conn.execute(text("SELECT count(*) FROM fda_corpus_run")).scalar() or 0)
+    with _offline_client() as client, pytest.raises(RuntimeError, match="384"):
+        sync_manifest(_manifest(artifact), client=client, defer_embeddings=False)
+    with get_engine().connect() as conn:
+        runs_after = int(conn.execute(text("SELECT count(*) FROM fda_corpus_run")).scalar() or 0)
+    # A refused preflight attempted nothing: no run row was ever created.
+    assert runs_after == runs_before
+
+
+def test_deferred_sync_skips_the_embed_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Chunk-only runs must not run the embed-during-sync preflight.
+
+    (The store's own lazy dim assert may still resolve the provider on first
+    write -- that guard predates the preflight and is covered elsewhere; here
+    only the sync-level preflight seams are fenced.)
+    """
+
+    def no_preflight(*args: object, **kwargs: object) -> object:
+        raise AssertionError("a deferred sync must not preflight the embed write config")
+
+    monkeypatch.setattr(sync_module, "get_embedding_provider", no_preflight)
+    monkeypatch.setattr(sync_module, "assert_embedding_write_config", no_preflight)
+    artifact = _inline_artifact("orange-book:product:deferred:001")
+    with _offline_client() as client:
+        stats = sync_manifest(_manifest(artifact), client=client, defer_embeddings=True)
+    assert stats.succeeded
+
+
+def test_embed_pending_corpus_preflights_the_target_space(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from regwatch.corpus.embeddings import embed_pending_corpus
+    from regwatch.store import pgvector_store
+
+    monkeypatch.setattr(pgvector_store, "get_embedding_provider", lambda: _Stub384Provider())
+    with pytest.raises(RuntimeError, match="384"):
+        embed_pending_corpus("legacy")

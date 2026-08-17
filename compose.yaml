@@ -1,13 +1,6 @@
-# INSTALL_LOCAL_EMBEDDINGS still defaults to true here (NOT in the Dockerfile,
-# where the slim no-torch image stays the default) so offline/eval tooling that
-# wants sentence-transformers has it. The APP default is EMBEDDING_PROVIDER=
-# openai below -- since R5 the pgvector chunk table is 1536-dim and refuses
-# 384-dim local-bge-small at boot. Set INSTALL_LOCAL_EMBEDDINGS=false for a
-# slim build.
+# One slim build flavor (no torch/sentence-transformers), matching production.
 x-regwatch-build: &regwatch-build
   context: .
-  args:
-    INSTALL_LOCAL_EMBEDDINGS: ${INSTALL_LOCAL_EMBEDDINGS:-true}
 
 x-regwatch-environment: &regwatch-environment
   DATA_DIR: /app/data
@@ -24,11 +17,14 @@ x-regwatch-environment: &regwatch-environment
   # Databricks Lakebase DIRECT endpoint URL with ?sslmode=require. Never a
   # `-pooler` host: docs/DEPLOY.md treats that as a release gate.
   DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/postgres}
-  # Postgres-only means the chunk table is vector(1536), so the provider must
-  # be 1536-dim: openai (set OPENAI_API_KEY in .env). local-bge-small is
-  # 384-dim and the K6 dim assert refuses it at boot -- it remains available
-  # only for offline/eval tooling, not the app datastore.
-  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+  # Providers are REQUIRED-EXPLICIT (2026-08-14 postmortem): nothing defaults.
+  # Real embeddings/generation: set EMBEDDING_PROVIDER=qwen3 with
+  # QWEN_EMBEDDING_BASE_URL/TOKEN, and LLM_PROVIDER=databricks with
+  # DATABRICKS_LLM_* in .env. The echo defaults below exist for the offline
+  # smoke stack only; the API refuses echo against a seeded corpus unless
+  # REGWATCH_ALLOW_TEST_PROVIDERS=1 is set deliberately.
+  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-echo}
+  LLM_PROVIDER: ${LLM_PROVIDER:-echo}
 
 services:
   db:

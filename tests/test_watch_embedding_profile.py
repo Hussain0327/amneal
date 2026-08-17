@@ -66,8 +66,12 @@ def _run_profile_preflight(**overrides: str) -> subprocess.CompletedProcess[str]
 def test_watch_maps_all_profile_secrets_and_uses_qwen() -> None:
     env = _workflow()["jobs"]["watch"]["env"]
     assert env["EMBEDDING_PROVIDER"] == "qwen3"
-    assert env["LLM_PROVIDER"] == "openai"
-    assert env["OPENAI_API_KEY"] == "${{ secrets.WATCH_OPENAI_API_KEY }}"
+    assert env["LLM_PROVIDER"] == "databricks"
+    # The SAME repo secrets/variable the eval workflow reads: they were already
+    # provisioned, so the cron needs no new WATCH_-scoped copies.
+    for llm_env in ("DATABRICKS_LLM_BASE_URL", "DATABRICKS_LLM_TOKEN"):
+        assert env[llm_env] == f"${{{{ secrets.{llm_env} }}}}"
+    assert env["DATABRICKS_LLM_MODEL"] == "${{ vars.DATABRICKS_LLM_MODEL }}"
     for env_name, secret_name in _PROFILE_ENV_TO_SECRET.items():
         assert env[env_name] == f"${{{{ secrets.{secret_name} }}}}"
 
@@ -139,7 +143,7 @@ def test_coverage_is_checked_after_every_attempted_watch_run() -> None:
     assert "sys.exit(1)" in coverage["run"]
 
 
-def test_openai_key_is_for_extraction_not_embeddings() -> None:
-    run = _step("preflight WATCH_OPENAI_API_KEY")["run"]
-    assert "Change summaries and extraction use OpenAI" in run
-    assert "embeds via OpenAI" not in run
+def test_llm_secrets_are_for_extraction_not_embeddings() -> None:
+    run = _step("preflight Databricks LLM config")["run"]
+    assert "Change summaries and extraction use the Databricks endpoint" in run
+    assert "embed" not in run.lower()

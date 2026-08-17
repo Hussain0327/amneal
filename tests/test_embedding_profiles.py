@@ -109,7 +109,7 @@ def pg_profile_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     from regwatch.store import db, pgvector_store, vector_store
 
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
     cs.get_settings.cache_clear()
     db.reset_for_tests()
     pgvector_store.reset_for_tests()

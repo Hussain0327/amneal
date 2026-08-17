@@ -202,7 +202,7 @@ def pg_alerts_db(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     # init_db asserts provider dim == vector(1536) in Postgres mode, so the
     # bootstrap needs the 1536-dim provider. No API key is required -- the
     # assert reads `.dim` without instantiating a client.
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
     cs.get_settings.cache_clear()
     cs.settings = cs.get_settings()
     db_module.reset_for_tests()

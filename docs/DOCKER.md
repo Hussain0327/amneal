@@ -94,12 +94,13 @@ Two settings pick the vector space, and it helps to keep them apart:
   other than the default `legacy` sends vectors to the profile-keyed
   `chunk_embedding` table instead.
 
-**Local Compose runs the legacy arm**: `EMBEDDING_PROVIDER=openai`, no profile.
-The legacy `chunk.embedding` column is `vector(1536)`, so the provider has to be
-1536-dim. `local-bge-small` is 384-dim and `assert_embedding_provider_dim` (in
-`store/pgvector_store.py`) refuses it at boot. It stays available for offline and
-eval tooling, just not as the app datastore's provider. Qwen3 is refused on this
-arm too: it may not write into the unversioned legacy space at all.
+**Local Compose defaults to the legacy arm with the test provider**:
+`EMBEDDING_PROVIDER=echo`, no profile — an offline smoke stack, fenced by the
+`REGWATCH_ALLOW_TEST_PROVIDERS` boot guard against seeded corpora. The legacy
+`chunk.embedding` column is `vector(1536)`, so any provider on this arm has to
+be 1536-dim (`assert_embedding_provider_dim` in `store/pgvector_store.py`
+refuses others at boot). Qwen3 is refused on this arm too: it may not write
+into the unversioned legacy space at all.
 
 **Production does not run the legacy arm.** It runs a registered profile:
 Databricks-hosted Qwen3 at 1024 dimensions, profile
@@ -108,9 +109,10 @@ Databricks-hosted Qwen3 at 1024 dimensions, profile
 column deliberately carries no dimension typmod. The profile row's dimension is
 enforced by a database trigger plus a per-profile expression index, which is what
 lets several vector spaces coexist. Because prod runs a real profile,
-`EMBEDDING_PROVIDER=openai` in `fly.toml` no longer affects the query path.
-The legacy OpenAI arm is a rollback only after it is backfilled: scheduled
-Watch now writes Qwen/profile embeddings and no longer refreshes that column.
+`EMBEDDING_PROVIDER=qwen3` in `fly.toml` satisfies the required-explicit boot
+assert without affecting the query path. The legacy column is a frozen
+historical space, not a rollback: its OpenAI embedder was removed 2026-08-17,
+and rollback means a previously promoted profile.
 
 To run the production-shaped vector space locally you need the Databricks
 embedding endpoint credentials, then three commands in the order
@@ -127,9 +129,9 @@ EMBEDDING_PROVIDER=qwen3 ACTIVE_EMBEDDING_PROFILE="$PROFILE_ID" uv run regwatch 
 Index before seed. Seeding activates the profile, and the activation assert wants
 a ready HNSW index.
 
-Build flavor is a separate axis. `INSTALL_LOCAL_EMBEDDINGS` defaults to `true` in
-`compose.yaml` and `false` in the `Dockerfile`; Fly builds with `false`. Set it
-false locally for the slim no-torch image, then `docker compose build`.
+There is exactly one build flavor since 2026-08-17: the slim no-torch image.
+`docker compose build` takes no flavor argument (the old
+`INSTALL_LOCAL_EMBEDDINGS` build arg is gone with the local bge provider).
 
 Do not load the full PSG corpus with `EMBEDDING_PROVIDER=echo`. That is enforced
 at startup: when an `echo` embedding or LLM provider meets a non-empty pgvector
@@ -140,15 +142,16 @@ seed it, but the next `api` start after that ingest fails fast unless the
 providers are real. If your mounted `./data` already holds a seeded corpus, set
 real providers before `docker compose up api`.
 
-## Why local embeddings are optional
+## Why the torch stack stays out of the image
 
 The first Docker build pulled large CUDA and NVIDIA packages through the
-`sentence-transformers` and `torch` dependency path, which made the baseline API
-image far too heavy for a service smoke test. So `sentence-transformers`, `torch`
-and `transformers` moved behind the `local-embeddings` extra, the slim build
-installs `--extra llm` only, and Linux uses the PyTorch CPU index when the local
-extra is installed. That gives a lightweight API image for development and a
-heavier one for local PSG ingest.
+`sentence-transformers` and `torch` dependency path, which made the baseline
+API image far too heavy for a service smoke test. Those packages live behind
+the `local-embeddings` extra, which since 2026-08-17 serves ONLY the
+off-by-default cross-encoder reranker (`retrieve/reranker.py`,
+`RERANKER_ENABLED`) — the local bge embedding provider the extra was named for
+was removed. The image installs `--extra llm` only (the OpenAI-compatible SDK,
+i.e. the Databricks transport), and no image flavor ever ships torch.
 
 ## Startup behavior
 

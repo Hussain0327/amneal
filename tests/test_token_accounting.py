@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
 from regwatch.generate.llm import (
@@ -11,69 +9,13 @@ from regwatch.generate.llm import (
     LLMMessage,
     LLMResponse,
     LLMUsage,
-    OpenAIProvider,
     estimate_cost_usd,
 )
 from tests.conftest import synth_turn_json
 
 # ---------- provider usage extraction ----------
-
-
-class _Usage:
-    def __init__(self, **kw: int) -> None:
-        for k, v in kw.items():
-            setattr(self, k, v)
-
-
-class _Resp:
-    def __init__(self, usage: Any = None) -> None:
-        self.output_text = "pong"
-        self.model = "gpt-5.4-nano"
-        self.usage = usage
-
-    def model_dump(self) -> dict[str, Any]:
-        return {"model": self.model}
-
-
-class _Responses:
-    def __init__(self, usage: Any) -> None:
-        self.usage = usage
-
-    def create(self, **kwargs: Any) -> _Resp:
-        return _Resp(self.usage)
-
-
-class _ChatResp:
-    def __init__(self, usage: Any) -> None:
-        class _Msg:
-            content = "pong"
-
-        class _Choice:
-            message = _Msg()
-
-        self.choices = [_Choice()]
-        self.usage = usage
-
-    def model_dump(self) -> dict[str, Any]:
-        return {}
-
-
-class _Completions:
-    def __init__(self, usage: Any) -> None:
-        self.usage = usage
-
-    def create(self, **kwargs: Any) -> _ChatResp:
-        return _ChatResp(self.usage)
-
-
-class _FakeClient:
-    def __init__(self, usage: Any = None, chat_usage: Any = None) -> None:
-        self.responses = _Responses(usage)
-
-        class _Chat:
-            completions = _Completions(chat_usage)
-
-        self.chat = _Chat()
+# Provider-level usage extraction is covered per provider (tests/test_databricks_llm_provider.py asserts the chat-completions usage mapping);
+# here only the provider-agnostic pieces remain.
 
 
 def test_echo_provider_reports_zero_usage() -> None:
@@ -81,27 +23,6 @@ def test_echo_provider_reports_zero_usage() -> None:
     assert r.usage == LLMUsage(input_tokens=0, output_tokens=0)
     r_json = EchoLLMProvider().complete([LLMMessage("user", "hi")], response_format="json")
     assert r_json.usage == LLMUsage(input_tokens=0, output_tokens=0)
-
-
-def test_responses_mode_extracts_usage() -> None:
-    client = _FakeClient(usage=_Usage(input_tokens=120, output_tokens=45))
-    p = OpenAIProvider(model="gpt-5.4-nano", api_key="x", mode="responses", client=client)
-    r = p.complete([LLMMessage("user", "hi")])
-    assert r.usage == LLMUsage(input_tokens=120, output_tokens=45)
-
-
-def test_responses_mode_missing_usage_stays_none() -> None:
-    client = _FakeClient(usage=None)
-    p = OpenAIProvider(model="gpt-5.4-nano", api_key="x", mode="responses", client=client)
-    r = p.complete([LLMMessage("user", "hi")])
-    assert r.usage == LLMUsage(input_tokens=None, output_tokens=None)
-
-
-def test_chat_mode_extracts_usage() -> None:
-    client = _FakeClient(chat_usage=_Usage(prompt_tokens=80, completion_tokens=20))
-    p = OpenAIProvider(model="gpt-5.4-nano", api_key="x", mode="chat", client=client)
-    r = p.complete([LLMMessage("user", "hi")])
-    assert r.usage == LLMUsage(input_tokens=80, output_tokens=20)
 
 
 def test_llmresponse_usage_is_optional_for_existing_callers() -> None:
@@ -112,29 +33,54 @@ def test_llmresponse_usage_is_optional_for_existing_callers() -> None:
 
 # ---------- cost from the settings price table ----------
 
+# The default table is EMPTY (only the operator knows the Databricks serving
+# rate), so priced-model tests declare their table via LLM_MODEL_PRICES.
+_TEST_PRICES = '{"oss-model": {"input": 0.05, "output": 0.40}}'
 
-def test_estimate_cost_known_model() -> None:
-    # Default table: gpt-5.4-nano at $0.05/1M input, $0.40/1M output.
-    cost = estimate_cost_usd("gpt-5.4-nano", LLMUsage(input_tokens=1_000_000, output_tokens=0))
+
+def _set_prices(monkeypatch: pytest.MonkeyPatch, table: str = _TEST_PRICES) -> None:
+    import config.settings as cs
+
+    monkeypatch.setenv("LLM_MODEL_PRICES", table)
+    cs.get_settings.cache_clear()
+
+
+def test_default_price_table_is_empty_never_a_guess() -> None:
+    # No hard-coded rate may survive for a model the operator did not price.
+    from config.settings import get_settings
+
+    assert get_settings().llm_model_prices == {}
+    assert estimate_cost_usd("gpt-oss-120b-080525", LLMUsage(10, 10)) is None
+
+
+def test_estimate_cost_known_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_prices(monkeypatch)
+    cost = estimate_cost_usd("oss-model", LLMUsage(input_tokens=1_000_000, output_tokens=0))
     assert cost == pytest.approx(0.05)
-    cost = estimate_cost_usd("gpt-5.4-nano", LLMUsage(input_tokens=200_000, output_tokens=100_000))
+    cost = estimate_cost_usd("oss-model", LLMUsage(input_tokens=200_000, output_tokens=100_000))
     assert cost == pytest.approx(0.2 * 0.05 + 0.1 * 0.40)
 
 
-def test_estimate_cost_unknown_model_is_none_never_a_guess() -> None:
+def test_estimate_cost_unknown_model_is_none_never_a_guess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_prices(monkeypatch)
     assert estimate_cost_usd("totally-unknown-model", LLMUsage(10, 10)) is None
     assert estimate_cost_usd("echo", LLMUsage(0, 0)) is None
 
 
-def test_estimate_cost_snapshot_suffixed_model_uses_family_price() -> None:
-    """OpenAI's Responses path echoes the resolved dated snapshot id, not the
-    configured alias — the family price must still resolve (review fix)."""
+def test_estimate_cost_snapshot_suffixed_model_uses_family_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A serving endpoint may report a dated snapshot id, not the configured
+    alias — the family price must still resolve (review fix)."""
+    _set_prices(monkeypatch)
     cost = estimate_cost_usd(
-        "gpt-5.4-nano-2026-01-15", LLMUsage(input_tokens=1_000_000, output_tokens=0)
+        "oss-model-2026-01-15", LLMUsage(input_tokens=1_000_000, output_tokens=0)
     )
     assert cost == pytest.approx(0.05)
     # Legacy short-form snapshots (e.g. -0613) are digits-and-hyphens too.
-    cost = estimate_cost_usd("gpt-5-nano-2025-08-07", LLMUsage(200_000, 100_000))
+    cost = estimate_cost_usd("oss-model-0613", LLMUsage(200_000, 100_000))
     assert cost == pytest.approx(0.2 * 0.05 + 0.1 * 0.40)
 
 
@@ -150,16 +96,18 @@ def test_snapshot_fallback_prefers_longest_prefix(monkeypatch: pytest.MonkeyPatc
     assert cost == pytest.approx(1.0)  # gpt-5-nano, never the shorter gpt-5 key
 
 
-def test_non_snapshot_suffix_never_falls_back() -> None:
+def test_non_snapshot_suffix_never_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     """A '-mini'/'-turbo' style suffix is a different model, not a snapshot."""
-    assert estimate_cost_usd("gpt-5-nano-mini", LLMUsage(10, 10)) is None
-    assert estimate_cost_usd("gpt-5.4-nanox", LLMUsage(10, 10)) is None
-    assert estimate_cost_usd("gpt-5.4-nano-2026-01-15-mini", LLMUsage(10, 10)) is None
+    _set_prices(monkeypatch)
+    assert estimate_cost_usd("oss-model-mini", LLMUsage(10, 10)) is None
+    assert estimate_cost_usd("oss-modelx", LLMUsage(10, 10)) is None
+    assert estimate_cost_usd("oss-model-2026-01-15-mini", LLMUsage(10, 10)) is None
 
 
-def test_estimate_cost_unreported_usage_is_none() -> None:
-    assert estimate_cost_usd("gpt-5.4-nano", LLMUsage(None, 5)) is None
-    assert estimate_cost_usd("gpt-5.4-nano", LLMUsage(5, None)) is None
+def test_estimate_cost_unreported_usage_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_prices(monkeypatch)
+    assert estimate_cost_usd("oss-model", LLMUsage(None, 5)) is None
+    assert estimate_cost_usd("oss-model", LLMUsage(5, None)) is None
 
 
 def test_price_table_env_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -169,8 +117,8 @@ def test_price_table_env_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
     cs.get_settings.cache_clear()
     cost = estimate_cost_usd("my-model", LLMUsage(input_tokens=500_000, output_tokens=500_000))
     assert cost == pytest.approx(0.5 * 1.0 + 0.5 * 2.0)
-    # The override REPLACES the table; old defaults are gone, cost stays NULL.
-    assert estimate_cost_usd("gpt-5.4-nano", LLMUsage(10, 10)) is None
+    # The override REPLACES the table; unlisted models still cost NULL.
+    assert estimate_cost_usd("gpt-oss-120b-080525", LLMUsage(10, 10)) is None
 
 
 def test_malformed_price_entry_yields_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -282,6 +230,7 @@ def test_ask_records_synthesizer_usage_and_cost(monkeypatch: pytest.MonkeyPatch)
     from regwatch.store.db import session_scope
     from regwatch.store.models import QueryLog
 
+    _set_prices(monkeypatch, '{"gpt-5.4-nano": {"input": 0.05, "output": 0.40}}')
     _seed_corpus()
     stub = _StubLLM(_ANSWER_TURN, LLMUsage(input_tokens=1_000, output_tokens=500))
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: stub)
@@ -294,23 +243,24 @@ def test_ask_records_synthesizer_usage_and_cost(monkeypatch: pytest.MonkeyPatch)
         assert row is not None
         assert row.input_tokens == 1_000
         assert row.output_tokens == 500
-        # gpt-5.4-nano default prices: (1000*0.05 + 500*0.40) / 1e6
+        # Priced via the operator table set above: (1000*0.05 + 500*0.40) / 1e6
         assert row.cost_usd == pytest.approx((1_000 * 0.05 + 500 * 0.40) / 1_000_000)
 
 
 def test_ask_prices_server_reported_snapshot_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The synthesizer audit path prices response.model, which on the (default)
-    Responses surface is the server-echoed dated snapshot id — not the alias
-    the app configured. Cost must resolve, not stay NULL (review fix)."""
+    """The synthesizer audit path prices response.model, which a serving
+    endpoint may report as a dated snapshot id — not the alias the app
+    configured. Cost must resolve, not stay NULL (review fix)."""
     from regwatch.generate import grounded_qa as qa_mod
     from regwatch.store.db import session_scope
     from regwatch.store.models import QueryLog
 
+    _set_prices(monkeypatch, '{"gpt-5.4-nano": {"input": 0.05, "output": 0.40}}')
     _seed_corpus()
     stub = _StubLLM(
         _ANSWER_TURN,
         LLMUsage(input_tokens=1_000, output_tokens=500),
-        model="gpt-5.4-nano-2026-01-15",  # what OpenAI actually echoes back
+        model="gpt-5.4-nano-2026-01-15",  # a server-echoed dated snapshot id
     )
     monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: stub)
 

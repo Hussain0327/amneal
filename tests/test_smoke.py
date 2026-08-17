@@ -186,18 +186,34 @@ def test_llm_provider_factory_echo() -> None:
     assert "hello" in out.text
 
 
-def test_llm_provider_openai_requires_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LLM_PROVIDER", "openai")
+def test_llm_provider_unset_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
     # Use empty string instead of delenv: pydantic-settings would otherwise
-    # fall back to the host's .env which may have a real key.
-    monkeypatch.setenv("OPENAI_API_KEY", "")
+    # fall back to the host's .env which may have a real value.
+    monkeypatch.setenv("LLM_PROVIDER", "")
     import config.settings as cs
 
     cs.get_settings.cache_clear()
     cs.settings = cs.get_settings()
     from regwatch.generate.llm import get_llm_provider
 
-    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+    with pytest.raises(RuntimeError, match="LLM_PROVIDER is not set"):
+        get_llm_provider()
+
+
+def test_llm_provider_databricks_requires_endpoint_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "databricks")
+    monkeypatch.setenv("DATABRICKS_LLM_BASE_URL", "")
+    monkeypatch.setenv("DATABRICKS_LLM_TOKEN", "")
+    monkeypatch.setenv("DATABRICKS_LLM_MODEL", "")
+    import config.settings as cs
+
+    cs.get_settings.cache_clear()
+    cs.settings = cs.get_settings()
+    from regwatch.generate.llm import get_llm_provider
+
+    with pytest.raises(RuntimeError, match="DATABRICKS_LLM"):
         get_llm_provider()
 
 

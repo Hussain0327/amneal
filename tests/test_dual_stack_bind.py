@@ -242,8 +242,6 @@ def _serve_env(tmp_path: Path) -> dict[str, str]:
             "LLM_PROVIDER": "echo",
             "REGWATCH_ALLOW_TEST_PROVIDERS": "1",
             "RATE_LIMIT_PER_MINUTE": "0",
-            "OPENAI_API_KEY": "",
-            "ANTHROPIC_API_KEY": "",
             "SENTRY_DSN": "",
             "DATABASE_URL": os.environ.get("TEST_DATABASE_URL", ""),
             "PGTZ": "UTC",

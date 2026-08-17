@@ -756,3 +756,36 @@ alone does not certify this residual.
   target-environment full sync, measured chunk count, embedding backfill, new-
   corpus eval, activation, and rollback rehearsal remain operator work. The
   canonical contract is `docs/AUTHORITATIVE_FDA_CORPUS.md`.
+
+## Providers are required-explicit; the OpenAI/Anthropic/local-bge paths are removed (Aug 17 2026)
+
+- **Root cause honored, not patched around.** The 2026-08-14 backfill outage
+  was a worker booted without `EMBEDDING_PROVIDER` silently defaulting to
+  local-bge-small: 295 documents paid fetch/parse/OCR and then all failed the
+  same 1536-dim write. `EMBEDDING_PROVIDER` and `LLM_PROVIDER` now have NO
+  defaults anywhere (settings, Docker image, Go proxy mirror): a process
+  without them refuses to start with a remediation message.
+- **Stale providers deleted outright.** `local-bge-small` (could never write
+  the prod geometry), the OpenAI embedding provider (`text-embedding-3-small`),
+  and the OpenAI-API/Anthropic LLM providers are gone, along with their
+  settings (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, role models,
+  `OPENAI_API_MODE`) and the `anthropic` dependency. The OpenAI SDK remains
+  only as the Databricks serving-endpoint transport. Production is Qwen3
+  embeddings + `gpt-oss-120b` generation, both in-tenant; rollback for
+  embeddings means a previously promoted profile (the legacy `chunk.embedding`
+  column is a frozen historical space), and rollback for generation means
+  repointing `DATABRICKS_LLM_MODEL` at another verified endpoint.
+- **Corpus runs preflight and self-limit.** `sync_manifest` and
+  `embed_pending_corpus` run `assert_embedding_write_config` (the geometry
+  half of the boot assert) before any document work, and the sync loop aborts
+  on a failed canary batch (`FDA_CORPUS_CANARY_DOCUMENTS`, default 5, first-N
+  all failing) or on `FDA_CORPUS_MAX_CONSECUTIVE_FAILURES` (default 10)
+  consecutive failures, recording `aborted_reason` on the run row. Isolated
+  bad documents trip neither guard.
+- **Deploy surfaces flipped with the code.** `fly.toml` sets
+  `EMBEDDING_PROVIDER=qwen3`; watch-daily's LLM work moved to the repo-wide
+  `DATABRICKS_LLM_BASE_URL/_TOKEN` secrets + `DATABRICKS_LLM_MODEL` variable
+  (already provisioned for the eval workflow, so no new secrets); the
+  databricks-eval legacy OpenAI arm is removed;
+  the INV-1 real-geometry test now targets the live Qwen 1024-dim profile
+  space behind `RUN_LIVE_QWEN_GEOMETRY=1`.

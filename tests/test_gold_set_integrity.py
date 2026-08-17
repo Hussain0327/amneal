@@ -3,8 +3,8 @@
 The QA gold set is the INV-1 ("refuse-or-cite") regression corpus, but the live
 eval that consumes it (`regwatch.eval.run_eval`) runs in CI only when provider
 credentials are configured -- the Databricks arm when the Qwen endpoint and
-serving-runtime variable are set, the legacy arm on OPENAI_API_KEY, and neither
-otherwise. With no credentials the asset would never be loaded or validated in
+serving-runtime variable are set, and not at all otherwise (the legacy OpenAI
+arm was removed). With no credentials the asset would never be loaded or validated in
 standard CI at all. A malformed row (the loader bare-subscripts
 `row["question"]`, so a missing key is a KeyError), an INV-1-violating row (a
 refusal that cites), or an uncategorized row would ship green.

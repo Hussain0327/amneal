@@ -85,19 +85,18 @@ anything else.**
 
 ## Defaults you can take without asking
 
-- **Embeddings.** Everything goes through `EmbeddingProvider`. Production uses a
-  named embedding profile (`ACTIVE_EMBEDDING_PROFILE`, migration 0015): the
-  Databricks-hosted Qwen3 endpoint, 1024-dim, vectors in the `chunk_embedding`
-  table. The `legacy` arm is the only one that reads `EMBEDDING_PROVIDER` (OpenAI
-  `text-embedding-3-small`, 1536-dim, in `chunk.embedding`); it is not current
-  state, and scheduled Watch no longer refreshes it. Backfill it before using it
-  as a current-corpus rollback. Code default is `local-bge-small`;
-  `BAAI/bge-small-en-v1.5` is for offline and eval tooling only (384-dim, rejected
-  against the app datastore by the dimension assert).
-- **LLM.** Pluggable, code default `openai` with the model from `LLM_MODEL`. An
-  `anthropic` provider also ships and `echo` is for tests. Production runs
-  `databricks`: one Model Serving endpoint (`DATABRICKS_LLM_MODEL`) for every
-  role, with OpenAI as the rollback path.
+- **Embeddings.** Everything goes through `EmbeddingProvider`, and
+  `EMBEDDING_PROVIDER` has NO default (unset refuses to boot; 2026-08-14
+  postmortem). Production uses a named embedding profile
+  (`ACTIVE_EMBEDDING_PROFILE`, migration 0015): the Databricks-hosted Qwen3
+  endpoint, 1024-dim, vectors in the `chunk_embedding` table. The `legacy`
+  `chunk.embedding` column (1536-dim) is a frozen historical space: its OpenAI
+  embedder was removed 2026-08-17, so rollback means a previously promoted
+  profile, never the legacy column. `echo` is the test provider.
+- **LLM.** `LLM_PROVIDER` has NO default either. Production runs `databricks`:
+  one Model Serving endpoint (`DATABRICKS_LLM_MODEL`) for every role. `echo` is
+  for tests. The OpenAI-API and Anthropic provider paths were removed
+  2026-08-17 (the OpenAI SDK remains only as the Databricks wire transport).
 - **Refusal threshold.** `REFUSAL_SCORE_THRESHOLD`, default 0.30. Passages
   scoring below it are withheld from the synthesizer before it runs. Note that
   0.30 was tuned on the old OpenAI vector space and has never been validated

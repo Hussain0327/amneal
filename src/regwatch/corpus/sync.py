@@ -44,6 +44,7 @@ from regwatch.ingest.embedding_writer import (
 )
 from regwatch.ingest.pdf_parser import ParsedPdf, parse_pdf_path
 from regwatch.process.chunker import CHUNKING_VERSION, Chunk, chunk_document_pages, chunk_pdf
+from regwatch.process.embedder import get_embedding_provider
 from regwatch.sources.http import download_authoritative_file, owned_fda_client
 from regwatch.sources.policy import FdaSourceFamily
 from regwatch.store.db import session_scope
@@ -54,6 +55,7 @@ from regwatch.store.models import (
 )
 from regwatch.store.vector_store import (
     add_chunks,
+    assert_embedding_write_config,
     delete_chunks_for_fda_document,
     update_legacy_chunk_embeddings,
 )
@@ -121,6 +123,10 @@ class CorpusSyncStats:
     workers: int = 1
     shard_id: int | None = None
     errors: list[dict[str, str]] = field(default_factory=list)
+    # Set when a blast-radius guard stopped the run early (canary batch all
+    # failed, or too many consecutive failures). Always accompanied by
+    # error_documents > 0, so `succeeded` needs no separate abort clause.
+    aborted_reason: str | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -161,8 +167,19 @@ def sync_manifest(
         workers=workers,
         shard_id=shard_id,
     )
+    if not defer_embeddings:
+        # Startup compatibility test, before ANY document work is spent: the
+        # run will write embeddings, so the configured provider must be able
+        # to write every required target space. Runs before the run row is
+        # created -- a refused preflight attempted nothing.
+        _preflight_embedding_write_config()
+    canary_documents = max(int(get_settings().fda_corpus_canary_documents), 0)
+    max_consecutive = max(int(get_settings().fda_corpus_max_consecutive_failures), 0)
     complete_run = manifest.complete_universe and not limit and shard_id is None
     _create_run(stats, manifest, complete_universe=complete_run)
+    processed = 0
+    consecutive_errors = 0
+    canary_errors = 0
     try:
         selected_store = artifact_store or build_artifact_store()
         with owned_fda_client(client) as active_client:
@@ -177,8 +194,12 @@ def sync_manifest(
                     status, chunks = outcome.result()
                     setattr(stats, f"{status}_documents", getattr(stats, f"{status}_documents") + 1)
                     stats.chunks_written += chunks
+                    consecutive_errors = 0
                 except Exception as exc:
                     stats.error_documents += 1
+                    consecutive_errors += 1
+                    if processed < canary_documents:
+                        canary_errors += 1
                     error = {
                         "canonical_id": artifact.canonical_id,
                         "error_type": type(exc).__name__,
@@ -186,7 +207,30 @@ def sync_manifest(
                     }
                     stats.errors.append(error)
                     log.exception("authoritative_corpus_document_failed", **error)
+                processed += 1
                 _checkpoint_run(stats)
+                abort_reason = _abort_reason(
+                    processed=processed,
+                    canary_documents=canary_documents,
+                    canary_errors=canary_errors,
+                    consecutive_errors=consecutive_errors,
+                    max_consecutive=max_consecutive,
+                )
+                if abort_reason is not None:
+                    # Stop the run instead of paying fetch/parse/OCR for every
+                    # remaining document in a systemically-failing run. Breaking
+                    # here cancels the queued futures; documents already
+                    # in-flight finish their own durable per-document commits
+                    # but are not counted in this run's stats.
+                    stats.aborted_reason = abort_reason
+                    log.error(
+                        "authoritative_corpus_sync_aborted",
+                        run_id=stats.run_id,
+                        reason=abort_reason,
+                        processed=processed,
+                        error_documents=stats.error_documents,
+                    )
+                    break
         if stats.succeeded and manifest.complete_universe and not limit and shard_id is None:
             stats.retired_documents = reconcile_active_manifest(manifest)
     except BaseException:
@@ -194,6 +238,52 @@ def sync_manifest(
         raise
     _finish_run(stats, status="succeeded" if stats.succeeded else "failed")
     return stats
+
+
+def _preflight_embedding_write_config() -> None:
+    """Refuse an embed-during-sync run whose provider cannot write its targets.
+
+    Mirrors exactly what ``_embed_chunk_rows`` will attempt per document: the
+    legacy ``chunk.embedding`` column is written unless the post-cutover skip
+    applies (a named active profile with a Qwen provider), and a named active
+    profile is always required. The optional shadow profile is deliberately
+    not preflighted -- shadow failures degrade to a logged skip by design.
+    """
+    active = (get_settings().active_embedding_profile or "legacy").strip()
+    provider = get_embedding_provider()  # Refuses when EMBEDDING_PROVIDER is unset.
+    if active == "legacy" or getattr(provider, "name", "") != "qwen3":
+        assert_embedding_write_config("legacy")
+    if active != "legacy":
+        assert_embedding_write_config(active)
+
+
+def _abort_reason(
+    *,
+    processed: int,
+    canary_documents: int,
+    canary_errors: int,
+    consecutive_errors: int,
+    max_consecutive: int,
+) -> str | None:
+    """Return why the run must stop now, or None to continue.
+
+    Two systemic-failure signatures, both immune to isolated bad documents:
+    the first ``canary_documents`` processed ALL failed (misconfiguration
+    present from the start), or ``max_consecutive`` failures in a row
+    (systemic failure that began mid-run). Either guard is disabled by 0.
+    """
+    if canary_documents > 0 and processed == canary_documents == canary_errors:
+        return (
+            f"canary batch failed: the first {canary_documents} documents all "
+            "failed; refusing to process the rest of the manifest "
+            "(FDA_CORPUS_CANARY_DOCUMENTS)"
+        )
+    if 0 < max_consecutive <= consecutive_errors:
+        return (
+            f"{consecutive_errors} consecutive document failures; stopping the "
+            "run as systemically broken (FDA_CORPUS_MAX_CONSECUTIVE_FAILURES)"
+        )
+    return None
 
 
 def _sync_artifacts(
@@ -845,6 +935,7 @@ def _copy_stats(run: FdaCorpusRun, stats: CorpusSyncStats) -> None:
         "embeddings_deferred": stats.embeddings_deferred,
         "workers": stats.workers,
         "shard_id": stats.shard_id,
+        "aborted_reason": stats.aborted_reason,
     }
 
 

@@ -19,7 +19,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import pytest
 import yaml
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -94,9 +93,16 @@ def test_the_required_arm_check_runs_before_any_billable_work() -> None:
         assert guard < names.index(costly), f"{costly} runs before the arm guard"
 
 
-@pytest.mark.parametrize("step_name", ["eval (databricks arm)", "eval (legacy openai arm)"])
-def test_both_arms_can_assert_they_match_production(step_name: str) -> None:
-    assert "--assert-prod-mode" in _step(step_name)["run"]
+def test_the_eval_arm_can_assert_it_matches_production() -> None:
+    assert "--assert-prod-mode" in _step("eval (databricks arm)")["run"]
+
+
+def test_the_legacy_openai_arm_stays_removed() -> None:
+    # The rollback arm was removed with the OpenAI provider (2026-08-17); a
+    # reintroduced legacy step would silently demote the gate's geometry.
+    names = [s.get("name") for s in _steps()]
+    assert "eval (legacy openai arm)" not in names
+    assert "seed vector store (legacy arm)" not in names
 
 
 def test_the_blocking_call_does_not_yet_assert_prod_mode() -> None:

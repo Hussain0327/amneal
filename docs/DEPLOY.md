@@ -32,20 +32,21 @@ Both models live in the company's own Databricks tenant:
   chunks are embedded on that profile (measured 2026-08-11).
 
 Generation, query/corpus embeddings and the database are all inside the tenant,
-so data residency item D1 is closed for analyst traffic. The interactive app's
-OpenAI provider is a tested rollback and serves no normal analyst turn.
-Scheduled Watch separately uses a scoped OpenAI key for public-document change
-summaries and extraction, never embeddings.
+so data residency item D1 is closed for analyst traffic. No third-party model
+provider ships at all since 2026-08-17: the OpenAI-API and Anthropic paths were
+removed, and scheduled Watch runs its change-summary/extraction LLM work on the
+same Databricks endpoint family, never embeddings.
 
 Auth is custom cookie sessions, minted by the Go proxy.
 
 Postgres + pgvector is the only datastore. `DATABASE_URL` is mandatory and the
 app refuses to boot without it.
 
-One thing that reads wrong at a glance: `fly.toml` still sets
-`EMBEDDING_PROVIDER = "openai"`. That is not the live query embedder. Retrieval
-picks its arm from `ACTIVE_EMBEDDING_PROFILE` (`retrieve/retriever.py`), and only
-the `legacy` arm ever reads `EMBEDDING_PROVIDER`. Prod runs a real profile, so
+`fly.toml` sets `EMBEDDING_PROVIDER = "qwen3"`. That satisfies the
+required-explicit boot assert (an unset provider refuses to start); the live
+query embedder itself comes from `ACTIVE_EMBEDDING_PROFILE`
+(`retrieve/retriever.py`), and only the `legacy` arm ever reads
+`EMBEDDING_PROVIDER`. Prod runs a real profile, so
 the setting now only governs the old `vector(1536)` chunk column and the boot
 dimension check in `store/pgvector_store.py`.
 
@@ -222,10 +223,6 @@ app = "amneal"
 primary_region = "iad"
 kill_timeout = 30                        # drain in-flight SSE on deploys
 
-[build]
-  [build.args]
-    INSTALL_LOCAL_EMBEDDINGS = "false"   # slim image: no torch
-
 [deploy]
   release_command = "alembic upgrade head"   # migrates BEFORE the roll
 
@@ -234,7 +231,7 @@ kill_timeout = 30                        # drain in-flight SSE on deploys
   proxy = "regwatch-proxy"    # Go proxy, holds the public port
 
 [env]
-  EMBEDDING_PROVIDER = "openai"    # legacy column only, NOT the query embedder
+  EMBEDDING_PROVIDER = "qwen3"    # required-explicit; unset refuses to boot
   AUTH_COOKIE_SECURE = "true"
   CORS_ALLOW_ORIGINS_CSV = "https://amneal.vercel.app"
   SENTRY_ENVIRONMENT = "production"
@@ -270,13 +267,13 @@ These are the names set on the app today:
 
 ```bash
 # DATABASE_URL              Lakebase DIRECT endpoint (see step 1.1)
-# OPENAI_API_KEY            interactive rollback; Watch uses a separate repo key
-# LLM_PROVIDER              databricks
-# DATABRICKS_LLM_MODEL      the serving alias that actually gets called
-# LLM_MODEL                 DISPLAY VALUE ONLY (GET /settings). Hand-sync it to
-#                           DATABRICKS_LLM_MODEL, nothing enforces they agree.
-# ACTIVE_EMBEDDING_PROFILE  picks the live vector space. This is the setting
-#                           that matters, not EMBEDDING_PROVIDER.
+# LLM_PROVIDER              databricks (required-explicit; no OpenAI path exists)
+# DATABRICKS_LLM_MODEL      the serving alias that actually gets called. GET
+#                           /settings displays this same value (the separate
+#                           hand-synced LLM_MODEL display secret is retired).
+# ACTIVE_EMBEDDING_PROFILE  picks the live vector space. EMBEDDING_PROVIDER
+#                           itself comes from fly.toml [env] (qwen3) and is
+#                           required-explicit: an unset value refuses to boot.
 # QWEN_EMBEDDING_DIMENSION  1024. The code default is 1536, so this must be set.
 # INTERNAL_RAG_TOKEN        Go proxy -> Python /internal/query/compute auth
 # METRICS_TOKEN             bearer gate on GET /metrics; unset = world-readable
@@ -284,14 +281,12 @@ These are the names set on the app today:
 # D1_ALLOWED_LLM_MODELS     JSON array of serving endpoints / served model ids
 fly secrets set \
   DATABASE_URL="postgresql://regwatch_app:...@ep-...cloud.databricks.com:5432/databricks_postgres" \
-  OPENAI_API_KEY="sk-..." \
   LLM_PROVIDER="databricks" \
-  DATABRICKS_LLM_BASE_URL="https://<workspace-host>/serving-endpoints" \
+  DATABRICKS_LLM_BASE_URL="https://<workspace-host>/ai-gateway/mlflow/v1" \
   DATABRICKS_LLM_TOKEN="..." \
   DATABRICKS_LLM_MODEL="workspace.default.regwatch" \
-  LLM_MODEL="workspace.default.regwatch" \
   ACTIVE_EMBEDDING_PROFILE="ep_2e7368b354d911ea3a013c3125e276c2" \
-  QWEN_EMBEDDING_BASE_URL="https://<workspace-host>/serving-endpoints/regwatch-embed" \
+  QWEN_EMBEDDING_BASE_URL="https://<workspace-host>/ai-gateway/mlflow/v1" \
   QWEN_EMBEDDING_TOKEN="..." \
   QWEN_EMBEDDING_MODEL="..." \
   QWEN_EMBEDDING_REVISION="..." \
@@ -387,7 +382,8 @@ What to check, and what a wrong value means:
 - `embedding.provider` must be `qwen3` and `embedding.profile` must be the
   profile id above. A profile of `legacy` means the query path fell back to the
   old OpenAI vector space.
-- `llm.provider` must be `databricks`. `openai` means the rollback secret is set.
+- `llm.provider` must be `databricks` (the only production value; there is no
+  OpenAI provider since 2026-08-17).
 - `corpus_count` must be non-zero.
 
 Also hit `GET /ready`. It fails closed if the boot RLS sweep left any public
@@ -513,7 +509,10 @@ Fly secrets take precedence over `fly.toml` `[env]`, so a bad provider or flag
 flip reverts with a secret:
 
 ```bash
-fly secrets set LLM_PROVIDER=openai -a amneal      # back to the OpenAI LLM
+# repoint generation at a different VERIFIED serving endpoint (there is no
+# OpenAI rollback path since 2026-08-17; add the name to D1_ALLOWED_LLM_MODELS
+# first if D1 enforcement is armed)
+fly secrets set DATABRICKS_LLM_MODEL=<other-endpoint> -a amneal
 fly secrets set GO_NATIVE_QUERY=false -a amneal    # proxy relays POST /query to Python
 fly secrets unset REGWATCH_SELECTIVE_CITATION -a amneal   # v7 policy off, v6 format stays
 fly secrets unset REGWATCH_LIVE_DRAFT -a amneal           # stop streaming the draft
@@ -521,8 +520,10 @@ fly secrets unset REGWATCH_LIVE_DRAFT -a amneal           # stop streaming the d
 
 Unset, do not set to empty. See the warning in step 3.2.
 
-Reverting `LLM_PROVIDER` to `openai` sends questions back out to OpenAI. That
-undoes the residency posture, so it is an incident lever, not a tuning knob.
+Repointing `DATABRICKS_LLM_MODEL` changes which serving endpoint answers every
+analyst question, so it is an incident lever, not a tuning knob — and the
+endpoint must be verified open-weight and listed in `D1_ALLOWED_LLM_MODELS`
+before the flip when enforcement is armed.
 
 **Lever 1, app rollback (bad deploy, schema unchanged).** List releases, note the
 image ref of the last good one, pin it:
