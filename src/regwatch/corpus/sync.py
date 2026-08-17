@@ -294,9 +294,16 @@ def sync_artifact(
 ) -> tuple[str, int]:
     """Stage, retain, parse, and publish one document with durable checkpoints."""
 
-    selected_store = artifact_store or build_artifact_store()
     spec = _processing_spec()
     fingerprint = _processing_fingerprint(spec)
+    if _already_complete(
+        artifact,
+        processing_fingerprint=fingerprint,
+        defer_embeddings=defer_embeddings,
+    ):
+        _touch_document(artifact, source_url=None)
+        return "unchanged", 0
+    selected_store = artifact_store or build_artifact_store()
     try:
         with fetch_artifact(artifact, client=client) as payload:
             reference = selected_store.put_file(
@@ -313,7 +320,7 @@ def sync_artifact(
                 processing_spec=spec,
             )
             if acquired.indexed and (defer_embeddings or acquired.embedding_ready):
-                _touch_document(artifact, payload.source_url)
+                _touch_document(artifact, source_url=payload.source_url)
                 return "unchanged", 0
             if acquired.indexed:
                 try:
@@ -997,13 +1004,67 @@ def _version_ready_in_session(session: Session, version: FdaDocumentVersion) -> 
     return embedding_complete_in_session(session, version, profile_id)
 
 
-def _touch_document(artifact: CorpusArtifact, source_url: str) -> None:
+def _already_complete(
+    artifact: CorpusArtifact,
+    *,
+    processing_fingerprint: str,
+    defer_embeddings: bool,
+) -> bool:
+    """Whether a paced FDA fetch for this artifact cannot produce new work.
+
+    Mirrors the post-fetch ``acquired.indexed and (defer_embeddings or
+    acquired.embedding_ready)`` unchanged check, evaluated from the lifecycle
+    tables alone so an already-complete document costs one read transaction
+    instead of a politeness-paced download (~5s each on every driver resume).
+
+    Only versions the resolution ledger already credits as INDEXED may skip:
+    a chunk-complete row still marked pending (written by pre-0025 worker
+    code) must take the fetch path so _record_acquired_version's self-heal
+    can credit it, or its shard's readiness would never recover.
+
+    Content drift is deliberately not detected here: the backfill processes a
+    frozen manifest snapshot, and reconciling live-URL drift is the watch
+    pipeline's job. Any uncertainty (missing document, other fingerprint,
+    partial chunks, missing embeddings) returns False and takes the fetch
+    path unchanged.
+    """
+    if artifact.inline_text is not None:
+        # Inline artifacts carry their content in the manifest: staging them
+        # costs no FDA request, and their content hash is how revisions are
+        # detected, so skipping would trade correctness for nothing.
+        return False
+    with session_scope() as session:
+        document = session.exec(
+            select(FdaDocument).where(FdaDocument.canonical_id == artifact.canonical_id)
+        ).first()
+        if document is None or document.id is None:
+            return False
+        versions = session.exec(
+            select(FdaDocumentVersion).where(
+                FdaDocumentVersion.fda_document_id == document.id,
+                FdaDocumentVersion.processing_fingerprint == processing_fingerprint,
+                FdaDocumentVersion.chunk_status == "complete",
+                FdaDocumentVersion.resolution_status == ResolutionStatus.INDEXED.value,
+            )
+        ).all()
+        for version in versions:
+            if not _version_indexed_in_session(session, version):
+                continue
+            if defer_embeddings or _version_ready_in_session(session, version):
+                return True
+        return False
+
+
+def _touch_document(artifact: CorpusArtifact, *, source_url: str | None) -> None:
+    """Refresh manifest-sourced document fields; ``source_url=None`` keeps the
+    redirect-resolved URL the last real fetch established (the skip path has no
+    payload, and the manifest URL may be the pre-redirect form)."""
     with session_scope() as session:
         _lock_document(session, artifact.canonical_id)
         doc = session.exec(
             select(FdaDocument).where(FdaDocument.canonical_id == artifact.canonical_id)
         ).one()
-        _apply_document_fields(doc, artifact, source_url)
+        _apply_document_fields(doc, artifact, doc.source_url if source_url is None else source_url)
         session.add(doc)
 
 
