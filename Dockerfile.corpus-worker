@@ -17,8 +17,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DAGSTER_HOME=/app/dagster
 
 RUN apt-get update \
-    # Keep inherited Debian packages current even when the reviewed base-image
-    # digest predates a security publication.
+    # The base digest is pinned, so Debian security updates only reach the
+    # image through an explicit upgrade; the Trivy gate fails on any FIXED
+    # HIGH/CRITICAL CVE, which is exactly the set this keeps at zero.
     && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
         build-essential \
