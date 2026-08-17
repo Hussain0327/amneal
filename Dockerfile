@@ -61,6 +61,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     WHITEPAPER_TEMPLATE_PATH=/app/data/templates/cra_white_paper_template.docx
 
 RUN apt-get update \
+    # The base digest is pinned, so Debian security updates only reach the
+    # image through an explicit upgrade; the Trivy gate fails on any FIXED
+    # HIGH/CRITICAL CVE, which is exactly the set this keeps at zero.
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
