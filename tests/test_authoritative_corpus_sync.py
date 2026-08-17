@@ -21,6 +21,7 @@ from regwatch.corpus.embeddings import (
     write_corpus_embeddings,
 )
 from regwatch.corpus.manifest import CorpusArtifact, CorpusManifest
+from regwatch.corpus.resolution import terminal_evidence_issues
 from regwatch.corpus.sharding import corpus_shard_id
 from regwatch.corpus.status import authoritative_corpus_coverage
 from regwatch.corpus.sync import ArtifactPayload, parse_artifact, sync_manifest
@@ -788,3 +789,208 @@ def test_html_pages_are_reduced_to_visible_main_content(tmp_path: Path) -> None:
     assert parsed.pages == ["FDA regulatory action\nAuthoritative safety text."]
     assert "navigation" not in parsed.text
     assert "do_not_index" not in parsed.text
+
+
+def test_pre_ledger_writer_rows_self_heal_instead_of_blocking_their_shard() -> None:
+    """A version completed by pre-0025 worker code must not freeze its shard.
+
+    Migration 0025's backfill is a one-time statement: workers still running
+    the previous code write completed versions whose ledger columns hold the
+    ADD COLUMN defaults (resolution_status='pending', is_current=false).
+    Without the self-heal in _record_acquired_version, the next sync reports
+    such a document "unchanged" while readiness demands resolution_status=
+    'indexed', so the shard fails forever with no repair path.
+    """
+    artifact = _inline_artifact("orange-book:product:n:910001")
+    manifest = _manifest(artifact)
+    with _offline_client() as client:
+        first = sync_manifest(manifest, client=client)
+    assert first.added_documents == 1
+
+    with get_engine().begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE fda_document_version SET resolution_status = 'pending', "
+                "resolved_at = NULL, is_current = false"
+            )
+        )
+
+    with _offline_client() as client:
+        resumed = sync_manifest(manifest, client=client)
+    assert resumed.unchanged_documents == 1
+    assert resumed.error_documents == 0
+
+    readiness = shard_readiness(
+        manifest,
+        corpus_shard_id(artifact.canonical_id),
+        profile_id="legacy",
+    )
+    assert readiness.issues == ()
+    assert readiness.ready is True
+    assert readiness.chunked_documents == 1
+
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT resolution_status, is_current, resolved_at IS NOT NULL FROM fda_document_version"
+            )
+        ).one()
+    assert tuple(row) == ("indexed", True, True)
+
+
+def test_every_terminal_evidence_field_is_independently_validated() -> None:
+    """Each check in terminal_evidence_issues must fail on its own.
+
+    The acceptance gate trusts this function to revalidate terminal rows; a
+    silently deleted check would let unaudited rows stand in for indexed
+    documents, so every field gets its own corruption and its own assertion.
+    """
+    artifact = _network_artifact(
+        "drugs-at-fda:application-doc:evidence",
+        "https://www.accessdata.fda.gov/drugsatfda_docs/nda/2026/evidence.pdf",
+    )
+    sha = "a" * 64
+    resolved_at = datetime.now(UTC)
+
+    def missing_row() -> dict[str, object]:
+        return {
+            "resolution_status": "missing_at_source",
+            "resolution_attempts": 2,
+            "resolved_at": resolved_at,
+            "resolution_error": "HTTP 404 after retry exhaustion",
+            "content_hash_kind": "terminal_observation",
+            "resolution_evidence_json": {
+                "manifest_sha256": sha,
+                "canonical_id": artifact.canonical_id,
+                "source_url": artifact.source_url,
+                "attempts": 2,
+                "http_status": 404,
+            },
+        }
+
+    def unparseable_row() -> dict[str, object]:
+        return {
+            "resolution_status": "unparseable",
+            "resolution_attempts": 2,
+            "resolved_at": resolved_at,
+            "resolution_error": "PdfParseError: exhausted parser",
+            "content_hash_kind": "source_bytes",
+            "artifact_retained": True,
+            "artifact_uri": "s3://bucket/documents/sha256/ab/cd/abcd",
+            "resolution_evidence_json": {
+                "manifest_sha256": sha,
+                "canonical_id": artifact.canonical_id,
+                "source_url": artifact.source_url,
+                "attempts": 2,
+                "error_type": "PdfParseError",
+            },
+        }
+
+    def issues(row: dict[str, object]) -> tuple[str, ...]:
+        return terminal_evidence_issues(row, artifact, manifest_sha256=sha, minimum_attempts=2)
+
+    assert issues(missing_row()) == ()
+    assert issues(unparseable_row()) == ()
+
+    def corrupted(base: dict[str, object], **changes: object) -> dict[str, object]:
+        row = dict(base)
+        base_evidence = row["resolution_evidence_json"]
+        assert isinstance(base_evidence, dict)
+        evidence: dict[str, object] = dict(base_evidence)
+        for key, value in changes.items():
+            if key in evidence or key in ("http_status", "error_type"):
+                evidence[key] = value
+            else:
+                row[key] = value
+        row["resolution_evidence_json"] = evidence
+        return row
+
+    cases: list[tuple[dict[str, object], str]] = [
+        (corrupted(missing_row(), resolution_status="pending"), "unsupported terminal"),
+        (corrupted(missing_row(), resolution_attempts=1), "requires 2"),
+        (corrupted(missing_row(), resolved_at=None), "missing resolved_at"),
+        (corrupted(missing_row(), resolution_error="  "), "missing its error summary"),
+        (corrupted(missing_row(), manifest_sha256="b" * 64), "not bound to this exact manifest"),
+        (corrupted(missing_row(), canonical_id="other:id"), "canonical_id does not match"),
+        (
+            corrupted(missing_row(), source_url="https://www.fda.gov/other"),
+            "source_url does not match",
+        ),
+        (corrupted(missing_row(), attempts=3), "attempt count does not match"),
+        (corrupted(missing_row(), content_hash_kind="source_bytes"), "not an observation hash"),
+        (corrupted(missing_row(), http_status=403), "lacks an exact HTTP 404"),
+        (
+            corrupted(unparseable_row(), content_hash_kind="terminal_observation"),
+            "not tied to captured source bytes",
+        ),
+        (corrupted(unparseable_row(), artifact_retained=False), "lacks a retained source artifact"),
+        (corrupted(unparseable_row(), artifact_uri="  "), "lacks a retained source artifact"),
+        (
+            corrupted(unparseable_row(), error_type="ValueError"),
+            "not produced by a reviewed parser error",
+        ),
+    ]
+    for row, expected in cases:
+        found = issues(row)
+        assert any(expected in issue for issue in found), (expected, found)
+
+
+def test_unparseable_attempts_reset_when_the_manifest_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parse-failure attempts must be manifest-scoped, like missing-source ones.
+
+    Attempts accumulated against a stale manifest must not count toward
+    terminalizing a record under a new manifest; otherwise one pre-freeze
+    failure plus one post-freeze failure terminalizes a document the new
+    manifest was never given a full retry budget for.
+    """
+    import config.settings as settings_module
+
+    monkeypatch.setenv("FDA_CORPUS_TERMINAL_ATTEMPTS", "2")
+    settings_module.get_settings.cache_clear()
+    artifact = _network_artifact(
+        "drugs-at-fda:application-doc:unparseable-reset",
+        "https://www.accessdata.fda.gov/drugsatfda_docs/nda/2026/unparseable-reset.pdf",
+    )
+    stale_manifest = _manifest(artifact)
+    manifest = CorpusManifest(
+        artifacts=(artifact,),
+        source_snapshots={"fixture": "sha256:new-manifest"},
+        complete_universe=False,
+    )
+    body = b"%PDF-1.7\nretained parser fixture"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "application/pdf"},
+            request=request,
+        )
+
+    def fail_parse(_payload: ArtifactPayload) -> ParsedPdf:
+        raise PdfParseError("synthetic exhausted parser")
+
+    store = FilesystemArtifactStore(tmp_path / "durable")
+    monkeypatch.setattr(sync_module, "parse_artifact", fail_parse)
+    try:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            stale = sync_manifest(
+                stale_manifest, defer_embeddings=True, client=client, artifact_store=store
+            )
+            first = sync_manifest(
+                manifest, defer_embeddings=True, client=client, artifact_store=store
+            )
+            second = sync_manifest(
+                manifest, defer_embeddings=True, client=client, artifact_store=store
+            )
+        assert stale.error_documents == 1
+        assert stale.terminal_documents == 0
+        assert first.error_documents == 1
+        assert first.terminal_documents == 0
+        assert second.error_documents == 0
+        assert second.terminal_documents == 1
+    finally:
+        settings_module.get_settings.cache_clear()

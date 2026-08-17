@@ -570,6 +570,16 @@ def _record_acquired_version(
         indexed = version.chunk_status == "complete" and _version_indexed_in_session(
             session, version
         )
+        if indexed and version.resolution_status == ResolutionStatus.PENDING.value:
+            # A worker running pre-0025 code can complete a version while the
+            # ledger columns hold their ADD COLUMN defaults; migration 0025's
+            # one-time backfill cannot cover rows written after it commits.
+            # Credit the proven-searchable row here, or it stays 'pending'
+            # forever and permanently blocks its shard's readiness.
+            version.resolution_status = ResolutionStatus.INDEXED.value
+            version.resolved_at = version.chunked_at or datetime.now(UTC)
+            version.resolution_error = None
+            session.add(version)
         embedding_ready = indexed and _version_ready_in_session(session, version)
         return AcquiredVersion(
             version_id=version.id,
@@ -600,6 +610,14 @@ def _publish_chunks(
             raise RuntimeError("acquired FDA version no longer belongs to its document")
 
         if version.chunk_status == "complete" and _version_indexed_in_session(session, version):
+            if version.resolution_status == ResolutionStatus.PENDING.value:
+                # Same pre-0025-writer self-heal as _record_acquired_version,
+                # reachable when a concurrent worker completed this version
+                # between acquisition and publish.
+                version.resolution_status = ResolutionStatus.INDEXED.value
+                version.resolved_at = version.chunked_at or datetime.now(UTC)
+                version.resolution_error = None
+                session.add(version)
             rows = session.connection().execute(
                 sa_text(
                     "SELECT id, text FROM chunk WHERE fda_version_id = :version_id ORDER BY id"
