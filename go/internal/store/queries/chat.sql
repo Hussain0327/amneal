@@ -147,3 +147,26 @@ INSERT INTO public.chat_message (
 UPDATE public.chat_session
 SET active_filters_json = $2, updated_at = $3
 WHERE id = $1;
+
+-- DeleteUserTurnMessage undoes T1's chat_message write for one turn (the
+-- saturation-shed compensation): a shed turn must leave zero new rows in both
+-- runtimes, matching Python's pre-write shed. turn_id is a fresh UUID minted
+-- per request, so this can never touch another turn's rows.
+-- name: DeleteUserTurnMessage :execrows
+DELETE FROM public.chat_message
+WHERE turn_id = $1 AND role = 'user';
+
+-- DeleteEmptySessionCreatedAt removes the session row ONLY when this turn
+-- created it (created_at is set solely on insert, so it equals the turn's t0
+-- iff T1's upsert inserted rather than updated) and no messages remain. A
+-- pre-existing session keeps a different created_at and is never touched; the
+-- NOT EXISTS guard protects a concurrent turn's committed message (the FK from
+-- chat_message additionally blocks a lost race, which the caller treats as
+-- best-effort).
+-- name: DeleteEmptySessionCreatedAt :execrows
+DELETE FROM public.chat_session cs
+WHERE cs.id = $1
+  AND cs.created_at = $2
+  AND NOT EXISTS (
+    SELECT 1 FROM public.chat_message cm WHERE cm.session_id = cs.id
+  );

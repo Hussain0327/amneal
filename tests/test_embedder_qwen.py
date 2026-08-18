@@ -524,6 +524,25 @@ def test_retriever_uses_query_semantics(monkeypatch: pytest.MonkeyPatch) -> None
         "get_embedding_provider",
         lambda: _QueryProvider(),
     )
+    # The legacy arm (conftest pins ACTIVE_EMBEDDING_PROFILE=legacy) must take
+    # its embedder from the EMBEDDING_PROVIDER selection above and never
+    # consult the profile machinery -- the converse of the named-profile pin
+    # in test_retriever_routes_named_active_profile_without_legacy_search.
+    monkeypatch.setattr(
+        retriever_module,
+        "get_embedding_profile",
+        lambda _pid: pytest.fail("legacy arm must not resolve a profile row"),
+    )
+    monkeypatch.setattr(
+        retriever_module,
+        "get_embedding_provider_for_profile",
+        lambda _p: pytest.fail("legacy arm must not build a profile embedder"),
+    )
+    monkeypatch.setattr(
+        retriever_module,
+        "similarity_search_profile",
+        lambda *_a, **_k: pytest.fail("legacy arm must not run profile search"),
+    )
     monkeypatch.setattr(
         retriever_module,
         "_current_version_ids_for_filters",
@@ -594,6 +613,14 @@ def test_retriever_routes_named_active_profile_without_legacy_search(
         retriever_module,
         "similarity_search",
         lambda *_args, **_kwargs: pytest.fail("legacy search must not run"),
+    )
+    # The conflicting env selection stays live under this test (conftest pins
+    # EMBEDDING_PROVIDER=echo); a named active profile must take its embedder
+    # from the profile row and never consult the env-selected provider.
+    monkeypatch.setattr(
+        retriever_module,
+        "get_embedding_provider",
+        lambda: pytest.fail("named profile must ignore EMBEDDING_PROVIDER"),
     )
 
     assert retriever_module.retrieve("Which PSG changed?", k=3) == []

@@ -9,7 +9,8 @@ package api
 //      WITHHELD as a 500 (Python _persist_turn's re-raise), never returned
 //      with audit_id=-1.
 //   3. Compute-endpoint 503 (ask() pool shed) -> relayed as the byte-identical
-//      FastAPI busy body, no audit row, no T3.
+//      FastAPI busy body, no audit row, no T3 -- and the T1 compensation
+//      leaves ZERO rows (S27 convergence with Python's pre-write shed).
 //
 // Same opt-in Postgres discipline as contract_test.go: TEST_DATABASE_URL unset
 // => skip. The RAG core is a canned httptest stub (the real cross-runtime
@@ -345,10 +346,85 @@ func TestCompleteQuerySaturatedComputeRelays503(t *testing.T) {
 	if n := h.queryLogCount(t); n != 0 {
 		t.Fatalf("a shed turn never ran; %d query_log rows", n)
 	}
-	// Pinned ACCEPTED divergence from Python's zero-write shed: T1 committed
-	// before the shed was known; no assistant row, no audit row.
-	if roles := h.chatMessageRoles(t); len(roles) != 1 || roles[0] != "user" {
-		t.Fatalf("want exactly the orphaned T1 user row, got %v", roles)
+	// The S27 convergence: T1 committed before the shed was known, and the
+	// compensation deleted it again -- ZERO chat rows, matching Python's
+	// pre-write shed. The turn minted a fresh session, so its empty shell
+	// must not linger in the Threads list either.
+	if roles := h.chatMessageRoles(t); len(roles) != 0 {
+		t.Fatalf("a shed turn must leave zero chat messages, got %v", roles)
+	}
+	if n := h.chatSessionCount(t); n != 0 {
+		t.Fatalf("a shed turn's fresh session must be cleaned up; %d rows", n)
+	}
+}
+
+func (h *harness) chatSessionCount(t *testing.T) int {
+	t.Helper()
+	var n int
+	if err := h.pool.QueryRow(t.Context(), `SELECT count(*) FROM public.chat_session`).Scan(&n); err != nil {
+		t.Fatalf("count chat_session: %v", err)
+	}
+	return n
+}
+
+// TestCompleteQuerySaturatedShedSparesPreexistingRows pins the compensation's
+// blast radius: only THIS turn's T1 user message dies. A session that existed
+// before the shed turn -- and every message already committed on it -- must
+// survive (the session delete is guarded by created_at = t0 and by the
+// remaining message).
+func TestCompleteQuerySaturatedShedSparesPreexistingRows(t *testing.T) {
+	h := nativeQueryHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"detail":"server is busy, retry shortly"}`)
+	})
+	h.seedUser(t, testEmail, testPassword, true)
+	token := h.login(t, testEmail, testPassword)
+	if _, err := h.pool.Exec(t.Context(),
+		`INSERT INTO public.chat_session (id, user_id, created_at, updated_at)
+		 VALUES ('existing', '1', now() - interval '1 hour', now() - interval '1 hour')`); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if _, err := h.pool.Exec(t.Context(),
+		`INSERT INTO public.chat_message (id, session_id, turn_id, role, content, created_at)
+		 VALUES ('msg-old', 'existing', 'turn-old', 'user', 'an earlier question',
+		         now() - interval '1 hour')`); err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
+
+	resp := h.do(t, "POST", "/query", token, map[string]any{
+		"question": "What study design is recommended?", "session_id": "existing",
+	})
+	if resp.StatusCode != 503 {
+		t.Fatalf("status %d, want 503", resp.StatusCode)
+	}
+	// The shed turn's own T1 message is gone; the earlier committed message
+	// and its session are untouched.
+	var turnIDs []string
+	rows, err := h.pool.Query(t.Context(),
+		`SELECT turn_id FROM public.chat_message ORDER BY created_at`)
+	if err != nil {
+		t.Fatalf("read chat_message turn ids: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan turn id: %v", err)
+		}
+		turnIDs = append(turnIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate turn ids: %v", err)
+	}
+	if len(turnIDs) != 1 || turnIDs[0] != "turn-old" {
+		t.Fatalf("want only the pre-existing message to survive, got turn_ids %v", turnIDs)
+	}
+	if n := h.chatSessionCount(t); n != 1 {
+		t.Fatalf("the pre-existing session must survive the shed; %d rows", n)
+	}
+	if n := h.queryLogCount(t); n != 0 {
+		t.Fatalf("a shed turn never ran; %d query_log rows", n)
 	}
 }
 
