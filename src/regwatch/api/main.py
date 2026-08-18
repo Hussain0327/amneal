@@ -85,6 +85,7 @@ from regwatch.common.ratelimit import query_limiter
 from regwatch.common.text_normalize import stripped_name
 from regwatch.deficiency.runner import run_deficiency_analysis, run_studio_check
 from regwatch.generate.grounded_qa import QAResult, QueryStatusLiteral, ask, compute_turn
+from regwatch.generate.llm import assert_llm_runtime_available
 from regwatch.generate.rag_contract import AuditPayload, RagOutcome, SessionPatch
 from regwatch.ingest.psg_crawler import (
     BROWSER_UA,
@@ -209,6 +210,13 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # An unset EMBEDDING_PROVIDER, or one whose endpoint credentials are
     # missing, must refuse to boot -- not 500 on the first embed call.
     assert_embedding_runtime_available(s.embedding_provider)
+    # Same posture for generation: every answer turn synthesizes, so an unset
+    # LLM_PROVIDER (or missing DATABRICKS_LLM_* credentials) is a
+    # misconfigured deployment and refuses HERE -- not lazily, refusing every
+    # question while /health reads green. Scoped to this lifespan on purpose:
+    # the corpus worker (dagster-daemon) and the CLI commands never run it,
+    # so non-generating entrypoints gain no generation requirement.
+    assert_llm_runtime_available(s.llm_provider)
     yield
 
 

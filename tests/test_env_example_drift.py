@@ -38,14 +38,38 @@ _ALLOWLIST: dict[str, str] = {
 _ASSIGN_RE = re.compile(r"^\s*#?\s*([A-Z][A-Z0-9_]*)\s*=", re.MULTILINE)
 
 
+def _field_env_names(field_name: str, field: object) -> list[str]:
+    """Env names one field binds, preferred name first.
+
+    A plain field binds its UPPER field name; a str validation_alias binds
+    that name; AliasChoices binds every choice, in declared order -- the
+    first is the preferred name, the rest are deprecated aliases (see
+    _DEPRECATED_ENV_ALIASES in config.settings).
+    """
+    alias = getattr(field, "validation_alias", None)
+    if isinstance(alias, str):
+        return [alias.upper()]
+    choices = getattr(alias, "choices", None)
+    if choices:
+        return [c.upper() for c in choices if isinstance(c, str)]
+    return [field_name.upper()]
+
+
 def _settings_env_names() -> set[str]:
-    """Env-var names the Settings model binds (validation_alias or UPPER field)."""
-    names: set[str] = set()
-    for field_name, field in Settings.model_fields.items():
-        alias = field.validation_alias
-        env = alias if isinstance(alias, str) else field_name
-        names.add(env.upper())
-    return names
+    """The PREFERRED env name per Settings field (what .env.example must show)."""
+    return {
+        _field_env_names(field_name, field)[0]
+        for field_name, field in Settings.model_fields.items()
+    }
+
+
+def _known_env_names() -> set[str]:
+    """Every env name any Settings field binds, deprecated aliases included."""
+    return {
+        name
+        for field_name, field in Settings.model_fields.items()
+        for name in _field_env_names(field_name, field)
+    }
 
 
 def _env_example_names() -> set[str]:
@@ -69,7 +93,7 @@ def test_env_example_documents_every_settings_field() -> None:
 def test_env_example_has_no_phantom_vars() -> None:
     """Fail if .env.example advertises a var the Settings model no longer reads."""
     documented = _env_example_names()
-    known = _settings_env_names() | set(_ALLOWLIST)
+    known = _known_env_names() | set(_ALLOWLIST)
     phantom = sorted(documented - known)
     assert not phantom, (
         "These vars are in .env.example but are not bound by any Settings "
@@ -80,7 +104,7 @@ def test_env_example_has_no_phantom_vars() -> None:
 
 def test_allowlist_entries_are_real_settings_fields() -> None:
     """An allowlist entry that no longer exists in Settings is itself drift."""
-    env_names = _settings_env_names()
+    env_names = _known_env_names()
     stale = sorted(name for name in _ALLOWLIST if name not in env_names)
     assert not stale, (
         f"_ALLOWLIST names no longer bound by Settings: {stale}. " "Drop them from the allowlist."

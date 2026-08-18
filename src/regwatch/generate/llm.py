@@ -1044,6 +1044,21 @@ def get_llm_provider(name: str | None = None, *, role: str = "default") -> LLMPr
     raise ValueError(f"unknown LLM provider: {name}")
 
 
+def assert_llm_runtime_available(name: str | None = None) -> None:
+    """Boot-time fail-fast: the configured LLM provider must be fully usable.
+
+    Mirrors process/embedder.assert_embedding_runtime_available. The API's
+    answer path generates unconditionally, so its lifespan calls this to
+    surface an unset LLM_PROVIDER or missing DATABRICKS_LLM_* at boot, with
+    the same remediation message the first generation call would raise.
+    Provider construction is credential validation only -- the HTTP client is
+    created lazily on first request -- so a configured-but-unreachable
+    endpoint still boots and degrades per turn, which the contract suite's
+    dead_provider flavor pins.
+    """
+    get_llm_provider(name)
+
+
 def current_model_name(role: str = "default") -> str:
     """Best-effort model label for audit rows; never raises.
 
