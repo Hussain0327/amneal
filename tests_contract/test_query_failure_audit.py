@@ -272,16 +272,24 @@ def _all_chat_roles() -> list[str]:
     return [r[0] for r in rows]
 
 
+def _chat_session_count() -> int:
+    with pg_conn() as conn:
+        row = conn.execute("SELECT count(*) FROM public.chat_session").fetchone()
+        assert row is not None
+        return int(row[0])
+
+
 def test_s27_saturated_ask_pool_sheds_the_same_503_on_both_paths(
     harness: Harness, edge_login: Callable[..., EdgeClient]
 ) -> None:
     """ask()-pool saturation (forced via the prod-fenced "saturate" fault) is a
     DEFINED shed, not a slow failure: the native path's compute call comes back
     503 and Go relays FastAPI's exact busy body -- byte-identical to what the
-    flag-off relay serves for the same condition -- with no audit row and no
-    assistant message. ACCEPTED, pinned divergence: the native path has already
-    committed the T1 user message when the shed arrives (Go writes it before
-    the compute call), where Python's shed precedes every write."""
+    flag-off relay serves for the same condition -- and a shed turn leaves
+    ZERO rows on BOTH paths. Go commits the T1 user message before the shed is
+    known, then compensates (deleting the message and the fresh session shell),
+    so the end state converges on Python's pre-write shed -- the formerly
+    accepted orphaned-T1 divergence is CLOSED, and this pins it closed."""
     busy = b'{"detail":"server is busy, retry shortly"}'
 
     native = harness.stack("saturate")
@@ -291,15 +299,16 @@ def test_s27_saturated_ask_pool_sheds_the_same_503_on_both_paths(
     assert response.content == busy, "must be byte-identical to FastAPI's busy body"
     assert response.headers["content-type"] == "application/json"
     assert query_log_count() == 0, "a shed turn never ran; nothing to audit"
-    assert _all_chat_roles() == ["user"], "exactly the orphaned T1 user turn"
+    assert _all_chat_roles() == [], "the T1 compensation leaves zero chat rows"
+    assert _chat_session_count() == 0, "the fresh session shell is cleaned up too"
 
     # Relay comparison: the flag-off path sheds the identical bytes, and
-    # Python's pre-write shed adds NO rows (the count stays at the native
-    # turn's single orphaned user message).
+    # Python's pre-write shed likewise leaves zero rows of every kind.
     relay = harness.stack("saturate", native=False)
     relay_client = edge_login(relay)
     relay_response = relay_client.http.post("/query", json={"question": ANSWERABLE_QUESTION})
     assert relay_response.status_code == 503
     assert relay_response.content == busy
     assert query_log_count() == 0
-    assert _all_chat_roles() == ["user"]
+    assert _all_chat_roles() == []
+    assert _chat_session_count() == 0
