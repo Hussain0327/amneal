@@ -5,7 +5,8 @@ each enforcing crawl_min_interval_ms multiply FDA request pressure by N. With
 crawl_pace_dir set, every process serializes request starts through one
 flock-guarded timestamp per host, making the interval a true host-wide budget.
 These tests drive the REAL _pace_request from multiple spawned processes and
-assert on observed start times -- no mocks around the locking itself.
+assert on the stamps it reserves under the flock -- no mocks around the
+locking itself.
 """
 
 from __future__ import annotations
@@ -18,14 +19,17 @@ from pathlib import Path
 import pytest
 
 INTERVAL_S = 0.30
-# Slack for scheduler jitter: starts must be spaced by the interval minus a
-# small tolerance, never by "roughly zero", which is what a broken limiter
-# yields when two processes race.
-TOLERANCE_S = 0.05
+# The asserted stamps are reserved INSIDE the flock (the value _pace_request
+# returns), where "stamp >= previous + interval" holds by construction, so no
+# scheduler-jitter slack is needed -- only clock/rounding granularity. A
+# time.time() sampled after return once flaked CI: a descheduled worker
+# recorded late, inflating one observed gap and shrinking the next by the
+# same amount while the true starts stayed perfectly spaced.
+TOLERANCE_S = 0.005
 
 
 def _paced_worker(pace_dir: str, out_path: str, starts: int) -> None:
-    """Record time.time() after each paced request start. Runs in a child."""
+    """Record the lock-reserved stamp of each paced start. Runs in a child."""
     import os
 
     os.environ["CRAWL_PACE_DIR"] = pace_dir
@@ -36,8 +40,9 @@ def _paced_worker(pace_dir: str, out_path: str, starts: int) -> None:
 
     stamps: list[float] = []
     for _ in range(starts):
-        http_mod._pace_request("https://www.accessdata.fda.gov/x.pdf", INTERVAL_S)
-        stamps.append(time.time())
+        stamp = http_mod._pace_request("https://www.accessdata.fda.gov/x.pdf", INTERVAL_S)
+        assert stamp is not None, "pace dir is set, expected a host-global stamp"
+        stamps.append(stamp)
     with open(out_path, "a", encoding="ascii") as handle:
         for stamp in stamps:
             handle.write(f"{stamp:.6f}\n")

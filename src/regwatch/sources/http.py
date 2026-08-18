@@ -235,7 +235,7 @@ def _stream_authoritative_to(
     raise last_error
 
 
-def _pace_request(url: str, min_interval_s: float) -> None:
+def _pace_request(url: str, min_interval_s: float) -> float | None:
     """Pace request starts per FDA host: host-global when configured.
 
     The in-process branch is complete only while ONE process crawls. The lock
@@ -245,24 +245,32 @@ def _pace_request(url: str, min_interval_s: float) -> None:
     being a budget. When ``crawl_pace_dir`` is set, every process serializes
     request starts through one flock-guarded timestamp file per host instead,
     making the interval a true host-wide budget regardless of process count.
+
+    Returns:
+        The host-global reserved start stamp (wall-clock seconds) when
+        ``crawl_pace_dir`` is set, else None. Production callers ignore it;
+        the cross-process pacing test asserts on it because a ``time.time()``
+        sampled after return sits outside the lock and scheduler jitter there
+        once produced a false CI failure (a short gap whose neighbor was
+        inflated by the same amount).
     """
 
     if min_interval_s <= 0:
-        return
+        return None
     host = (urlsplit(url).hostname or "").lower()
     pace_dir = get_settings().crawl_pace_dir
     if pace_dir is not None:
-        _pace_request_host_global(host, min_interval_s, pace_dir)
-        return
+        return _pace_request_host_global(host, min_interval_s, pace_dir)
     with _PACE_LOCK:
         now = time.monotonic()
         remaining = min_interval_s - (now - _LAST_REQUEST_BY_HOST.get(host, 0.0))
         if remaining > 0:
             time.sleep(remaining)
         _LAST_REQUEST_BY_HOST[host] = time.monotonic()
+    return None
 
 
-def _pace_request_host_global(host: str, min_interval_s: float, pace_dir: Path) -> None:
+def _pace_request_host_global(host: str, min_interval_s: float, pace_dir: Path) -> float:
     """Serialize request starts across PROCESSES via one flock'd file per host.
 
     The sleep happens WHILE HOLDING the lock, deliberately: the contract is
@@ -274,6 +282,12 @@ def _pace_request_host_global(host: str, min_interval_s: float, pace_dir: Path) 
     POSIX-only, matching everywhere this crawler runs (Linux worker image,
     macOS dev); it also serializes threads within one process, because each
     call opens its own file description.
+
+    Returns:
+        The reserved start stamp (wall-clock seconds) written to the pace
+        file under the lock. On this timeline the spacing invariant
+        ``stamp >= previous + min_interval_s`` holds by construction, which
+        is what makes it assertable without scheduler-jitter tolerance.
     """
     import fcntl
 
@@ -290,10 +304,11 @@ def _pace_request_host_global(host: str, min_interval_s: float, pace_dir: Path) 
         remaining = min_interval_s - (time.time() - previous)
         if remaining > 0:
             time.sleep(min(remaining, min_interval_s))
-        stamp = f"{time.time():.6f}".encode("ascii")
+        started = time.time()
         os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)
-        os.write(fd, stamp)
+        os.write(fd, f"{started:.6f}".encode("ascii"))
+        return started
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
