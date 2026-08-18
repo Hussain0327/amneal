@@ -330,10 +330,15 @@ def _assert_profile_ready(profile: str) -> None:
             "chunk(s) pending); backfill before evaluating it"
         )
     if not index_ready:
-        raise SystemExit(
-            f"profile {profile} has no ready HNSW index; run `regwatch "
-            f"embedding-profile-index {profile}` before evaluating it"
-        )
+        from config.settings import get_settings
+
+        # Mirror the serving gate: PROFILE_HNSW_INDEX_REQUIRED=false serves
+        # (and therefore evaluates) the profile by pgvector exact scan.
+        if get_settings().profile_hnsw_index_required:
+            raise SystemExit(
+                f"profile {profile} has no ready HNSW index; run `regwatch "
+                f"embedding-profile-index {profile}` before evaluating it"
+            )
 
 
 def _load_gold(path: Path) -> list[GoldItem]:
