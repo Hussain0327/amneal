@@ -152,6 +152,14 @@ class Settings(BaseSettings):
     # "legacy" below is a local-dev default only.
     active_embedding_profile: str = "legacy"
     embedding_shadow_profile: str | None = None
+    # Serving normally requires the active profile's deterministic HNSW index
+    # (assert_profile_ready_for_activation, checked at boot and before every
+    # embedding write). pgvector's exact scan returns identical results
+    # without the index -- only slower -- while the index roughly doubles
+    # vector storage. On a logical-size-capped database (Lakebase free tier:
+    # 512 MB) that doubling is decisive, so an operator may waive the index
+    # requirement explicitly. Coverage completeness is never waived.
+    profile_hnsw_index_required: bool = True
 
     # Private Databricks Chat Completions endpoint. Prod points this at the
     # Unity Catalog alias workspace.default.regwatch, which serves gpt-oss-120b

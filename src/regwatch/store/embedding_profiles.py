@@ -33,6 +33,7 @@ from sqlalchemy import Engine, ForeignKey, Index, Table
 from sqlalchemy import text as sa_text
 from sqlmodel import SQLModel
 
+from regwatch.common.logging import get_logger
 from regwatch.retrieve.mode import (
     RetrievalMode,
     RetrievalScope,
@@ -45,6 +46,8 @@ if TYPE_CHECKING:
 
     from regwatch.store.vector_store import Hit
 
+
+log = get_logger(__name__)
 
 _PROFILE_ID_RE = re.compile(r"^ep_[0-9a-f]{32}$")
 _CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -723,7 +726,14 @@ def profile_hnsw_index_ready(profile_id: str) -> bool:
 
 
 def assert_profile_ready_for_activation(profile_id: str) -> EmbeddingProfile:
-    """Fail closed unless a profile is complete and has a valid HNSW index."""
+    """Fail closed unless a profile is complete and has a valid HNSW index.
+
+    Coverage completeness is always required. The HNSW index requirement can
+    be waived with PROFILE_HNSW_INDEX_REQUIRED=false: pgvector then serves
+    the profile by exact scan, which returns identical results (only slower),
+    while the index would roughly double vector storage -- decisive on a
+    logical-size-capped database (Lakebase free tier is 512 MB, hit 2026-08-18).
+    """
     profile = get_embedding_profile(profile_id)
     coverage = profile_embedding_coverage(profile_id)
     if not coverage.complete:
@@ -732,10 +742,14 @@ def assert_profile_ready_for_activation(profile_id: str) -> EmbeddingProfile:
             f"{coverage.embedded_chunks}/{coverage.total_chunks} chunks embedded"
         )
     if not profile_hnsw_index_ready(profile_id):
-        raise RuntimeError(
-            f"embedding profile {profile_id} has no ready HNSW index; run "
-            f"`regwatch embedding-profile-index {profile_id}` before activation"
-        )
+        from config.settings import get_settings
+
+        if get_settings().profile_hnsw_index_required:
+            raise RuntimeError(
+                f"embedding profile {profile_id} has no ready HNSW index; run "
+                f"`regwatch embedding-profile-index {profile_id}` before activation"
+            )
+        log.warning("profile_hnsw_index_waived", profile_id=profile_id)
     return profile
 
 
