@@ -149,7 +149,7 @@ def test_retries_transient_marker_buried_in_large_multiline_output(tmp_path: Pat
     multiline = (
         "==> Building image\n"
         "image: registry.fly.io/amneal:deployment-01\n"
-        "Running amneal release_command: alembic upgrade head\n"
+        "Running amneal release_command: regwatch release\n"
         "error starting release_command machine: failed to start VM d895132ae09628: "
         "deadline_exceeded: machine still starting\n"
         f"{filler}\n"

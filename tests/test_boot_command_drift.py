@@ -47,6 +47,12 @@ def _fly_process_argv() -> list[str]:
     return shlex.split(fly["processes"]["app"])
 
 
+def _fly_release_argv() -> list[str]:
+    with _FLY_TOML.open("rb") as fh:
+        fly: dict[str, Any] = tomllib.load(fh)
+    return shlex.split(fly["deploy"]["release_command"])
+
+
 def _dockerfile_cmd_argv() -> list[str]:
     matches = _CMD_RE.findall(_DOCKERFILE.read_text(encoding="utf-8"))
     assert matches, "No JSON-exec-form CMD found in the Dockerfile"
@@ -65,6 +71,11 @@ def _compose_api_command_argv() -> list[str]:
 
 def test_fly_process_matches_expected_boot_argv() -> None:
     assert _fly_process_argv() == _EXPECTED
+
+
+def test_fly_release_runs_migration_and_serving_preflight() -> None:
+    """The one-off release must gate live state before any machine is rolled."""
+    assert _fly_release_argv() == ["regwatch", "release"]
 
 
 def test_dockerfile_cmd_matches_fly_process() -> None:

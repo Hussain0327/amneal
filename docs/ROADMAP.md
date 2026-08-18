@@ -111,7 +111,8 @@ proxy machines, so the real fleet ceiling is about twice the configured rate.
 
 The database is Databricks Lakebase; the last verified live head was
 `0020_eval_run`, while repository head now includes 0021. The migration release gate is done
-(`release_command = "alembic upgrade head"` in `fly.toml`). What is missing is
+(`release_command = "regwatch release"` in `fly.toml`, which migrates and then
+asserts serving readiness before the roll). What is missing is
 proof: nobody has ever rehearsed a restore, and the scripted
 `scripts/restore_drill.sh` was deleted in R5. The app also still connects with a
 full-privilege role. Polyglot step 7, where Python drops to a read-only role, is

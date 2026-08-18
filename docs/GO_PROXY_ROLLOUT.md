@@ -289,7 +289,8 @@ per-IP bucket only fires on a 31st attempt using distinct emails. The limiter is
 also in-process and split across machines, which makes any count-based probe
 nondeterministic. The log read is deterministic and takes one request.
 
-`release_command = "alembic upgrade head"` is the sole migration authority.
+`release_command = "regwatch release"` is the sole migration authority; it also
+runs the serving-readiness guard before either process group rolls.
 
 ## Pre-merge checklist for anything touching this topology
 

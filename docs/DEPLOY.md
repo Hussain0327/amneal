@@ -110,9 +110,11 @@ rebuild is unrehearsed, same as the restore drill in 6.5.
 ## 2. Schema and migrations
 
 The Fly deploy is the single migration authority. `fly.toml` sets
-`[deploy] release_command = "alembic upgrade head"`, which runs in a one-off
-machine BEFORE the rolling replace, so a schema-advancing release migrates
-itself. There is no manual pre-migration step on the normal path.
+`[deploy] release_command = "regwatch release"`, which runs in a one-off machine
+BEFORE the rolling replace. It applies `alembic upgrade head` and then executes
+the full serving-readiness guard, so both migration failures and live
+embedding-profile drift abort before any long-lived machine is replaced. There
+is no manual pre-migration step on the normal path.
 
 The deployed corpus schema includes `0023_authoritative_fda_corpus` and
 `0024_fda_streaming_lifecycle`. This follow-up adds
@@ -120,10 +122,11 @@ The deployed corpus schema includes `0023_authoritative_fda_corpus` and
 run ledgers before terminal-tail repair and acceptance. No corpus migration
 makes network calls or performs a corpus backfill.
 
-The boot guard is the other half. The entrypoint runs `regwatch init-db`, which
-compares the alembic stamp to the head this image expects and refuses to start on
-a mismatch. That refusal is the signal that image and schema came from different
-commits. To heal it, from a checkout of the DEPLOYED commit on `main`:
+App boot repeats the guard after the release preflight. The entrypoint runs
+`regwatch init-db`, which compares the Alembic stamp to the head this image
+expects and verifies the active serving profile. That repetition covers drift
+in the interval after the one-off release check. To heal a schema mismatch,
+from a checkout of the DEPLOYED commit on `main`:
 
 ```bash
 DATABASE_URL="$PROD_DB_URL" uv run alembic upgrade head
@@ -228,7 +231,7 @@ primary_region = "iad"
 kill_timeout = 30                        # drain in-flight SSE on deploys
 
 [deploy]
-  release_command = "alembic upgrade head"   # migrates BEFORE the roll
+  release_command = "regwatch release"  # migrates + asserts readiness BEFORE roll
 
 [processes]
   app = "regwatch serve"      # dual-stack uvicorn on :8000

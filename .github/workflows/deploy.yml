@@ -121,8 +121,11 @@ jobs:
           version: "0.4.71"  # no leading v
 
       # flyctl builds remotely and runs fly.toml [deploy] release_command
-      # (alembic upgrade head) before the rolling machine replace. The token is
-      # passed via env (never inlined) per the workflow-injection-safe pattern.
+      # (`regwatch release`) before the rolling machine replace. That one-off
+      # command migrates to head, then runs the full serving-readiness guard so
+      # deterministic DB/profile drift aborts before ANY machine is replaced.
+      # The token is passed via env (never inlined) per the
+      # workflow-injection-safe pattern.
       #
       # Wrapped in scripts/fly-deploy.sh, which retries ONLY transient Fly
       # platform errors (e.g. "deadline_exceeded: machine still starting" when

@@ -19,9 +19,9 @@
 # never silently re-attempted behind a green check.
 #
 # WHY a blind re-run of the whole deploy is SAFE here (idempotency):
-#   * release_command = `alembic upgrade head`: a linear single-head chain that
-#     is a no-op once the DB is stamped at head (and the latest migration's DDL
-#     is itself re-runnable -- CREATE OR REPLACE FUNCTION / DROP ... IF EXISTS).
+#   * release_command = `regwatch release`: its Alembic phase is a no-op once
+#     the DB is stamped at head (the linear migrations are re-runnable), and its
+#     following serving-readiness phase is idempotent validation/ensure work.
 #   * Fly runs release_command in a TEMPORARY machine BEFORE the rolling replace
 #     and aborts the entire deploy if it fails, so a failed attempt never leaves
 #     a half-rolled fleet for the next attempt to corrupt.

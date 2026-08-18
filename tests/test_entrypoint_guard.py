@@ -8,9 +8,12 @@ pointed under tmp_path, so nothing touches the repo, /app, or a real database.
 The contract under test (entrypoint dispatch on $1, across today's app group
 and the staged phase-3 proxy group -- docs/GO_PROXY_ROLLOUT.md):
 
-* ``alembic ...`` (the Fly release_command) skips init-db: the release machine
-  exists to MOVE the alembic stamp to head, and the stamp guard would refuse
-  and abort the whole deploy first.
+* ``regwatch release`` (the Fly release_command) skips the entrypoint init-db:
+  the command migrates first and then runs the full guard itself. The pre-command
+  guard would refuse a behind stamp before the migration could advance it. The
+  Fly-provided ``RELEASE_COMMAND=1`` marker also skips that guard independent of
+  the concrete argv wrapper.
+* direct ``alembic ...`` operator commands retain the same pre-guard skip.
 * ``regwatch-proxy`` (proxy process group), plain or path-qualified, skips
   init-db: the proxy must boot DB-independent. A proxy machine crash-looping
   on the stamp guard while holding the public port is the 2026-06-18/07-07
@@ -141,10 +144,28 @@ def test_uvicorn_runs_init_db_then_hands_off(tmp_path: Path) -> None:
     ]
 
 
-def test_alembic_release_command_skips_init_db(tmp_path: Path) -> None:
+def test_direct_alembic_command_skips_init_db(tmp_path: Path) -> None:
     proc, lines = _run(tmp_path, ["alembic", "upgrade", "head"])
     assert proc.returncode == 0, proc.stderr
     assert lines == ["alembic|upgrade head|db_init=unset"]
+
+
+def test_regwatch_release_command_skips_pre_migration_init_db(tmp_path: Path) -> None:
+    proc, lines = _run(tmp_path, ["regwatch", "release"])
+    assert proc.returncode == 0, proc.stderr
+    assert lines == ["regwatch|release|db_init=unset"]
+
+
+def test_fly_release_marker_skips_pre_command_init_for_wrapped_argv(
+    tmp_path: Path,
+) -> None:
+    proc, lines = _run(
+        tmp_path,
+        ["/bin/sh", "-c", "regwatch release"],
+        env_extra={"RELEASE_COMMAND": "1"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert lines == ["regwatch|release|db_init=unset"]
 
 
 def test_proxy_skips_init_db(tmp_path: Path) -> None:
