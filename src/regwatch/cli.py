@@ -140,6 +140,17 @@ def cmd_init_db() -> None:
     rprint("[green]ok[/green] postgres schema at head")
 
 
+@app.command("release", hidden=True)
+def cmd_release() -> None:
+    """Migrate and run the full serving-readiness gate for a Fly release."""
+    from regwatch.store.db import prepare_release_database
+
+    s = get_settings()
+    s.ensure_dirs()
+    prepare_release_database()
+    rprint("[green]ok[/green] release database and serving profile ready")
+
+
 @app.command("authoritative-corpus-init-db", hidden=True)
 def cmd_authoritative_corpus_init_db() -> None:
     """Verify worker schema without requiring already-complete embeddings."""

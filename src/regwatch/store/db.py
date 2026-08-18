@@ -302,6 +302,26 @@ def _alembic_config() -> Config:
     return cfg
 
 
+def prepare_release_database() -> None:
+    """Migrate to head, then assert that the serving process can cold-boot.
+
+    Fly runs this in its one-off release machine before touching any long-lived
+    machine. The ordering is load-bearing: the existing schema stamp may be
+    behind this image, so the migration must run before :func:`init_db`; after
+    the migration, the normal serving guard verifies the exact head plus the
+    active embedding profile's coverage, configured HNSW policy, and provider
+    geometry.
+
+    Keeping that second phase in the release machine prevents deterministic
+    serving-state drift from surfacing five minutes later as a rolling-update
+    health timeout after some process groups have already been replaced.
+    """
+    from alembic import command
+
+    command.upgrade(_alembic_config(), "head")
+    init_db()
+
+
 def _head_revision(cfg: Config) -> str:
     from alembic.script import ScriptDirectory
 

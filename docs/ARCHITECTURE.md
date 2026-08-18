@@ -723,10 +723,11 @@ full 140,438-record backfill is operator-owned while serving remains on
 - **Schema bootstrap, two paths.** A fresh, empty database is created with
   `create_all` plus `alembic stamp head`, no history replay
   (`store/db.py::_init_postgres`). An existing database is migrated
-  incrementally: `fly.toml`'s `[deploy] release_command = "alembic upgrade head"`
-  runs pending migrations on a one-off machine before the app machines roll, so a
-  newer image never boots against an older schema. That is the fix for the
-  2026-06-18 incident. Tests run the same alembic path against
+  incrementally: `fly.toml`'s `[deploy] release_command = "regwatch release"`
+  runs pending migrations and then the full serving-readiness guard on a one-off
+  machine before the app machines roll. A newer image never boots against an
+  older schema, and live embedding-profile drift fails before the roll starts.
+  Tests run the same alembic path against
   `TEST_DATABASE_URL`, so dev, CI and prod share one migration history.
 
 ---
