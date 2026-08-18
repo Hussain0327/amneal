@@ -314,6 +314,10 @@ class Settings(BaseSettings):
         "route_call_mode",
         "route_call_max_tokens",
         "selective_citation_enabled",
+        # Same rollback story: this flag ships as a Fly secret / workflow env
+        # value, and a blank must mean "default (required)", never a
+        # bool_parsing crash at import.
+        "profile_hnsw_index_required",
         mode="before",
     )
     @classmethod
