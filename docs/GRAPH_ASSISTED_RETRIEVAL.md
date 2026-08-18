@@ -1,14 +1,16 @@
 # Graph-Assisted Adaptive Retrieval
 
 > **Status: proposed design. Only the Tier-1 storage is built.**
-> Last updated: 2026-08-11.
+> Last updated: 2026-08-18.
 >
 > Migration `0018_knowledge_graph` and `src/regwatch/store/graph_store.py` write
 > deterministic application, PSG-document and PSG-section nodes, typed edges, and
 > node-to-chunk references. Verified today: `derive_document_graph` is called
-> only from the ingest pipeline and the CLI, at chunk-write time. Nothing reads
-> those tables. There is no read API and no traversal code. Ask still uses the
-> plain vector retrieval path in `ARCHITECTURE.md`.
+> only from the `regwatch graph-backfill` CLI command. Ingest-time population
+> was retired on 2026-08-18 because nothing reads those tables. There is no read
+> API and no traversal code. Ask still uses the plain vector retrieval path in
+> `ARCHITECTURE.md`. Revival path: run the CLI backfill when a traversal
+> consumer ships, and only then re-wire ingest-time derivation.
 
 ## Why bother
 

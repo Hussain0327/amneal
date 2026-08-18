@@ -69,8 +69,8 @@ Two of these are now done. The numbers are kept because other docs cite them.
   in `0025_fda_terminal_resolution`. The corrected production canary passed
   21 / 21 and produced 499 chunks with complete active-profile embeddings. The
   full 140,438-record backfill is operator-owned and retrieval remains on
-  `legacy`. R5 deleted the SQLite and Chroma dual-mode, so `DATABASE_URL` is
-  unconditionally required and the app refuses to boot without it. pgvector
+  `legacy`. `DATABASE_URL` is unconditionally required and the app refuses to
+  boot without it (R5 deleted the SQLite and Chroma dual-mode). pgvector
   dimension checks fail fast.
   - Note on history: the earlier call
     ([`DATABRICKS_ADOPTION_2026-07-28.md`](DATABRICKS_ADOPTION_2026-07-28.md))

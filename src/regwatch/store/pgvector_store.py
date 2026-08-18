@@ -3,9 +3,9 @@
 `store/vector_store.py` owns the public interface and delegates here; callers
 never import this module directly.
 
-Schema (K4): one ``chunk`` table whose btree-indexed metadata columns mirror
-the Chroma chunk metadata, plus a ``vector(1536)`` embedding column with an
-HNSW cosine index. The table is created by the Postgres bootstrap and also
+Schema (K4): one ``chunk`` table with btree-indexed metadata columns (the
+citation and drug-filter fields), plus a ``vector(1536)`` embedding column
+with an HNSW cosine index. The table is created by the Postgres bootstrap and also
 self-heals here on first use (idempotent DDL), so the store works even when
 it is exercised before/without `store/db.py`'s init path.
 
@@ -50,7 +50,7 @@ if TYPE_CHECKING:  # runtime import is deferred to avoid an import cycle
 # The chunk table stores 1536-dim vectors (OpenAI text-embedding-3-small).
 EMBEDDING_DIM = 1536
 
-# Columns the Chroma-style `where` filters may reference (everything except
+# Columns the `where` filter DSL may reference (everything except
 # id/text/embedding). Unknown fields fail loudly rather than silently
 # returning unfiltered results — filters are a cross-drug-leak control (INV).
 _FILTERABLE_COLUMNS = frozenset(
@@ -91,7 +91,7 @@ _METADATA_COLUMNS = _INT_METADATA_COLUMNS + _TEXT_METADATA_COLUMNS
 
 
 class Chunk(SQLModel, table=True):
-    """K4 chunk row. The pgvector twin of one Chroma collection entry."""
+    """K4 chunk row: text, citation/filter metadata, and the legacy vector."""
 
     __tablename__ = "chunk"
 
@@ -583,9 +583,8 @@ def update_legacy_chunk_embeddings(
 def delete_chunks_for_doc_except_version(doc_id: int, keep_version_id: int) -> int:
     """Delete indexed chunks for one PSG document except the current version.
 
-    Same semantics as the Chroma path: a NULL/unparseable version_id never
-    matches the kept version, so those rows are deleted too
-    (`IS DISTINCT FROM` keeps NULLs in the delete set).
+    A NULL/unparseable version_id never matches the kept version, so those
+    rows are deleted too (`IS DISTINCT FROM` keeps NULLs in the delete set).
     """
     _ensure_ready()
     with get_engine().begin() as conn:
@@ -658,10 +657,10 @@ def _append_condition(
     sql_column = f"{table_alias}.{column}" if table_alias else column
 
     def coerce(v: object) -> object:
-        # Match the bound value to the column's declared type, mirroring the
-        # Chroma path's loose metadata coercion: a client-supplied string
-        # version_id/doc_id/page (filters is dict[str, Any] off the wire) would
-        # otherwise mismatch the integer column instead of filtering correctly.
+        # Match the bound value to the column's declared type: a client-supplied
+        # string version_id/doc_id/page (filters is dict[str, Any] off the wire)
+        # would otherwise mismatch the integer column instead of filtering
+        # correctly.
         return _as_int(v) if column in _INT_METADATA_COLUMNS else v
 
     if isinstance(value, dict):
@@ -714,7 +713,7 @@ def _where_clause(
     *,
     table_alias: str = "",
 ) -> tuple[str, dict[str, Any]]:
-    """Chroma-style `where` ({field: {"$eq"/"$in": ...}}, "$and") → SQL."""
+    """Compile a `where` filter ({field: {"$eq"/"$in": ...}}, "$and") to SQL."""
     conditions: list[str] = []
     params: dict[str, Any] = {}
     if where:
@@ -768,13 +767,12 @@ def similarity_search(
 
     hits: list[Hit] = []
     for row in rows:
-        # Score convention — MUST stay identical to the Chroma backend
-        # (store/vector_store.py, similarity_search):
-        #   pgvector `<=>` returns cosine distance d = 1 - cos_sim, d ∈ [0, 2],
-        #   exactly what Chroma's "hnsw:space=cosine" returns.
-        #   score = 1 - d/2 ∈ [0, 1]  (1.0 identical, 0.5 orthogonal, 0.0 opposite)
-        # REFUSAL_SCORE_THRESHOLD (default 0.30) therefore means the same
-        # thing on both backends.
+        # Score convention -- PINNED (store/vector_store.py, similarity_search):
+        #   pgvector `<=>` returns cosine distance d = 1 - cos_sim, d in [0, 2]
+        #   score = 1 - d/2 in [0, 1]  (1.0 identical, 0.5 orthogonal,
+        #   0.0 opposite)
+        # REFUSAL_SCORE_THRESHOLD (default 0.30) is calibrated against this
+        # scale, so changing it silently moves the refusal boundary.
         sim = 1.0 - float(row["distance"]) / 2.0
         sim = max(0.0, min(1.0, sim))
         meta = {c: row[c] for c in _METADATA_COLUMNS if row[c] is not None}
@@ -848,16 +846,16 @@ def document_chunks(doc_id: int, version_id: int) -> list[tuple[int, int, str]]:
 def distinct_metadata_values(key: str) -> set[str]:
     """Distinct non-empty values of one text metadata column.
 
-    Mirrors the Chroma path (including the cache, invalidated by writes).
-    Non-text/unknown keys return an empty set — same as a metadata key that
-    no Chroma chunk carries.
+    Cached with a TTL; `add_chunks` and test resets invalidate the cache.
+    Non-text/unknown keys return an empty set -- same as a metadata key
+    that no chunk carries.
     """
     cached = _metadata_values_cache.get(key)
     if cached is not None and _metadata_cache_fresh(cached[0]):
         return set(cached[1])
     if key not in _TEXT_METADATA_COLUMNS:
-        # Cache the empty result too, matching the Chroma path (which caches
-        # every key) so the dual-backend behavior stays identical.
+        # Cache the empty result too: every key is cached, real metadata
+        # column or not, so lookup behavior stays uniform.
         _metadata_values_cache[key] = (time.monotonic(), frozenset())
         return set()
     _ensure_ready()

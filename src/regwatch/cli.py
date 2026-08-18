@@ -817,9 +817,10 @@ def cmd_graph_backfill(
 ) -> None:
     """Derive tier-1 graph nodes/edges/refs from EXISTING chunk rows.
 
-    For corpora chunked before the graph tables existed (ingest and rechunk
-    derive inline). Idempotent: re-running converges to the same rows.
-    Requires chunk.ordinal (migration 0017) to be populated.
+    The ONLY population path: ingest-time derivation was retired on
+    2026-08-18 because nothing reads the graph tables at runtime (see
+    store/graph_store.py). Idempotent: re-running converges to the same
+    rows. Requires chunk.ordinal (migration 0017) to be populated.
     """
     from sqlalchemy import text as sa_text
 

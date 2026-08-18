@@ -92,7 +92,7 @@ def _fold_filter_casing(filters: dict[str, Any] | None) -> dict[str, Any] | None
 
 
 def _build_where(filters: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Convert flat filters to Chroma's `where` syntax."""
+    """Convert flat filters to the vector store's `where` filter DSL."""
     if not filters:
         return None
     out: dict[str, Any] = {}
@@ -127,9 +127,9 @@ def _and_where(*clauses: dict[str, Any] | None) -> dict[str, Any] | None:
 def _current_version_ids_for_filters(filters: dict[str, Any] | None) -> list[int] | None:
     """Return current PSG version ids matching filters, or None in vector-only mode.
 
-    Some unit tests seed Chroma directly without a SQLite PSG catalog. In the real
-    app, once `psg_document` exists, normal retrieval must be scoped to the latest
-    `psg_version` rows so superseded chunks cannot be cited.
+    Some unit tests seed the vector store directly without a PSG catalog. In the
+    real app, once `psg_document` exists, normal retrieval must be scoped to the
+    latest `psg_version` rows so superseded chunks cannot be cited.
     """
     engine = get_engine()
     inspector = inspect(engine)
@@ -153,8 +153,8 @@ def _current_version_ids_for_filters(filters: dict[str, Any] | None) -> list[int
             doc_stmt = doc_stmt.where(
                 PsgDocument.normalized_name == str(filters["normalized_name"])
             )
-        # Case-insensitive on both sides (works on SQLite and Postgres): the
-        # catalog stores FDA listing casing while UI filters are hand-typed.
+        # Case-insensitive on both sides of the comparison: the catalog
+        # stores FDA listing casing while UI filters are hand-typed.
         if filters.get("dosage_form"):
             doc_stmt = doc_stmt.where(
                 func.lower(PsgDocument.dosage_form) == str(filters["dosage_form"]).lower()
