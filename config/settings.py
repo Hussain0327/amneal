@@ -553,6 +553,16 @@ class Settings(BaseSettings):
     retrieval_corpus: Literal["legacy", "authoritative_fda"] = Field(
         default="legacy", validation_alias="REGWATCH_RETRIEVAL_CORPUS"
     )
+    # Scoped-activation amendment (2026-08-18): when set, activation counts
+    # against the durable manifest with this exact logical sha256 instead of
+    # requiring a complete-universe run. The full 140,438-doc universe became
+    # permanently unreachable under the Lakebase free tier's 512MB cap, so
+    # the served corpus is a curated manifest the operator names EXPLICITLY
+    # here -- a scoped sync still can never activate by accident. Unset keeps
+    # the original complete-universe-only behavior.
+    serving_manifest_sha: str | None = Field(
+        default=None, validation_alias="REGWATCH_SERVING_MANIFEST_SHA"
+    )
     # Two-stage retrieval (per spec diagram):
     #   stage 1: vector search returns VECTOR_TOP_K candidates (wide net)
     #   stage 2: rerank to RERANK_TOP_K (the set we actually cite from)
