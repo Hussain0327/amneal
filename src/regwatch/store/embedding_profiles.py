@@ -757,7 +757,7 @@ _TIEBREAK = ", c.id"
 
 
 def _where_filter_keys(where: dict[str, Any] | None) -> dict[str, Any]:
-    """Flatten a Chroma-style ``where`` back to {field: marker}.
+    """Flatten a vector-store ``where`` filter back to {field: marker}.
 
     Only the KEYS matter for scope classification -- the values already persist
     in ``route_json['filters']``. Used when a caller does not pass an explicit

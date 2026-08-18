@@ -1,9 +1,24 @@
-// Fixture repository for the Compliance Studio.
+// Fixture repository for the Compliance Studio -- and the definitive map of
+// which side of the fixture/backend line each Studio feature lives on.
 //
-// This surface is the UI/UX layer only: nothing here talks to the API. The
-// shapes are the contract the real endpoints will have to meet, and the seams
-// are deliberate -- CHECK_RESULTS stands in for the compliance pipeline,
-// assistantReply stands in for the cited Q&A stream.
+// FIXTURE (this file; no network):
+// - the eleven working draft documents (DOCS) and the repository tree (TREE);
+// - findings (CHECK_RESULTS), applied by the page after a fake CHECK_MS
+//   delay -- the backend POST /studio/check + poll GET /studio/check/{id}
+//   exists and is tested, but this page does not call it yet;
+// - canned assistant replies (assistantReply) for questions about the
+//   working repository.
+//
+// BACKEND-BACKED (real endpoints, called from app/studio/page.tsx):
+// - the PSG reference rail: GET /psg/documents and
+//   /psg/documents/{id}/{content|requirements|pdf|docx};
+// - reference-PSG checks: fetchPsgRequirements anchors the requirements
+//   ingest extracted from that exact PSG version;
+// - assistant Q&A over an open reference PSG: askQuery (/query), scoped to
+//   that PSG's drug, with server-validated citations.
+//
+// Before adding a feature here, decide which side of this line it lives on;
+// there is no drafts/document service to find.
 //
 // Content is representative CMC material for a generic ER tablet. It is sample
 // data, not an Amneal submission.

@@ -196,8 +196,8 @@ manifest facts were updated from the 2026-08-17 operator handoff.
   feedback, settings, and products natively. Since 2026-07-24 it also
   orchestrates `POST /query` end to end: it persists the audit row and calls
   Python's internal, token-gated RAG compute endpoint. Python keeps the stateless
-  RAG core. The SQLite/Chroma dual mode was deleted in R5, so Postgres plus
-  pgvector is the only datastore. Remaining: legacy-path deletion, hardening step
+  RAG core. Postgres plus pgvector is the only datastore (the SQLite/Chroma
+  dual mode was deleted in R5). Remaining: legacy-path deletion, hardening step
   R3, and steps 6 through 9.
 - **Not yet externally exposed.** The work between here and an external launch is
   an SSO plus TLS gateway, least-privilege database credentials, and a rehearsed

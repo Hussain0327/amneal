@@ -1,11 +1,17 @@
 """Tier-1 knowledge-graph tables + deterministic derivation (migration 0018).
 
-Nodes and edges are DERIVED from the PSG spine at chunk-write time -- string
-joins over rows that already exist, never mined and never model-generated in
-this tier. Chunks remain the ONLY citable unit: graph rows navigate TO chunks
-through ``graph_node_chunk`` refs, and nothing in these tables may reach
-answer text directly (INV-1). Traversal consumers arrive in a later PR; until
-then the tables are populated but unread at runtime.
+Nodes and edges are DERIVED from the PSG spine -- string joins over rows that
+already exist, never mined and never model-generated in this tier. Chunks
+remain the ONLY citable unit: graph rows navigate TO chunks through
+``graph_node_chunk`` refs, and nothing in these tables may reach answer text
+directly (INV-1).
+
+Recorded decision (2026-08-18): populated-but-unread was retired from the
+ingest path. Nothing reads these tables at runtime, so the ingest pipeline no
+longer derives graph rows at chunk-write time. The tables, this derivation,
+and the ``regwatch graph-backfill`` CLI command remain as the revival path:
+when a traversal consumer actually ships, re-populate via the CLI backfill
+and only then re-wire ingest-time derivation.
 
 v1 scope (deliberately minimal -- see DECISIONS.md):
 - node types: ``application``, ``psg_doc``, ``psg_section``

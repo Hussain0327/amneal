@@ -663,13 +663,6 @@ def test_pipeline_uses_document_semantics_without_mutating_text(
         "_cleanup_stale_chunks",
         lambda _doc_id, _version_id: None,
     )
-    # add_chunks is stubbed above, so no chunk rows exist for the graph refs'
-    # FK; stub the (orthogonal) derivation out the same way.
-    monkeypatch.setattr(
-        pipeline_module,
-        "derive_document_graph",
-        lambda **_kwargs: None,
-    )
 
     pipeline_module._regenerate_chunks(7, 11, parsed, listing)
 

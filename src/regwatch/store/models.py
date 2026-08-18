@@ -2,7 +2,7 @@
 
 These tables hold the *verified* facts: products on the watchlist, PSG
 documents, their versions, extracted BE requirements, and the audit log.
-Embeddings live in Chroma — see store/vector_store.py.
+Embeddings live in the same Postgres via pgvector -- see store/vector_store.py.
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ from sqlmodel import Field, SQLModel
 def _json_column() -> Column[Any]:
     """A JSON column that becomes JSONB on Postgres (K3).
 
-    Same Python types at every call site; SQLite (and any other dialect)
-    keeps plain JSON. Each sa_column must be a fresh Column instance.
+    Same Python types at every call site; Postgres -- the only runtime
+    dialect -- stores JSONB. Each sa_column must be a fresh Column instance.
     """
     return Column(JSON().with_variant(JSONB(), "postgresql"))
 
@@ -73,8 +73,9 @@ class PsgVersion(SQLModel, table=True):
     # (INV-4 -- a duplicate never-alerted row would re-alert it the next day).
     # Declared in metadata so create_all (the fresh-Postgres bootstrap) and
     # migration 0014 produce the identical index on both paths. A unique INDEX
-    # (not a UniqueConstraint) because 0014 must add it to existing SQLite DBs
-    # without a batch table rebuild.
+    # (not a UniqueConstraint) to stay converged with what frozen migration
+    # 0014 created -- it predates R5 and had to avoid a table rebuild on the
+    # databases of that era.
     __table_args__ = (
         Index("uq_psg_version_doc_hash", "psg_document_id", "content_hash", unique=True),
     )
@@ -164,7 +165,6 @@ class FdaDocumentVersion(SQLModel, table=True):
             "fda_document_id",
             unique=True,
             postgresql_where=text("is_current"),
-            sqlite_where=text("is_current"),
         ),
         CheckConstraint("byte_size >= 0", name="ck_fda_document_version_byte_size"),
         CheckConstraint("page_count >= 0", name="ck_fda_document_version_page_count"),

@@ -58,8 +58,10 @@ import type {
   StudioDoc,
 } from "@/lib/studio-types";
 
-// How long a stand-in compliance run takes. The real pipeline will be slower and
-// streamed; the surface only needs the states (idle -> checking -> checked).
+// How long a stand-in compliance run takes. The backend check
+// (POST /studio/check + poll) exists but is not wired here yet -- see the
+// boundary map in lib/studio-fixtures.ts. The surface only needs the states
+// (idle -> checking -> checked).
 const CHECK_MS = 1500;
 const TYPE_MS = 14;
 
