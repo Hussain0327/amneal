@@ -174,8 +174,12 @@ RETRIEVED_ITEM_KEYS = frozenset(
 # happen" is asserted as a VALUE, never as key presence -- multi_form declines on
 # both sides of retrieve(), so no reason-keyed rule could express it without
 # encoding a false invariant.
+# "timings" is the per-stage wall-clock block (2026-08-19). It rides every
+# PYTHON-authored row, including early-branch turns (which report zero), so the
+# key set stays branch-independent. Rows Go synthesizes without reaching Python
+# (upstream_error) correctly carry no block -- no Python stage ran.
 ROUTE_JSON_KEYS = frozenset(
-    {"route", "filters", "reason", "context_applied", "response_mode", "retrieval"}
+    {"route", "filters", "reason", "context_applied", "response_mode", "retrieval", "timings"}
 )
 # Healthy pre-synthesis non-answer routes carry a constrained router-model
 # ledger. The model selects only an allowlisted next step and existing option

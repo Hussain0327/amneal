@@ -17,6 +17,7 @@ from config.settings import get_settings
 from sqlalchemy import desc, func, inspect
 from sqlmodel import col, select
 
+from regwatch.common.stage_timing import stage
 from regwatch.process.embedder import (
     embed_query,
     get_embedding_provider,
@@ -250,10 +251,16 @@ def retrieve(
 
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="retrieve-scope") as pool:
             scoping = pool.submit(_fold_and_scope, filters)
-            qv = embed_query(embedder, query)
-            filters, current_version_ids = scoping.result()
+            # Timed as "embed_and_scope": the scoping round trips run in the
+            # worker above, so this span is max(embed, scope), never their sum.
+            # (The worker sees no collector -- fresh thread context -- so it
+            # cannot double-count the overlap it was built to hide.)
+            with stage("retrieve.embed_and_scope"):
+                qv = embed_query(embedder, query)
+                filters, current_version_ids = scoping.result()
     else:
-        qv = embed_query(embedder, query)
+        with stage("retrieve.embed"):
+            qv = embed_query(embedder, query)
         filters = _fold_filter_casing(filters)
     where = _build_where(filters)
     if authoritative:
@@ -269,10 +276,11 @@ def retrieve(
         if not current_version_ids:
             return []
         where = _and_where(where, {"version_id": {"$in": current_version_ids}})
-    if profile_id == "legacy":
-        hits: list[Hit] = similarity_search(qv, k=k, where=where)
-    else:
-        hits = similarity_search_profile(profile_id, qv, k=k, where=where, mode=resolved_mode)
+    with stage("retrieve.vector_search"):
+        if profile_id == "legacy":
+            hits: list[Hit] = similarity_search(qv, k=k, where=where)
+        else:
+            hits = similarity_search_profile(profile_id, qv, k=k, where=where, mode=resolved_mode)
 
     passages: list[RetrievedPassage] = []
     for h in hits:
