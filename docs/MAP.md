@@ -1,6 +1,6 @@
 # REGWATCH - Map of Content
 
-Last updated: 2026-08-13.
+Last updated: 2026-08-19.
 
 **Start here.** This is the hub: how the system fits together, plus a link to
 every living doc in `docs/`, grouped by purpose.
@@ -80,7 +80,7 @@ This is the only index of `docs/`. Every living doc appears exactly once below.
 - [Architecture](ARCHITECTURE.md) - the canonical system design: Router, Handlers, Synthesizer, the surfaces, INV-1..9
 - [Compliance Studio](COMPLIANCE_STUDIO.md) - `/studio`: the span-anchored finding model, the disposition record, the evidence gate behind "Fixed", and what is deliberately not built
 - [Graph-assisted adaptive retrieval](GRAPH_ASSISTED_RETRIEVAL.md) - proposed bounded graph traversal from citable chunks. Tier-1 graph storage is landed, runtime traversal is not; ingest-time population was retired 2026-08-18 (CLI `graph-backfill` is the revival path)
-- [Polyglot target](POLYGLOT_TARGET_2026-07-10.md) - the TS/Go/Python/Rust strangler plan, steps 0-5 done
+- [Polyglot target](POLYGLOT_TARGET_2026-07-10.md) - the TS/Go/Python strangler plan, steps 0-5 done (step 8, the Rust PDF CLI, was cancelled 2026-08-19)
 - [Go proxy rollout](GO_PROXY_ROLLOUT.md) - how Go took the public edge (complete)
 - [Go native query rollout](GO_NATIVE_QUERY_ROLLOUT.md) - the step-5 `/query` cutover runbook, flip live 2026-07-24. `tests/test_go_native_query_pin.py` reads this file by path and pins its status line to `fly.toml`, so do not move it and do not add a second status block
 - [Project spec](PROJECT_SPEC.md) - the original build-ready spec. Current-state docs win where they conflict

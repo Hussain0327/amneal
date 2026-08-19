@@ -2,7 +2,7 @@
 
 Append-only. What was picked, why, and when.
 
-Last updated: 2026-08-11.
+Last updated: 2026-08-19.
 
 Old entries are left as they were written. When something later changed, a dated
 follow-up line goes under the original entry instead of editing the original
@@ -814,3 +814,26 @@ alone does not certify this residual.
   Full-manifest parity is `indexed + validated terminal = 140438`; vector parity
   applies to every indexed chunk. The serving namespace remains `legacy` until
   that gate and the retrieval/citation evaluation pass.
+
+## Polyglot target amended to three runtimes - Rust cut (Aug 19 2026)
+
+- **Step 8 (Rust PDF CLI) is cancelled; the target is TS + Go + Python**
+  (owner decision 2026-08-15, recorded in issue #243). This supersedes the
+  runtime count in the "Four-runtime target approved (Jul 10)" entry above;
+  per this file's append-only rule the Jul 10 entry stays as written.
+- **Why the Rust case no longer holds.** C1's delivery premise is gone: a
+  dedicated worker image now exists (`Dockerfile.corpus-worker`) and it is
+  Python with Tesseract and Dagster baked in, because that is the ecosystem
+  the work lives in. Parse CPU is not the bottleneck: the corpus pipeline is
+  throttled by deliberate host-global FDA politeness pacing and by Tesseract
+  OCR (already a C binary). And a native-speed parser is already a dependency
+  (`pymupdf`, C-backed), so if extraction time ever measures as a problem the
+  fix is a library swap, not a fourth toolchain. Against zero payoff, step 8
+  carried the plan's highest correctness risk (the empty-page invariant and
+  citation page-mapping parity) plus a permanent fourth CI lane, style guide
+  and toolchain for a bus-factor-one team.
+- **PDF parsing stays in Python permanently**; no `rust/` directory is ever
+  created. The only language-migration work from here is completing the Go
+  strangler (the step-5 deletion PR, relay auth, R3, steps 6-7, then 9),
+  holding the plan's own gate: the replaced Python path is deleted in the
+  same PR that lands the Go replacement.

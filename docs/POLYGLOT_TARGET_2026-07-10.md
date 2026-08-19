@@ -1,20 +1,28 @@
 # Polyglot Target Architecture - 2026-07-10 (APPROVED direction)
 
-Last updated: 2026-08-11. **Steps 0 through 5 are done and live.** What is left
-is the legacy-path deletion, hardening step R3, and steps 6 to 9.
+Last updated: 2026-08-19. **Steps 0 through 5 are done and live.** What is left
+is the legacy-path deletion, hardening step R3, and steps 6, 7 and 9.
 
-Owner decision: all-Python is unacceptable, so regwatch moves to a four-runtime
-architecture. This supersedes the "no new language" default of
+**Amended 2026-08-19 (owner decision 2026-08-15, issue #243): the Rust lane is
+cut.** Step 8 (Rust PDF CLI) is cancelled; PDF parsing stays in Python
+permanently and no `rust/` directory is ever created. The target is three
+runtimes: TypeScript, Go and Python. The only language-migration work from here
+is completing the Go strangler, holding the plan's own gate: the replaced
+Python path is deleted in the same PR that lands the Go replacement. Rationale
+is recorded in the 2026-08-19 entry in `docs/DECISIONS.md`.
+
+Owner decision (Jul 10): all-Python is unacceptable, so regwatch moves to a
+multi-runtime architecture (four runtimes as approved; three since the
+amendment above). This supersedes the "no new language" default of
 `archive/POLYGLOT_ARCHITECTURE_REVIEW_2026-06-17.md` and the same-day
 conservative verdict in `archive/POLYGLOT_ASSESSMENT_2026-07-10.md`. That was an
 owner-level architecture call about bus factor and control-plane rigor, not a
 measured performance result. The two archived docs remain the record of what is
 and is not a perf-driven move.
 
-Approved with two adjustments (the owner's):
+Approved with one adjustment (the owner's):
 
-1. Rust owns PDF and document processing first, NOT production embeddings.
-2. Go owns database writes through coarse transactional commands, NOT a chatty
+1. Go owns database writes through coarse transactional commands, NOT a chatty
    CRUD microservice.
 
 ## Ownership map
@@ -23,8 +31,7 @@ Approved with two adjustments (the owner's):
 |---|---|
 | TypeScript | UI, browser state, generated API client |
 | Go         | Public API, auth/SSO, authorization, rate limiting, sessions, audit, idempotency, SSE gateway, database writes and migrations |
-| Python     | Stateless RAG, product resolution, retrieval policy, citation validation, LLM synthesis and extraction, Assemble and White Paper logic |
-| Rust       | Pure PDF bytes into ordered pages and chunks. No database credentials, no business rules |
+| Python     | Stateless RAG, PDF parsing and document processing, product resolution, retrieval policy, citation validation, LLM synthesis and extraction, Assemble and White Paper logic |
 
 Coarse write commands, target four or fewer: CompleteQuery, CommitIngest,
 CommitWhitepaperRun, CompleteWatchRun. Python keeps read-only DB access
@@ -66,10 +73,10 @@ Left to do:
    delivery.
 7. **Python drops to a read-only DB role.** This is the open least-privilege
    credentials item. White Paper and Assemble persistence stays Python until
-   steps 8 and 9.
-8. **Rust PDF CLI**: build and artifact pipeline (C1 below), shadow parity (C2),
-   cutover in the watch workflow, then delete the `_try_pdfplumber` and
-   `_try_pypdf` paths. Nothing has been built yet; there is no `rust/` directory.
+   step 9.
+8. **Cancelled 2026-08-19.** The Rust PDF CLI is cut (see the amendment at the
+   top); PDF parsing stays in Python permanently. The number is kept so step 9
+   keeps its name.
 9. **CommitWhitepaperRun last** (the `whitepaper_runs.py` coupling). Delete the
    public FastAPI surface and the superseded Python persistence, and only then
    decide who owns the migration tool (C3).
@@ -84,15 +91,16 @@ Two items sit between step 5 and step 6:
 Gate for every remaining phase: the replaced Python path is deleted in the same
 phase (measured in handwritten behavior-bearing LOC, excluding generated OpenAPI
 and sqlc types), the full gate is green (pytest, mypy, ruff, black, tsc, eslint,
-vitest, and the go/rust lanes), and no INV test is lost. A moved test must land
+vitest, and the go lane), and no INV test is lost. A moved test must land
 as a contract test before the Python original is deleted.
 
 ## Facts the remaining work still rests on
 
 - **Empty-page preservation is a hard parser invariant**
   (`pdf_parser.py`): pages append as `""` rather than being dropped, so page
-  indices stay 1:1 with the PDF and citations never shift. The Rust CLI must
-  honor this.
+  indices stay 1:1 with the PDF and citations never shift. Any parser swap
+  (for example a `pymupdf` move, the fallback if extraction time ever measures
+  as a problem) must honor this.
 - **Three in-process `ask()` callers exist**: `POST /query`, the `/assemble`
   dossier (a nested `ask()` with `bind_session=False`), and the White Paper
   populator. The stateless core has to serve all three, and their audit
@@ -104,21 +112,8 @@ as a contract test before the Python original is deleted.
 
 ## Corrections to the original proposal (mechanics, not shape)
 
-**C1. There is no worker image in prod, so nothing can bundle the Rust
-executable "inside the Python worker image".** Parsing runs on a GitHub Actions
-ubuntu-latest runner via `uv run regwatch watch`; manual `ingest-all` runs on a
-dev laptop (macOS arm64). The Fly image never parses a PDF and should stay that
-way. Delivery instead: CI builds the Rust CLI as pinned release artifacts (Linux
-x86_64 musl static, macOS arm64), sha256-pinned download in the watch workflow,
-and a cargo build cache for the Rust CI lane.
-
-**C2. Shadow parity "across the existing corpus" needs the raw bytes, and raw
-PDFs are not durably stored.** `parsed_text_path` points at ephemeral runner
-disk, and durable parsed text was deferred. Shadow plan: run the Rust CLI side
-by side on every new download in the daily watch and log parity, then do a
-one-off polite re-crawl of the catalog for full-corpus parity before cutover.
-Parity gates: page count, empty-page positions, extracted citation quotes, chunk
-page mappings.
+C1 (Rust CLI artifact delivery) and C2 (Rust shadow-parity plan) were deleted
+with step 8 by the 2026-08-19 amendment.
 
 **C3. Go does not own migrations during the strangler.** Alembic, run by Fly's
 `release_command`, stays the single schema authority until the Python
@@ -130,8 +125,8 @@ migration ownership is the last move, not an early one. The live Alembic head is
 
 Still live:
 
-- **R2. Three `ask()` callers.** See the facts section above. Open until steps 8
-  and 9.
+- **R2. Three `ask()` callers.** See the facts section above. Open until
+  step 9.
 - **R3. SSE.** Pre-validation provisional token streaming was deliberately
   reversed at commit 0a96f7e, because the per-sentence gate that guarded it
   could not survive the structured-turn contract. It came back on 2026-08-10 as
@@ -163,9 +158,15 @@ Closed:
   database all sit inside the company's Databricks tenant as of 2026-08-11. See
   `docs/DATABRICKS_ADOPTION_2026-07-28.md`.
 
-## LOC baseline (verified 2026-07-10, not re-measured since)
+## LOC baseline (verified 2026-07-10; re-measured 2026-08-15)
 
 src Python 19,521; tests Python 20,036; frontend TS+TSX 10,353. Expectation
 accepted at the time: Python LOC goes down, total handwritten LOC stays roughly
 flat to +10-25% while Go owns every table's writes, with a temporary +30-50%
 during the strangler. The metric is handwritten behavior-bearing LOC only.
+
+Re-measured 2026-08-15 (issue #243): src Python 44,939; tests Python 46,144;
+TypeScript 31,174 (+9,486 CSS); Go 8,677; Rust 0. Python more than doubled
+instead of shrinking, because feature work lands in Python by default while
+the planned subtractions (the step-5 deletion PR, relay auth, R3, steps 6-7)
+stalled. That drift, not runtime count, is what the remaining work fixes.
