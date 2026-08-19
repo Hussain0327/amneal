@@ -11,7 +11,10 @@ const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingm
 function docxResponse(disposition: string | null): Response {
   const headers = new Headers({ "content-type": DOCX_MIME });
   if (disposition !== null) headers.set("content-disposition", disposition);
-  return new Response(new Blob(["docx-bytes"], { type: DOCX_MIME }), { status: 200, headers });
+  // Plain string body: CI's undici Response cannot consume a jsdom Blob
+  // (object.stream is not a function), and the body bytes are irrelevant --
+  // these tests only exercise the Content-Disposition -> filename path.
+  return new Response("docx-bytes", { status: 200, headers });
 }
 
 describe("downloadWhitepaperDocx filename handling", () => {
