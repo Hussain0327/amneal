@@ -58,6 +58,7 @@ from regwatch.common.conversation import (
 )
 from regwatch.common.logging import get_logger
 from regwatch.common.observability import capture_exception
+from regwatch.common.stage_timing import TurnTimings, collect_stage_timings, stage
 from regwatch.common.text_normalize import canonical_name
 from regwatch.generate import prose_turn
 from regwatch.generate import turn_gate as tg
@@ -1211,6 +1212,25 @@ def _latency_ms(t0: float | None) -> int | None:
     return min(int((perf_counter() - t0) * 1000), 2**31 - 1)
 
 
+def _attach_stage_timings(audit: AuditPayload, timings: TurnTimings) -> None:
+    """Folds one turn's stage timings into the audit row's ``route_json``.
+
+    Rides ``route_json`` rather than a new column: it is already the row's
+    diagnostic bag, already JSON, and needs no migration. Present on EVERY
+    Python-authored row (an early-branch turn reports zero) so the pinned
+    cross-runtime key set stays deterministic; rows Go synthesizes without
+    reaching Python correctly carry no block at all.
+
+    Never raises: a diagnostic must not be able to fail a turn that otherwise
+    succeeded, least of all on the INV-6 answer path where a lost audit row
+    costs the user their answer.
+    """
+    try:
+        audit.route_json["timings"] = timings.as_route_json()
+    except Exception:  # broad: instrumentation is never worth failing a turn
+        log.debug("stage_timings_attach_failed", exc_info=True)
+
+
 def _persist_turn(
     outcome: RagOutcome,
     audit: AuditPayload,
@@ -2311,7 +2331,8 @@ def _retrieve_and_group(
             k=k if k is not None else s.vector_top_k,
         ).as_route_json()
     )
-    passages = retrieve(search_query, k=k, filters=scope.as_filters(), mode=retrieval_mode)
+    with stage("retrieve"):
+        passages = retrieve(search_query, k=k, filters=scope.as_filters(), mode=retrieval_mode)
     state.retrieval_block["returned"] = len(passages)
     route_json["retrieval"] = dict(state.retrieval_block)
     # Stage 2: optional rerank, then trim to RERANK_TOP_K. Same rewritten query
@@ -2548,7 +2569,8 @@ def _synthesize_and_admit(
         )
 
     try:
-        response = _run_synthesis(synth_messages)
+        with stage("synthesis"):
+            response = _run_synthesis(synth_messages)
     except Exception as exc:  # provider transport error (timeout / 429 / 5xx)
         # B2: a synthesizer failure must NOT return a naked 500 with no audit
         # row, which would break INV-6 exactly when the system misbehaves. We
@@ -3390,80 +3412,88 @@ def ask(
     # latency_ms measure the same interval and are comparable in one percentile.
     t0 = perf_counter()
 
-    # Session bookkeeping is best-effort: a DB hiccup here must never stop the query
-    # from being processed and audited (INV-6). Degrade to a fresh id on failure.
-    # The user-message write stays HERE, before compute, so a core exception still
-    # leaves the question in the chat history exactly as before the split.
-    try:
-        session_id = ensure_session(
-            session_id, user_id=user_id if bind_session else None, origin=origin
-        )
-        turn_id = turn_id or new_turn_id()
-        record_message(
-            session_id=session_id,
-            turn_id=turn_id,
-            role="user",
-            content=question,
-            filters=filters,
-        )
-    except SessionOwnershipError:
-        # Lost an ownership race after the API's pre-check. Abort rather than
-        # write this caller's turns into another user's session (the API maps
-        # this to its ownership 404).
-        raise
-    except SessionOriginError:
-        # An origin outside SESSION_ORIGINS: a programming error in the caller
-        # (the API boundary already validates), not the transient DB hiccup the
-        # generic degrade below exists for. Propagate -- folding it into a
-        # fresh-id degrade would hide the bad call instead of surfacing it.
-        # Caught by its own type, not by ValueError: the try also wraps the
-        # record_message write, and re-raising every ValueError from there
-        # would narrow that degrade path for reasons unrelated to origin.
-        raise
-    except Exception:
-        log.warning("session_setup_failed", exc_info=True)
-        turn_id = turn_id or new_turn_id()
-        # Degrade to a FRESH id, never the requested one: after a failed bind
-        # (e.g. a lost create race on a client-chosen id) the requested session
-        # may belong to someone else, so later writes must not target it.
-        session_id = turn_id
+    # Stage timing spans the session write and compute but NOT _persist_turn:
+    # the audit row cannot contain the duration of its own write. The gap
+    # between measured_total_ms and the row's latency_ms is the unattributed
+    # remainder (persistence included), which is the number this exists to
+    # expose.
+    with collect_stage_timings() as timings:
+        # Session bookkeeping is best-effort: a DB hiccup here must never stop the query
+        # from being processed and audited (INV-6). Degrade to a fresh id on failure.
+        # The user-message write stays HERE, before compute, so a core exception still
+        # leaves the question in the chat history exactly as before the split.
+        try:
+            with stage("session_write"):
+                session_id = ensure_session(
+                    session_id, user_id=user_id if bind_session else None, origin=origin
+                )
+                turn_id = turn_id or new_turn_id()
+                record_message(
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    role="user",
+                    content=question,
+                    filters=filters,
+                )
+        except SessionOwnershipError:
+            # Lost an ownership race after the API's pre-check. Abort rather than
+            # write this caller's turns into another user's session (the API maps
+            # this to its ownership 404).
+            raise
+        except SessionOriginError:
+            # An origin outside SESSION_ORIGINS: a programming error in the caller
+            # (the API boundary already validates), not the transient DB hiccup the
+            # generic degrade below exists for. Propagate -- folding it into a
+            # fresh-id degrade would hide the bad call instead of surfacing it.
+            # Caught by its own type, not by ValueError: the try also wraps the
+            # record_message write, and re-raising every ValueError from there
+            # would narrow that degrade path for reasons unrelated to origin.
+            raise
+        except Exception:
+            log.warning("session_setup_failed", exc_info=True)
+            turn_id = turn_id or new_turn_id()
+            # Degrade to a FRESH id, never the requested one: after a failed bind
+            # (e.g. a lost create race on a client-chosen id) the requested session
+            # may belong to someone else, so later writes must not target it.
+            session_id = turn_id
 
-    # Session context enters the core through loaders the SHELL owns (the core
-    # never touches conversation storage). The loader bodies resolve
-    # get_session_filters/get_recent_turns as module globals at CALL time so
-    # tests that monkeypatch them on this module keep working; a future HTTP
-    # shell passes constants over pre-loaded request data instead.
-    sid, tid = session_id, turn_id
-    try:
-        outcome, audit, patch = ask_core(
-            question,
-            session_id=sid,
-            turn_id=tid,
-            filters=filters,
-            k=k,
-            user_id=user_id,
-            load_session_filters=lambda: get_session_filters(sid),
-            load_recent_turns=lambda: get_recent_turns(sid, limit=3, exclude_turn_id=tid),
-            on_progress=on_progress,
-            on_draft=on_draft,
-            on_draft_reset=on_draft_reset,
-        )
-    except Exception as exc:
-        # The SAME audited-error boundary compute_turn owns for the Go control
-        # plane. The surfaces that reach ask() -- POST /query/stream (never
-        # served natively) and POST /query whenever GO_NATIVE_QUERY is false
-        # (the code default and the rollback path) -- must fail IDENTICALLY to
-        # the native one: a raise in retrieve()/rerank/resolve otherwise leaves
-        # the user turn recorded above with no audit row at all (INV-6).
-        log.warning("qa_pipeline_error", error=str(exc), error_type=type(exc).__name__)
-        capture_exception(exc)
-        outcome, audit, patch = _pipeline_error(
-            question,
-            session_id=sid,
-            turn_id=tid,
-            user_id=user_id,
-            filters=filters,
-        )
+        # Session context enters the core through loaders the SHELL owns (the core
+        # never touches conversation storage). The loader bodies resolve
+        # get_session_filters/get_recent_turns as module globals at CALL time so
+        # tests that monkeypatch them on this module keep working; a future HTTP
+        # shell passes constants over pre-loaded request data instead.
+        sid, tid = session_id, turn_id
+        try:
+            outcome, audit, patch = ask_core(
+                question,
+                session_id=sid,
+                turn_id=tid,
+                filters=filters,
+                k=k,
+                user_id=user_id,
+                load_session_filters=lambda: get_session_filters(sid),
+                load_recent_turns=lambda: get_recent_turns(sid, limit=3, exclude_turn_id=tid),
+                on_progress=on_progress,
+                on_draft=on_draft,
+                on_draft_reset=on_draft_reset,
+            )
+        except Exception as exc:
+            # The SAME audited-error boundary compute_turn owns for the Go control
+            # plane. The surfaces that reach ask() -- POST /query/stream (never
+            # served natively) and POST /query whenever GO_NATIVE_QUERY is false
+            # (the code default and the rollback path) -- must fail IDENTICALLY to
+            # the native one: a raise in retrieve()/rerank/resolve otherwise leaves
+            # the user turn recorded above with no audit row at all (INV-6).
+            log.warning("qa_pipeline_error", error=str(exc), error_type=type(exc).__name__)
+            capture_exception(exc)
+            outcome, audit, patch = _pipeline_error(
+                question,
+                session_id=sid,
+                turn_id=tid,
+                user_id=user_id,
+                filters=filters,
+            )
+    _attach_stage_timings(audit, timings)
     return _persist_turn(outcome, audit, patch, t0, on_token)
 
 
@@ -3526,26 +3556,34 @@ def compute_turn(
     """
     get_settings()
     current_model_name(role="synthesizer")
-    try:
-        return ask_core(
-            question,
-            session_id=session_id,
-            turn_id=turn_id,
-            filters=filters,
-            k=k,
-            user_id=user_id,
-            load_session_filters=lambda: get_session_filters(session_id),
-            load_recent_turns=lambda: get_recent_turns(
-                session_id, limit=3, exclude_turn_id=turn_id
-            ),
-        )
-    except Exception as exc:
-        log.warning("qa_pipeline_error", error=str(exc), error_type=type(exc).__name__)
-        capture_exception(exc)
-        return _pipeline_error(
-            question,
-            session_id=session_id,
-            turn_id=turn_id,
-            user_id=user_id,
-            filters=filters,
-        )
+    # The native path is where production traffic actually flows, so it gets
+    # the same stage timings as the relay path. Go owns the write, and it
+    # persists this route_json verbatim, so the block reaches query_log
+    # unchanged. There is no session_write stage here: Go performed that write
+    # before calling, and its own timing belongs to Go.
+    with collect_stage_timings() as timings:
+        try:
+            outcome, audit, patch = ask_core(
+                question,
+                session_id=session_id,
+                turn_id=turn_id,
+                filters=filters,
+                k=k,
+                user_id=user_id,
+                load_session_filters=lambda: get_session_filters(session_id),
+                load_recent_turns=lambda: get_recent_turns(
+                    session_id, limit=3, exclude_turn_id=turn_id
+                ),
+            )
+        except Exception as exc:
+            log.warning("qa_pipeline_error", error=str(exc), error_type=type(exc).__name__)
+            capture_exception(exc)
+            outcome, audit, patch = _pipeline_error(
+                question,
+                session_id=session_id,
+                turn_id=turn_id,
+                user_id=user_id,
+                filters=filters,
+            )
+    _attach_stage_timings(audit, timings)
+    return outcome, audit, patch
