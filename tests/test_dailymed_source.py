@@ -64,6 +64,15 @@ def test_spl_parser_refuses_dtd_or_entity_declarations() -> None:
         parse_spl_section_codes(malicious)
 
 
+def test_spl_parser_refuses_dtd_hidden_past_comment_padded_prolog() -> None:
+    # The prolog admits arbitrary comment padding before a DOCTYPE, so the
+    # refusal must scan the whole document, not a fixed-size head.
+    padding = "<!-- " + "x" * 8192 + " -->"
+    payload = '<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>'
+    with pytest.raises(ValueError, match="DTD/entity"):
+        parse_spl_section_codes(padding + payload)
+
+
 def test_dailymed_is_not_registered_or_requestable() -> None:
     routed = route_sources(SourceQuery(query_text="find the approved label"))
     assert SourceKind.DAILYMED not in routed

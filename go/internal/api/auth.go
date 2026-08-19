@@ -271,10 +271,21 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			s.errLog.Printf("logout: revoke failed: %v", err)
 		}
 	}
-	// Deletion cookie parity: Python's delete_cookie renders Max-Age=0 with
-	// neither HttpOnly nor Secure; attribute casing differs between stacks
-	// but is case-insensitive per RFC 6265.
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", MaxAge: -1, Path: "/", SameSite: http.SameSiteLaxMode})
+	// The deletion cookie mirrors the mint attributes (handleLogin above):
+	// browsers match deletion on (name, domain, path) alone, so this is
+	// hygiene rather than correctness -- both Set-Cookie writes for
+	// regwatch_session stay attribute-identical. The old bare shape existed
+	// only for wire parity with Python's delete_cookie, retired with the
+	// Python logout path.
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookie,
+		Value:    "",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   s.cfg.CookieSecure,
+		Path:     "/",
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 

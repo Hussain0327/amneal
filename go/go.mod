@@ -1,6 +1,6 @@
 module github.com/Hussain0327/amneal/go
 
-go 1.26.1
+go 1.26.6
 
 require (
 	github.com/getsentry/sentry-go v0.48.0

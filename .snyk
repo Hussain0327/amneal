@@ -1,0 +1,20 @@
+# Snyk Code (SAST) path exclusions -- test code only.
+#
+# Every entry below was individually verified (2026-08-19) before exclusion:
+# the flagged "hardcoded passwords" are dummy fixtures (bcrypt-hashed into
+# disposable per-run test databases, piped into CLI prompts under test, or
+# minted-and-dropped low-priv roles), none of which appear outside test code;
+# the flagged env-var-to-subprocess flow is the CI-owned REGWATCH_PROXY_BIN
+# harness pattern (list argv, no shell, is_file()-validated before use).
+# Production paths stay fully scanned: a real secret in src/, go/ (non-test),
+# migrations/, scripts/, or config is still flagged.
+#
+# Mirrors the documentation style of .trivyignore (repo root): keep a reason
+# next to every suppression, and remove entries that stop being true.
+version: v1.5.0
+exclude:
+  code:
+    - tests/**
+    - tests_contract/**
+    - go/**/*_test.go
+    - regwatch/frontend/test/**

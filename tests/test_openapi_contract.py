@@ -14,10 +14,13 @@ codegen consumes (``npm run gen:types`` regenerates it together with
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.routing import APIRoute
 from pydantic import BaseModel
 
@@ -105,3 +108,21 @@ def test_every_json_route_declares_a_response_model() -> None:
     assert {("POST", "/query"), ("GET", "/watch/latest"), ("GET", "/health")} <= seen
     assert seen >= NO_JSON_BODY_ROUTES
     assert seen >= INTERNAL_ROUTES
+
+
+def test_export_script_refuses_paths_outside_the_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The snapshot is a committed repo artifact; the exporter must contain
+    # its write to the repository even when handed an escaping path.
+    spec = importlib.util.spec_from_file_location(
+        "export_openapi", REPO_ROOT / "scripts" / "export_openapi.py"
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    outside = tmp_path / "outside.json"
+    monkeypatch.setattr(sys, "argv", ["export_openapi.py", str(outside)])
+    with pytest.raises(SystemExit):
+        mod.main()
+    assert not outside.exists()
