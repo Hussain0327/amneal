@@ -91,8 +91,13 @@ def test_health_reports_the_profile_arm_not_the_legacy_setting(
     monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
     monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", profile_id)
     # Non-echo LLM so the echo warning below can only come from the embedding
-    # side -- otherwise the LLM arm masks what this test is checking.
+    # side -- otherwise the LLM arm masks what this test is checking. The boot
+    # guard validates databricks credentials in the lifespan now, so fake but
+    # complete DATABRICKS_LLM_* values are required to boot at all.
     monkeypatch.setenv("LLM_PROVIDER", "databricks")
+    monkeypatch.setenv("DATABRICKS_LLM_BASE_URL", "https://dbx.example/serving-endpoints")
+    monkeypatch.setenv("DATABRICKS_LLM_TOKEN", "dapi-test-fake")
+    monkeypatch.setenv("DATABRICKS_LLM_MODEL", "databricks-test-model")
     cs.get_settings.cache_clear()
 
     class _Profile:
@@ -155,6 +160,8 @@ def test_health_no_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "databricks")
     monkeypatch.setenv("DATABRICKS_LLM_BASE_URL", "https://dbx.example/serving-endpoints")
     monkeypatch.setenv("DATABRICKS_LLM_TOKEN", "dapi-test-secret-do-not-leak")
+    # The lifespan boot guard requires a complete databricks credential set.
+    monkeypatch.setenv("DATABRICKS_LLM_MODEL", "databricks-test-model")
     cs.get_settings.cache_clear()
     r = _open().get("/health")
     assert r.status_code == 200

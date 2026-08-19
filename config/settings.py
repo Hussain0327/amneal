@@ -10,13 +10,16 @@ values live in fly.toml and in Fly secrets.
 
 from __future__ import annotations
 
+import os
 import re
+import warnings
 from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, ValidationInfo, field_validator, model_validator
+from dotenv import dotenv_values
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # OpenAI dated-snapshot suffix: what follows "<alias>-" in the server-reported
@@ -55,6 +58,18 @@ _D1_PARTNER_MODEL_PREFIXES = ("databricks-gpt", "databricks-claude", "databricks
 # Gateway. Unset (None) means "do not send the parameter at all", which is the
 # only way to keep an endpoint that does not understand it from 400-ing.
 _REASONING_EFFORTS = ("low", "medium", "high")
+
+# Preferred (new) -> deprecated (old) environment names. Resolution itself is
+# AliasChoices on the fields below (new name wins when both are set); this
+# table only drives the deprecation warnings in _warn_deprecated_env_names.
+# The new names say which PATH each knob steers: RETRIEVAL_EMBEDDING_PROFILE
+# picks the profile the query path serves with; INGEST_EMBEDDING_PROVIDER
+# picks the provider the ingest/backfill WRITE path embeds with. The old
+# names keep working unchanged -- prod Fly secrets still use them.
+_DEPRECATED_ENV_ALIASES: tuple[tuple[str, str], ...] = (
+    ("RETRIEVAL_EMBEDDING_PROFILE", "ACTIVE_EMBEDDING_PROFILE"),
+    ("INGEST_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER"),
+)
 
 
 def d1_model_rejection(model: str, allowed: Iterable[str]) -> str | None:
@@ -99,7 +114,16 @@ class Settings(BaseSettings):
     # point now refuses loudly instead of guessing. Prod sets qwen3 (fly.toml
     # [env]); tests set echo (conftest). The same posture applies to
     # llm_provider: prod sets databricks (gpt-oss-120b), tests set echo.
-    embedding_provider: str | None = None
+    #
+    # INGEST_EMBEDDING_PROVIDER is the preferred env name: this knob steers
+    # the ingest/backfill WRITE path (and the legacy retrieval arm), while
+    # retrieval serving is steered by active_embedding_profile below. The old
+    # EMBEDDING_PROVIDER keeps working as a deprecated alias; when both are
+    # set the new name wins (AliasChoices order, warned about below).
+    embedding_provider: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("INGEST_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER"),
+    )
     llm_provider: str | None = None
     # Private Qwen3 embedding endpoint. This is deliberately a separate
     # OpenAI-compatible client from the LLM client: pointing the shared OpenAI
@@ -150,7 +174,14 @@ class Settings(BaseSettings):
     # dual-written/backfilled but never serves user retrieval until explicitly
     # promoted. Prod promoted a Databricks Qwen3 profile on 2026-07-30, so
     # "legacy" below is a local-dev default only.
-    active_embedding_profile: str = "legacy"
+    #
+    # RETRIEVAL_EMBEDDING_PROFILE is the preferred env name (it names the path
+    # this knob actually steers); the old ACTIVE_EMBEDDING_PROFILE keeps
+    # working as a deprecated alias, and the new name wins when both are set.
+    active_embedding_profile: str = Field(
+        default="legacy",
+        validation_alias=AliasChoices("RETRIEVAL_EMBEDDING_PROFILE", "ACTIVE_EMBEDDING_PROFILE"),
+    )
     embedding_shadow_profile: str | None = None
     # Serving normally requires the active profile's deterministic HNSW index
     # (assert_profile_ready_for_activation, checked at boot and before every
@@ -303,6 +334,63 @@ class Settings(BaseSettings):
             return None
         value = str(v).strip()
         return value or None
+
+    @staticmethod
+    def _raw_env_value(name: str) -> str | None:
+        """Raw value of ``name`` from the process env or the .env file, or None.
+
+        Mirrors the sources and precedence pydantic-settings itself reads
+        (process env wins over the env file; names match case-insensitively,
+        parsed by the same python-dotenv), but only to decide the deprecation
+        warnings below -- field VALUES are resolved by pydantic-settings
+        through AliasChoices, never here.
+        """
+        wanted = name.upper()
+        for key, env_value in os.environ.items():
+            if key.upper() == wanted:
+                return env_value
+        env_file = Path(".env")
+        if env_file.is_file():
+            for key, file_value in dotenv_values(env_file).items():
+                if key.upper() == wanted and file_value is not None:
+                    return file_value
+        return None
+
+    @model_validator(mode="after")
+    def _warn_deprecated_env_names(self) -> Settings:
+        """One clear nudge per deprecated env name still steering config.
+
+        Blank values count as unset, matching the normalize validators. Old
+        name set with the new one absent: still works, warns once. Both set
+        and disagreeing: the new name wins (AliasChoices order above) and the
+        warning says so. Both set and agreeing: silent -- that is the safe
+        transition state a deployment passes through while renaming secrets.
+
+        FutureWarning, not DeprecationWarning: the audience is the operator
+        reading boot logs, and Python's default filters hide DeprecationWarning
+        outside __main__ -- exactly where this module loads in production. The
+        default "print each unique warning once" filter is what keeps this to
+        a single line per process.
+        """
+        for new_name, old_name in _DEPRECATED_ENV_ALIASES:
+            old_value = (self._raw_env_value(old_name) or "").strip()
+            if not old_value:
+                continue
+            new_value = (self._raw_env_value(new_name) or "").strip()
+            if not new_value:
+                warnings.warn(
+                    f"{old_name} is deprecated; set {new_name} instead (same value, new name).",
+                    FutureWarning,
+                    stacklevel=1,
+                )
+            elif new_value != old_value:
+                warnings.warn(
+                    f"Both {new_name} and {old_name} are set and disagree; {new_name} "
+                    f"({new_value!r}) wins over deprecated {old_name} ({old_value!r}).",
+                    FutureWarning,
+                    stacklevel=1,
+                )
+        return self
 
     @field_validator(
         "qwen_embedding_model",

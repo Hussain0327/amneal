@@ -47,12 +47,15 @@ def test_ready_503_when_llm_not_constructable(monkeypatch: pytest.MonkeyPatch) -
     # A real provider with no endpoint config cannot construct
     # get_llm_provider() -> the LLM check fails and /ready 503s naming "llm".
     # No paid call is made (construction raises before any request).
+    # Boot FIRST (the lifespan guard would refuse this env at startup); the
+    # scenario /ready still owns is credentials breaking AFTER a good boot.
+    client = _anon()
     monkeypatch.setenv("LLM_PROVIDER", "databricks")
     monkeypatch.setenv("DATABRICKS_LLM_BASE_URL", "")
     monkeypatch.setenv("DATABRICKS_LLM_TOKEN", "")
     monkeypatch.setenv("DATABRICKS_LLM_MODEL", "")
     cs.get_settings.cache_clear()
-    r = _anon().get("/ready")
+    r = client.get("/ready")
     assert r.status_code == 503
     body = r.json()
     assert body["status"] == "not_ready"
