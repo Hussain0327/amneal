@@ -3,8 +3,8 @@
 One list of everything that is NOT done yet. If another doc disagrees with this
 file or with [`PROD_READINESS.md`](PROD_READINESS.md), these two win.
 
-Last updated: 2026-08-17 for the authoritative FDA corpus rollout. Unrelated
-live app, database and Fly values were last checked 2026-08-11.
+Last updated: 2026-08-19 for the polyglot amendment (Rust step cancelled).
+Unrelated live app, database and Fly values were last checked 2026-08-11.
 
 Labels: **BLOCKER** stops external exposure. **SHOULD-HAVE** before launch.
 **DECISION** needs a person to choose. **LATER** is optional.
@@ -176,10 +176,11 @@ are done: the Go edge plus native `/query`, live since 2026-07-24. Remaining:
   [`archive/STEP5_INV_TEST_MAPPING.md`](archive/STEP5_INV_TEST_MAPPING.md).
 - **R3**, the safe-prefix streaming rewrite. It has to keep the
   `D1ResidencyError`-excluded SSE fallback from #138.
-- **Steps 6 to 9**: coarse write commands for ingest and Watch (6), Python down
-  to a read-only DB role (7, the least-privilege item above), the Rust PDF CLI
-  with shadow parity (8), `CommitWhitepaperRun` plus deleting the Python
-  persistence layer (9).
+- **Steps 6, 7 and 9**: coarse write commands for ingest and Watch (6), Python
+  down to a read-only DB role (7, the least-privilege item above), and
+  `CommitWhitepaperRun` plus deleting the Python persistence layer (9). Step 8
+  (the Rust PDF CLI) was cancelled 2026-08-19; PDF parsing stays in Python
+  permanently.
 
 ### Secrets policy  (PROD_READINESS #10)
 
