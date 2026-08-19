@@ -14,6 +14,7 @@ import type { SessionMeta } from "@/lib/auth-types";
 import { formatFiled, parseApiDate } from "@/lib/time";
 import { assistantTurn, nonAnswerLabel, turnFromMessage, userTurn, type Turn } from "@/lib/turns";
 import { syncTextareaHeight } from "@/lib/composer";
+import { DRAFT_TICK_MS, draftTake } from "@/lib/draft-pacing";
 
 // Example inquiries grouped by the KIND of question the corpus answers — the
 // grouping teaches the tool's range (a study-design question, a spec question, or
@@ -133,16 +134,6 @@ function SendFailNotice({ message, onRetry }: { message: string; onRetry: () => 
   );
 }
 
-// Client-side typewriter timing for the live-draft channel (onDraft). Adaptive
-// drain, not a fixed rate: base cadence while caught up, and once the pending
-// buffer crosses the catch-up threshold the per-tick take scales up so the
-// visible text is never more than roughly one catch-up window behind the
-// wire -- hungry when behind, calm once caught up.
-const DRAFT_TICK_MS = 33; // ~30fps
-const DRAFT_CHARS_PER_TICK = 6; // base cadence (~180 chars/s) once caught up
-const DRAFT_CATCHUP_THRESHOLD_CHARS = 400;
-const DRAFT_CATCHUP_WINDOW_MS = 1000;
-
 export default function AskPage() {
   // useSearchParams needs a Suspense boundary during prerender.
   return (
@@ -216,14 +207,10 @@ function AskView() {
         stopDraftDrain(false);
         return;
       }
-      // Adaptive take: base rate while caught up; once the backlog crosses
-      // the threshold, take enough per tick to clear it within the catch-up
-      // window instead of falling further behind.
-      const ticksToClear = Math.max(1, Math.round(DRAFT_CATCHUP_WINDOW_MS / DRAFT_TICK_MS));
-      const take =
-        buf.length > DRAFT_CATCHUP_THRESHOLD_CHARS
-          ? Math.max(DRAFT_CHARS_PER_TICK, Math.ceil(buf.length / ticksToClear))
-          : DRAFT_CHARS_PER_TICK;
+      // Adaptive take (lib/draft-pacing.ts): base rate while caught up; once
+      // the backlog crosses the threshold, take enough per tick to clear it
+      // within the catch-up window instead of falling further behind.
+      const take = draftTake(buf.length);
       draftBufRef.current = buf.slice(take);
       setDraft((prev) => (prev ?? "") + buf.slice(0, take));
     }, DRAFT_TICK_MS);
