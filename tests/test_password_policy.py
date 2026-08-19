@@ -30,7 +30,7 @@ _HIBP_HOST = "https://api.pwnedpasswords.com"
 
 def _hibp_split(password: str) -> tuple[str, str]:
     # Mirrors the production hash: SHA-1 is HIBP's k-anonymity scheme, not crypto.
-    digest = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+    digest = hashlib.sha1(password.encode("utf-8"), usedforsecurity=False).hexdigest().upper()
     return digest[:5], digest[5:]
 
 

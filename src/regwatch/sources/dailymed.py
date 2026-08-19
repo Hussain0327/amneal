@@ -338,6 +338,12 @@ def _parse_published(value: object) -> datetime | None:
         return None
 
 
+# The XML prolog admits arbitrary comment padding before a DOCTYPE, so the
+# DTD refusal must scan the whole document -- a fixed-size head would be
+# bypassable.
+_DTD_MARKER = re.compile(r"<!DOCTYPE|<!ENTITY", re.IGNORECASE)
+
+
 def _safe_fromstring(xml_text: str) -> ET.Element:
     """Parse SPL XML, refusing any document that declares a DTD.
 
@@ -345,8 +351,7 @@ def _safe_fromstring(xml_text: str) -> ET.Element:
     is neutralized up front: SPL documents never carry a DOCTYPE, and a payload
     that does is rejected rather than parsed.
     """
-    head = xml_text[:4096].upper()
-    if "<!DOCTYPE" in head or "<!ENTITY" in head:
+    if _DTD_MARKER.search(xml_text):
         raise ValueError("refusing to parse SPL XML with a DTD/entity declaration")
     return ET.fromstring(xml_text)  # noqa: S314 - DTD/entity refused above
 

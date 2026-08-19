@@ -68,8 +68,9 @@ def password_breach_count(password: str, *, client: httpx.Client | None = None) 
     "not known breached") rather than blocking account provisioning on an HIBP
     outage. The only external call here carries an explicit short timeout.
     """
-    # SHA-1 is HIBP's required k-anonymity hash, not a security primitive here.
-    digest = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()  # noqa: S324
+    # SHA-1 is HIBP's required k-anonymity hash, not a security primitive here
+    # (usedforsecurity=False declares exactly that to the runtime and scanners).
+    digest = hashlib.sha1(password.encode("utf-8"), usedforsecurity=False).hexdigest().upper()
     prefix, suffix = digest[:5], digest[5:]
     owns_client = client is None
     active = client or httpx.Client(timeout=_HIBP_TIMEOUT_S)

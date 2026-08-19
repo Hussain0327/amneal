@@ -772,18 +772,32 @@ export function resolveProduct(
 
 // Content-Disposition: attachment; filename=whitepaper_020503.docx — also
 // tolerates the quoted and RFC 5987 (filename*=UTF-8''…) forms.
+// The server suggests the download name; confine it to a plain basename so a
+// hostile or proxied Content-Disposition can never smuggle path separators or
+// control characters into the anchor's download attribute. An all-junk name
+// collapses to null and the caller's fallback wins.
+function sanitizeFilename(name: string): string | null {
+  const cleaned = name
+    .replace(/[/\\]/g, "_")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim();
+  if (!cleaned || cleaned === "." || cleaned === "..") return null;
+  return cleaned;
+}
+
 function filenameFromDisposition(header: string | null): string | null {
   if (!header) return null;
   const star = /filename\*\s*=\s*(?:UTF-8'')?([^;]+)/i.exec(header);
   if (star) {
     try {
-      return decodeURIComponent(star[1].trim().replace(/^"+|"+$/g, ""));
+      const safe = sanitizeFilename(decodeURIComponent(star[1].trim().replace(/^"+|"+$/g, "")));
+      if (safe !== null) return safe;
     } catch {
       // malformed encoding — fall through to the plain form
     }
   }
   const plain = /filename\s*=\s*"?([^";]+)"?/i.exec(header);
-  return plain ? plain[1].trim() : null;
+  return plain ? sanitizeFilename(plain[1].trim()) : null;
 }
 
 // Org-shared saved runs, newest activity first. Filters are passed through to

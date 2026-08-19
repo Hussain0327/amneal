@@ -4,7 +4,8 @@ Run from the repo root:
 
     uv run python scripts/export_openapi.py regwatch/frontend/openapi.json
 
-With no argument the JSON goes to stdout. Given a path, the snapshot is
+With no argument the JSON goes to stdout. Given a path (which must resolve
+inside the repository - the snapshot is a committed artifact), the snapshot is
 written via a same-directory temp file + os.replace, so a failing export
 (broken venv, import-time error in the app) can never truncate the committed
 snapshot the way a shell `>` redirect would.
@@ -25,8 +26,11 @@ import json
 import os
 import sys
 from contextlib import suppress
+from pathlib import Path
 
 from regwatch.api.main import app
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def main() -> None:
@@ -36,7 +40,12 @@ def main() -> None:
     if len(sys.argv) < 2:
         sys.stdout.write(payload)
         return
-    out = sys.argv[1]
+    # The snapshot is a committed repo artifact; contain the write to the
+    # repository so a caller-supplied path can never escape it.
+    resolved = Path(sys.argv[1]).resolve()
+    if not resolved.is_relative_to(_REPO_ROOT):
+        sys.exit(f"refusing to write outside the repository: {resolved}")
+    out = str(resolved)
     tmp = f"{out}.tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as fh:

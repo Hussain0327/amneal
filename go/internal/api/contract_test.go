@@ -305,6 +305,13 @@ func TestLoginSecureCookieFlag(t *testing.T) {
 	if !found {
 		t.Fatal("no session cookie set on login")
 	}
+	// The deletion cookie mirrors mint attributes, Secure included.
+	resp = h.do(t, "POST", "/auth/logout", "", nil)
+	for _, c := range resp.Cookies() {
+		if c.Name == sessionCookie && !c.Secure {
+			t.Fatal("Secure flag missing on deletion cookie with CookieSecure=true")
+		}
+	}
 }
 
 // One message for unknown email / wrong password / inactive account
@@ -511,6 +518,9 @@ func TestMeAndLogoutLifecycle(t *testing.T) {
 	for _, c := range resp.Cookies() {
 		if c.Name == sessionCookie && c.Value == "" && c.MaxAge < 0 {
 			cleared = true
+			if !c.HttpOnly || c.Path != "/" {
+				t.Fatalf("deletion cookie must mirror mint attributes: %+v", c)
+			}
 		}
 	}
 	if !cleared {
