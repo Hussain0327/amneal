@@ -92,6 +92,23 @@ def test_unset_embedding_provider_refuses_to_boot(monkeypatch: pytest.MonkeyPatc
     db_module.reset_for_tests()
 
 
+def test_unset_database_url_refuses_to_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The DATABASE_URL half of the boot contract, pinned at the API lifespan.
+
+    tests/test_smoke.py pins get_engine()'s refusal directly; this pins that
+    the API startup path actually reaches it (lifespan -> init_db ->
+    get_engine) instead of booting half-configured and failing on first use.
+    Blank normalizes to unset, so this covers both.
+    """
+    from regwatch.store import db as db_module
+
+    _reload_settings(monkeypatch, DATABASE_URL="")
+    db_module.reset_for_tests()  # Drop the memoized engine from prior tests.
+    with pytest.raises(RuntimeError, match="only datastore"), TestClient(app):
+        pass
+    db_module.reset_for_tests()
+
+
 def test_retired_provider_name_refuses_to_boot(monkeypatch: pytest.MonkeyPatch) -> None:
     # local-bge-small and openai were removed 2026-08-17; a machine still
     # configured with one must refuse loudly, never fall back.

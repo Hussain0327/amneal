@@ -505,9 +505,12 @@ without a matching catalog row, is detected and skipped.
 ### Graph-assisted retrieval (foundation only)
 
 Migration `0018_knowledge_graph` and `store/graph_store.py` derive a
-deterministic Tier-1 hierarchy at chunk-write time: `application` to `psg_doc`
-(`HAS_PSG`), `psg_doc` to `psg_section` (`HAS_SECTION`), ordered sections
-(`FOLLOWS`), and graph nodes back to source chunks.
+deterministic Tier-1 hierarchy: `application` to `psg_doc` (`HAS_PSG`),
+`psg_doc` to `psg_section` (`HAS_SECTION`), ordered sections (`FOLLOWS`), and
+graph nodes back to source chunks. Ingest-time population was retired on
+2026-08-18 (nothing reads the tables at runtime); the `regwatch
+graph-backfill` CLI command is the only population path and the documented
+revival path.
 
 Chunks remain the only citable unit. The graph has no node embeddings and no
 runtime query consumer, so the Ask path above is unchanged. The proposed
@@ -723,10 +726,11 @@ full 140,438-record backfill is operator-owned while serving remains on
 - **Schema bootstrap, two paths.** A fresh, empty database is created with
   `create_all` plus `alembic stamp head`, no history replay
   (`store/db.py::_init_postgres`). An existing database is migrated
-  incrementally: `fly.toml`'s `[deploy] release_command = "alembic upgrade head"`
-  runs pending migrations on a one-off machine before the app machines roll, so a
-  newer image never boots against an older schema. That is the fix for the
-  2026-06-18 incident. Tests run the same alembic path against
+  incrementally: `fly.toml`'s `[deploy] release_command = "regwatch release"`
+  runs pending migrations and then the full serving-readiness guard on a one-off
+  machine before the app machines roll. A newer image never boots against an
+  older schema, and live embedding-profile drift fails before the roll starts.
+  Tests run the same alembic path against
   `TEST_DATABASE_URL`, so dev, CI and prod share one migration history.
 
 ---
@@ -752,7 +756,7 @@ full 140,438-record backfill is operator-owned while serving remains on
 | `fda_corpus_run` | Complete/scoped sync ledger, manifest hash, checkpoints, errors, and reconciliation facts |
 | `spl_document` | Historical pre-corpus SPL provenance retained for saved-run compatibility; no new acquisition |
 | `embedding_profile`, `chunk_embedding` | Named vector spaces and their vectors (migration 0015) |
-| `graph_node`, `graph_edge`, `graph_node_chunk` | The Tier-1 hierarchy from migration 0018; write-only today |
+| `graph_node`, `graph_edge`, `graph_node_chunk` | The Tier-1 hierarchy from migration 0018; unread at runtime, populated only by the CLI `graph-backfill` since 2026-08-18 |
 
 The Orange Book tables store raw rows only. Paragraph classification and
 eligibility are never persisted (INV-3, no regulatory judgment).

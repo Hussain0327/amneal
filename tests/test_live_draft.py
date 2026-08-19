@@ -168,7 +168,11 @@ def test_result_carries_draft_withdrawn_when_a_painted_draft_dies(
 ) -> None:
     """A stub that streams fluent prose which the gate then REFUSES (its one
     citation is fabricated) must stamp draft_withdrawn='refused' on the result
-    frame -- and a clean answer turn must stamp nothing."""
+    frame, whose answer is the GATED refusal -- the painted draft's content
+    may never survive into the terminal frame. (A clean answer turn stamps
+    nothing: the test above.)"""
+    from config.settings import get_settings
+
     from tests.conftest import create_user, session_client
     from tests.test_query_stream import _parse_sse, _stream
 
@@ -183,9 +187,20 @@ def test_result_carries_draft_withdrawn_when_a_painted_draft_dies(
         frames = _parse_sse(_stream(client, _QUESTION, live_draft=True).text)
         events = [e for e, _ in frames]
         assert "draft" in events  # the fluent draft painted
+        # Positive control: the fabricated content really went over the draft
+        # channel -- so the absence assertions below have something to catch.
+        drafted = "".join(json.loads(d)["delta"] for e, d in frames if e == "draft")
+        assert "fabricated dose claim" in drafted
         result_data = next(d for e, d in frames if e == "result")
         result = json.loads(result_data)
         assert result["refused"] is True
         assert result["draft_withdrawn"] == "refused"
+        # The terminal frame carries the gate's rendering (the refusal copy),
+        # never the withdrawn draft or any fragment of it.
+        assert result["answer"] == get_settings().refusal_text
+        assert "fabricated dose claim" not in result["answer"]
+        assert result["citations"] == []
+        # A withdrawn draft is also never replayed as gated tokens.
+        assert "token" not in events
     finally:
         client.__exit__(None, None, None)

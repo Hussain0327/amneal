@@ -159,12 +159,15 @@ The entrypoint creates the container data directories, runs `regwatch init-db`,
 and exports `REGWATCH_DB_INITIALIZED=1`. FastAPI checks that marker and skips its
 own `init_db()` call, so the same work does not happen twice.
 
-Two argv shapes skip `init-db` entirely, plus an explicit `REGWATCH_INIT_DB=false`
-override:
+Three explicit argv shapes bypass the entrypoint's pre-command `init-db`, plus
+an explicit `REGWATCH_INIT_DB=false` override:
 
-- `alembic ...`: the Fly release_command (`alembic upgrade head`) exists to move
-  the schema stamp to head. The boot guard would otherwise refuse and abort the
-  deploy before the migration ever ran.
+- `regwatch release`: the Fly release command migrates first and then runs the
+  full serving guard itself. The entrypoint must not run that guard against the
+  old stamp before the migration gets a chance to advance it. Fly's
+  `RELEASE_COMMAND=1` marker enforces the same bypass if the command is wrapped.
+- `alembic ...`: direct operator migration commands retain the same pre-guard
+  bypass.
 - `regwatch-proxy`: the Go proxy must boot DB-independent, so a proxy machine
   never crash-loops on the stamp guard while holding the public port.
 

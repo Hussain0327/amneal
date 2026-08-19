@@ -69,8 +69,8 @@ Two of these are now done. The numbers are kept because other docs cite them.
   in `0025_fda_terminal_resolution`. The corrected production canary passed
   21 / 21 and produced 499 chunks with complete active-profile embeddings. The
   full 140,438-record backfill is operator-owned and retrieval remains on
-  `legacy`. R5 deleted the SQLite and Chroma dual-mode, so `DATABASE_URL` is
-  unconditionally required and the app refuses to boot without it. pgvector
+  `legacy`. `DATABASE_URL` is unconditionally required and the app refuses to
+  boot without it (R5 deleted the SQLite and Chroma dual-mode). pgvector
   dimension checks fail fast.
   - Note on history: the earlier call
     ([`DATABRICKS_ADOPTION_2026-07-28.md`](DATABRICKS_ADOPTION_2026-07-28.md))
@@ -85,15 +85,15 @@ Two of these are now done. The numbers are kept because other docs cite them.
 
 ### 3. Migration discipline  DONE
 
-- **Where:** `release_command = "alembic upgrade head"` under `[deploy]` in
+- **Where:** `release_command = "regwatch release"` under `[deploy]` in
   `fly.toml`; `init_db()` in
   [`src/regwatch/store/db.py`](../src/regwatch/store/db.py); release steps in
   [`DEPLOY.md`](DEPLOY.md).
-- **In place:** a schema-advancing release runs Alembic as a gated deploy step.
-  Fly runs `alembic upgrade head` in a one-off machine before the machines roll,
-  so the release fails before any new code serves if the migration fails. Boot
-  still verifies the Alembic stamp matches head and refuses to start on a
-  mismatch, so boot is verification only.
+- **In place:** Fly runs `regwatch release` in a one-off machine before the
+  machines roll. It advances Alembic to head and then runs the same full
+  serving-readiness guard as an app cold boot, so migration failures and active
+  embedding-profile drift fail before any long-lived machine is replaced. App
+  boot repeats the verification to cover drift after the release preflight.
 - **Residual:** rollback and roll-forward rehearsal is folded into the restore
   drill in #2. Migrations still have to be backward-compatible and reversible.
 

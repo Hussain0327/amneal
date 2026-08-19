@@ -168,16 +168,18 @@ func (s *Server) handleCompleteQuery(w http.ResponseWriter, r *http.Request) {
 		// The Python ask() pool shed load (503): relay the SAME defined
 		// overload contract flag-on clients would see flag-off, with no audit
 		// row and no T3 -- the turn never ran, so there is nothing to audit
-		// (Python's shed is pre-dispatch for the same reason). ACCEPTED
-		// divergence: T1 above already committed the user message, where
-		// Python's shed writes nothing (its check precedes every write);
-		// pinned in contract S27.
+		// (Python's shed is pre-dispatch for the same reason). T1 above
+		// already committed the user message where Python's shed writes
+		// nothing, so compensate BEFORE responding: best-effort delete of the
+		// T1 user message (and the session row iff this turn created it),
+		// converging both runtimes on zero rows per shed turn (contract S27).
 		//
 		// Logged for the same reason as the 429 above: a shed turn writes no
 		// audit row by design, so without this line load-shedding is invisible
-		// -- and the ids ARE in scope here, which ties the shed 503 to the T1
-		// user message it already committed.
+		// -- and this line plus qa_shed_compensation_failed (if any) is the
+		// full forensic record of the shed turn once its rows are gone.
 		s.qaLog("qa_shed_saturated", turnID, sessionID, ragErr)
+		s.compensateShedTurn(baseCtx, sessionID, turnID, t0)
 		writeSaturated(w)
 		return
 	}

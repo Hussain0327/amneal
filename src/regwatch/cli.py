@@ -140,6 +140,17 @@ def cmd_init_db() -> None:
     rprint("[green]ok[/green] postgres schema at head")
 
 
+@app.command("release", hidden=True)
+def cmd_release() -> None:
+    """Migrate and run the full serving-readiness gate for a Fly release."""
+    from regwatch.store.db import prepare_release_database
+
+    s = get_settings()
+    s.ensure_dirs()
+    prepare_release_database()
+    rprint("[green]ok[/green] release database and serving profile ready")
+
+
 @app.command("authoritative-corpus-init-db", hidden=True)
 def cmd_authoritative_corpus_init_db() -> None:
     """Verify worker schema without requiring already-complete embeddings."""
@@ -817,9 +828,10 @@ def cmd_graph_backfill(
 ) -> None:
     """Derive tier-1 graph nodes/edges/refs from EXISTING chunk rows.
 
-    For corpora chunked before the graph tables existed (ingest and rechunk
-    derive inline). Idempotent: re-running converges to the same rows.
-    Requires chunk.ordinal (migration 0017) to be populated.
+    The ONLY population path: ingest-time derivation was retired on
+    2026-08-18 because nothing reads the graph tables at runtime (see
+    store/graph_store.py). Idempotent: re-running converges to the same
+    rows. Requires chunk.ordinal (migration 0017) to be populated.
     """
     from sqlalchemy import text as sa_text
 

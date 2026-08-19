@@ -298,9 +298,11 @@ What it does, in order:
    action), wrapped in `scripts/fly-deploy.sh`, which retries only transient Fly
    platform errors such as "machine still starting" and fails fast on everything
    else.
-4. Fly runs `fly.toml [deploy] release_command = "alembic upgrade head"` in a
-   one-off machine before the rolling replace, so the live schema reaches the
-   build's head before the app's boot-time stamp guard checks it.
+4. Fly runs `fly.toml [deploy] release_command = "regwatch release"` in a
+   one-off machine before the rolling replace. It migrates the live schema to
+   the build's head and then runs the full serving-readiness guard, so profile
+   coverage/configured-index/provider drift also aborts before any machine is
+   replaced.
 
 Guard rails: a 45-minute job timeout, and a `deploy-fly` concurrency group with
 `cancel-in-progress: false`, so an in-flight release is never killed mid-roll

@@ -357,6 +357,51 @@ def test_activation_gate_requires_complete_coverage_and_ready_index(
     assert pg_profile_store.assert_profile_ready_for_activation(profile.profile_id) == profile
 
 
+def test_activation_gate_index_requirement_is_waivable(
+    pg_profile_store: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import config.settings as cs
+
+    _seed_two_chunks(pg_profile_store)
+    profile = pg_profile_store.register_embedding_profile(_spec())
+    pending = pg_profile_store.pending_profile_chunks(profile.profile_id)
+    pg_profile_store.upsert_profile_embeddings(
+        profile.profile_id,
+        [chunk.chunk_id for chunk in pending],
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        [chunk.content_hash for chunk in pending],
+    )
+
+    # No index was ever built: the default stays fail-closed, byte-identical
+    # to the pre-flag behavior.
+    with pytest.raises(RuntimeError, match="no ready HNSW index"):
+        pg_profile_store.assert_profile_ready_for_activation(profile.profile_id)
+
+    monkeypatch.setenv("PROFILE_HNSW_INDEX_REQUIRED", "false")
+    cs.get_settings.cache_clear()
+    try:
+        assert pg_profile_store.assert_profile_ready_for_activation(profile.profile_id) == profile
+    finally:
+        cs.get_settings.cache_clear()
+
+
+def test_activation_gate_coverage_is_never_waivable(
+    pg_profile_store: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import config.settings as cs
+
+    _seed_two_chunks(pg_profile_store)
+    profile = pg_profile_store.register_embedding_profile(_spec())
+
+    monkeypatch.setenv("PROFILE_HNSW_INDEX_REQUIRED", "false")
+    cs.get_settings.cache_clear()
+    try:
+        with pytest.raises(RuntimeError, match="incomplete"):
+            pg_profile_store.assert_profile_ready_for_activation(profile.profile_id)
+    finally:
+        cs.get_settings.cache_clear()
+
+
 def _mark_authoritative(ids: list[str]) -> None:
     """Move chunk rows into the authoritative namespace (reviewed source_family)."""
     from regwatch.store import db

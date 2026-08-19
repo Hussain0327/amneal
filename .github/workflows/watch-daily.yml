@@ -11,8 +11,9 @@ name: watch-daily
 # Lakebase) and writes durable alerts to the DB (stream 1).
 #
 # It does NOT migrate the schema. The Fly deploy is the single migration authority
-# (fly.toml `[deploy] release_command = "alembic upgrade head"` runs migrations in
-# a one-off machine before the rolling deploy). The Postgres init path
+# (fly.toml `[deploy] release_command = "regwatch release"` runs migrations and
+# the serving-readiness guard in a one-off machine before the rolling deploy).
+# The Postgres init path
 # (src/regwatch/store/db.py::_init_postgres) REFUSES to start when the DB stamp !=
 # the code's head, so if a migration was merged but not yet deployed this cron
 # fails loudly here rather than advancing the live schema ahead of the running API
@@ -95,6 +96,10 @@ jobs:
       DATABASE_URL: ${{ secrets.WATCH_DATABASE_URL }}
       REQUIRE_DATABASE_URL: "true"
       EMBEDDING_PROVIDER: "qwen3"
+      # GitHub Actions env is a separate surface from Fly secrets: without
+      # this, init-db's boot gate would require the qwen3 profile's HNSW
+      # index, dropped 2026-08-18 under the Lakebase 512MB size cap.
+      PROFILE_HNSW_INDEX_REQUIRED: "false"
       # Watch change summaries/extraction use the same Databricks serving
       # endpoint family as prod. Keep that provider boundary explicit while
       # embeddings use the Qwen values below.

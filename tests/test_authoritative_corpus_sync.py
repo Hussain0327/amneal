@@ -563,6 +563,66 @@ def test_activation_requires_all_families_and_a_full_covered_run() -> None:
     assert coverage.activation_blockers == ()
 
 
+def test_activation_accepts_an_explicitly_named_serving_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scoped-activation amendment: REGWATCH_SERVING_MANIFEST_SHA names the
+    counted universe. Unset, a scoped sync can never activate (unchanged
+    original behavior); set, only a run of that exact manifest activates."""
+    import config.settings as cs
+
+    artifacts = (
+        _inline_artifact(
+            "drugs-at-fda:application:nda020503",
+            family=FdaSourceFamily.DRUGS_AT_FDA,
+            document_type=FdaDocumentType.APPLICATION_METADATA,
+        ),
+        _inline_artifact(
+            "drugs-at-fda:application-doc:review-1",
+            family=FdaSourceFamily.ACTION_PACKAGE,
+            document_type=FdaDocumentType.CLINICAL_REVIEW,
+        ),
+        _inline_artifact(
+            "psg:020503",
+            family=FdaSourceFamily.PSG,
+            document_type=FdaDocumentType.PRODUCT_SPECIFIC_GUIDANCE,
+        ),
+        _inline_artifact(
+            "fda-be-guidance:test",
+            family=FdaSourceFamily.FDA_BE_GUIDANCE,
+            document_type=FdaDocumentType.BIOEQUIVALENCE_GUIDANCE,
+        ),
+        _inline_artifact("orange-book:product:n:020503"),
+    )
+    manifest = _manifest(*artifacts)
+    assert manifest.complete_universe is False
+    with _offline_client() as client:
+        stats = sync_manifest(manifest, client=client)
+    assert stats.succeeded is True
+
+    # Original behavior preserved: a scoped run alone never activates.
+    unscoped = authoritative_corpus_coverage()
+    assert unscoped.activation_ready is False
+    assert any("complete-universe" in b for b in unscoped.activation_blockers)
+
+    try:
+        # Naming the manifest makes it the counted universe.
+        monkeypatch.setenv("REGWATCH_SERVING_MANIFEST_SHA", manifest.sha256)
+        cs.get_settings.cache_clear()
+        scoped = authoritative_corpus_coverage()
+        assert scoped.activation_ready is True
+        assert scoped.activation_blockers == ()
+
+        # A wrong sha still refuses, with the scoped blocker message.
+        monkeypatch.setenv("REGWATCH_SERVING_MANIFEST_SHA", "0" * 64)
+        cs.get_settings.cache_clear()
+        wrong = authoritative_corpus_coverage()
+        assert wrong.activation_ready is False
+        assert any("serving manifest" in b for b in wrong.activation_blockers)
+    finally:
+        cs.get_settings.cache_clear()
+
+
 def test_activation_accepts_only_audited_terminal_manifest_outcomes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

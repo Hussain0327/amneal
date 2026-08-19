@@ -166,8 +166,8 @@ def current_dosage_form_routes(
                 select(PsgVersion.psg_document_id).distinct()
             ),
         )
-        # Case-insensitive on both sides (works on SQLite and Postgres): the
-        # catalog stores FDA listing casing ("Aerosol, Metered") while a
+        # Case-insensitive on both sides of the comparison: the catalog
+        # stores FDA listing casing ("Aerosol, Metered") while a
         # hand-typed UI filter arrives in whatever casing the user chose -- a
         # case-sensitive pin would silently enumerate zero combos.
         if dosage_form:

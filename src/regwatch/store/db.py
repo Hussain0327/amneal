@@ -51,8 +51,8 @@ _provider_asserted = False
 _unprotected_tables: tuple[str, ...] = ()
 
 # K4: the pgvector chunk store. The embedding column is raw DDL (the `vector`
-# type comes from the pgvector extension); everything else mirrors the Chroma
-# metadata fields so the vector-store interface can dispatch transparently.
+# type comes from the pgvector extension); everything else is the chunk
+# metadata the vector-store facade (store/vector_store.py) exposes.
 # {vector_schema} is the schema the extension actually lives in — `extensions`
 # on Databricks Lakebase, `public` on a local docker Postgres. Qualifying the
 # type and the opclass means the DDL works even when that schema isn't on the
@@ -155,17 +155,16 @@ def _active_database_url() -> str:
 
 
 def _required_database_url() -> str:
-    """DATABASE_URL, or a loud refusal — there is no fallback datastore.
+    """DATABASE_URL, or a loud refusal -- there is no fallback datastore.
 
-    Preserves the B1 fail-loud posture unconditionally: booting without a
-    configured Postgres once meant silently landing on the container's
-    ephemeral SQLite disk; now it is simply an error at first engine use.
+    Preserves the B1 fail-loud posture unconditionally: an unset
+    DATABASE_URL is an error at first engine use, never a silent fallback.
     """
     url = (get_settings().database_url or "").strip()
     if not url:
         raise RuntimeError(
-            "DATABASE_URL is empty — Postgres is the only datastore since R5 "
-            "(the SQLite fallback is gone). Set DATABASE_URL to a "
+            "DATABASE_URL is empty -- Postgres is the only datastore and "
+            "there is no fallback. Set DATABASE_URL to a "
             "Postgres URL (Databricks Lakebase in prod); tests use "
             "TEST_DATABASE_URL (see tests/conftest.py)."
         )
@@ -300,6 +299,26 @@ def _alembic_config() -> Config:
     # Postgres URLs) must be escaped as '%%'.
     cfg.set_main_option("sqlalchemy.url", _active_database_url().replace("%", "%%"))
     return cfg
+
+
+def prepare_release_database() -> None:
+    """Migrate to head, then assert that the serving process can cold-boot.
+
+    Fly runs this in its one-off release machine before touching any long-lived
+    machine. The ordering is load-bearing: the existing schema stamp may be
+    behind this image, so the migration must run before :func:`init_db`; after
+    the migration, the normal serving guard verifies the exact head plus the
+    active embedding profile's coverage, configured HNSW policy, and provider
+    geometry.
+
+    Keeping that second phase in the release machine prevents deterministic
+    serving-state drift from surfacing five minutes later as a rolling-update
+    health timeout after some process groups have already been replaced.
+    """
+    from alembic import command
+
+    command.upgrade(_alembic_config(), "head")
+    init_db()
 
 
 def _head_revision(cfg: Config) -> str:

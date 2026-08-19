@@ -13,17 +13,21 @@ primary_region = "iad"
 # suffix.
 kill_timeout = 30
 
-# Run pending Alembic migrations in a one-off machine BEFORE the rolling deploy
-# of the app machines. This moves the live schema to the build's head so the
-# app's boot guard (store/db.py::_init_postgres) passes instead of crash-looping
-# -- the 2026-06-18 incident, where deploying a 0009 image against a 0008 DB took
-# prod down. The entrypoint skips its own init-db for the `alembic` command (see
-# docker/entrypoint.sh) so this isn't blocked by that same guard. DATABASE_URL +
-# secrets are injected into the release machine automatically.
+# Run pending Alembic migrations in a one-off machine BEFORE the rolling deploy,
+# then run the SAME full serving-readiness guard as an app cold boot. Migration
+# first prevents the 2026-06-18 schema-stamp crash loop. Readiness second prevents
+# deterministic live-state drift from reaching the roll: v155 replaced both
+# proxy machines and crash-looped an app machine before revealing that the
+# active profile's HNSW index had been intentionally dropped to recover writes
+# at the database size cap. `regwatch release` now applies the configured
+# serving policy in the one-off phase, before any long-lived machine is touched.
+# The entrypoint skips its pre-command init only for this explicit subcommand so
+# it cannot reject the old stamp before the migration gets a chance to advance it.
+# DATABASE_URL and Fly secrets are injected into the release machine.
 # Assumes an already-bootstrapped/stamped DB (incremental upgrade); a fresh empty
 # Postgres is still bootstrapped by init-db's create_all+stamp path, not here.
 [deploy]
-  release_command = "alembic upgrade head"
+  release_command = "regwatch release"
 
 # TWO process groups: the Go proxy holds the public port and relays to the app
 # group over 6PN -- phase 3 of docs/GO_PROXY_ROLLOUT.md, re-landing PR #93's

@@ -31,7 +31,8 @@ def _hash_token(raw: str) -> str:
 
 
 def _as_utc(dt: datetime) -> datetime:
-    # SQLite round-trips datetimes naive; everything we write is UTC.
+    # Timestamp columns round-trip naive (no tzinfo); everything we write
+    # is UTC, so a naive read is reinterpreted as UTC.
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 

@@ -183,6 +183,14 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("RETRIEVAL_EMBEDDING_PROFILE", "ACTIVE_EMBEDDING_PROFILE"),
     )
     embedding_shadow_profile: str | None = None
+    # Serving normally requires the active profile's deterministic HNSW index
+    # (assert_profile_ready_for_activation, checked at boot and before every
+    # embedding write). pgvector's exact scan returns identical results
+    # without the index -- only slower -- while the index roughly doubles
+    # vector storage. On a logical-size-capped database (Lakebase free tier:
+    # 512 MB) that doubling is decisive, so an operator may waive the index
+    # requirement explicitly. Coverage completeness is never waived.
+    profile_hnsw_index_required: bool = True
 
     # Private Databricks Chat Completions endpoint. Prod points this at the
     # Unity Catalog alias workspace.default.regwatch, which serves gpt-oss-120b
@@ -394,6 +402,10 @@ class Settings(BaseSettings):
         "route_call_mode",
         "route_call_max_tokens",
         "selective_citation_enabled",
+        # Same rollback story: this flag ships as a Fly secret / workflow env
+        # value, and a blank must mean "default (required)", never a
+        # bool_parsing crash at import.
+        "profile_hnsw_index_required",
         mode="before",
     )
     @classmethod
@@ -628,6 +640,16 @@ class Settings(BaseSettings):
     # embedding coverage.
     retrieval_corpus: Literal["legacy", "authoritative_fda"] = Field(
         default="legacy", validation_alias="REGWATCH_RETRIEVAL_CORPUS"
+    )
+    # Scoped-activation amendment (2026-08-18): when set, activation counts
+    # against the durable manifest with this exact logical sha256 instead of
+    # requiring a complete-universe run. The full 140,438-doc universe became
+    # permanently unreachable under the Lakebase free tier's 512MB cap, so
+    # the served corpus is a curated manifest the operator names EXPLICITLY
+    # here -- a scoped sync still can never activate by accident. Unset keeps
+    # the original complete-universe-only behavior.
+    serving_manifest_sha: str | None = Field(
+        default=None, validation_alias="REGWATCH_SERVING_MANIFEST_SHA"
     )
     # Two-stage retrieval (per spec diagram):
     #   stage 1: vector search returns VECTOR_TOP_K candidates (wide net)

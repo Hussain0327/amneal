@@ -123,18 +123,39 @@ def authoritative_corpus_coverage() -> CorpusCoverage:
             .mappings()
             .first()
         )
-        latest_complete = (
-            conn.execute(
-                sa_text(
-                    f"SELECT {run_columns} FROM fda_corpus_run "  # noqa: S608
-                    "WHERE status = 'succeeded' "
-                    "AND stats_json->>'complete_universe' = 'true' "
-                    "ORDER BY started_at DESC, id DESC LIMIT 1"
+        # Scoped-activation amendment (2026-08-18): a configured serving
+        # manifest replaces the complete-universe requirement -- the counted
+        # universe becomes the manifest the operator explicitly named. All
+        # downstream arithmetic (full processing, zero errors, terminal
+        # parity, searchable reconciliation) is unchanged.
+        serving_sha = (get_settings().serving_manifest_sha or "").strip()
+        if serving_sha:
+            latest_complete = (
+                conn.execute(
+                    sa_text(
+                        f"SELECT {run_columns} FROM fda_corpus_run "  # noqa: S608
+                        "WHERE status = 'succeeded' "
+                        "AND manifest_sha256 = :serving_sha "
+                        "ORDER BY started_at DESC, id DESC LIMIT 1"
+                    ),
+                    {"serving_sha": serving_sha},
                 )
+                .mappings()
+                .first()
             )
-            .mappings()
-            .first()
-        )
+        else:
+            latest_complete = (
+                conn.execute(
+                    sa_text(
+                        f"SELECT {run_columns} FROM fda_corpus_run "  # noqa: S608
+                        "WHERE status = 'succeeded' "
+                        "AND stats_json->>'complete_universe' = 'true' "
+                        "ORDER BY started_at DESC, id DESC LIMIT 1"
+                    )
+                )
+                .mappings()
+                .first()
+            )
 
     pending = max(chunks - embedded, 0)
     percent = round(100.0 * embedded / chunks, 2) if chunks else 0.0
@@ -198,7 +219,14 @@ def _activation_blockers(
     if missing:
         blockers.append("missing source families: " + ", ".join(missing))
     if complete_run is None:
-        blockers.append("no successful complete-universe sync is recorded")
+        serving_sha = (get_settings().serving_manifest_sha or "").strip()
+        if serving_sha:
+            blockers.append(
+                "no successful sync of the configured serving manifest "
+                f"{serving_sha[:12]}... is recorded"
+            )
+        else:
+            blockers.append("no successful complete-universe sync is recorded")
         return blockers
     expected = int(complete_run.get("expected_documents") or 0)
     discovered = int(complete_run.get("discovered_documents") or 0)

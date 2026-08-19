@@ -92,6 +92,33 @@ func (s *Server) persistUserTurn(
 	return sessionID, nil
 }
 
+// compensateShedTurn best-effort undoes T1 after a saturation shed, so a shed
+// turn leaves ZERO new rows in both runtimes (Python's shed precedes every
+// write; contract S27). Order is load-bearing: the user message first, then
+// the session row -- chat_message.session_id has no ON DELETE CASCADE. The
+// session delete fires only when THIS turn created the row (created_at = t0;
+// the upsert sets created_at solely on insert) and no other messages remain,
+// so a pre-existing session is never touched (its updated_at bump is not
+// reverted -- an UPDATE, not a row, like the pre-shed NULL-owner adoption
+// both runtimes keep). Failures are logged, never fatal: the shed 503 still
+// stands and the orphaned T1 row is then exactly the pre-compensation state.
+func (s *Server) compensateShedTurn(ctx context.Context, sessionID, turnID string, t0 time.Time) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if _, err := s.q.DeleteUserTurnMessage(ctx, turnID); err != nil {
+		// The message may survive; skip the session delete (its FK would
+		// block it anyway) and keep the forensic log line.
+		s.qaLog("qa_shed_compensation_failed", turnID, sessionID, err)
+		return
+	}
+	if _, err := s.q.DeleteEmptySessionCreatedAt(ctx, store.DeleteEmptySessionCreatedAtParams{
+		ID:        sessionID,
+		CreatedAt: ts(t0),
+	}); err != nil {
+		s.qaLog("qa_shed_compensation_failed", turnID, sessionID, err)
+	}
+}
+
 // errAnswerUnaudited is _persist_turn's defensive re-raise ("if
 // audit.failure_fallback is None: raise"): a strict validated answer whose
 // authoritative audit write failed with NO core-supplied fallback to degrade

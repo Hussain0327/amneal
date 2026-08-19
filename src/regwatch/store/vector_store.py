@@ -8,8 +8,8 @@ metadata carries enough to build a citation (`doc_id`, `version_id`, `page`,
 against.
 
 This module stays as the seam every caller imports (retriever, ingest
-pipeline, watch, API health, resolver) — the Chroma half of the old dual-mode
-dispatch is gone, but keeping the facade means callers never changed.
+pipeline, watch, API health, resolver): a thin facade over pgvector_store, so
+callers never depend on the backend module directly.
 """
 
 from __future__ import annotations

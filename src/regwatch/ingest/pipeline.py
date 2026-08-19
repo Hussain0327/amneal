@@ -15,8 +15,7 @@ All vector and DB writes commit before we touch the next PSG so a partial run
 leaves the DB consistent. A revision lands ATOMICALLY: the version row, the
 doc's content fields, the version's pgvector chunk rows, and its
 be_requirement row (when extraction succeeded) commit in one transaction, so
-a crash mid-ingest can never leave a version without its chunks (the sole
-path since R5 -- the non-transactional SQLite/Chroma dev mode is gone).
+a crash mid-ingest can never leave a version without its chunks.
 """
 
 from __future__ import annotations
@@ -48,7 +47,6 @@ from regwatch.process.chunker import Chunk, chunk_pdf
 from regwatch.process.embedder import embed_documents, get_embedding_provider
 from regwatch.process.extractor import ExtractionResult, extract_be
 from regwatch.store.db import init_db, session_scope
-from regwatch.store.graph_store import derive_document_graph
 from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion
 from regwatch.store.vector_store import (
     add_chunks,
@@ -349,14 +347,6 @@ def _commit_version_and_doc(
                         conn=s.connection(),
                     )
                     _write_profile_batches(s, ids, profile_batches)
-                    derive_document_graph(
-                        doc_id=psg_document_id,
-                        version_id=v.id,
-                        chunk_ids=ids,
-                        chunk_metas=metas,
-                        doc_attrs=_graph_doc_attrs(listing),
-                        conn=s.connection(),
-                    )
                     log.info("chunks_added", doc_id=psg_document_id, version_id=v.id, n=len(ids))
             if extraction is not None:
                 s.add(
@@ -490,17 +480,6 @@ def _extract_and_save_be(doc_id: int, version_id: int, pages: list[str], appl_no
         )
 
 
-def _graph_doc_attrs(listing: PsgListing) -> dict[str, object]:
-    """The doc-identity attrs the tier-1 graph derivation stamps on nodes."""
-    return {
-        "appl_no": listing.appl_no,
-        "normalized_name": listing.normalized_name,
-        "dosage_form": listing.dosage_form or "",
-        "route": listing.route or "",
-        "psg_type": listing.psg_type,
-    }
-
-
 def _chunk_metadata_base(doc_id: int, listing: PsgListing) -> dict[str, object]:
     # version_id is intentionally absent: _index_rows stamps it, so the
     # Postgres path can chunk+embed BEFORE the version row (and its id) exists.
@@ -556,9 +535,8 @@ def _regenerate_chunks(
 ) -> None:
     """Embed and store this version's chunks, then drop any superseded ones.
 
-    Shared by the dev-mode revised/added path and (both modes) the
-    unchanged-but-chunkless backfill, so both produce an identical,
-    current-only index for the document. The Postgres revision path instead
+    The unchanged-but-chunkless backfill path: it produces the same
+    current-only index a fresh revision gets. The revision path instead
     threads the chunk upsert through the version-commit transaction (see
     _commit_version_and_doc).
     """
@@ -578,14 +556,6 @@ def _regenerate_chunks(
         )
         if profile_batches:
             _write_profile_batches(s, ids, profile_batches)
-        derive_document_graph(
-            doc_id=doc_id,
-            version_id=version_id,
-            chunk_ids=ids,
-            chunk_metas=metas,
-            doc_attrs=_graph_doc_attrs(listing),
-            conn=s.connection(),
-        )
     log.info("chunks_added", doc_id=doc_id, version_id=version_id, n=len(chunks))
     _cleanup_stale_chunks(doc_id, version_id)
 
@@ -663,14 +633,6 @@ def rechunk_document(doc_id: int) -> str:
         add_chunks(ids=ids, embeddings=embeddings, documents=texts, metadatas=metas, conn=conn)
         if profile_batches:
             _write_profile_batches(s, ids, profile_batches)
-        derive_document_graph(
-            doc_id=doc_id,
-            version_id=version_id,
-            chunk_ids=ids,
-            chunk_metas=metas,
-            doc_attrs=_graph_doc_attrs(listing),
-            conn=conn,
-        )
     log.info("rechunked", doc_id=doc_id, version_id=version_id, n=len(chunks))
     return "rechunked"
 
@@ -690,10 +652,9 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
             doc_id = _create_psg_document(listing, content_hash, str(path))
         elif latest_hash == content_hash:
             # Content is unchanged, but this version may still have gaps: a BE
-            # row missing because extraction failed at ingest time (both
-            # modes), or chunks missing from a dev-mode crash between the
-            # version commit and the Chroma write / from prod data that
-            # predates the atomic Postgres commit. Because the hash matches
+            # row missing because extraction failed at ingest time, or chunks
+            # missing because the version row predates the atomic
+            # version+chunks commit. Because the hash matches
             # forever, the normal path never revisits it -- so backfill any
             # MISSING chunks (else this version is a permanent retrieval blind
             # spot) or be_requirement (missing extraction == missing
@@ -733,9 +694,8 @@ def ingest_listing(listing: PsgListing, *, extract: bool = True) -> str:
 
         # Everything network-bound (chunking is local, but embedding and BE
         # extraction are API calls) runs BEFORE the commit transaction, then
-        # version + doc fields + chunks + BE row land atomically -- the sole
-        # ingest path since R5 removed the non-transactional SQLite/Chroma
-        # dev mode.
+        # version + doc fields + chunks + BE row land atomically -- the only
+        # ingest path.
         chunks = chunk_pdf(parsed.pages, base_metadata=_chunk_metadata_base(doc_id, listing))
         texts = [c.text for c in chunks]
         embeddings = _legacy_document_embeddings(texts)

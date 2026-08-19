@@ -1,5 +1,5 @@
 // Shared timestamp helpers for the Ask surface. The backend emits naive-UTC
-// timestamps (no offset) from SQLite/Postgres; browsers would otherwise parse
+// timestamps (no offset) from Postgres; browsers would otherwise parse
 // those as LOCAL time and skew every displayed date by the viewer's offset.
 // Same rule as the Sidebar's relTime: a missing offset means UTC.
 

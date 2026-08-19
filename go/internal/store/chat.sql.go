@@ -95,6 +95,52 @@ func (q *Queries) DeleteChatSession(ctx context.Context, id string) (int64, erro
 	return result.RowsAffected(), nil
 }
 
+const deleteEmptySessionCreatedAt = `-- name: DeleteEmptySessionCreatedAt :execrows
+DELETE FROM public.chat_session cs
+WHERE cs.id = $1
+  AND cs.created_at = $2
+  AND NOT EXISTS (
+    SELECT 1 FROM public.chat_message cm WHERE cm.session_id = cs.id
+  )
+`
+
+type DeleteEmptySessionCreatedAtParams struct {
+	ID        string
+	CreatedAt pgtype.Timestamp
+}
+
+// DeleteEmptySessionCreatedAt removes the session row ONLY when this turn
+// created it (created_at is set solely on insert, so it equals the turn's t0
+// iff T1's upsert inserted rather than updated) and no messages remain. A
+// pre-existing session keeps a different created_at and is never touched; the
+// NOT EXISTS guard protects a concurrent turn's committed message (the FK from
+// chat_message additionally blocks a lost race, which the caller treats as
+// best-effort).
+func (q *Queries) DeleteEmptySessionCreatedAt(ctx context.Context, arg DeleteEmptySessionCreatedAtParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteEmptySessionCreatedAt, arg.ID, arg.CreatedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteUserTurnMessage = `-- name: DeleteUserTurnMessage :execrows
+DELETE FROM public.chat_message
+WHERE turn_id = $1 AND role = 'user'
+`
+
+// DeleteUserTurnMessage undoes T1's chat_message write for one turn (the
+// saturation-shed compensation): a shed turn must leave zero new rows in both
+// runtimes, matching Python's pre-write shed. turn_id is a fresh UUID minted
+// per request, so this can never touch another turn's rows.
+func (q *Queries) DeleteUserTurnMessage(ctx context.Context, turnID string) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteUserTurnMessage, turnID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getChatSessionByID = `-- name: GetChatSessionByID :one
 
 SELECT id, user_id, title, active_filters_json, origin, created_at, updated_at FROM public.chat_session

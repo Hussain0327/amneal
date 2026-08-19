@@ -326,8 +326,8 @@ def _db_component() -> dict[str, Any]:
     try:
         with get_engine().connect() as conn:
             conn.execute(text("SELECT 1"))
-        # B1: expose the dialect so a prod stack accidentally on SQLite is
-        # visibly wrong (operators / the uptime check can assert 'postgresql').
+        # B1: expose the dialect so operators / the uptime check can assert
+        # 'postgresql' -- any other value must read as visibly wrong.
         return {"ok": True, "dialect": engine_dialect()}
     except Exception as exc:
         # /health is the one anonymous-reachable endpoint: never return the raw
@@ -458,8 +458,8 @@ def health(response: Response) -> dict[str, Any]:
         "status": "ok",
         "components": {
             "db": db,
-            # Renamed from "chroma" with R5: pgvector is the only backend. An
-            # ops probe reading the old key must update (see DEPLOY.md).
+            # pgvector is the only vector backend; the component key is
+            # deliberately backend-neutral (see DEPLOY.md).
             "vector_store": vector_store,
             "llm": {"provider": s.llm_provider, "key_present": _llm_key_present(s)},
             "embedding": embedding,
