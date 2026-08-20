@@ -389,6 +389,12 @@ _FOLLOW_UP_PREFIXES = (
     #     question, so "why?" is never embedded verbatim.
     # Removing either guard makes this tuple a cross-product leak.
     "why",
+    # 2026-08-20: "how come?" is the most common drill-down a user types after
+    # reading an answer, and it matched NOTHING -- no prefix, and no pronoun
+    # from _FOLLOW_UP_PRONOUNS -- so the session product was dropped and the
+    # turn landed on need_product ("Sure -- which product?") one message after
+    # the product had been answered about. Verified live as audit #2501.
+    "how come",
     "what should",
     "how do i",
     "how would",
@@ -568,6 +574,26 @@ _ROUTE_CLARIFY_REASONS = frozenset(
 )
 
 
+_LEADING_FILLER_RE = re.compile(
+    r"^(?:ok(?:ay)?|alright|right|got\s+it|thanks|thank\s+you|cool|sure|hmm+|well)\b[\s,.:;-]*"
+)
+
+
+def _strip_leading_filler(text: str) -> str:
+    """Drops conversational filler so the follow-up shapes below still match.
+
+    "ok and dissolution?" is the same turn as "and dissolution?"; without this
+    the acknowledgement token hid the follow-up and the session product was
+    dropped.
+    """
+    prev = None
+    out = text
+    while out != prev:
+        prev = out
+        out = _LEADING_FILLER_RE.sub("", out, count=1).lstrip()
+    return out
+
+
 def _looks_like_follow_up(question: str) -> bool:
     """Reports whether the question reads as a follow-up to a prior turn.
 
@@ -578,8 +604,13 @@ def _looks_like_follow_up(question: str) -> bool:
         True when it opens with a known drill-down prefix, or is short and
         carries a back-referring pronoun.
     """
-    q = question.strip().lower()
+    q = _strip_leading_filler(question.strip().lower())
     if any(q.startswith(prefix) for prefix in _FOLLOW_UP_PREFIXES):
+        return True
+    # A question OPENING with a conjunction is continuing the previous one --
+    # "and the fed study?", "so what about dissolution?". This is the same
+    # drill-down shape as the prefixes above and rides the same two guards.
+    if re.match(r"^(?:and|so|then|but)\b", q):
         return True
     tokens = {t for t in re.split(r"[^a-z0-9]+", q) if t}
     return bool(tokens & _FOLLOW_UP_PRONOUNS) and len(tokens) <= 8
