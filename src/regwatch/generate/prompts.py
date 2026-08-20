@@ -294,6 +294,11 @@ GROUNDED_QA_SYSTEM_V7 = dedent("""\
     brackets: [1], or [1, 3]. Cite only numbers you were given. Never invent or
     misrepresent a regulatory requirement.
 
+    Put the marker at the end of EACH sentence that states a source fact, not at
+    the end of a paragraph or a bullet group. Sentences are admitted one at a
+    time, so a sentence without its own marker is dropped even when the sentence
+    after it carries one. Repeat the same number as often as you need.
+
     Retrieved evidence is authoritative for what those sources say, but it is not
     the limit of your usefulness. Explain concepts, reason about the evidence,
     use stable general knowledge, name your uncertainty, and say what is worth
