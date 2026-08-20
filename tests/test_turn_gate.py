@@ -1198,12 +1198,16 @@ def test_heading_prefix_still_drops_the_claim_when_not_selective() -> None:
     assert [d.reason for d in turn.dropped] == [tg.DROP_MARKUP]
 
 
-def test_selective_heading_prefixed_cited_claim_stays_on_drop_markup_not_corrected() -> None:
-    """Post-launch-review regression (P2): the heading strip must not feed the
-    lexical corrector. A cited claim whose declared cite is unknown, with a
-    leading heading, must stay DROP_MARKUP -- never re-stamped onto an
-    unrelated passage by token overlap and served as a cited FDA fact on a
-    shape v5/v6 refused outright."""
+def test_selective_heading_prefixed_cited_claim_is_never_corrected() -> None:
+    """The heading strip must not feed the lexical corrector.
+
+    Amended 2026-08-20: presentation is a product feature, so a leading heading
+    is now STRIPPED rather than refused, for cited claims too. The safety half
+    of the old rule is unchanged and is what this test pins: a cited claim whose
+    declared cite does not exist must never be re-stamped onto an unrelated
+    passage by token overlap. It is now refused as DROP_UNKNOWN_CITATION -- the
+    true reason -- instead of DROP_MARKUP, which was only ever an incidental
+    shield. The provenance outcome is identical: nothing is admitted."""
     passages = [
         _uniform_passage(3, "chunk-best", _BEST_TEXT),
         _uniform_passage(4, "chunk-other", _OFF_TOPIC_TEXT),
@@ -1220,7 +1224,7 @@ def test_selective_heading_prefixed_cited_claim_stays_on_drop_markup_not_correct
     )
     assert isinstance(turn, tg.AdmittedTurn)
     assert turn.admitted == ()
-    assert [d.reason for d in turn.dropped] == [tg.DROP_MARKUP]
+    assert [d.reason for d in turn.dropped] == [tg.DROP_UNKNOWN_CITATION]
     assert turn.verdict == tg.VERDICT_NO_VALID_CITATIONS
 
 

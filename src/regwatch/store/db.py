@@ -90,6 +90,11 @@ _CHUNK_INDEX_DDL = (
     # stay identical to what `pgvector_store.Chunk` declares (index=True
     # columns + the HNSW DDL in ensure_schema) — both bootstrap paths must
     # produce the same schema regardless of module-initialization order.
+    # Renamed by migration 0026: this index is on the LEGACY chunk.embedding
+    # column, not on chunk_embedding, and the old name said otherwise. The DDL
+    # here must use the post-0026 name or every boot recreates the old one
+    # alongside the renamed index -- two HNSW indexes on one column, ~42 MB of
+    # duplicate against a 512 MiB branch cap.
     "CREATE INDEX IF NOT EXISTS ix_chunk_embedding_hnsw ON chunk "
     "USING hnsw (embedding {vector_schema}.vector_cosine_ops) "
     "WITH (m = 16, ef_construction = 64)",

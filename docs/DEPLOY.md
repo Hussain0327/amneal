@@ -22,20 +22,26 @@ browser -- https --> Vercel (Next.js, regwatch/frontend, https://amneal.vercel.a
                      Databricks Lakebase Postgres + pgvector (rows, vectors, audit)
 ```
 
-Both models live in the company's own Databricks tenant:
+Both models ran in the company's own Databricks tenant from 2026-07-30 through
+2026-08-19:
 
 - Generation: serving alias `workspace.default.regwatch`, served model
-  `gpt-oss-120b-080525`. One model does every role: router, synthesizer,
+  `gpt-oss-120b-080525`. One model did every role: router, synthesizer,
   extractor. `LLM_PROVIDER=databricks`.
 - Embeddings: serving endpoint `workspace.default.regwatch-embed`, Qwen3, 1024
   dimensions, active profile `ep_2e7368b354d911ea3a013c3125e276c2`. All 5,494
-  chunks are embedded on that profile (measured 2026-08-11).
+  chunks were embedded on that profile (measured 2026-08-11).
 
-Generation, query/corpus embeddings and the database are all inside the tenant,
-so data residency item D1 is closed for analyst traffic. No third-party model
-provider ships at all since 2026-08-17: the OpenAI-API and Anthropic paths were
-removed, and scheduled Watch runs its change-summary/extraction LLM work on the
-same Databricks endpoint family, never embeddings.
+**As of 2026-08-20, by owner decision, both legs move to OpenAI:** generation to
+`gpt-5.6-terra` (`LLM_PROVIDER=openai`) and embeddings to
+`text-embedding-3-large` truncated to 1024 dimensions (`EMBEDDING_PROVIDER=openai`).
+This deliberately reopens data residency item D1 for those two legs -- an
+analyst question now leaves the tenant for a third-party model API on the
+normal path, which is the intended outcome of the decision, not a leak.
+`D1_ENFORCED` was never set in prod, so no armed guard was bypassed. The
+database is unchanged: Lakebase still holds every chunk and vector, in-tenant.
+Only the model calls moved. Scheduled Watch's change-summary/extraction LLM
+work moves with generation, never embeddings.
 
 Auth is custom cookie sessions, minted by the Go proxy.
 
@@ -516,10 +522,12 @@ Fly secrets take precedence over `fly.toml` `[env]`, so a bad provider or flag
 flip reverts with a secret:
 
 ```bash
-# repoint generation at a different VERIFIED serving endpoint (there is no
-# OpenAI rollback path since 2026-08-17; add the name to D1_ALLOWED_LLM_MODELS
-# first if D1 enforcement is armed)
-fly secrets set DATABRICKS_LLM_MODEL=<other-endpoint> -a amneal
+# rollback path since 2026-08-20: repoint generation/embeddings back to
+# Databricks (LLM_PROVIDER/EMBEDDING_PROVIDER=databricks) if the OpenAI leg
+# needs to come out of the loop; this re-closes D1 for the legs it affects.
+# Add the served model id to D1_ALLOWED_LLM_MODELS first if D1 enforcement
+# is armed (it is not, in prod, today).
+fly secrets set LLM_PROVIDER=databricks DATABRICKS_LLM_MODEL=<verified-endpoint> -a amneal
 fly secrets set GO_NATIVE_QUERY=false -a amneal    # proxy relays POST /query to Python
 fly secrets unset REGWATCH_SELECTIVE_CITATION -a amneal   # v7 policy off, v6 format stays
 fly secrets unset REGWATCH_LIVE_DRAFT -a amneal           # stop streaming the draft
@@ -527,10 +535,10 @@ fly secrets unset REGWATCH_LIVE_DRAFT -a amneal           # stop streaming the d
 
 Unset, do not set to empty. See the warning in step 3.2.
 
-Repointing `DATABRICKS_LLM_MODEL` changes which serving endpoint answers every
-analyst question, so it is an incident lever, not a tuning knob — and the
-endpoint must be verified open-weight and listed in `D1_ALLOWED_LLM_MODELS`
-before the flip when enforcement is armed.
+Repointing generation changes which endpoint answers every analyst question, so
+it is an incident lever, not a tuning knob — and if rolling back onto Databricks,
+the endpoint must be verified open-weight and listed in `D1_ALLOWED_LLM_MODELS`
+before the flip, if D1 enforcement is ever armed.
 
 **Lever 1, app rollback (bad deploy, schema unchanged).** List releases, note the
 image ref of the last good one, pin it:

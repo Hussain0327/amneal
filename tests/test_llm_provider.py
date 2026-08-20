@@ -1,10 +1,14 @@
 """get_llm_provider factory contract: explicit config or loud refusal.
 
 The Databricks provider's own behavior lives in
-tests/test_databricks_llm_provider.py; this module pins the factory rules
-introduced when the OpenAI-API/Anthropic paths were removed (2026-08-17):
+tests/test_databricks_llm_provider.py; this module pins the factory rules:
 LLM_PROVIDER has no default, unknown names refuse, and the audit label helper
 never raises.
+
+The OpenAI-API path was removed 2026-08-17 and DELIBERATELY REINSTATED by the
+2026-08-20 generation migration (gpt-5.6-terra over Chat Completions), so
+"openai" is a supported name again and is pinned positively below. Anthropic
+stays retired.
 """
 
 from __future__ import annotations
@@ -29,12 +33,38 @@ def test_unset_provider_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_retired_provider_names_refuse(monkeypatch: pytest.MonkeyPatch) -> None:
-    # openai/anthropic were removed 2026-08-17; a machine still configured
-    # with one must refuse loudly, never fall back to another provider.
-    for name in ("openai", "anthropic"):
-        _reload(monkeypatch, LLM_PROVIDER=name)
-        with pytest.raises(ValueError, match="unknown LLM provider"):
-            get_llm_provider()
+    # Anthropic was removed 2026-08-17 and stays removed; a machine still
+    # configured with it must refuse loudly, never fall back to another
+    # provider. ("openai" was un-retired by the 2026-08-20 migration -- see
+    # the two tests below.)
+    _reload(monkeypatch, LLM_PROVIDER="anthropic")
+    with pytest.raises(ValueError, match="unknown LLM provider"):
+        get_llm_provider()
+
+
+def test_openai_provider_constructs_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The 2026-08-20 migration reinstated this path; a configured machine must
+    # get a real OpenAI provider, not the retired-name ValueError.
+    _reload(
+        monkeypatch,
+        LLM_PROVIDER="openai",
+        OPENAI_API_KEY="sk-test-not-a-real-key",
+        OPENAI_LLM_MODEL="gpt-5.6-terra",
+    )
+    provider = get_llm_provider()
+    assert provider.name == "openai"
+
+
+def test_openai_requires_endpoint_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Missing credentials must name the exact env var, not fall back.
+    _reload(
+        monkeypatch,
+        LLM_PROVIDER="openai",
+        OPENAI_API_KEY="",
+        OPENAI_LLM_MODEL="",
+    )
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+        get_llm_provider()
 
 
 def test_databricks_requires_endpoint_config(monkeypatch: pytest.MonkeyPatch) -> None:

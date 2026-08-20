@@ -271,6 +271,96 @@ def _classify_uncited(text: str) -> ClaimKind:
     return "conversation"
 
 
+# 2026-08-20. "There is no dissolution requirement" ASSERTS something about the
+# world; "I don't see a fed requirement in the PSG we pulled" OBSERVES something
+# about the evidence. The lexicons cannot tell them apart -- both contain "no"
+# and "requirement" -- so the whole difference is grammatical person. Without
+# this, ordinary colleague hedging is silently dropped as an uncited source
+# fact, which is the single most common way this gate damages the product.
+_FIRST_PERSON_OBSERVATION_RE = re.compile(
+    r"(?:\bi\s+don'?t\s+see|i\s+do\s+not\s+see|i'?m\s+not\s+seeing"
+    r"|i\s+have\s+no|i'?d\b|i\s+would\b|i\s+wouldn'?t\b"
+    r"|my\s+read(?:ing)?\b|\bi'?d\s+need\b|\bi\s+need\b)",
+    re.IGNORECASE,
+)
+
+# ...but a first-person opener must never become a smuggling channel. If the
+# sentence still attributes something to a named source, the exemption is void.
+_ATTRIBUTED_ASSERTION_RE = re.compile(
+    r"\b(?:fda|the\s+agency|the\s+guidance|the\s+psg|cfr)\b[^.]{0,24}?\b"
+    r"(?:requires?|recommends?|permits?|prohibits?|states?|says?|specifies?"
+    r"|mandates?|allows?|advises?|expects?|instructs?)\b",
+    re.IGNORECASE,
+)
+
+
+# A hedge may soften a CLAIM but it does not make it an observation. "I'd say a
+# fed study is required" asserts a requirement; "I don't see a fed requirement"
+# reports what the evidence shows. The difference is a deontic PREDICATE -- a
+# copula plus a regulatory participle, or a bare modal -- so the exemption is
+# void whenever one is present, named source or not.
+_DEONTIC_PREDICATE_RE = re.compile(
+    r"\b(?:must|shall)\b"
+    r"|\b(?:is|are|was|were|be|been|being)\s+(?:not\s+)?"
+    r"(?:required|permitted|prohibited|approved|exempt|exempted|waived"
+    r"|acceptable|expected|recommended|allowed|mandated|needed)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_first_person_observation(text: str) -> bool:
+    """True when ``text`` reports the author's read, not a source's content."""
+    body = _despan(text)
+    if _ATTRIBUTED_ASSERTION_RE.search(body):
+        return False
+    if _DEONTIC_PREDICATE_RE.search(body):
+        return False
+    return _FIRST_PERSON_OBSERVATION_RE.search(body) is not None
+
+
+# "The provided passage does not state any waiver conditions" reports what THIS
+# turn's evidence contains -- the single most useful thing a colleague can say
+# about a gap. "The guidance does not require a fed study" is a proposition
+# about FDA and stays a source fact. The whole difference is evidence deixis, so
+# match only explicit references to the material in front of us.
+_EVIDENCE_DEIXIS_RE = re.compile(
+    r"\b(?:the\s+)?(?:provided|supplied|retrieved|given|above|these|this)\s+"
+    r"(?:passages?|excerpts?|documents?|texts?|sections?|material)\b"
+    r"|\bwhat\s+(?:i\s+have|was\s+retrieved|we\s+pulled|you\s+gave\s+me)\b"
+    r"|\bpassages?\s+(?:i|we)\s+(?:have|pulled|retrieved|got)\b",
+    re.IGNORECASE,
+)
+_ABSENCE_REPORT_RE = re.compile(
+    r"\b(?:does\s+not|do\s+not|doesn'?t|don'?t|did\s+not|didn'?t)\s+"
+    r"(?:state|say|mention|cover|address|include|contain|specify|list)\b"
+    r"|\bcontains?\s+no\b|\blacks?\b|\bis\s+silent\b|\bsays?\s+nothing\b"
+    r"|\bmakes?\s+no\s+mention\b|\bno\s+mention\s+of\b",
+    re.IGNORECASE,
+)
+
+
+# Presentation is a feature now, so the model legitimately writes "does **not**
+# state". Every lexicon and epistemic regex below matches on WORDS, and markdown
+# emphasis splices punctuation into the middle of them -- "does **not** state"
+# silently failed the absence-report match and the sentence was dropped as an
+# uncited source fact. Normalise emphasis away for CLASSIFICATION ONLY; the
+# rendered text the user sees is untouched.
+_EMPHASIS_RE = re.compile(r"(?:\*{1,3}|_{1,3}|`)")
+
+
+def _despan(text: str) -> str:
+    """Strip markdown emphasis so word-boundary matching sees whole words."""
+    return _EMPHASIS_RE.sub("", text or "")
+
+
+def _is_evidence_observation(text: str) -> bool:
+    """True when ``text`` reports what THIS turn's passages do or do not contain."""
+    body = _despan(text)
+    if _ATTRIBUTED_ASSERTION_RE.search(body) or _DEONTIC_PREDICATE_RE.search(body):
+        return False
+    return bool(_EVIDENCE_DEIXIS_RE.search(body) and _ABSENCE_REPORT_RE.search(body))
+
+
 def _classify_uncited_selective(text: str) -> ClaimKind:
     """v7 epistemic kind for a sentence with no trailing marker (B.10.3.3).
 
@@ -288,7 +378,9 @@ def _classify_uncited_selective(text: str) -> ClaimKind:
     100% of the time.
     """
     frame, body = frame_split(text)
-    scan = body if frame else text
+    scan = _despan(body if frame else text)
+    if _is_first_person_observation(text) or _is_evidence_observation(text):
+        return "reasoning" if frame else "conversation"
     if materiality_trigger(scan) is not None or source_assertion_trigger(scan) is not None:
         return "source_fact"
     return "reasoning" if frame else "conversation"

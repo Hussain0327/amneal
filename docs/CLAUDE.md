@@ -3,7 +3,7 @@
 This file mirrors Section 15 of the project spec. **Read this before touching
 anything else.**
 
-> **Implementation status. Last updated: 2026-08-11.**
+> **Implementation status. Last updated: 2026-08-20.**
 > REGWATCH is built and running in production. It is not a greenfield build. The
 > hard rules below are still in force. The phase-by-phase plan in the spec is
 > history: phases 0-5 are done (ingest/extract, cited Q&A, Watch, Assemble,
@@ -21,17 +21,22 @@ anything else.**
 >   database. Rows, vectors and the audit log all live there. Alembic head
 >   `0020_eval_run`. Supabase is no longer the datastore. The old dual-mode
 >   SQLite/Chroma path was deleted in R5.
-> - **LLM.** Databricks Model Serving inside the company tenant. Serving alias
->   `workspace.default.regwatch`, served model `gpt-oss-120b-080525`. One model
->   serves every role: router, synthesizer, extractor. See
->   `docs/DATABRICKS_ADOPTION_2026-07-28.md`.
-> - **Embeddings.** Databricks Model Serving as well, endpoint
->   `workspace.default.regwatch-embed`, Qwen3, 1024 dimensions, profile
->   `ep_2e7368b354d911ea3a013c3125e276c2`. All 5,494 chunks are embedded on that
->   profile (measured 2026-08-11).
-> - **Data residency (D1) is closed.** Generation, embeddings and the database
->   are all inside the company's Databricks tenant. OpenAI is the rollback path
->   only.
+> - **LLM.** Moving from Databricks Model Serving (`gpt-oss-120b-080525` on alias
+>   `workspace.default.regwatch`) to OpenAI `gpt-5.6-terra` via Chat Completions,
+>   by owner decision 2026-08-20. One model serves every role: router,
+>   synthesizer, extractor. See `docs/DATABRICKS_ADOPTION_2026-07-28.md` for the
+>   Databricks-era history.
+> - **Embeddings.** Moving from Databricks Qwen3 (endpoint
+>   `workspace.default.regwatch-embed`) to OpenAI `text-embedding-3-large`
+>   truncated to 1024 dimensions via the `dimensions` param, by the same
+>   2026-08-20 decision. All 5,494 chunks were embedded on the Qwen3 profile
+>   before the cutover (measured 2026-08-11); dimension stays 1024 so profile
+>   geometry is unaffected.
+> - **Data residency (D1) is deliberately reversed for model calls, 2026-08-20.**
+>   Generation and embeddings now leave the company's Databricks tenant for
+>   OpenAI on the normal path -- an intentional owner decision, not a leak.
+>   `D1_ENFORCED` was never set in prod, so no armed guard was bypassed. The
+>   database (Databricks Lakebase) is unchanged and stays in-tenant.
 > - **Answer policy.** v7 selective citation, live in prod. Cite the facts, talk
 >   like a person.
 >
@@ -87,20 +92,25 @@ anything else.**
 
 - **Embeddings.** Everything goes through `EmbeddingProvider`, and
   `EMBEDDING_PROVIDER` has NO default (unset refuses to boot; 2026-08-14
-  postmortem). Production uses a named embedding profile
-  (`ACTIVE_EMBEDDING_PROFILE`, migration 0015): the Databricks-hosted Qwen3
-  endpoint, 1024-dim, vectors in the `chunk_embedding` table. The `legacy`
-  `chunk.embedding` column (1536-dim) is a frozen historical space: its OpenAI
-  embedder was removed 2026-08-17, so rollback means a previously promoted
-  profile, never the legacy column. `echo` is the test provider.
-- **LLM.** `LLM_PROVIDER` has NO default either. Production runs `databricks`:
-  one Model Serving endpoint (`DATABRICKS_LLM_MODEL`) for every role. `echo` is
-  for tests. The OpenAI-API and Anthropic provider paths were removed
-  2026-08-17 (the OpenAI SDK remains only as the Databricks wire transport).
+  postmortem; the current name is `INGEST_EMBEDDING_PROVIDER`). Production uses
+  a named embedding profile (`RETRIEVAL_EMBEDDING_PROFILE`, migration 0015):
+  OpenAI `text-embedding-3-large` truncated to 1024 dims via the `dimensions`
+  parameter, vectors in the `chunk_embedding` table. There is deliberately NO
+  HNSW index on that arm -- the Lakebase branch is capped at 512 MiB and an
+  index roughly doubles vector storage, so retrieval exact-scans ~16k vectors.
+  The `legacy` `chunk.embedding` column (1536-dim) is a frozen historical
+  space; rollback means a previously promoted profile, never the legacy column.
+  `echo` is the test provider.
+- **LLM.** `LLM_PROVIDER` has NO default either. Production runs `openai`
+  (`OPENAI_LLM_MODEL`, currently `gpt-5.6-terra`, Chat Completions with
+  `reasoning_effort=low`) for every role. `echo` is for tests. The Databricks
+  provider remains implemented and is the rollback arm.
 - **Refusal threshold.** `REFUSAL_SCORE_THRESHOLD`, default 0.30. Passages
   scoring below it are withheld from the synthesizer before it runs. Note that
-  0.30 was tuned on the old OpenAI vector space and has never been validated
-  against the current Qwen3 space.
+  0.30 is the GLOBAL fallback only. Each embedding profile carries its own
+  measured floor in `REFUSAL_SCORE_THRESHOLD_BY_PROFILE`; the live
+  text-embedding-3-large@1024 profile is 0.70, measured 2026-08-20 (40 gold
+  questions scored >= 0.8224, 8 off-corpus controls scored <= 0.5787).
 - **Vector store.** pgvector, in the same Postgres database as the structured
   store. There is no other vector backend since R5.
 - **Structured store.** Postgres via `DATABASE_URL` (Lakebase in prod, a

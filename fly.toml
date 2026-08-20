@@ -57,13 +57,22 @@ kill_timeout = 30
   proxy = "regwatch-proxy"
 
 [env]
-  # EMBEDDING_PROVIDER is REQUIRED-EXPLICIT since the 2026-08-14 backfill
-  # postmortem: a process without it refuses to boot instead of guessing.
-  # Retrieval itself picks its embedder from ACTIVE_EMBEDDING_PROFILE (the
-  # Databricks Qwen3 1024-dim profile promoted 2026-07-30); this line is what
-  # the boot assert and the legacy-arm skip logic read, and qwen3 is the only
-  # production value. The former "openai" rollback arm is removed.
-  EMBEDDING_PROVIDER = "qwen3"
+  # REQUIRED-EXPLICIT since the 2026-08-14 backfill postmortem: a process
+  # without it refuses to boot instead of guessing. OpenAI as of 2026-08-20 --
+  # generation and embeddings both moved off the Databricks tenant by owner
+  # decision, while the DATABASE stays on Databricks Lakebase. Retrieval picks
+  # its embedder from RETRIEVAL_EMBEDDING_PROFILE (a Fly secret, currently the
+  # text-embedding-3-large @1024 profile); this line is what the boot assert
+  # and the legacy-arm skip logic read.
+  INGEST_EMBEDDING_PROVIDER = "openai"
+  LLM_PROVIDER = "openai"
+  # No HNSW on the profile arm: the Lakebase branch is capped at 512 MiB and an
+  # index roughly doubles vector storage. Exact scan over ~16k vectors is well
+  # inside budget and returns perfect recall.
+  PROFILE_HNSW_INDEX_REQUIRED = "false"
+  # The shadow router was a blocking pre-retrieval model call whose result was
+  # discarded. Off the critical Ask path since 2026-08-20.
+  REGWATCH_ROUTE_CALL = "off"
   AUTH_COOKIE_SECURE = "true"
   CORS_ALLOW_ORIGINS_CSV = "https://amneal.vercel.app"
   SENTRY_ENVIRONMENT = "production"

@@ -565,6 +565,10 @@ def test_bootstrap_creates_chunk_table_and_indexes(pg_db: ModuleType) -> None:
             )
         }
     assert embedding_type == "vector(1536)"
+    # Indexes the LEGACY chunk.embedding column despite the name -- a known
+    # misnomer. The 0026 rename that fixes it is parked until this changeset
+    # ships, because bumping the alembic head past prod's 0025 would stop every
+    # deployed machine from booting. Until then the live name is the only name.
     assert "hnsw" in index_defs["ix_chunk_embedding_hnsw"]
     # Must match the btree indexes the pgvector_store.Chunk model declares —
     # both bootstrap paths produce the same schema regardless of import order.

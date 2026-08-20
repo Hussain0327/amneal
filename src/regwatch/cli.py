@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket
 import sys
 from pathlib import Path
+from typing import TypeVar
 
 import typer
 import uvicorn
@@ -21,10 +22,40 @@ log = get_logger(__name__)
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="REGWATCH command line.")
 
+_T = TypeVar("_T")
+
+# Defaults for the Lakebase storage guard shared by the two backfill commands.
+# Named so the typer.Option default and the direct-call fallback in
+# _opt_value can never drift apart.
+_DEFAULT_MIN_FREE_MB = 50.0
+_DEFAULT_CHECK_EVERY_BATCHES = 5
+
 
 @app.callback()
 def _root() -> None:
     configure_logging()
+
+
+def _opt_value(value: _T, default: _T) -> _T:
+    """Resolve a parameter that may still hold its ``typer.Option`` sentinel.
+
+    Typer substitutes the real value only when it dispatches the command. The
+    ``cmd_*`` functions are also called directly (by tests and by other
+    commands), and such a call leaves any omitted parameter bound to the
+    ``OptionInfo`` object used as its default, which then explodes on the
+    first comparison or arithmetic. Resolving through here keeps both entry
+    points honest without duplicating the default.
+
+    Args:
+        value: The parameter as received by the command function.
+        default: The value to use when ``value`` is still the Typer sentinel.
+
+    Returns:
+        ``default`` if ``value`` is an unresolved Typer sentinel, else ``value``.
+    """
+    if isinstance(value, typer.models.ParameterInfo):
+        return default
+    return value
 
 
 # Phase 2 of the Go proxy rollout (docs/GO_PROXY_ROLLOUT.md). The app must
@@ -322,11 +353,31 @@ def cmd_authoritative_corpus_embed(
         min=0,
         help="Maximum authoritative chunks this run; 0 means all pending chunks.",
     ),
+    min_free_mb: float = typer.Option(
+        _DEFAULT_MIN_FREE_MB,
+        "--min-free-mb",
+        min=0.0,
+        help="Refuse to start, or continue, below this much free Lakebase headroom.",
+    ),
+    check_every_batches: int = typer.Option(
+        _DEFAULT_CHECK_EVERY_BATCHES,
+        "--check-every-batches",
+        min=1,
+        help="Re-check storage headroom after this many committed batches.",
+    ),
 ) -> None:
-    """Backfill only authoritative FDA chunks with durable batch checkpoints."""
+    """Backfill only authoritative FDA chunks with durable batch checkpoints.
+
+    Storage headroom is checked before the run starts and every
+    --check-every-batches batches; a run that falls through the floor stops
+    cleanly (already-committed batches stay durable) and is safely resumable
+    by re-running the same command.
+    """
     from dataclasses import asdict
 
     from regwatch.corpus.embeddings import (
+        StorageHeadroomError,
+        assert_storage_headroom,
         corpus_embedding_counts,
         embed_pending_corpus,
     )
@@ -337,14 +388,48 @@ def cmd_authoritative_corpus_embed(
     # COVERAGE completeness before the backfill that creates it is circular --
     # hence assert_provider=False here.
     init_db(assert_provider=False)
+    min_free_mb = _opt_value(min_free_mb, _DEFAULT_MIN_FREE_MB)
+    check_every_batches = _opt_value(check_every_batches, _DEFAULT_CHECK_EVERY_BATCHES)
+    try:
+        assert_storage_headroom(min_free_mb)
+    except StorageHeadroomError as exc:
+        rprint(f"[red]error[/red] {exc}")
+        raise typer.Exit(code=3) from exc
+
     selected = (profile_id or get_settings().active_embedding_profile or "legacy").strip()
-    processed = embed_pending_corpus(
-        selected,
-        batch_size=batch_size,
-        limit=limit,
-        on_batch=lambda count: rprint({"profile_id": selected, "embedded_this_run": count}),
-    )
+    batches = 0
+
+    def _on_batch(count: int) -> None:
+        nonlocal batches
+        rprint({"profile_id": selected, "embedded_this_run": count})
+        batches += 1
+        if batches % check_every_batches == 0:
+            assert_storage_headroom(min_free_mb)
+
+    try:
+        processed = embed_pending_corpus(
+            selected, batch_size=batch_size, limit=limit, on_batch=_on_batch
+        )
+    except StorageHeadroomError as exc:
+        rprint(f"[red]error[/red] {exc}")
+        rprint(
+            "[yellow]stopped cleanly; already-committed batches are durable, "
+            "re-run the same command to resume[/yellow]"
+        )
+        raise typer.Exit(code=3) from exc
     rprint({"processed": processed, "coverage": asdict(corpus_embedding_counts(selected))})
+
+
+# OpenAI's text-embedding-3-large is a single-representation model: unlike
+# Qwen3, which is instruction-tuned and embeds queries/documents asymmetrically
+# (QWEN3_QUERY_INSTRUCTION_VERSION), OpenAI applies no query-side instruction
+# prefix at all. The two OpenAI vocabulary constants live in
+# regwatch.process.embedder and are imported at the point of use:
+# get_embedding_provider_for_profile compares a loaded profile's
+# query_instruction_version / preprocessing_version against those exact
+# literals and REFUSES on any disagreement, so a second definition here would
+# mint profiles that the factory then rejects at load time.
+_KNOWN_EMBEDDING_PROVIDERS = frozenset({"qwen3", "openai"})
 
 
 @app.command("embedding-profile-register")
@@ -354,16 +439,35 @@ def cmd_embedding_profile_register(
         "--serving-runtime-version",
         help="Immutable serving runtime/deployment version, e.g. vllm-0.10.2.",
     ),
-    provider: str = typer.Option("qwen3", "--provider"),
-    model: str = typer.Option("", "--model", help="Defaults to QWEN_EMBEDDING_MODEL."),
-    revision: str = typer.Option("", "--revision", help="Defaults to QWEN_EMBEDDING_REVISION."),
+    provider: str = typer.Option("qwen3", "--provider", help="qwen3 or openai."),
+    model: str = typer.Option(
+        "", "--model", help="Defaults to the provider's configured *_EMBEDDING_MODEL."
+    ),
+    revision: str = typer.Option(
+        "",
+        "--revision",
+        help=(
+            "Defaults to QWEN_EMBEDDING_REVISION for qwen3. OpenAI serves versioned "
+            "model names directly and exposes no separate revision hash, so the "
+            "openai default is the model name itself."
+        ),
+    ),
     dimension: int = typer.Option(
         0,
         "--dimension",
-        help="Defaults to QWEN_EMBEDDING_DIMENSION.",
+        help="Defaults to the provider's configured *_EMBEDDING_DIMENSION.",
     ),
     dtype: str = typer.Option("float32", "--dtype"),
     normalization: str = typer.Option("l2", "--normalization"),
+    query_instruction_version: str = typer.Option(
+        "",
+        "--query-instruction-version",
+        help=(
+            "Defaults to Qwen's asymmetric retrieval instruction for qwen3, or the "
+            "no-instruction sentinel for openai. Never silently carries one "
+            "provider's default over into the other's profile."
+        ),
+    ),
     preprocessing_version: str = typer.Option("", "--preprocessing-version"),
     chunking_version: str = typer.Option("", "--chunking-version"),
     id_only: bool = typer.Option(
@@ -375,7 +479,7 @@ def cmd_embedding_profile_register(
         ),
     ),
 ) -> None:
-    """Register one immutable Qwen embedding profile and print its ID.
+    """Register one immutable embedding profile (qwen3 or openai) and print its ID.
 
     Registration is content-addressed and idempotent: the id is a hash of the
     spec, so re-running with identical arguments returns the same id and writes
@@ -384,20 +488,69 @@ def cmd_embedding_profile_register(
     from dataclasses import asdict
 
     from regwatch.process.chunker import CHUNKING_VERSION
-    from regwatch.process.embedder import QWEN3_DOCUMENT_PREPROCESSING_VERSION
+    from regwatch.process.embedder import (
+        OPENAI_DOCUMENT_PREPROCESSING_VERSION,
+        OPENAI_QUERY_INSTRUCTION_VERSION,
+        QWEN3_DOCUMENT_PREPROCESSING_VERSION,
+    )
     from regwatch.store.embedding_profiles import EmbeddingProfileSpec
     from regwatch.store.vector_store import register_embedding_profile
 
     settings = get_settings()
+    normalized_provider = provider.strip().lower()
+    if normalized_provider == "openai":
+        default_model = settings.openai_embedding_model or ""
+        default_revision = default_model
+        default_dimension = settings.openai_embedding_dimension
+        default_query_instruction_version = OPENAI_QUERY_INSTRUCTION_VERSION
+    elif normalized_provider == "qwen3":
+        default_model = settings.qwen_embedding_model
+        default_revision = settings.qwen_embedding_revision
+        default_dimension = settings.qwen_embedding_dimension
+        default_query_instruction_version = settings.qwen_embedding_query_instruction_version
+    else:
+        allowed = ", ".join(sorted(_KNOWN_EMBEDDING_PROVIDERS))
+        rprint(f"[red]error[/red] unknown --provider {provider!r}; expected one of: {allowed}")
+        raise typer.Exit(code=2)
+
+    default_preprocessing_version = (
+        OPENAI_DOCUMENT_PREPROCESSING_VERSION
+        if normalized_provider == "openai"
+        else QWEN3_DOCUMENT_PREPROCESSING_VERSION
+    )
+
+    final_model = model or default_model
+    final_revision = revision or default_revision
+    final_dimension = dimension or default_dimension
+    final_query_instruction_version = query_instruction_version or default_query_instruction_version
+    if not final_model:
+        rprint(
+            f"[red]error[/red] no --model given and no default configured "
+            f"for provider {provider!r}"
+        )
+        raise typer.Exit(code=2)
+    if not final_revision:
+        rprint(
+            f"[red]error[/red] no --revision given and no default configured "
+            f"for provider {provider!r}"
+        )
+        raise typer.Exit(code=2)
+    if final_dimension <= 0:
+        rprint(
+            f"[red]error[/red] no --dimension given and no default configured "
+            f"for provider {provider!r}"
+        )
+        raise typer.Exit(code=2)
+
     spec = EmbeddingProfileSpec(
         provider=provider,
-        model=model or settings.qwen_embedding_model,
-        revision=revision or settings.qwen_embedding_revision,
-        dimension=dimension or settings.qwen_embedding_dimension,
+        model=final_model,
+        revision=final_revision,
+        dimension=final_dimension,
         dtype=dtype,
         normalization=normalization,
-        query_instruction_version=settings.qwen_embedding_query_instruction_version,
-        preprocessing_version=(preprocessing_version or QWEN3_DOCUMENT_PREPROCESSING_VERSION),
+        query_instruction_version=final_query_instruction_version,
+        preprocessing_version=(preprocessing_version or default_preprocessing_version),
         chunking_version=chunking_version or CHUNKING_VERSION,
         serving_runtime_version=serving_runtime_version,
     )
@@ -472,14 +625,51 @@ def cmd_embedding_profile_backfill(
         min=0,
         help="Maximum chunks this run; 0 means all pending chunks.",
     ),
+    swap_from: str = typer.Option(
+        "",
+        "--swap-from",
+        help=(
+            "Old profile id to retire in the SAME transaction as each batch's "
+            "write: DELETE that profile's rows for the batch's chunk_ids, then "
+            "INSERT the new profile's rows for the same chunk_ids, so the freed "
+            "heap/TOAST pages are reused instead of the table growing "
+            "additively. Omit for the default additive backfill, where old and "
+            "new profile rows coexist."
+        ),
+    ),
+    min_free_mb: float = typer.Option(
+        _DEFAULT_MIN_FREE_MB,
+        "--min-free-mb",
+        min=0.0,
+        help="Refuse to start, or continue, below this much free Lakebase headroom.",
+    ),
+    check_every_batches: int = typer.Option(
+        _DEFAULT_CHECK_EVERY_BATCHES,
+        "--check-every-batches",
+        min=1,
+        help="Re-check storage headroom after this many committed batches.",
+    ),
 ) -> None:
-    """Backfill pending chunks with durable, resumable checkpoints."""
+    """Backfill pending chunks with durable, resumable checkpoints.
+
+    With --swap-from, each batch retires the old profile's rows for that
+    batch's chunk_ids in the same transaction as writing the new profile's
+    rows, bounding growth to one batch's worth of extra rows at a time instead
+    of the whole corpus. Storage headroom is checked before the run starts and
+    every --check-every-batches batches; a run that falls through the floor
+    stops cleanly (already-committed batches stay durable) and is safely
+    resumable by re-running the same command.
+    """
     from dataclasses import asdict
 
+    from sqlalchemy import text as sa_text
+
+    from regwatch.corpus.embeddings import StorageHeadroomError, assert_storage_headroom
     from regwatch.process.embedder import (
         embed_documents,
         get_embedding_provider_for_profile,
     )
+    from regwatch.store.db import get_engine
     from regwatch.store.vector_store import (
         get_embedding_profile,
         pending_profile_chunks,
@@ -493,23 +683,68 @@ def cmd_embedding_profile_backfill(
     # profile already be COMPLETE, which is circular -- this command is what
     # completes it, and that circle is what wedged the 2026-08-13 recovery.
     init_db(assert_provider=False)
+    min_free_mb = _opt_value(min_free_mb, _DEFAULT_MIN_FREE_MB)
+    check_every_batches = _opt_value(check_every_batches, _DEFAULT_CHECK_EVERY_BATCHES)
+    try:
+        assert_storage_headroom(min_free_mb)
+    except StorageHeadroomError as exc:
+        rprint(f"[red]error[/red] {exc}")
+        raise typer.Exit(code=3) from exc
+
     profile = get_embedding_profile(profile_id)
     provider = get_embedding_provider_for_profile(profile)
+    old_profile_id = swap_from.strip()
+    if old_profile_id:
+        get_embedding_profile(old_profile_id)  # fail on a typo before any write
+
     processed = 0
+    batches = 0
     while limit == 0 or processed < limit:
         page_size = batch_size if limit == 0 else min(batch_size, limit - processed)
         pending = pending_profile_chunks(profile_id, limit=page_size)
         if not pending:
             break
         embeddings = embed_documents(provider, [chunk.text for chunk in pending])
-        upsert_profile_embeddings(
-            profile_id,
-            [chunk.chunk_id for chunk in pending],
-            embeddings,
-            [chunk.content_hash for chunk in pending],
-        )
+        chunk_ids = [chunk.chunk_id for chunk in pending]
+        content_hashes = [chunk.content_hash for chunk in pending]
+        if old_profile_id:
+            # One transaction per batch: DELETE the old profile's rows for
+            # these chunk_ids, then INSERT the new profile's rows for the same
+            # chunk_ids, so Postgres reuses the freed heap/TOAST pages inside
+            # this table rather than growing it additively.
+            with get_engine().begin() as conn:
+                conn.execute(
+                    sa_text(
+                        "DELETE FROM chunk_embedding WHERE profile_id = :old_profile_id "
+                        "AND chunk_id = ANY(CAST(:chunk_ids AS text[]))"
+                    ),
+                    {"old_profile_id": old_profile_id, "chunk_ids": chunk_ids},
+                )
+                upsert_profile_embeddings(
+                    profile_id, chunk_ids, embeddings, content_hashes, conn=conn
+                )
+        else:
+            upsert_profile_embeddings(profile_id, chunk_ids, embeddings, content_hashes)
         processed += len(pending)
-        rprint({"profile_id": profile_id, "embedded_this_run": processed})
+        batches += 1
+        rprint(
+            {
+                "profile_id": profile_id,
+                "swap_from": old_profile_id or None,
+                "embedded_this_run": processed,
+            }
+        )
+        if batches % check_every_batches == 0:
+            try:
+                assert_storage_headroom(min_free_mb)
+            except StorageHeadroomError as exc:
+                rprint(f"[red]error[/red] {exc}")
+                rprint(
+                    f"[yellow]stopped cleanly after {processed} chunk(s) in "
+                    f"{batches} batch(es); already-committed batches are durable, "
+                    "re-run the same command to resume[/yellow]"
+                )
+                raise typer.Exit(code=3) from exc
 
     coverage = profile_embedding_coverage(profile_id)
     rprint(

@@ -33,13 +33,26 @@
 >   endpoint and never the `-pooler` host, which is now a documented release
 >   gate in `docs/DEPLOY.md`. And OLTP was never split from the vectors: rows,
 >   vectors and the audit log all moved together into one Postgres.
-> - **D1 is CLOSED.** All three legs, generation, embeddings and the database,
->   sit inside the company's own Databricks tenant. Status lines below reading
->   "D1 NOT CLOSED" or "D1 half closed" describe stages of a rollout that has
->   since finished. The guardrails from step 1 are still in the code and still
->   worth keeping: `D1_ALLOWED_LLM_MODELS` plus the runtime served-model check
->   in `generate/llm.py`, which rejects a response served by a model outside the
->   allowlist and rejects partner-hosted families outright.
+> - **D1 was CLOSED from 2026-07-30 through 2026-08-19.** All three legs,
+>   generation, embeddings and the database, sat inside the company's own
+>   Databricks tenant. Status lines below reading "D1 NOT CLOSED" or "D1 half
+>   closed" describe stages of that rollout, now history either way. The
+>   guardrails from step 1 are still in the code and still worth keeping:
+>   `D1_ALLOWED_LLM_MODELS` plus the runtime served-model check in
+>   `generate/llm.py`, which rejects a response served by a model outside the
+>   allowlist and rejects partner-hosted families outright -- though
+>   `D1_ENFORCED` was never armed in prod, so this check has never actually
+>   fired there.
+> - **Update 2026-08-20: D1 is deliberately reversed for the model-call legs.**
+>   By owner decision, generation moves from Databricks `gpt-oss-120b` to
+>   OpenAI `gpt-5.6-terra`, and embeddings move from Databricks Qwen3 to OpenAI
+>   `text-embedding-3-large` truncated to 1024 dimensions. This intentionally
+>   reopens exactly the leak this document's tables argued against below --
+>   that tradeoff was reconsidered and the owner chose it anyway. It is not a
+>   bypassed guard: `D1_ENFORCED` was never set in prod. The database leg is
+>   unchanged: Lakebase still holds every chunk and vector, in-tenant. See
+>   `docs/ARCHITECTURE.md` (Section 2 and "The D1 residency guard") for the
+>   current state.
 > - **Corpus numbers below are July figures.** Wherever this file says 10,749
 >   chunks, the live count is 5,494, measured 2026-08-11.
 > - **The cost table in section 5 is stale.** It prices the retired 12b
@@ -81,7 +94,7 @@ The Go edge adds no third egress: it does zero inference and zero vector math an
 
 **Does Databricks close both halves? Yes, on the code path, and only after both switches move.** `LLM_PROVIDER` and `EMBEDDING_PROVIDER`/`ACTIVE_EMBEDDING_PROFILE` are independent settings with nothing coupling them. Shipping the generation flip alone and calling D1 closed is exactly the security theater the requirement warns about; the internal status until the profile is promoted must read "D1 NOT CLOSED".
 
-*[Both switches moved. The profile was promoted on 2026-07-30 and the database followed. D1 is closed as of 2026-08-11.]*
+*[Both switches moved. The profile was promoted on 2026-07-30 and the database followed. D1 was closed 2026-08-11 through 2026-08-19. As of 2026-08-20 it is deliberately reversed for the two model-call legs -- see the update box at the top of this file.]*
 
 **What stays open, and it is legal, not engineering:**
 

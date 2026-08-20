@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import text as sa_text
 
+from regwatch.common.logging import get_logger
 from regwatch.corpus.lifecycle import (
     mark_embedding_failed,
     refresh_embedding_states_for_chunks,
@@ -20,6 +21,77 @@ from regwatch.store.vector_store import (
     update_legacy_chunk_embeddings,
     upsert_profile_embeddings,
 )
+
+log = get_logger(__name__)
+
+# Lakebase's logical-size cap is tier-fixed and NOT raisable via the control
+# plane API (measured 2026-08-18: branch_logical_size_limit_bytes ==
+# 536,870,912 exactly). A batched write that never checks it can exhaust the
+# last few MiB mid-run with no earlier warning; PostgreSQL's own OOM-style
+# "no space left" error surfaces mid-transaction, not before it starts.
+LAKEBASE_LOGICAL_SIZE_LIMIT_BYTES = 536_870_912
+
+
+@dataclass(frozen=True)
+class StorageHeadroom:
+    database_size_bytes: int
+    limit_bytes: int
+
+    @property
+    def free_bytes(self) -> int:
+        return max(self.limit_bytes - self.database_size_bytes, 0)
+
+    @property
+    def free_mb(self) -> float:
+        return self.free_bytes / (1024 * 1024)
+
+
+class StorageHeadroomError(RuntimeError):
+    """Free Lakebase headroom is below a caller's configured floor."""
+
+
+def storage_headroom() -> StorageHeadroom | None:
+    """Read the live database size against the Lakebase tier-fixed cap.
+
+    Returns ``None`` when the size cannot be measured. The cap is a property of
+    a Lakebase BRANCH; a disposable local or CI Postgres has no such limit, and
+    there `pg_database_size` can simply time out under the suite's tight
+    statement_timeout. Crashing there turned an unrelated CLI assertion into an
+    OperationalError and told the operator nothing useful, so an unmeasurable
+    database is reported as "unknown" and the caller decides.
+    """
+    try:
+        with get_engine().connect() as conn:
+            size = conn.execute(sa_text("SELECT pg_database_size(current_database())")).scalar_one()
+    except Exception as exc:
+        log.warning("storage_headroom_unavailable", error_type=type(exc).__name__)
+        return None
+    return StorageHeadroom(
+        database_size_bytes=int(size), limit_bytes=LAKEBASE_LOGICAL_SIZE_LIMIT_BYTES
+    )
+
+
+def assert_storage_headroom(min_free_mb: float) -> StorageHeadroom:
+    """Raise ``StorageHeadroomError`` when free headroom is below ``min_free_mb``.
+
+    Call once before a batched write starts and again every few batches: a
+    check that only runs at the top can still let a long run exhaust the cap.
+    """
+    if min_free_mb < 0:
+        raise ValueError("min_free_mb must be non-negative")
+    headroom = storage_headroom()
+    if headroom is None:
+        # Unmeasurable: not a Lakebase branch, or the probe was cancelled. The
+        # floor cannot be enforced, and refusing every write on an unmeasurable
+        # database would block local and CI runs that have no cap at all.
+        return StorageHeadroom(database_size_bytes=0, limit_bytes=LAKEBASE_LOGICAL_SIZE_LIMIT_BYTES)
+    if headroom.free_mb < min_free_mb:
+        raise StorageHeadroomError(
+            f"Lakebase free space {headroom.free_mb:.1f} MiB is below the "
+            f"configured floor {min_free_mb:.1f} MiB (database_size="
+            f"{headroom.database_size_bytes} bytes, limit={headroom.limit_bytes} bytes)"
+        )
+    return headroom
 
 
 @dataclass(frozen=True)

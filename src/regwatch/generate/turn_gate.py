@@ -111,6 +111,13 @@ MATERIALITY_WORDS: tuple[str, ...] = (
 _MATERIALITY_RE = re.compile(r"\b(?:" + "|".join(MATERIALITY_WORDS) + r")\b", re.IGNORECASE)
 
 
+# "the May 2026 draft PSG" is a DATE. Matching it as the modal "may" made the
+# gold set refuse whole answers (verdict=material_drop) because a month name
+# appeared in a citation-worthy sentence. Mask month-shaped uses before the
+# deontic scan; every real modal use ("may be waived") is unaffected.
+_MONTH_MAY_RE = re.compile(r"\bMay\b(?=\s+\d)")
+
+
 def materiality_trigger(claim_text: str) -> str | None:
     """The word that makes dropping ``claim_text`` MATERIAL, or None.
 
@@ -118,7 +125,7 @@ def materiality_trigger(claim_text: str) -> str | None:
     returned word is what gets logged. Pure and case-insensitive, matching on
     word boundaries only.
     """
-    match = _MATERIALITY_RE.search(claim_text or "")
+    match = _MATERIALITY_RE.search(_MONTH_MAY_RE.sub("", claim_text or ""))
     return match.group(0).lower() if match is not None else None
 
 
@@ -195,7 +202,9 @@ SOURCE_ASSERTION_WORDS: tuple[str, ...] = (
     "suggests",
     "waive",
     "waived",
-    "waiver",
+    "permitted",
+    "exempted",
+    "waives",
 )
 
 _SOURCE_ASSERTION_RE = re.compile(
@@ -786,19 +795,28 @@ def admit_claims(
     for index, claim in enumerate(claims):
         declared = claim.cites
         text = _sanitize_claim_text(claim.text)
-        if selective and not declared:
-            # Sanitize-keep, narrowed from the parked draft: only the leading
-            # heading marker is stripped here (link/URL markup and any
-            # residual bracket still fall through to _MARKUP_RE below).
-            # Post-launch-review fix (P2): scoped to UNCITED claims only --
-            # applying it before the cited branch fed a heading-stripped,
-            # markup-clean text straight into the lexical re-stamp corrector
-            # (correct_unknown_citation), so a claim whose only declared
-            # support was a passage number that does not exist could be
-            # re-stamped and served as a cited FDA fact on a shape v5/v6
-            # refused outright (DROP_MARKUP). A cited claim now stays on
-            # today's DROP_MARKUP path exactly as it did before v7.
-            text = _HEADING_PREFIX_RE.sub("", text, count=1)
+        layout_stripped = False
+        if selective:
+            # 2026-08-20: presentation is a PRODUCT FEATURE now. The v7 prompt
+            # tells the model to use headings and bullets when they help, and
+            # the gold set then refused 18 otherwise-correct answers purely for
+            # DROP_MARKUP on a leading "##". A heading marker carries no
+            # provenance meaning, so strip it and keep the claim -- for CITED
+            # claims too, which the previous narrowing excluded.
+            #
+            # BUT the old narrowing was also load-bearing for a second reason:
+            # DROP_MARKUP fired BEFORE the lexical corrector, so a heading-
+            # prefixed cited claim whose declared cite does not exist could not
+            # be re-stamped onto an unrelated passage by token overlap. Removing
+            # the drop without replacing that guard re-opened exactly that hole
+            # (verified: a claim citing PSG_999999,p.7 was served stamped
+            # PSG_020503,p.3). So: strip the layout, and make a claim that
+            # needed stripping ineligible for correction. Presentation gets
+            # free; the re-stamp surface is unchanged from before v7.
+            stripped = _HEADING_PREFIX_RE.sub("", text, count=1)
+            stripped = _LEADING_BULLET_RE.sub("", stripped).strip()
+            layout_stripped = stripped != text
+            text = stripped
         # A claim wearing a marker is always an assertion, regardless of what
         # the parser's kind said for it (B.10.3.4). Absent that, the parser's
         # reading governs ONLY in selective mode; every other caller keeps
@@ -836,7 +854,8 @@ def admit_claims(
         correction_method: str | None = None
         corrected: RetrievedPassage | None = None
         downgrade = False
-        if correct and reason in (DROP_NO_CITES, DROP_UNKNOWN_CITATION):
+        correctable = correct and not (layout_stripped and declared)
+        if correctable and reason in (DROP_NO_CITES, DROP_UNKNOWN_CITATION):
             if materiality_trigger(text) is not None:
                 # F1 (P0): token overlap is negation-blind -- "a fed study is
                 # NOT required" matches the passage saying it IS required -- so

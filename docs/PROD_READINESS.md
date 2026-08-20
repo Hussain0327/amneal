@@ -131,35 +131,41 @@ Two of these are now done. The numbers are kept because other docs cite them.
   origin behavior is verified there, and the analyst flows in the deploy smoke
   checklist pass.
 
-### 5. LLM provider and data handling (D1)  DONE, closed 2026-07-30
+### 5. LLM provider and data handling (D1)  REVERSED for model calls 2026-08-20
 
 - **Where:** `llm_provider` and the embedding-profile settings in
   [`config/settings.py`](../config/settings.py);
   [`DATABRICKS_ADOPTION_2026-07-28.md`](DATABRICKS_ADOPTION_2026-07-28.md);
   history in [`archive/DATA_RESIDENCY_D1.md`](archive/DATA_RESIDENCY_D1.md).
-- **Closed.** All three legs run inside the company's Databricks tenant:
+- **Was closed 2026-07-30 through 2026-08-19.** All three legs ran inside the
+  company's Databricks tenant:
   - generation: `workspace.default.regwatch`, serving `gpt-oss-120b` (served id
     `gpt-oss-120b-080525`, repointed from `gpt-oss-20b` on 2026-08-05). One model
-    serves every role: router, synthesizer, extractor.
+    served every role: router, synthesizer, extractor.
   - query and corpus embeddings: `workspace.default.regwatch-embed`, Qwen3, 1024
     dim, profile `ep_2e7368b354d911ea3a013c3125e276c2`, 5,494 of 5,494 chunks
     covered since 2026-07-30.
   - the database: Lakebase, see #2.
-  No analyst question can leave for a third-party model API at all: the
-  OpenAI-API and Anthropic provider paths were removed on 2026-08-17
-  (`generate/llm.py` holds only the Databricks provider plus the test-only
-  echo), and scheduled Watch runs its change-summary/extraction LLM work on
-  the same Databricks endpoint family. `EMBEDDING_PROVIDER` is
-  required-explicit (no default; unset refuses to boot) and `fly.toml` sets it
-  to `qwen3`; retrieval itself serves from the named profile.
-- **Guardrails:** `D1_ALLOWED_LLM_MODELS` plus a runtime served-model check in
-  `generate/llm.py` that rejects a reply served by a model outside the allowlist,
-  and always rejects the partner-hosted families (`databricks-gpt*`,
-  `databricks-claude*`, `databricks-gemini*`) even if someone allowlists them by
-  hand. That runtime check only runs when `D1_ENFORCED` is on, and it is NOT on:
-  verified 2026-08-11, the variable is in neither the Fly secrets nor `fly.toml`
-  and defaults to `false`, so the check is inert today. `D1_ALLOWED_LLM_MODELS`
-  is already set, so arming it is a one-secret change.
+- **Deliberately reversed for the two model-call legs, 2026-08-20, by owner
+  decision.** Generation moves to OpenAI `gpt-5.6-terra` (Chat Completions,
+  `reasoning_effort=low`, no `temperature`); embeddings move to OpenAI
+  `text-embedding-3-large` truncated to 1024 dimensions via the `dimensions`
+  param. An analyst question now leaves for a third-party model API on the
+  normal path -- that is the intended outcome of the decision, not a leak. The
+  database leg is untouched: Lakebase still holds every chunk and vector,
+  in-tenant, unchanged. Be precise about the split: only the model calls moved.
+  `EMBEDDING_PROVIDER` and `LLM_PROVIDER` stay required-explicit (no default;
+  unset refuses to boot).
+- **No guard was bypassed.** `D1_ALLOWED_LLM_MODELS` plus a runtime
+  served-model check in `generate/llm.py` reject a reply served by a model
+  outside the allowlist, and always reject the partner-hosted families
+  (`databricks-gpt*`, `databricks-claude*`, `databricks-gemini*`) even if
+  someone allowlists them by hand. That runtime check only runs when
+  `D1_ENFORCED` is on, and it was never on in prod: verified 2026-08-11 and
+  unchanged through the 2026-08-20 reversal, the variable is in neither the
+  Fly secrets nor `fly.toml` and defaults to `false`, so the check has been
+  inert the entire time. The guard code stays in the repo for a possible
+  future re-migration to Databricks.
 - **Residual:** serving is on the profile. Scheduled Watch is now coded to use
   that same Qwen profile and fail closed. Its change-summary/extraction LLM
   work moved on 2026-08-17 (the OpenAI provider was removed) to the repo-wide

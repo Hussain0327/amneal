@@ -224,10 +224,32 @@ def ensure_schema(engine: Engine) -> None:
     # already exists (e.g. created first by store/db.py's bootstrap DDL), and
     # both bootstrap paths must converge on the same index set (K4) regardless
     # of module-initialization order.
+    #
+    # The HNSW index is built ONLY under the legacy profile. Lakebase's branch
+    # is capped at 512 MiB (branch_logical_size_limit_bytes, tier-fixed, not
+    # raisable) and measured headroom has been as low as ~21 MiB; the index is
+    # 42 MB on disk and reads exclusively from `chunk.embedding`
+    # (retrieve/retriever.py:220-276 only queries that column when
+    # active_embedding_profile == "legacy"). Once a named profile serves
+    # retrieval, `chunk.embedding` is dead weight and rebuilding its index on
+    # every boot silently reclaims the 512 MiB budget out from under an
+    # operator running scripts/reclaim_lakebase_space.py. Unconditional
+    # `CREATE INDEX IF NOT EXISTS` is exactly why a manual `DROP INDEX` kept
+    # coming back.
+    active_profile_id = (get_settings().active_embedding_profile or "legacy").strip()
+    hnsw_ddl = (
+        (
+            # Legacy name kept deliberately: the 0026 rename is parked until this
+            # ships, so the DDL must match what is actually in prod (0025).
+            "CREATE INDEX IF NOT EXISTS ix_chunk_embedding_hnsw "
+            "ON chunk USING hnsw (embedding vector_cosine_ops) "
+            "WITH (m = 16, ef_construction = 64)",
+        )
+        if active_profile_id == "legacy"
+        else ()
+    )
     index_ddl = (
-        "CREATE INDEX IF NOT EXISTS ix_chunk_embedding_hnsw "
-        "ON chunk USING hnsw (embedding vector_cosine_ops) "
-        "WITH (m = 16, ef_construction = 64)",
+        *hnsw_ddl,
         *(
             f"CREATE INDEX IF NOT EXISTS ix_chunk_{column} ON chunk ({column})"
             for column in (
@@ -321,11 +343,16 @@ def assert_embedding_provider_dim() -> None:
             "Register/backfill a named embedding profile, then set "
             "ACTIVE_EMBEDDING_PROFILE to that profile ID."
         )
-    # A legacy provider remains useful during a profile rollout because it
-    # keeps rollback vectors current.  Once Qwen is the global provider and a
-    # named profile is active, ingest stores NULL in the legacy vector column
-    # instead of mixing Qwen vectors into the old space.
-    if not isinstance(provider, Qwen3EmbeddingProvider) and int(provider.dim) != EMBEDDING_DIM:
+    # This check only protects the LEGACY `chunk.embedding` column, whose typmod
+    # is vector(1536). It must therefore only fire when that column is what
+    # serves retrieval. The exemption used to be `isinstance(provider,
+    # Qwen3EmbeddingProvider)`, which encoded "the one non-legacy provider we
+    # happen to have" rather than the actual condition, so the OpenAI cutover
+    # (2026-08-20) tripped a guard whose own error message told the operator to
+    # do exactly what they had already done -- serve through a named profile.
+    # Key it on the active profile, which is the real invariant.
+    serves_legacy_column = active_profile_id == "legacy"
+    if serves_legacy_column and int(provider.dim) != EMBEDDING_DIM:
         raise RuntimeError(
             f"EMBEDDING_PROVIDER={provider.name!r} produces {provider.dim}-dim vectors, "
             f"but the Postgres chunk table stores vector({EMBEDDING_DIM}). "

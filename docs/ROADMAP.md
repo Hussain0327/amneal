@@ -11,17 +11,18 @@ Labels: **BLOCKER** stops external exposure. **SHOULD-HAVE** before launch.
 
 ## What changed since the 2026-08-05 stamp
 
-- **Data residency (D1) is closed.** All three legs run inside the company's own
-  Databricks tenant. Generation is `gpt-oss-120b` (served id
-  `gpt-oss-120b-080525`) behind `workspace.default.regwatch`. Query and corpus
-  embeddings are Qwen3 behind `workspace.default.regwatch-embed`, 1024 dim,
-  profile `ep_2e7368b354d911ea3a013c3125e276c2`, 5,494 of 5,494 chunks covered
-  since 2026-07-30. The database is Databricks Lakebase. No OpenAI provider
-  path exists any more (removed 2026-08-17; the OpenAI SDK survives only as
-  the Databricks wire transport), `LLM_PROVIDER`/`EMBEDDING_PROVIDER` are
-  required-explicit with no defaults, and scheduled Watch runs its
-  change-summary/extraction LLM work on the same Databricks endpoint.
-  The D1 blocker that used to head this file is gone. History lives in
+- **Data residency (D1) is deliberately reversed for model calls, 2026-08-20.**
+  From 2026-07-30 through 2026-08-19 all three legs ran inside the company's
+  own Databricks tenant: generation was `gpt-oss-120b` behind
+  `workspace.default.regwatch`, and query/corpus embeddings were Qwen3 behind
+  `workspace.default.regwatch-embed`, 1024 dim. By owner decision, generation
+  now moves to OpenAI `gpt-5.6-terra` and embeddings move to OpenAI
+  `text-embedding-3-large` truncated to 1024 dimensions. This intentionally
+  reopens D1 for those two legs; it is not a regression or a bypassed guard --
+  `D1_ENFORCED` was never set in prod. The database leg is unchanged: Lakebase
+  still holds every chunk and vector, in-tenant. `LLM_PROVIDER`/
+  `EMBEDDING_PROVIDER` stay required-explicit with no defaults.
+  History of the 2026-07-30 to 2026-08-19 closed period lives in
   [`archive/DATA_RESIDENCY_D1.md`](archive/DATA_RESIDENCY_D1.md).
 - **The answer rule changed.** "Cite or refuse" is dead as the headline rule. v7
   selective citation is live in prod: cite the facts, talk like a person.
@@ -203,8 +204,11 @@ the allowlist and always rejects the partner-hosted families (`databricks-gpt*`,
 `databricks-claude*`, `databricks-gemini*`). That runtime check only runs when
 `D1_ENFORCED` is on, and it is NOT on in prod. Verified 2026-08-11: `D1_ENFORCED`
 appears in neither `fly secrets list -a amneal` nor `fly.toml`, and the setting
-defaults to `false` (config/settings.py). So the runtime check is inert today.
-`D1_ALLOWED_LLM_MODELS` is already set, which is the only thing arming it needs.
+defaults to `false` (config/settings.py). So the runtime check is inert today,
+and it stayed inert through the 2026-08-20 OpenAI cutover -- the guard was never
+armed, so the move to OpenAI did not bypass it. `D1_ALLOWED_LLM_MODELS` allowlists
+Databricks-served model ids; it has no bearing on the OpenAI path and would need
+its own allowlist logic if the guard is ever re-armed against OpenAI models.
 
 ---
 

@@ -1,10 +1,13 @@
-"""LLMProvider interface + concrete providers (databricks, echo).
+"""LLMProvider interface + concrete providers (openai, databricks, echo).
 
 Business logic NEVER hard-codes a model name. It calls `get_llm_provider()`
-and uses the protocol below. The OpenAI-API and Anthropic provider paths were
-removed 2026-08-17: prod generation is gpt-oss-120b on a Databricks serving
-endpoint (the OpenAI SDK remains as its wire transport only), and echo is the
-test provider.
+and uses the protocol below.
+
+`openai` is the 2026-08-20 migration target: gpt-5.6-terra over the OpenAI
+Chat Completions API. `databricks` is the incumbent it replaces (gpt-oss-120b
+on a serving endpoint, reached over the same OpenAI-compatible SDK); it stays
+so the flip is a single LLM_PROVIDER change in either direction. `echo` is the
+test provider. The Anthropic path was removed 2026-08-17 and has not returned.
 """
 
 from __future__ import annotations
@@ -567,7 +570,14 @@ def _safe_chat_raw(resp: Any, *, finish_reason: Any = None) -> dict[str, Any]:
     private by default.
     """
     raw: dict[str, Any] = {}
-    for key in ("id", "object", "created", "model", "system_fingerprint", "service_tier"):
+    for key in (
+        "id",
+        "object",
+        "created",
+        "model",
+        "system_fingerprint",
+        "service_tier",
+    ):
         value = getattr(resp, key, None)
         if value is not None and isinstance(value, (str, int, float, bool)):
             raw[key] = value
@@ -980,6 +990,330 @@ class DatabricksProvider:
         )
 
 
+# ---------- OpenAI provider ----------
+class OpenAIProvider:
+    """Chat model over the OpenAI Chat Completions API (GPT-5.x).
+
+    Mirrors DatabricksProvider's structure, timeout/retry posture, error
+    handling, and logging. It diverges where the OpenAI GPT-5 wire contract
+    or the absence of gpt-oss-specific output formatting requires it:
+
+    * ``temperature`` is intentionally not sent. Some GPT-5 models support
+      sampling parameters only for specific reasoning configurations (for
+      example, reasoning disabled), while reasoning-enabled requests may
+      reject them. This provider therefore uses ``reasoning_effort`` as its
+      reasoning-control knob and drops the protocol-level ``temperature``
+      argument for consistent behavior across supported GPT-5 models.
+
+    * ``max_completion_tokens`` is used instead of the deprecated
+      ``max_tokens`` Chat Completions parameter. The limit includes both
+      visible output tokens and reasoning tokens.
+
+    * ``reasoning_effort`` is sent using the Chat Completions wire format.
+      Supported values depend on the selected model; GPT-5.6 supports
+      ``none``, ``low``, ``medium``, ``high``, ``xhigh``, and ``max``.
+
+    * No ``_StreamScrubber`` / ``_visible_answer_text`` processing is
+      applied. Those helpers handle gpt-oss/Harmony-style reasoning-channel
+      output used by the Databricks provider. This provider preserves
+      first-party OpenAI assistant content verbatim.
+
+    * No D1 residency check is performed. Under the 2026-08-20 migration
+      decision, OpenAI is treated as an off-perimeter provider. The served
+      model is logged for operational visibility rather than residency
+      enforcement.
+
+    Chat Completions is retained here for provider-interface compatibility.
+    For new OpenAI-native reasoning, tool-calling, or multi-turn workflows,
+    OpenAI recommends the Responses API.
+
+    The client and every connection input are injectable so offline tests
+    never touch a developer's environment or the ``get_settings`` cache.
+    """
+
+    name = "openai"
+
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        *,
+        base_url: str = "https://api.openai.com/v1",
+        role: str = "default",
+        reasoning_effort: str | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+        client: Any = None,
+    ) -> None:
+        self.model = model
+        self.api_key = api_key
+        self.base_url = base_url
+        self.role = role
+        self.reasoning_effort = reasoning_effort
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self._client = client
+
+    def _client_or_create(self) -> Any:
+        """Return the shared SDK client, refusing loudly without a key.
+
+        get_llm_provider already rejects an unset OPENAI_API_KEY, so this is
+        the second gate for directly-constructed providers: without it the SDK
+        would raise its own ``OpenAIError`` at import-adjacent construction
+        time with a message that says nothing about which env var to set.
+        """
+        if self._client is None:
+            if not (self.api_key or "").strip():
+                raise RuntimeError(
+                    "OPENAI_API_KEY is not set; configure the OpenAI Chat Completions transport"
+                )
+            s = get_settings()
+            timeout = self.timeout if self.timeout is not None else s.llm_timeout_s
+            max_retries = self.max_retries if self.max_retries is not None else s.llm_max_retries
+            from regwatch.common.llm_clients import shared_openai_api_client
+
+            self._client = shared_openai_api_client(
+                self.base_url,
+                self.api_key,
+                timeout=timeout,
+                max_retries=max_retries,
+            )
+        return self._client
+
+    @staticmethod
+    def _request_messages(messages: list[LLMMessage]) -> list[dict[str, str]]:
+        """One consolidated system turn, then the conversation verbatim.
+
+        Same shaping as ``DatabricksProvider._request_messages`` so the
+        migration changes the model and nothing else, minus its two
+        gpt-oss-only steps: no ``<|think|>`` handling (OpenAI has no such
+        control token, and the literal never appears outside this module) and
+        no scrub of prior assistant turns, which would silently truncate an
+        assistant turn that legitimately quotes ``</think>``.
+        """
+        system = "\n\n".join(
+            message.content for message in messages if message.role == "system"
+        ).strip()
+        request: list[dict[str, str]] = []
+        if system:
+            request.append({"role": "system", "content": system})
+        for message in messages:
+            if message.role == "system":
+                continue
+            request.append({"role": message.role, "content": message.content})
+        return request
+
+    def _request_kwargs(
+        self,
+        messages: list[LLMMessage],
+        *,
+        max_tokens: int,
+        response_format: str | None = None,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        """Build the Chat Completions payload.
+
+        Takes no ``temperature`` parameter at all: the omission is structural
+        rather than a conditional a later edit could flip back on.
+        """
+        request = self._request_messages(messages)
+        if response_format == "json":
+            # The json_object precondition -- the word "json" must appear in
+            # the messages -- is an OpenAI-API rule that the Databricks
+            # OpenAI-compatible endpoint inherits, not a Databricks quirk, so
+            # this reuses the one choke point rather than copying it. The
+            # helper's stricter USER-turn placement (a Databricks-only live
+            # finding) is a superset of what OpenAI requires, and reusing it
+            # keeps the wire prompt byte-identical across the migration so the
+            # model stays the only variable that changed.
+            request = DatabricksProvider._ensure_user_json_token(request)
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": request,
+            # max_completion_tokens, NOT max_tokens: the GPT-5 series rejects
+            # max_tokens on Chat Completions outright. The budget covers
+            # reasoning + visible tokens, so exhausting it arrives as
+            # finish_reason="length", which _raise_for_finish_reason fails on.
+            "max_completion_tokens": max_tokens,
+        }
+        # DO NOT add "temperature" here. GPT-5 reasoning models 400 on any
+        # non-default value, including an explicit 0.0, which would be a total
+        # outage on the very first call rather than a degraded answer.
+        if self.reasoning_effort is not None:
+            # Valid top-level Chat Completions parameter for the GPT-5 series.
+            # Absent key, never a null: a runtime that does not know the
+            # parameter must see no parameter at all.
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        if response_format == "json":
+            kwargs["response_format"] = {"type": "json_object"}
+        if stream:
+            kwargs["stream"] = True
+            # Without include_usage the stream carries no usage block at all,
+            # and cost_usd then persists NULL with no error and no failing
+            # test -- a silent accounting hole, not a visible break.
+            kwargs["stream_options"] = {"include_usage": True}
+        return kwargs
+
+    def _log_served(self, served: str | None) -> None:
+        """Record which model actually answered. Ops visibility, not a gate.
+
+        OPENAI_LLM_MODEL can name an alias that resolves to a dated snapshot,
+        so the response is the only place the answering model appears. There
+        is deliberately no residency check on this path (see the class
+        docstring); model names only -- this line must never carry prompt
+        content.
+        """
+        _log_served_model_once(self.model, (served or "").strip() or "<unreported>")
+
+    @staticmethod
+    def _first_choice(resp: Any) -> Any:
+        choices = getattr(resp, "choices", None)
+        if not choices:
+            raise RuntimeError("openai chat completion returned no choices")
+        return choices[0]
+
+    @staticmethod
+    def _raise_for_finish_reason(finish_reason: Any) -> None:
+        if finish_reason in ("length", "content_filter"):
+            raise RuntimeError(
+                f"openai chat completion terminated with finish_reason={finish_reason}"
+            )
+
+    def complete(
+        self,
+        messages: list[LLMMessage],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+        response_format: str | None = None,
+    ) -> LLMResponse:
+        # Accepted to satisfy the LLMProvider protocol and dropped on purpose:
+        # see the class docstring. Discarding it here makes the drop explicit
+        # instead of an omission a reader could mistake for an oversight.
+        del temperature
+        client = self._client_or_create()
+        kwargs = self._request_kwargs(
+            messages,
+            max_tokens=max_tokens,
+            response_format=response_format,
+        )
+        # The timeout and retry budget live on the client (_client_or_create):
+        # the SDK retries max_retries times and then raises APITimeoutError.
+        # Deliberately NOT caught here -- it propagates to grounded_qa's
+        # provider boundary, which degrades the turn to qa_provider_error
+        # exactly as it already does for Databricks.
+        resp = client.chat.completions.create(**kwargs)
+        served = getattr(resp, "model", None)
+        self._log_served(served)
+        choice = self._first_choice(resp)
+        finish_reason = getattr(choice, "finish_reason", None)
+        self._raise_for_finish_reason(finish_reason)
+        message = getattr(choice, "message", None)
+        candidate = _chat_content_text(getattr(message, "content", None))
+        # _extract_json_blob is pure slicing and provider-agnostic: json_object
+        # mode makes a fenced or prose-wrapped payload unlikely, not impossible,
+        # and slicing can never mint a token the model did not emit. The prose
+        # branch only trims whitespace -- no reasoning scrub, see the docstring.
+        text = _extract_json_blob(candidate) if response_format == "json" else candidate.strip()
+        return LLMResponse(
+            text=text,
+            model=served or self.model,
+            raw=_safe_chat_raw(resp, finish_reason=finish_reason),
+            usage=_usage_from(resp, "prompt_tokens", "completion_tokens"),
+        )
+
+    def stream(
+        self,
+        messages: list[LLMMessage],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> Iterator[LLMStreamChunk]:
+        """True incremental streaming, yielding the same LLMStreamChunk type
+        DatabricksProvider yields so the SSE bridge in api/main.py is untouched.
+
+        No scrubber runs: OpenAI emits no inline reasoning markers, and
+        ``delta.reasoning_content`` / ``reasoning`` / ``thinking`` extension
+        fields are ignored by ``_chat_content_text``, so private reasoning can
+        never reach a delta. After the first yielded delta the buffered
+        fallback is DISABLED -- a re-send would repaint the whole answer.
+        """
+        del temperature  # Never sent; see the class docstring.
+        client = self._client_or_create()
+        try:
+            events = client.chat.completions.create(
+                **self._request_kwargs(messages, max_tokens=max_tokens, stream=True)
+            )
+        except Exception:
+            # Nothing yielded yet, so a buffered re-send is safe. Mirrors the
+            # Databricks no-SSE fallback; on a permanent error (bad key, bad
+            # model) the re-send raises the same error and the turn fails
+            # loudly, one extra round-trip later.
+            yield from _buffered_stream(self, messages, temperature=0.0, max_tokens=max_tokens)
+            return
+        parts: list[str] = []
+        usage = LLMUsage()
+        finish_reason: Any = None
+        last_event: Any = None
+        served: str | None = None
+        logged = False
+        yielded = False
+        saw_choice = False
+        iterator = iter(events)
+        while True:
+            try:
+                event = next(iterator)
+            except StopIteration:
+                break
+            except Exception:
+                if yielded:
+                    raise
+                yield from _buffered_stream(self, messages, temperature=0.0, max_tokens=max_tokens)
+                return
+            last_event = event
+            reported = getattr(event, "model", None)
+            if reported:
+                served = reported
+                if not logged:
+                    self._log_served(reported)
+                    logged = True
+            event_usage = _usage_from(event, "prompt_tokens", "completion_tokens")
+            if event_usage.input_tokens is not None:
+                usage.input_tokens = event_usage.input_tokens
+            if event_usage.output_tokens is not None:
+                usage.output_tokens = event_usage.output_tokens
+            choices = getattr(event, "choices", None) or []
+            if not choices:
+                # The include_usage terminal event carries usage and no
+                # choices; it must not be mistaken for an empty stream.
+                continue
+            saw_choice = True
+            choice = choices[0]
+            candidate_finish = getattr(choice, "finish_reason", None)
+            if candidate_finish is not None:
+                finish_reason = candidate_finish
+            delta = getattr(choice, "delta", None)
+            raw = _chat_content_text(getattr(delta, "content", None))
+            if raw:
+                parts.append(raw)
+                yielded = True
+                yield LLMStreamChunk(delta=raw)
+        if not logged:
+            self._log_served(served)
+        if not saw_choice:
+            raise RuntimeError("openai chat stream returned no choices")
+        self._raise_for_finish_reason(finish_reason)
+        yield LLMStreamChunk(
+            done=True,
+            response=LLMResponse(
+                text="".join(parts).strip(),
+                model=served or self.model,
+                raw=_safe_chat_raw(last_event, finish_reason=finish_reason),
+                usage=usage,
+            ),
+        )
+
+
 def get_llm_provider(name: str | None = None, *, role: str = "default") -> LLMProvider:
     """Build the configured LLM provider, refusing when none is configured.
 
@@ -993,10 +1327,45 @@ def get_llm_provider(name: str | None = None, *, role: str = "default") -> LLMPr
     if not name:
         raise RuntimeError(
             "LLM_PROVIDER is not set and has no default. Set "
-            "LLM_PROVIDER=databricks (prod) or LLM_PROVIDER=echo (tests only)."
+            "LLM_PROVIDER=openai or LLM_PROVIDER=databricks (prod), or "
+            "LLM_PROVIDER=echo (tests only)."
         )
     if name == "echo":
         return EchoLLMProvider()
+    if name == "openai":
+        openai_key = getattr(s, "openai_api_key", None)
+        openai_model = getattr(s, "openai_llm_model", None)
+        # base_url has a real default in Settings; getattr keeps a
+        # SimpleNamespace test settings object from becoming an AttributeError
+        # at provider build, exactly as on the Databricks branch below.
+        openai_base_url = getattr(s, "openai_base_url", None) or "https://api.openai.com/v1"
+        missing = [
+            env_name
+            for env_name, value in (
+                ("OPENAI_API_KEY", openai_key),
+                ("OPENAI_LLM_MODEL", openai_model),
+            )
+            if not isinstance(value, str) or not value.strip()
+        ]
+        if missing:
+            raise RuntimeError(f"{', '.join(missing)} not set; configure the OpenAI LLM provider")
+        # Narrowing for mypy only; the `missing` check above is the real gate.
+        assert isinstance(openai_key, str)  # noqa: S101
+        assert isinstance(openai_model, str)  # noqa: S101
+        openai_timeout = getattr(s, "openai_timeout_s", None)
+        openai_retries = getattr(s, "openai_max_retries", None)
+        return OpenAIProvider(
+            model=openai_model,
+            api_key=openai_key,
+            base_url=openai_base_url,
+            role=role,
+            reasoning_effort=getattr(s, "openai_reasoning_effort", None),
+            # Explicit None checks, not `or`: 0.0 / 0 are meaningful values a
+            # truthiness fallback would silently replace with the generic
+            # llm_* budget.
+            timeout=openai_timeout if openai_timeout is not None else s.llm_timeout_s,
+            max_retries=openai_retries if openai_retries is not None else s.llm_max_retries,
+        )
     if name == "databricks":
         base_url = getattr(s, "databricks_llm_base_url", None)
         token = getattr(s, "databricks_llm_token", None)
@@ -1066,11 +1435,13 @@ def current_model_name(role: str = "default") -> str:
     misconfigured provider yields the honest label "unconfigured" here and
     the turn itself fails at get_llm_provider with the real remediation.
     """
-    del role  # The Databricks path serves one model for every role.
+    del role  # Both real providers serve one model for every role.
     s = get_settings()
     provider = (s.llm_provider or "").strip().lower()
     if provider == "echo":
         return "echo"
+    if provider == "openai":
+        return getattr(s, "openai_llm_model", None) or "unconfigured"
     if provider == "databricks":
         return getattr(s, "databricks_llm_model", None) or "unconfigured"
     return "unconfigured"

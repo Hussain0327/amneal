@@ -19,7 +19,13 @@ from pathlib import Path
 from typing import Literal
 
 from dotenv import dotenv_values
-from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # OpenAI dated-snapshot suffix: what follows "<alias>-" in the server-reported
@@ -52,7 +58,11 @@ SYNTH_MAX_TOKENS_CEILING = 6000
 # indistinguishable at the call site, but they carry the partner's retention
 # terms, which is precisely the exposure D1 exists to remove. Matched
 # case-insensitively as a prefix; see the _check_d1_enforcement validator.
-_D1_PARTNER_MODEL_PREFIXES = ("databricks-gpt", "databricks-claude", "databricks-gemini")
+_D1_PARTNER_MODEL_PREFIXES = (
+    "databricks-gpt",
+    "databricks-claude",
+    "databricks-gemini",
+)
 
 # OpenAI-compatible reasoning budget levels accepted by the Databricks AI
 # Gateway. Unset (None) means "do not send the parameter at all", which is the
@@ -122,7 +132,9 @@ class Settings(BaseSettings):
     # set the new name wins (AliasChoices order, warned about below).
     embedding_provider: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("INGEST_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER"),
+        validation_alias=AliasChoices(
+            "INGEST_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER"
+        ),
     )
     llm_provider: str | None = None
     # Private Qwen3 embedding endpoint. This is deliberately a separate
@@ -180,7 +192,18 @@ class Settings(BaseSettings):
     # working as a deprecated alias, and the new name wins when both are set.
     active_embedding_profile: str = Field(
         default="legacy",
-        validation_alias=AliasChoices("RETRIEVAL_EMBEDDING_PROFILE", "ACTIVE_EMBEDDING_PROFILE"),
+        validation_alias=AliasChoices(
+            "RETRIEVAL_EMBEDDING_PROFILE", "ACTIVE_EMBEDDING_PROFILE"
+        ),
+    )
+    refusal_score_threshold_by_profile: dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Per-embedding-profile INV-2 cosine floor. A threshold is a property "
+            "of one model's score distribution, so the Qwen3-Embedding cutover "
+            "gets its own calibrated entry rather than inheriting the legacy "
+            "0.30. An absent profile falls back to refusal_score_threshold."
+        ),
     )
     embedding_shadow_profile: str | None = None
     # Serving normally requires the active profile's deterministic HNSW index
@@ -222,6 +245,34 @@ class Settings(BaseSettings):
     # older measurement, not a fresh one. Unset ("") sends no parameter, for
     # endpoints that reject it.
     databricks_reasoning_effort: str | None = "low"
+
+    # OpenAI Chat Completions + embeddings (migration target: gpt-5.6-terra
+    # generation, text-embedding-3-large @ 1024 dims via Matryoshka
+    # truncation). Mirrors the databricks_llm_* / qwen_embedding_* fields
+    # above -- same validator wiring, same blank-env-is-unset handling.
+    openai_api_key: str | None = None
+    openai_base_url: str = "https://api.openai.com/v1"
+    # No default: this is the OpenAI model NAME (e.g. gpt-5.6-terra), and a
+    # wrong default would fail every synthesis the same way an unset
+    # databricks_llm_model does. Unset instead, so get_llm_provider's
+    # `missing` check fails the turn loudly.
+    openai_llm_model: str | None = None
+    # Reasoning models reject a non-default temperature, so this is the only
+    # knob the OpenAI provider exposes over reasoning depth. Validated
+    # against _REASONING_EFFORTS below, exactly like
+    # databricks_reasoning_effort. Unset sends no parameter.
+    openai_reasoning_effort: str | None = None
+    openai_embedding_model: str | None = None
+    # 1024 is the profile prod runs (Matryoshka truncation of the model's
+    # native 3072-dim via the API's `dimensions` param), not the model
+    # default. Changing it here changes what gets folded into the embedding
+    # profile fingerprint -- same caveat as qwen_embedding_dimension above.
+    openai_embedding_dimension: int = 1024
+    # OpenAI's per-request input cap, not a tuning knob like
+    # qwen_embedding_batch_size.
+    openai_embedding_batch_size: int = 256
+    openai_timeout_s: float = 60.0
+    openai_max_retries: int = 3
     # v6 prose synthesis (slm-layer Phase A). False = the v5 claims-JSON
     # synthesis contract, byte-identical to before the flag existed. True =
     # prose + [n] markers parsed server-side (generate/prose_turn.py) and
@@ -236,7 +287,9 @@ class Settings(BaseSettings):
     # 2026-08-10). Dark by default; effective only when prose synthesis is
     # also on AND the request opts in. Alias so the prod flip is a REGWATCH_*
     # Fly secret like the prose flag. ON in prod.
-    live_draft_enabled: bool = Field(default=False, validation_alias="REGWATCH_LIVE_DRAFT")
+    live_draft_enabled: bool = Field(
+        default=False, validation_alias="REGWATCH_LIVE_DRAFT"
+    )
     # Conversational route-call rollout. ``off``/``shadow`` are unchanged from
     # PR11b: no call, or observe-only. PR12 gave ``live`` a real meaning --
     # generate/grounded_qa.py's no-product branch may carry a session product
@@ -325,6 +378,10 @@ class Settings(BaseSettings):
         "databricks_llm_token",
         "databricks_reasoning_effort",
         "embedding_shadow_profile",
+        "openai_api_key",
+        "openai_llm_model",
+        "openai_reasoning_effort",
+        "openai_embedding_model",
         mode="before",
     )
     @classmethod
@@ -406,10 +463,19 @@ class Settings(BaseSettings):
         # value, and a blank must mean "default (required)", never a
         # bool_parsing crash at import.
         "profile_hnsw_index_required",
+        # Same CI-templating trap as qwen_embedding_model/_dimension above:
+        # an unconfigured OPENAI_BASE_URL/_EMBEDDING_DIMENSION/_BATCH_SIZE
+        # arrives here as "", which would otherwise fail int parsing or the
+        # https:// check at import time.
+        "openai_base_url",
+        "openai_embedding_dimension",
+        "openai_embedding_batch_size",
         mode="before",
     )
     @classmethod
-    def _blank_env_falls_back_to_default(cls, v: object, info: ValidationInfo) -> object:
+    def _blank_env_falls_back_to_default(
+        cls, v: object, info: ValidationInfo
+    ) -> object:
         """An env var set to "" means "not configured", not "override with empty".
 
         CI templating renders an unset value as the EMPTY STRING rather than
@@ -429,7 +495,7 @@ class Settings(BaseSettings):
             return cls.model_fields[str(info.field_name)].default
         return v
 
-    @field_validator("qwen_embedding_base_url", "databricks_llm_base_url")
+    @field_validator("qwen_embedding_base_url", "databricks_llm_base_url", "openai_base_url")
     @classmethod
     def _require_https_endpoint(cls, v: str | None) -> str | None:
         """Private inference endpoints must be TLS.
@@ -468,7 +534,9 @@ class Settings(BaseSettings):
     @classmethod
     def _check_qwen_embedding_request_token_budget(cls, v: int) -> int:
         if not 1 <= v <= 65536:
-            raise ValueError("QWEN_EMBEDDING_REQUEST_TOKEN_BUDGET must be in [1, 65536]")
+            raise ValueError(
+                "QWEN_EMBEDDING_REQUEST_TOKEN_BUDGET must be in [1, 65536]"
+            )
         return v
 
     @field_validator("databricks_reasoning_effort")
@@ -484,6 +552,36 @@ class Settings(BaseSettings):
                 f"{', '.join(_REASONING_EFFORTS)} (or empty to send no parameter)"
             )
         return effort
+
+    @field_validator("openai_reasoning_effort")
+    @classmethod
+    def _check_openai_reasoning_effort(cls, v: str | None) -> str | None:
+        """Reject a typo at boot rather than 400-ing every synthesis at runtime."""
+        if v is None:
+            return None
+        effort = v.strip().lower()
+        if effort not in _REASONING_EFFORTS:
+            raise ValueError(
+                "OPENAI_REASONING_EFFORT must be one of "
+                f"{', '.join(_REASONING_EFFORTS)} (or empty to send no parameter)"
+            )
+        return effort
+
+    @field_validator("openai_embedding_dimension")
+    @classmethod
+    def _check_openai_embedding_dimension(cls, v: int) -> int:
+        # 3072 is text-embedding-3-large's native size; we run 1024 via
+        # Matryoshka truncation, but a smaller custom profile is still valid.
+        if not 32 <= v <= 3072:
+            raise ValueError("OPENAI_EMBEDDING_DIMENSION must be in [32, 3072]")
+        return v
+
+    @field_validator("openai_embedding_batch_size")
+    @classmethod
+    def _check_openai_embedding_batch_size(cls, v: int) -> int:
+        if not 1 <= v <= 2048:
+            raise ValueError("OPENAI_EMBEDDING_BATCH_SIZE must be in [1, 2048]")
+        return v
 
     @field_validator("synthesizer_max_tokens")
     @classmethod
@@ -547,7 +645,9 @@ class Settings(BaseSettings):
         on_databricks_llm = provider == "databricks"
         # "legacy" is the unversioned OpenAI vector space; any other value is a
         # registered profile, which selects its own (private) query embedder.
-        on_profile_embedding = (self.active_embedding_profile or "").strip().lower() != "legacy"
+        on_profile_embedding = (
+            self.active_embedding_profile or ""
+        ).strip().lower() != "legacy"
         if on_databricks_llm != on_profile_embedding:
             raise ValueError(
                 "D1_ENFORCED: generation and query embedding must move together. "
@@ -625,11 +725,17 @@ class Settings(BaseSettings):
 
     # ---------- Company ----------
     company_name: str = "Amneal"
-    company_applicant_aliases: str = "AMNEAL PHARMS,AMNEAL PHARMACEUTICALS,AMNEAL PHARMS LLC"
+    company_applicant_aliases: str = (
+        "AMNEAL PHARMS,AMNEAL PHARMACEUTICALS,AMNEAL PHARMS LLC"
+    )
 
     @property
     def applicant_aliases(self) -> list[str]:
-        return [s.strip().upper() for s in self.company_applicant_aliases.split(",") if s.strip()]
+        return [
+            s.strip().upper()
+            for s in self.company_applicant_aliases.split(",")
+            if s.strip()
+        ]
 
     # ---------- Retrieval / refusal ----------
     # Corpus cutover is a reversible configuration change. ``legacy`` keeps
@@ -671,7 +777,9 @@ class Settings(BaseSettings):
     # are one piece of evidence, not eight. Similarity is text-based
     # (retrieve/diversity.py), so the flip costs no extra embedding or query.
     # Aliased so the flip reads as a REGWATCH_* Fly secret like the flags above.
-    mmr_diversity_enabled: bool = Field(default=False, validation_alias="REGWATCH_MMR_DIVERSITY")
+    mmr_diversity_enabled: bool = Field(
+        default=False, validation_alias="REGWATCH_MMR_DIVERSITY"
+    )
     # Legacy alias, populated from RETRIEVAL_TOP_K if set (backwards compat).
     retrieval_top_k: int | None = None
     # Cosine floor: passages below it are withheld from the synthesizer, so a
@@ -769,7 +877,9 @@ class Settings(BaseSettings):
     processed_dir: Path = Path("./data/processed")
 
     # ---------- Crawler ----------
-    user_agent: str = "RegWatch/0.1 (clinical-regulatory-affairs; +https://example.invalid/contact)"
+    user_agent: str = (
+        "RegWatch/0.1 (clinical-regulatory-affairs; +https://example.invalid/contact)"
+    )
     http_timeout_s: float = 30.0
     # The authoritative corpus worker uses this bounded concurrency after
     # schema initialization. Request starts remain host-paced by
@@ -863,7 +973,9 @@ class Settings(BaseSettings):
     fda_corpus_ocr_dpi: int = Field(default=200, ge=72, le=400)
     fda_corpus_ocr_page_timeout_s: float = Field(default=60.0, gt=0, le=300)
     fda_corpus_ocr_max_pages: int = Field(default=500, ge=1, le=3_000)
-    fda_corpus_ocr_max_pixels: int = Field(default=20_000_000, ge=1_000_000, le=100_000_000)
+    fda_corpus_ocr_max_pixels: int = Field(
+        default=20_000_000, ge=1_000_000, le=100_000_000
+    )
     fda_corpus_ocr_max_output_bytes: int = Field(
         default=10 * 1024 * 1024,
         ge=64 * 1024,
@@ -903,7 +1015,9 @@ class Settings(BaseSettings):
     # The Word template the CRA White Paper populator fills (python-docx). It is
     # gitignored but present on a real deployment; when absent (CI), the docx
     # writer generates a structurally-equivalent document from scratch.
-    whitepaper_template_path: Path = Path("./CRA White Paper Template May 2026 - Raja.docx")
+    whitepaper_template_path: Path = Path(
+        "./CRA White Paper Template May 2026 - Raja.docx"
+    )
     # Prod machines have no persistent volume, so the gitignored template never
     # survives a deploy and every prod render fell back. When set (a long-lived
     # signed URL to a private object-store copy of the template, delivered as a

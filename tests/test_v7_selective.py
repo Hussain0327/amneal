@@ -63,8 +63,9 @@ def test_v7_identity_pins() -> None:
     assert prompts.GROUNDED_QA_PROMPT_V7.version == "7"
     assert prompts.GROUNDED_QA_PROMPT_V7.sha256 != prompts.GROUNDED_QA_PROMPT.sha256
     assert prompts.GROUNDED_QA_PROMPT_V7.sha256 != prompts.GROUNDED_QA_PROMPT_V6.sha256
-    roles = [role for role, _ in prompts.GROUNDED_QA_EXEMPLARS_V7]
-    assert roles == ["user", "assistant"] * 3
+    # Zero-shot by decision (2026-08-20). Re-adding a pair is deliberate and
+    # must come with a gold-set result, so pin the empty tuple.
+    assert prompts.GROUNDED_QA_EXEMPLARS_V7 == ()
 
 
 # ---------- T-2: no sentinel anywhere ----------
@@ -91,13 +92,24 @@ def test_v7_prompt_carries_no_no_evidence_sentinel() -> None:
 # the tg-identity half is added in S2 once REASONING_FRAME_PREFIXES moves) ----------
 
 
-def test_v7_system_prompt_pins_every_reasoning_frame_opener() -> None:
-    """A frame the parser does not recognize is not a hedge, it is an uncited
-    claim -- so every opener the parser accepts must appear verbatim in the
-    prompt that teaches the model to use it."""
-    lowered = prompts.GROUNDED_QA_SYSTEM_V7.lower()
-    for prefix in pt.REASONING_FRAME_PREFIXES:
-        assert prefix in lowered
+def test_v7_gate_authored_frame_is_recognized_by_its_own_parser() -> None:
+    """The prompt no longer teaches the frame openers (2026-08-20).
+
+    Under v7 an unframed uncited sentence classifies as CONVERSATION and is
+    ADMITTED -- ``_classify_uncited_selective`` only returns ``source_fact``
+    when materiality or source-assertion fires, so a frame was never required
+    for admission. It only relabels conversation -> reasoning.
+
+    What still MUST hold is narrower and real: turn_gate authors
+    ``REASONING_FRAME`` itself when it corrects a claim, so that frame has to
+    be recognized by the same parser, or the gate's own output would be
+    reclassified as an uncited source fact and dropped.
+    """
+    assert tg.REASONING_FRAME.lower().startswith(tg.REASONING_FRAME_PREFIXES)
+    # Provenance is preserved without the ritual: an uncited sentence that
+    # asserts what a source says is still a source_fact, framed or not.
+    assert pt._classify_uncited_selective("FDA requires a fasting study") == "source_fact"
+    assert pt._classify_uncited_selective("I would check the BE guidance next") == "conversation"
 
 
 def test_frame_prefixes_moved_to_turn_gate_and_prose_turn_reexports_it() -> None:

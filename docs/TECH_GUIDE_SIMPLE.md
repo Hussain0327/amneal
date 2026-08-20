@@ -26,20 +26,28 @@ Verified against the live system on 2026-08-11.
 - Alembic head in the live DB is `0020_eval_run`, which matches the repo. Nothing
   pending.
 - 5,494 chunk rows in the corpus.
-- Generation model: **`gpt-oss-120b`** (served id `gpt-oss-120b-080525`),
-  open weight, served from the company Databricks tenant at
-  `workspace.default.regwatch`. One model does every role: router, synthesizer,
-  extractor. `DATABRICKS_REASONING_EFFORT=low`.
-- Embeddings: **Databricks Qwen3** at `workspace.default.regwatch-embed`, 1024
-  dimensions, active profile `ep_2e7368b354d911ea3a013c3125e276c2`. All 5,494
-  chunks are embedded on that profile, so coverage is 100 percent.
-- No normal analyst turn uses OpenAI. Its provider remains the tested interactive
-  LLM rollback; scheduled Watch has a separate scoped key for public-document
-  change summaries and extraction, never embeddings.
+- Generation model: **moving to OpenAI `gpt-5.6-terra`** (Chat Completions,
+  `reasoning_effort=low`) by owner decision 2026-08-20. One model does every
+  role: router, synthesizer, extractor. Before the cutover, prod ran
+  `gpt-oss-120b` (served id `gpt-oss-120b-080525`), open weight, served from
+  the company Databricks tenant at `workspace.default.regwatch`; that remains
+  the rollback path.
+- Embeddings: **moving to OpenAI `text-embedding-3-large`**, truncated to 1024
+  dimensions via the `dimensions` param, by the same decision. Before the
+  cutover, prod ran Databricks Qwen3 at `workspace.default.regwatch-embed`,
+  1024 dimensions, active profile `ep_2e7368b354d911ea3a013c3125e276c2`, with
+  all 5,494 chunks embedded on it (100 percent coverage).
+- The normal analyst turn now uses OpenAI for both legs, by design. Scheduled
+  Watch has a separate scoped key for public-document change summaries and
+  extraction, never embeddings.
 
-Data residency is closed. Generation, embeddings, and the database all sit
-inside the company's Databricks tenant, so a normal analyst question never
-leaves for a third-party model API.
+Data residency for the model-call legs was deliberately reversed on 2026-08-20,
+by owner decision: generation and embeddings moved from Databricks to OpenAI
+(`gpt-5.6-terra` and `text-embedding-3-large` @ 1024-dim). A normal analyst
+question now leaves the company's Databricks tenant for OpenAI on the normal
+path -- intentional, not a leak. The database is unchanged: it still sits
+inside the company's Databricks tenant (Lakebase), holding every chunk and
+vector.
 
 Main stack:
 

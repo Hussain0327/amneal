@@ -54,9 +54,13 @@ superseded citation. The scope bar's picker validates a product through
 `POST /resolve`, which is entity resolution only: not an LLM turn, and it writes
 no audit row.
 
-Generation and embeddings both run on Databricks Model Serving inside the company
-tenant, and the production Postgres is Databricks Lakebase. All three legs sit
-in-tenant, so the D1 data-residency question is closed.
+The production Postgres is Databricks Lakebase, unchanged and still in-tenant.
+Generation and embeddings moved from Databricks Model Serving to OpenAI
+(`gpt-5.6-terra` and `text-embedding-3-large` @ 1024-dim) on 2026-08-20 by
+owner decision, which deliberately reopens the D1 data-residency question for
+those two legs -- the database leg stays in-tenant. `D1_ENFORCED` was never set
+in prod, so no armed guard was bypassed. See [Section 2 of
+`ARCHITECTURE.md`](ARCHITECTURE.md#2-deployment-topology).
 
 The answer policy is **cite the facts, talk like a person** (v7 selective
 citation, live in prod). A sentence that states what FDA guidance says must carry
@@ -134,7 +138,7 @@ blocker as open. `ROADMAP.md` and `PROD_READINESS.md` own open work.
 Six docs moved to `archive/` on 2026-08-11 because the questions they were
 written to answer have since been settled:
 
-- [`archive/DATA_RESIDENCY_D1.md`](archive/DATA_RESIDENCY_D1.md) - D1 is closed. Generation, embeddings, and the database are all in-tenant now
+- [`archive/DATA_RESIDENCY_D1.md`](archive/DATA_RESIDENCY_D1.md) - D1 was closed 2026-07-30 through 2026-08-19 (generation, embeddings, and the database all in-tenant). As of 2026-08-20 it is deliberately reversed for the model-call legs by owner decision: generation and embeddings moved to OpenAI. The database leg is unchanged and still in-tenant
 - [`archive/OPEN_MODEL_ROLLOUT.md`](archive/OPEN_MODEL_ROLLOUT.md) - the embedding-profile rollout finished on 2026-07-30
 - [`archive/THRESHOLD_VALIDATION_2026-06-25.md`](archive/THRESHOLD_VALIDATION_2026-06-25.md) - the 0.30 refusal threshold. Still unvalidated against the current vector space, tracked in `ROADMAP.md`
 - [`archive/WHITEPAPER_RUNS_PHASE2_DESIGN.md`](archive/WHITEPAPER_RUNS_PHASE2_DESIGN.md) - saved runs and the analyst overlay, shipped

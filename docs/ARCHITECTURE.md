@@ -82,14 +82,22 @@ port; there are two Fly process groups, `proxy` and `app`, declared in
 `fly.toml`. The schema self-migrates on every deploy through the Fly
 `release_command` (section 9).
 
-Generation and embeddings both run on Databricks Model Serving inside the
-company's own Databricks tenant, and the production database is Databricks
-Lakebase. That closes the data-residency question, D1: an analyst's question no
-longer leaves the tenant on the normal path. See
+The production database is Databricks Lakebase, unchanged and still in-tenant.
+Generation and embeddings, which ran on Databricks Model Serving inside the
+company's own Databricks tenant from 2026-07-30 through 2026-08-19, moved to
+OpenAI (`gpt-5.6-terra` for generation, `text-embedding-3-large` truncated to
+1024 dimensions for embeddings) on 2026-08-20 by owner decision. That
+deliberately reopens the data-residency question, D1, for the two model-call
+legs: an analyst's question now leaves the tenant for a third-party model API on
+the normal path. `D1_ENFORCED` was never set in prod, so no armed guard was
+bypassed by the move -- see [Section on the D1 residency
+guard](#the-d1-residency-guard) below. See
 [`DATABRICKS_ADOPTION_2026-07-28.md`](DATABRICKS_ADOPTION_2026-07-28.md) for the
-adoption call and [`archive/DATA_RESIDENCY_D1.md`](archive/DATA_RESIDENCY_D1.md)
-for the original threat model. Note that the adoption doc argued Supabase should
-stay; that call was reversed and the move to Lakebase already happened.
+Databricks adoption call and
+[`archive/DATA_RESIDENCY_D1.md`](archive/DATA_RESIDENCY_D1.md) for the original
+threat model. Note that the adoption doc argued Supabase should stay; that call
+was reversed and the move to Lakebase already happened, and it is not part of
+the 2026-08-20 reversal -- the database leg stays exactly where it was.
 
 Postgres and pgvector are the only datastore since R5. Locally and in CI the
 same code runs against a disposable Postgres (`TEST_DATABASE_URL` for tests),
@@ -1027,27 +1035,45 @@ provider face a real corpus. Tests and CI only.
 ### The D1 residency guard
 
 D1 asked one question: does an analyst's question ever leave the company
-perimeter? Today it does not. Generation, query and corpus embeddings, and the
-database all sit inside the company's Databricks tenant. D1 is closed.
+perimeter? From 2026-07-30 through 2026-08-19 it did not: generation, query and
+corpus embeddings, and the database all sat inside the company's Databricks
+tenant, and D1 was closed.
 
-The guard stays in the code, because a Unity Catalog alias can be repointed with
-no deploy. Both halves of it are armed by `D1_ENFORCED`, and both are inert while
-that is off:
+**As of 2026-08-20, D1 is deliberately reversed for the two model-call legs, by
+owner decision.** Generation moved from Databricks `gpt-oss-120b` to OpenAI
+`gpt-5.6-terra`; embeddings moved from Databricks Qwen3 to OpenAI
+`text-embedding-3-large` truncated to 1024 dimensions. An analyst's question now
+leaves the company perimeter for a third-party model API on the normal path.
+The database leg did not move: all chunks and vectors still live in Databricks
+Lakebase, in-tenant, unchanged. Be precise about the split -- only the model
+calls left the tenant; the data store did not.
 
-- At boot, `D1_ENFORCED=true` refuses a half-migrated configuration. Generation
-  on Databricks while query embedding still goes to OpenAI, or the reverse, leaks
-  the question anyway.
-- At runtime, every completion and stream is checked against
+This was not a bypassed guard. `D1_ENFORCED` was never set in prod (verified
+2026-08-11, unchanged since), so the boot-time and runtime checks below were
+never armed and blocked nothing. The reversal is a config and provider change,
+not a defeat of a live control.
+
+The guard code itself stays in the repo, because a Unity Catalog alias can be
+repointed with no deploy and a future re-migration to Databricks may want it
+armed again. Both halves of it are gated by `D1_ENFORCED`, and both are inert
+while that is off (which is prod's state today):
+
+- At boot, `D1_ENFORCED=true` would refuse a half-migrated configuration --
+  generation on Databricks while query embedding goes to OpenAI, or the
+  reverse.
+- At runtime, every completion and stream would be checked against
   `D1_ALLOWED_LLM_MODELS` using the model id the endpoint reports, not the name
-  in config. The check also rejects partner-hosted families
-  (`databricks-gpt*`, `databricks-claude*`, `databricks-gemini*`) even if someone
-  allowlists them by hand, because those carry the partner's retention terms.
-- An off-perimeter response raises a dedicated `D1ResidencyError`. The streaming
-  path deliberately excludes it from the SSE fallback retry: a residency
-  violation must never cause the question to be re-sent to the very endpoint the
-  guard fences off.
+  in config, and would reject partner-hosted families
+  (`databricks-gpt*`, `databricks-claude*`, `databricks-gemini*`) even if
+  someone allowlists them by hand, because those carry the partner's retention
+  terms.
+- An off-allowlist response would raise a dedicated `D1ResidencyError`, which
+  the streaming path deliberately excludes from the SSE fallback retry. None of
+  this fires today because the guard is unarmed and OpenAI is now the intended
+  provider, not a violation to be caught.
 
-The original threat model is archived at
+The original threat model, and the 2026-07-30 to 2026-08-19 "D1 is closed"
+record, are archived at
 [`archive/DATA_RESIDENCY_D1.md`](archive/DATA_RESIDENCY_D1.md).
 
 ---

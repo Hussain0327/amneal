@@ -2,7 +2,7 @@
 
 Append-only. What was picked, why, and when.
 
-Last updated: 2026-08-19.
+Last updated: 2026-08-20.
 
 Old entries are left as they were written. When something later changed, a dated
 follow-up line goes under the original entry instead of editing the original
@@ -673,6 +673,10 @@ alone does not certify this residual.
   served by a model outside the allowlist, and reject partner-hosted families
   (`databricks-gpt*`, `databricks-claude*`, `databricks-gemini*`) even if
   someone allowlists them by hand.
+  (2026-08-20 follow-up: reversed for the model-call legs. See the "D1
+  deliberately reversed for model calls" entry at the bottom of this file.
+  This entry's "all three legs" and "no analyst question leaves" claims held
+  only through 2026-08-19.)
 
 ## v7 selective citation is live in prod: cite the facts, talk like a person (Aug 11 2026)
 
@@ -837,3 +841,35 @@ alone does not certify this residual.
   strangler (the step-5 deletion PR, relay auth, R3, steps 6-7, then 9),
   holding the plan's own gate: the replaced Python path is deleted in the
   same PR that lands the Go replacement.
+
+## D1 deliberately reversed for model calls (Aug 20 2026)
+
+- **Generation and embeddings move from Databricks to OpenAI, by owner
+  decision.** Generation: `gpt-oss-120b` (Databricks Model Serving) to
+  `gpt-5.6-terra` (OpenAI Chat Completions, `reasoning_effort=low`, no
+  `temperature`, `max_completion_tokens` not `max_tokens`). Embeddings: Qwen3
+  (Databricks Model Serving, 1024-dim) to `text-embedding-3-large` (OpenAI,
+  Matryoshka-truncated to 1024-dim via the `dimensions` param, so the existing
+  `chunk_embedding` profile geometry is unaffected).
+- **This is a deliberate reversal of D1 for the two model-call legs, not a
+  regression.** The "D1 data residency is closed" entry above held from
+  2026-07-30 through 2026-08-19. As of today, an analyst question leaves the
+  company's Databricks tenant for OpenAI on the normal path -- that is the
+  intended outcome of the owner's decision.
+- **The database leg is unchanged and out of scope for this decision.**
+  Databricks Lakebase stays the OLTP store and holds every chunk and vector,
+  in-tenant, exactly as it did before. Be precise about the split: only the
+  model calls moved.
+- **No guard was bypassed.** `D1_ENFORCED` was never set in prod (verified
+  2026-08-11, unchanged through this reversal), so the boot-time
+  half-migration check and the runtime served-model check in `generate/llm.py`
+  were never armed and blocked nothing before or after this change. The guard
+  code and `D1_ALLOWED_LLM_MODELS` stay in the repo for a possible future
+  re-migration to Databricks, but they gate Databricks-served model ids only
+  and have no bearing on the OpenAI path today.
+- **Index-naming cleanup, same day.** `ix_chunk_embedding_hnsw` was discovered
+  to actually be on `public.chunk` (the legacy `chunk.embedding` column), not
+  on `chunk_embedding` as its name implies -- confirmed to have caused two
+  wrong conclusions during the investigation that led to this entry. Renamed
+  to `ix_chunk_legacy_embedding_hnsw` via a reversible Alembic migration; see
+  `migrations/versions/`.

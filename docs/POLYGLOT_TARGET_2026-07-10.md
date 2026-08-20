@@ -155,7 +155,10 @@ Closed:
   `release_command` (C3).
 - **R7. D1.** This plan closed none of it, as predicted, and it did not have to:
   D1 was closed on the provider seam instead. Generation, embeddings and the
-  database all sit inside the company's Databricks tenant as of 2026-08-11. See
+  database all sat inside the company's Databricks tenant from 2026-08-11
+  through 2026-08-19. As of 2026-08-20, D1 is deliberately reversed for the
+  two model-call legs by owner decision (generation and embeddings moved to
+  OpenAI); the database leg is unchanged. See
   `docs/DATABRICKS_ADOPTION_2026-07-28.md`.
 
 ## LOC baseline (verified 2026-07-10; re-measured 2026-08-15)
