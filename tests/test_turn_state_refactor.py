@@ -45,7 +45,7 @@ def test_resolution_writes_into_the_turn_state(monkeypatch: pytest.MonkeyPatch) 
         state,
         question="What BE study is recommended for albuterol sulfate?",
         session_id="sess-turnstate-resolved",
-        s=get_settings(),
+        settings=get_settings(),
         _decline=_no_decline,
         _session_filters=lambda: {},
     )
@@ -72,7 +72,7 @@ def test_carry_over_flows_through_the_dataclass(monkeypatch: pytest.MonkeyPatch)
         state,
         question="tell me more",
         session_id="sess-turnstate-carry-over",
-        s=get_settings(),
+        settings=get_settings(),
         _decline=_no_decline,
         # Canonical, as the shell stores it: the form carry-over compares the
         # session name against the canonicalized resolved name.

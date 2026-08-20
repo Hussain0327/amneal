@@ -197,7 +197,7 @@ def test_seam_flag_off_is_the_plain_slice(monkeypatch: pytest.MonkeyPatch) -> No
         _real("c2", _DISTINCT, 0.60),
     ]
     s = _settings(monkeypatch, mmr=False)
-    assert qa_mod._trim_evidence(passages, s) == passages[:2]
+    assert qa_mod._trim_evidence(passages, s, qa_mod._refusal_threshold(s)) == passages[:2]
 
 
 def test_seam_flag_on_diversifies(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -207,7 +207,7 @@ def test_seam_flag_on_diversifies(monkeypatch: pytest.MonkeyPatch) -> None:
         _real("c2", _DISTINCT, 0.60),
     ]
     s = _settings(monkeypatch, mmr=True)
-    kept = qa_mod._trim_evidence(passages, s)
+    kept = qa_mod._trim_evidence(passages, s, qa_mod._refusal_threshold(s))
     assert [p.chunk_id for p in kept] == ["c0", "c2"]
 
 
@@ -225,7 +225,7 @@ def test_seam_flag_on_never_selects_sub_threshold_evidence(
         _real("c2", _DISTINCT, 0.20),
     ]
     s = _settings(monkeypatch, mmr=True)
-    kept = qa_mod._trim_evidence(passages, s)
+    kept = qa_mod._trim_evidence(passages, s, qa_mod._refusal_threshold(s))
     assert [p.chunk_id for p in kept] == ["c0", "c1"]
 
 
@@ -239,4 +239,4 @@ def test_seam_flag_on_all_sub_threshold_is_the_plain_slice(
         _real("c2", _DISTINCT, 0.10),
     ]
     s = _settings(monkeypatch, mmr=True)
-    assert qa_mod._trim_evidence(passages, s) == passages[:2]
+    assert qa_mod._trim_evidence(passages, s, qa_mod._refusal_threshold(s)) == passages[:2]
