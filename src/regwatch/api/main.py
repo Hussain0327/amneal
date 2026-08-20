@@ -385,6 +385,12 @@ def _llm_key_present(s: Settings) -> bool:
         # Both values are required to construct the private OpenAI-compatible
         # client. Do not expose either value; health reports only this boolean.
         return bool(s.databricks_llm_base_url and s.databricks_llm_token)
+    if s.llm_provider == "openai":
+        # Added with the 2026-08-20 cutover. Without this branch a correctly
+        # configured OpenAI deployment reported key_present=false on /health --
+        # a health endpoint claiming a credential is missing when it is not is
+        # as bad as one claiming it is present when it is not.
+        return bool(s.openai_api_key and s.openai_llm_model)
     # echo needs no key; an UNSET provider is a misconfiguration, not a
     # keyless-but-healthy state, and must not read as ok on /health.
     return s.llm_provider == "echo"
