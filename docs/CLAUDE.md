@@ -111,6 +111,9 @@ anything else.**
   measured floor in `REFUSAL_SCORE_THRESHOLD_BY_PROFILE`; the live
   text-embedding-3-large@1024 profile is 0.70, measured 2026-08-20 (40 gold
   questions scored >= 0.8224, 8 off-corpus controls scored <= 0.5787).
+  `GET /settings` reports this effective per-profile floor, and the Ask
+  confidence band's High cut is derived from it (floor + a third of the
+  headroom to 1.0: 0.80 live), never a fixed number.
 - **Vector store.** pgvector, in the same Postgres database as the structured
   store. There is no other vector backend since R5.
 - **Structured store.** Postgres via `DATABASE_URL` (Lakebase in prod, a

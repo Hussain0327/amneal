@@ -121,3 +121,56 @@ def test_blank_artifact_credentials_preserve_workload_identity() -> None:
     assert s.fda_artifact_s3_secret_access_key is None
     assert s.fda_artifact_s3_session_token is None
     assert s.fda_artifact_s3_endpoint_url is None
+
+
+def test_effective_refusal_threshold_prefers_the_active_profile() -> None:
+    """The prod shape: map only, profile named, global left at its default.
+
+    Every reader of "the floor" (synthesis, ``regwatch status``, the Go
+    proxy's ``GET /settings``) must resolve this the same way, or a UI band
+    derived from the reported floor is derived from a number nothing is
+    gated on (issue #272).
+    """
+    s = _settings(
+        active_embedding_profile="ep_live",
+        refusal_score_threshold_by_profile={"ep_live": 0.7, "legacy": 0.3},
+    )
+    assert s.effective_refusal_threshold() == 0.7
+    assert s.refusal_score_threshold == 0.30
+
+
+def test_effective_refusal_threshold_falls_back_to_the_global() -> None:
+    """An uncalibrated profile, or no map at all, reads the global field."""
+    assert _settings(refusal_score_threshold=0.45).effective_refusal_threshold() == 0.45
+    s = _settings(
+        active_embedding_profile="ep_uncalibrated",
+        refusal_score_threshold=0.45,
+        refusal_score_threshold_by_profile={"ep_live": 0.7},
+    )
+    assert s.effective_refusal_threshold() == 0.45
+
+
+def test_effective_refusal_threshold_defaults_the_profile_to_legacy() -> None:
+    """A blank profile resolves to "legacy", as synthesis always did."""
+    s = _settings(
+        active_embedding_profile="",
+        refusal_score_threshold_by_profile={"legacy": 0.33},
+    )
+    assert s.effective_refusal_threshold() == 0.33
+
+
+def test_status_reports_the_effective_floor_beside_the_global(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``regwatch status`` names the floor answers are gated on, not only the fallback."""
+    from regwatch import cli
+
+    s = _settings(
+        active_embedding_profile="ep_live",
+        refusal_score_threshold_by_profile={"ep_live": 0.7},
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: s)
+    cli.cmd_status()
+    out = capsys.readouterr().out
+    assert "'refusal_score_threshold': 0.7" in out
+    assert "'refusal_score_threshold_global': 0.3" in out

@@ -184,7 +184,8 @@ func TestConfigFromEnvPublicSettings(t *testing.T) {
 	for _, name := range []string{"AUTH_COOKIE_SECURE", "TRUST_PROXY_HEADERS", "AUTH_SESSION_TTL_HOURS",
 		"CORS_ALLOW_ORIGINS_CSV", "SENTRY_ENVIRONMENT", "INGEST_EMBEDDING_PROVIDER",
 		"EMBEDDING_PROVIDER", "LLM_PROVIDER", "OPENAI_LLM_MODEL", "RETRIEVAL_TOP_K",
-		"REFUSAL_SCORE_THRESHOLD", "COMPANY_NAME"} {
+		"REFUSAL_SCORE_THRESHOLD", "REFUSAL_SCORE_THRESHOLD_BY_PROFILE",
+		"RETRIEVAL_EMBEDDING_PROFILE", "ACTIVE_EMBEDDING_PROFILE", "COMPANY_NAME"} {
 		// t.Setenv registers restoration of the original value; the Unsetenv
 		// after it gives the UNSET state envOrDefault distinguishes from "".
 		t.Setenv(name, "")
@@ -236,6 +237,52 @@ func TestConfigFromEnvPublicSettings(t *testing.T) {
 	cfg, err = ConfigFromEnv()
 	if err != nil || cfg.RefusalScoreThreshold != 0.45 {
 		t.Fatalf("threshold override: %+v err=%v", cfg, err)
+	}
+}
+
+// TestConfigFromEnvEffectiveRefusalThreshold pins GET /settings to the floor
+// the synthesizer APPLIES (grounded_qa._refusal_threshold), not the global
+// field. Prod sets only REFUSAL_SCORE_THRESHOLD_BY_PROFILE, so the global
+// alone reported 0.30 while every answer was gated at the profile's 0.70 --
+// the confidence band (issue #272) was derived from a floor nothing used.
+func TestConfigFromEnvEffectiveRefusalThreshold(t *testing.T) {
+	for _, name := range []string{"REFUSAL_SCORE_THRESHOLD", "REFUSAL_SCORE_THRESHOLD_BY_PROFILE",
+		"RETRIEVAL_EMBEDDING_PROFILE", "ACTIVE_EMBEDDING_PROFILE"} {
+		t.Setenv(name, "")
+		_ = os.Unsetenv(name)
+	}
+	// The prod shape: map only, global unset, profile named by the new env.
+	t.Setenv("REFUSAL_SCORE_THRESHOLD_BY_PROFILE", `{"ep_live": 0.7, "legacy": 0.3}`)
+	t.Setenv("RETRIEVAL_EMBEDDING_PROFILE", "ep_live")
+	cfg, err := ConfigFromEnv()
+	if err != nil || cfg.RefusalScoreThreshold != 0.7 {
+		t.Fatalf("profile entry must win over the 0.30 default: %+v err=%v", cfg, err)
+	}
+	// The deprecated alias names the profile when the new env is unset.
+	_ = os.Unsetenv("RETRIEVAL_EMBEDDING_PROFILE")
+	t.Setenv("ACTIVE_EMBEDDING_PROFILE", "ep_live")
+	if cfg, err = ConfigFromEnv(); err != nil || cfg.RefusalScoreThreshold != 0.7 {
+		t.Fatalf("ACTIVE_EMBEDDING_PROFILE alias: %+v err=%v", cfg, err)
+	}
+	// Both unset resolves to "legacy", exactly as config/settings.py defaults.
+	_ = os.Unsetenv("ACTIVE_EMBEDDING_PROFILE")
+	if cfg, err = ConfigFromEnv(); err != nil || cfg.RefusalScoreThreshold != 0.3 {
+		t.Fatalf("default profile must be legacy: %+v err=%v", cfg, err)
+	}
+	// A profile with no calibrated entry falls back to the global field.
+	t.Setenv("RETRIEVAL_EMBEDDING_PROFILE", "ep_uncalibrated")
+	t.Setenv("REFUSAL_SCORE_THRESHOLD", "0.45")
+	if cfg, err = ConfigFromEnv(); err != nil || cfg.RefusalScoreThreshold != 0.45 {
+		t.Fatalf("absent profile must fall back to the global: %+v err=%v", cfg, err)
+	}
+	// Malformed JSON refuses boot, as pydantic-settings does for the same env.
+	t.Setenv("REFUSAL_SCORE_THRESHOLD_BY_PROFILE", `{"ep_live": 0.7`)
+	if _, err := ConfigFromEnv(); err == nil {
+		t.Fatal("malformed REFUSAL_SCORE_THRESHOLD_BY_PROFILE must fail loudly")
+	}
+	t.Setenv("REFUSAL_SCORE_THRESHOLD_BY_PROFILE", `["ep_live", 0.7]`)
+	if _, err := ConfigFromEnv(); err == nil {
+		t.Fatal("non-object REFUSAL_SCORE_THRESHOLD_BY_PROFILE must fail loudly")
 	}
 }
 
