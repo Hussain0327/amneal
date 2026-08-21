@@ -1,9 +1,20 @@
 """Claim-level admission gate for the synthesizer turn.
 
-Last updated: 2026-08-11.
+Last updated: 2026-08-21.
 
 This module is the reliability boundary: it is the ONLY place model-authored
 bytes can become user-visible text, and it admits them one claim at a time.
+
+Amended 2026-08-21: presentation is rebuilt, not trusted. The v7 prose parser
+tags every claim with the markdown BLOCK it came from (``common.blocks``: a
+heading, a list item, a table cell, a paragraph sentence) and ``render_answer``
+writes real headings, lists and GFM tables from the ADMITTED claims and their
+tags. A heading or a cell is still one claim with its own marker; the only
+policy differences for those structural units are that a label masks the
+descriptive ``LABEL_TOPIC_WORDS`` in the attribution scan (``blocks.is_label``),
+a bad cite on one is never
+re-stamped, and dropping one is PARTIAL rather than MATERIAL_DROP
+(``blocks.STRUCTURAL_KINDS`` explains why).
 
 WHAT THE POLICY IS NOW (v7, live in prod)
 "Cite the facts, talk like a person." A sentence that states what FDA guidance
@@ -34,8 +45,9 @@ text itself is never trusted and the renderer still writes every canonical
 marker from a validated passage.
 
 FIVE PROPERTIES THE OLD GATE DID NOT HAVE
-1. A markdown header cannot occupy a claim slot (claim text is collapsed to one
-   line and structural markup is rejected outright).
+1. Markdown structure never rides inside a claim slot (claim text is collapsed
+   to one line; under v7 the parser lifts the heading/list/table shape out into
+   a block tag first, and link/URL markup is still rejected outright).
 2. Citation markers are written ONLY by the renderer. Model-authored markers are
    stripped; a claim still holding '[' or ']' afterwards is dropped, because an
    UNBALANCED fabricated marker survives strip_all_citations (the bracket regex
@@ -62,6 +74,8 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from regwatch.common import blocks
+from regwatch.common.blocks import PARAGRAPH, Block
 from regwatch.common.citations import strip_all_citations
 from regwatch.common.logging import get_logger
 from regwatch.common.sentences import sentence_count
@@ -79,7 +93,10 @@ RENDERER_VERSION = 1
 # mis-stamp every v5/v6 row for the whole dark window, when those rows are
 # still produced by the v1 renderer. ledger() takes it as a parameter, passed
 # by the ONE caller only when selective_mode is true (B.10.1.4).
-RENDERER_VERSION_SELECTIVE = 2
+# 3 (2026-08-21): the selective renderer rebuilds markdown structure
+# (headings, lists, tables) from the claims' block tags; a v7 row stamped 2
+# was rendered as one flat paragraph.
+RENDERER_VERSION_SELECTIVE = 3
 
 # ---------------------------------------------------------------------------
 # OD-4: materiality.
@@ -212,9 +229,38 @@ _SOURCE_ASSERTION_RE = re.compile(
 )
 
 
-def source_assertion_trigger(text: str) -> str | None:
-    """The word that makes ``text`` a report of what a source SAYS, or None."""
-    match = _SOURCE_ASSERTION_RE.search(text or "")
+# 2026-08-21, structured claims. The attribution lexicon exists to catch
+# SENTENCES that report what a source says. A LABEL -- a heading, a table
+# header cell, a row label (blocks.is_label) -- has no predicate, and the
+# descriptive words below are the vocabulary every PSG heading is built from
+# ("Recommended BE design", "Requirements"). Only these words are masked for
+# a label; the deontic/exemption vocabulary (exempt, waived, no, shall,
+# should, permitted, ...) and every verb of saying (recommends, requires,
+# states, ...) still fire on a label, so a bare "Exempt" row label cannot ride
+# the exemption (review finding). The materiality lexicon is never masked.
+LABEL_TOPIC_WORDS: tuple[str, ...] = (
+    "recommended",
+    "recommendation",
+    "recommendations",
+    "requirement",
+    "requirements",
+    "specified",
+    "notes",
+    "stated",
+)
+_LABEL_TOPIC_RE = re.compile(r"\b(?:" + "|".join(LABEL_TOPIC_WORDS) + r")\b", re.IGNORECASE)
+
+
+def source_assertion_trigger(text: str, *, label: bool = False) -> str | None:
+    """The word that makes ``text`` a report of what a source SAYS, or None.
+
+    Args:
+        text: The sentence (or label) to scan.
+        label: True for a heading / table label (``blocks.is_label``): the
+            ``LABEL_TOPIC_WORDS`` are masked before the scan, nothing else.
+    """
+    body = _LABEL_TOPIC_RE.sub(" ", text or "") if label else (text or "")
+    match = _SOURCE_ASSERTION_RE.search(body)
     return match.group(0).lower() if match is not None else None
 
 
@@ -381,6 +427,10 @@ class ParsedClaim:
 
     text: str
     cites: tuple[tuple[str, int], ...] = ()  # declared (short_name, page), declaration order
+    # Markdown container the sentence came from (common.blocks). Defaults to
+    # the flat paragraph so the v5 JSON front door and every v6 caller are
+    # unchanged; only the v7 prose parser sets anything else.
+    block: Block = PARAGRAPH
 
 
 @dataclass(frozen=True)
@@ -395,6 +445,9 @@ class AdmittedClaim:
     correction_method: str | None = None
     original_cites: tuple[tuple[str, int], ...] | None = None  # pre-correction, as declared
     downgraded: bool = False
+    # Presentation only: which container render_answer rebuilds around this
+    # claim. Carries no provenance meaning and is never trusted as content.
+    block: Block = PARAGRAPH
 
 
 @dataclass(frozen=True)
@@ -407,6 +460,7 @@ class DroppedClaim:
     material_word: str | None
     # material_exempt when the materiality guard blocked correction/downgrade.
     correction_method: str | None = None
+    block: Block = PARAGRAPH
 
 
 @dataclass(frozen=True)
@@ -817,6 +871,15 @@ def admit_claims(
             stripped = _LEADING_BULLET_RE.sub("", stripped).strip()
             layout_stripped = stripped != text
             text = stripped
+        if claim.block.kind in blocks.STRUCTURAL_KINDS:
+            # 2026-08-21: the prose parser now removes the heading marker and
+            # the table pipes BEFORE this module sees the text, so the
+            # `layout_stripped` guard above would no longer fire for them.
+            # Same hole, same closure: a heading or a cell with a bad cite is
+            # dropped, never re-stamped by token overlap -- a cell is a few
+            # words, which is exactly where overlap re-stamping is least
+            # trustworthy.
+            layout_stripped = True
         # A claim wearing a marker is always an assertion, regardless of what
         # the parser's kind said for it (B.10.3.4). Absent that, the parser's
         # reading governs ONLY in selective mode; every other caller keeps
@@ -906,6 +969,7 @@ def admit_claims(
                     reason=reason,
                     material_word=trigger,
                     correction_method=correction_method,
+                    block=claim.block,
                 )
             )
             continue
@@ -920,13 +984,21 @@ def admit_claims(
                     overlap=_overlap(text, [corrected]),
                     correction_method=CORRECTION_LEXICAL,
                     original_cites=declared,
+                    block=claim.block,
                 )
             )
             continue
         if downgrade:
             admitted.append(
                 downgrade_to_reasoning(
-                    AdmittedClaim(index=index, text=text, pairs=(), citations=(), overlap=0.0)
+                    AdmittedClaim(
+                        index=index,
+                        text=text,
+                        pairs=(),
+                        citations=(),
+                        overlap=0.0,
+                        block=claim.block,
+                    )
                 )
             )
             continue
@@ -952,6 +1024,7 @@ def admit_claims(
                 citations=tuple(citations),
                 overlap=_overlap(text, cited_passages),
                 kind=claim_kind,
+                block=claim.block,
             )
         )
 
@@ -970,7 +1043,19 @@ def admit_claims(
         # Identical to today for every non-selective turn: with no dropped
         # claims this generator is empty and material_word is None, which is
         # what the old `elif not dropped` branch hardcoded.
-        material_word = next((d.material_word for d in dropped if d.material_word), None)
+        # A dropped heading or table cell (blocks.STRUCTURAL_KINDS) is never
+        # material: it is not part of a sentence flow, so removing it cannot
+        # invert what survives the way a dropped qualifier can; the grid keeps
+        # a visible hole and PARTIAL's disclosure says something was removed.
+        # The drop itself, its text and its material word stay in the ledger.
+        material_word = next(
+            (
+                d.material_word
+                for d in dropped
+                if d.material_word and d.block.kind not in blocks.STRUCTURAL_KINDS
+            ),
+            None,
+        )
         no_source_fact_admitted = selective and not any(
             c.kind == CLAIM_KIND_SOURCE_FACT for c in admitted
         )
@@ -1048,6 +1133,80 @@ def _marker(pairs: tuple[tuple[str, int], ...]) -> str:
     return "[" + "; ".join(f"{s}, p.{p}" for s, p in pairs) + "]"
 
 
+def _heading_depth(level: int) -> int:
+    """Markdown depth for a model heading level: two registers, not six.
+
+    An answer lives in a chat column, not a document, so a model's "#"/"##"
+    both render as h3 (the display serif) and anything deeper as h4 (the mono
+    kicker register). The level itself is never load-bearing.
+    """
+    return 3 if level <= 2 else 4
+
+
+def _render_list(members: list[tuple[AdmittedClaim, str]], kind: str) -> str:
+    items: dict[int, list[str]] = {}
+    for claim, text in members:
+        items.setdefault(claim.block.item, []).append(text)
+    lines: list[str] = []
+    for position, item in enumerate(sorted(items), start=1):
+        # Renumbered from 1: a dropped item must not leave a visible gap, and
+        # no ordinal the model wrote is load-bearing.
+        marker = f"{position}." if kind == blocks.BLOCK_NUMBERED else "-"
+        lines.append(f"{marker} {' '.join(items[item])}")
+    return "\n".join(lines)
+
+
+def _render_table(members: list[tuple[AdmittedClaim, str]]) -> str:
+    rows: dict[int, dict[int, str]] = {}
+    width = 0
+    for claim, text in members:
+        rows.setdefault(claim.block.item, {})[claim.block.cell] = text
+        width = max(width, claim.block.width, claim.block.cell + 1)
+
+    def line(cells: dict[int, str]) -> str:
+        # A dropped or empty cell renders EMPTY, never as invented text: the
+        # grid keeps its shape from the header width and the CSS marks the
+        # hole. PARTIAL_DROP_DISCLOSURE still says something was removed.
+        return "| " + " | ".join(cells.get(column, "") for column in range(width)) + " |"
+
+    out = [line(rows.get(0, {})), "| " + " | ".join("---" for _ in range(width)) + " |"]
+    out.extend(line(rows[item]) for item in sorted(rows) if item != 0)
+    return "\n".join(out)
+
+
+def _render_blocks(rendered: list[tuple[AdmittedClaim, str]]) -> str:
+    """Rebuild markdown structure from the admitted claims' block tags.
+
+    Consecutive claims with the same (group, kind) are one container. Every
+    claim of a flat turn carries the default PARAGRAPH block (group 0), so the
+    whole turn is one paragraph joined with single spaces -- byte-identical
+    to the renderer this replaced, which is what the v5/v6 pins check.
+    """
+    out: list[str] = []
+    start = 0
+    while start < len(rendered):
+        block = rendered[start][0].block
+        end = start
+        while (
+            end < len(rendered)
+            and rendered[end][0].block.group == block.group
+            and rendered[end][0].block.kind == block.kind
+        ):
+            end += 1
+        members = rendered[start:end]
+        start = end
+        if block.kind == blocks.BLOCK_HEADING:
+            text = " ".join(t for _, t in members)
+            out.append(f"{'#' * _heading_depth(block.level)} {text}")
+        elif block.kind in (blocks.BLOCK_BULLET, blocks.BLOCK_NUMBERED):
+            out.append(_render_list(members, block.kind))
+        elif block.kind == blocks.BLOCK_TABLE:
+            out.append(_render_table(members))
+        else:
+            out.append(" ".join(t for _, t in members))
+    return "\n\n".join(out)
+
+
 def render_answer(turn: AdmittedTurn) -> str:
     """The deterministic answer string for a renderable verdict.
 
@@ -1069,23 +1228,32 @@ def render_answer(turn: AdmittedTurn) -> str:
     gets (OD-5): silently dropping would hand back a confident answer with
     the qualifier deleted, same as any other drop.
     """
-    sentences: list[str] = []
+    rendered: list[tuple[AdmittedClaim, str]] = []
     render_time_drop = False
     for claim in turn.admitted:
         if not claim.pairs:
             # Only uncited claims are re-scanned: a claim carrying pairs is a
             # cite-validated source_fact already, not this guard's concern.
             scan = frame_split(claim.text)[1] or claim.text
-            if materiality_trigger(scan) is not None or source_assertion_trigger(scan) is not None:
+            # Mirrors prose_turn._classify_uncited_selective: a LABEL (heading,
+            # table header or row label) masks LABEL_TOPIC_WORDS only.
+            leaks = (
+                materiality_trigger(scan) is not None
+                or source_assertion_trigger(scan, label=blocks.is_label(claim.block)) is not None
+            )
+            if leaks:
                 render_time_drop = True
                 continue
         body = claim.text
-        terminator = "."
+        # A heading, bullet or cell is terminated by its line, so no period is
+        # invented for it; a paragraph sentence keeps the "." default exactly
+        # as before, so every flat turn renders byte-identically.
+        terminator = "" if claim.block.kind in blocks.LINE_TERMINATED_KINDS else "."
         if body and body[-1] in ".!?":
             terminator = body[-1]
             body = body[:-1].rstrip()
         if claim.pairs:
-            sentences.append(f"{body} {_marker(claim.pairs)}{terminator}")
+            rendered.append((claim, f"{body} {_marker(claim.pairs)}{terminator}"))
         else:
             # v7 uncited kinds (reasoning/conversation): no marker to write.
             # Unreachable under v5/v6 -- :531-532's DROP_NO_CITES drops every
@@ -1094,11 +1262,11 @@ def render_answer(turn: AdmittedTurn) -> str:
             # rendering is provably byte-identical without a flag check here
             # (the scan above is unreachable flag-off for the same reason:
             # `claim.pairs` is never empty for an admitted v5/v6 claim).
-            sentences.append(f"{body}{terminator}")
-    if not sentences:
+            rendered.append((claim, f"{body}{terminator}"))
+    if not rendered:
         return ""
 
-    parts = [" ".join(sentences)]
+    parts = [_render_blocks(rendered)]
     if turn.unsupported:
         parts.append(f"\n{PARTIAL_EVIDENCE_PREFIX} {', '.join(turn.unsupported)}.")
     if turn.verdict == VERDICT_PARTIAL or render_time_drop:
@@ -1252,6 +1420,18 @@ def ledger(
         for claim in turn.admitted:
             counts[claim.kind] = counts.get(claim.kind, 0) + 1
         payload["kind_counts"] = counts
+        # Per-claim presentation record, same order as payload["claims"]
+        # (admitted then dropped). Selective-only so v5/v6 ledger bytes stay
+        # pinned; answers the forensic question "was the dropped claim a
+        # table cell or a sentence?" without re-parsing the draft.
+        claim_blocks = [c.block for c in turn.admitted] + [d.block for d in turn.dropped]
+        for entry, block in zip(payload["claims"], claim_blocks, strict=True):
+            entry["block"] = {
+                "kind": block.kind,
+                "group": block.group,
+                "item": block.item,
+                "cell": block.cell,
+            }
     if decline_guard is not None:
         payload["decline_guard"] = decline_guard
     return payload

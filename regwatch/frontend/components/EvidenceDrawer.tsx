@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
 import { RecencyBadge } from "@/components/RecencyBadge";
+import { StructurePlate } from "@/components/StructurePlate";
 import type { Citation } from "@/lib/api";
 import { citationProduct } from "@/lib/citations";
 import { safeHref } from "@/lib/url";
@@ -91,6 +92,10 @@ export function EvidenceDrawer({
             ×
           </button>
         </header>
+        {/* The structure card, when one is stored for this citation's own
+            ingredient. Fetches on its own; renders nothing while loading, on
+            error, or with nothing stored (never delays the drawer). */}
+        {citation.product_name && <StructurePlate ingredient={citation.product_name} />}
         {/* Product identity first when we have it; the drawer is where the
             internal identifiers belong, so short_name stays on the line below
             rather than being replaced. */}

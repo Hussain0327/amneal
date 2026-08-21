@@ -110,6 +110,7 @@ from regwatch.process.psg_docx import (
 from regwatch.sources.router import search_sources
 from regwatch.sources.types import SourceKind as InternalSourceKind
 from regwatch.sources.types import SourceQuery
+from regwatch.store import chemistry as chemistry_store
 from regwatch.store import deficiency_runs as deficiency_run_store
 from regwatch.store import whitepaper_runs as run_store
 from regwatch.store.db import engine_dialect, get_engine, init_db, session_scope
@@ -2077,6 +2078,53 @@ class PsgDocumentListResponse(BaseModel):
     limit: int
     offset: int
     documents: list[PsgLibraryDoc]
+
+
+class ChemistryStructure(BaseModel):
+    """One drawable structure: a registry identity, never a model's words.
+
+    ``match`` is "exact" when the stored row is the product's own salt/form
+    and "parent" when only the salt-stripped compound is known; the client
+    must say so in the caption. ``smiles`` is drawn client-side; ``source_url``
+    is the PubChem page the figure can be checked against.
+    """
+
+    name: str
+    pubchem_cid: int
+    smiles: str
+    inchikey: str | None = None
+    molecular_formula: str | None = None
+    molecular_weight: float | None = None
+    iupac_name: str | None = None
+    unii: str | None = None
+    match: str
+    source_url: str
+    fetched_at: datetime
+
+
+class ChemistryStructuresResponse(BaseModel):
+    ingredient: str
+    structures: list[ChemistryStructure]
+
+
+@protected.get("/chemistry/structures", response_model=ChemistryStructuresResponse)
+def chemistry_structures(
+    # The citation's product_name (a normalized ingredient name, possibly
+    # "a; b"). Bounded so the lookup key can never be a paragraph.
+    ingredient: str = Query(..., min_length=1, max_length=200),
+) -> dict[str, Any]:
+    """Stored PubChem structures for a product name. DB read only, no egress.
+
+    Empty ``structures`` means nothing is stored for that name (never looked
+    up, not found, or ambiguous); the client hides the figure. A structure is
+    never citable and is deliberately absent from the turn payload.
+    """
+    with session_scope() as s:
+        views = chemistry_store.lookup_structures(s, ingredient)
+    return {
+        "ingredient": ingredient,
+        "structures": [asdict(v) for v in views],
+    }
 
 
 @protected.get("/psg/documents", response_model=PsgDocumentListResponse)

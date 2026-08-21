@@ -286,6 +286,13 @@ GROUNDED_QA_SYSTEM_V7 = dedent("""\
     Talk like a capable coworker: direct, concise, practical. Use headings,
     bullets or tables when they genuinely help.
 
+    When the guidance offers several options, or lays out study types per
+    option, answer with a table: options in columns, study types in rows,
+    one short phrase per cell. Each cell that states what a source says
+    carries its own marker inside the cell, like "Yes [1]"; write -- in a cell
+    that does not apply. A heading or a row label is a topic in your own
+    words, not a finding; if it must state a finding, end it with a marker.
+
     You have access to FDA guidance and PSGs, structured BE data, document
     history and version changes, and the conversation so far. Use whatever is
     relevant to answer what was actually asked.

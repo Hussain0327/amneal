@@ -21,6 +21,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/chemistry/structures": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Chemistry Structures
+         * @description Stored PubChem structures for a product name. DB read only, no egress.
+         *
+         *     Empty ``structures`` means nothing is stored for that name (never looked
+         *     up, not found, or ambiguous); the client hides the figure. A structure is
+         *     never citable and is deliberately absent from the turn payload.
+         */
+        get: operations["chemistry_structures_chemistry_structures_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/deficiency/analyze": {
         parameters: {
             query?: never;
@@ -685,6 +709,49 @@ export interface components {
         Body_deficiency_analyze_deficiency_analyze_post: {
             /** File */
             file: string;
+        };
+        /**
+         * ChemistryStructure
+         * @description One drawable structure: a registry identity, never a model's words.
+         *
+         *     ``match`` is "exact" when the stored row is the product's own salt/form
+         *     and "parent" when only the salt-stripped compound is known; the client
+         *     must say so in the caption. ``smiles`` is drawn client-side; ``source_url``
+         *     is the PubChem page the figure can be checked against.
+         */
+        ChemistryStructure: {
+            /**
+             * Fetched At
+             * Format: date-time
+             */
+            fetched_at: string;
+            /** Inchikey */
+            inchikey?: string | null;
+            /** Iupac Name */
+            iupac_name?: string | null;
+            /** Match */
+            match: string;
+            /** Molecular Formula */
+            molecular_formula?: string | null;
+            /** Molecular Weight */
+            molecular_weight?: number | null;
+            /** Name */
+            name: string;
+            /** Pubchem Cid */
+            pubchem_cid: number;
+            /** Smiles */
+            smiles: string;
+            /** Source Url */
+            source_url: string;
+            /** Unii */
+            unii?: string | null;
+        };
+        /** ChemistryStructuresResponse */
+        ChemistryStructuresResponse: {
+            /** Ingredient */
+            ingredient: string;
+            /** Structures */
+            structures: components["schemas"]["ChemistryStructure"][];
         };
         /** ClarifyOptionOut */
         ClarifyOptionOut: {
@@ -1504,6 +1571,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AssembleResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    chemistry_structures_chemistry_structures_get: {
+        parameters: {
+            query: {
+                ingredient: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: {
+                regwatch_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChemistryStructuresResponse"];
                 };
             };
             /** @description Validation Error */

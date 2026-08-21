@@ -165,6 +165,122 @@
         "title": "Body_deficiency_analyze_deficiency_analyze_post",
         "type": "object"
       },
+      "ChemistryStructure": {
+        "description": "One drawable structure: a registry identity, never a model's words.\n\n``match`` is \"exact\" when the stored row is the product's own salt/form\nand \"parent\" when only the salt-stripped compound is known; the client\nmust say so in the caption. ``smiles`` is drawn client-side; ``source_url``\nis the PubChem page the figure can be checked against.",
+        "properties": {
+          "fetched_at": {
+            "format": "date-time",
+            "title": "Fetched At",
+            "type": "string"
+          },
+          "inchikey": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inchikey"
+          },
+          "iupac_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Iupac Name"
+          },
+          "match": {
+            "title": "Match",
+            "type": "string"
+          },
+          "molecular_formula": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Molecular Formula"
+          },
+          "molecular_weight": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Molecular Weight"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pubchem_cid": {
+            "title": "Pubchem Cid",
+            "type": "integer"
+          },
+          "smiles": {
+            "title": "Smiles",
+            "type": "string"
+          },
+          "source_url": {
+            "title": "Source Url",
+            "type": "string"
+          },
+          "unii": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unii"
+          }
+        },
+        "required": [
+          "name",
+          "pubchem_cid",
+          "smiles",
+          "match",
+          "source_url",
+          "fetched_at"
+        ],
+        "title": "ChemistryStructure",
+        "type": "object"
+      },
+      "ChemistryStructuresResponse": {
+        "properties": {
+          "ingredient": {
+            "title": "Ingredient",
+            "type": "string"
+          },
+          "structures": {
+            "items": {
+              "$ref": "#/components/schemas/ChemistryStructure"
+            },
+            "title": "Structures",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ingredient",
+          "structures"
+        ],
+        "title": "ChemistryStructuresResponse",
+        "type": "object"
+      },
       "ClarifyOptionOut": {
         "properties": {
           "filters": {
@@ -2393,6 +2509,64 @@
           }
         },
         "summary": "Assemble"
+      }
+    },
+    "/chemistry/structures": {
+      "get": {
+        "description": "Stored PubChem structures for a product name. DB read only, no egress.\n\nEmpty ``structures`` means nothing is stored for that name (never looked\nup, not found, or ambiguous); the client hides the figure. A structure is\nnever citable and is deliberately absent from the turn payload.",
+        "operationId": "chemistry_structures_chemistry_structures_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "ingredient",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Ingredient",
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "regwatch_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Regwatch Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChemistryStructuresResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Chemistry Structures"
       }
     },
     "/deficiency/analyze": {

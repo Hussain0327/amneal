@@ -804,3 +804,45 @@ class DeficiencyRun(SQLModel, table=True):
     # QueryLog row for this run (mode="defpredict"); set on the terminal
     # transition so every LLM-content path stays audit-covered (INV-6).
     audit_id: int | None = Field(default=None, index=True)
+
+
+class IngredientChemistry(SQLModel, table=True):
+    """What PubChem says one active-ingredient NAME is, looked up offline.
+
+    One row per ingredient name as it appears in the corpus
+    (``ingredient_key``: a single, lowercased ingredient -- multi-ingredient
+    products are split before lookup). The row is the ONLY source of the
+    structure figure the Ask surface shows beside an answer: the figure is
+    drawn in the browser from ``smiles`` and captioned with ``pubchem_cid``,
+    never authored or touched by a model, and never cited. A name PubChem
+    maps to several compounds is stored as ``ambiguous`` with no structure;
+    a miss is stored as ``not_found``. Negative rows exist so the backfill
+    does not re-query PubChem every run and so "looked up, nothing" is
+    distinguishable from "never looked up" (INV-5 spirit: only a registry
+    identity, with its provenance, is ever displayed).
+
+    Written only by ``regwatch chemistry-backfill``; read by
+    ``GET /chemistry/structures``. Tiny (a few hundred bytes per row), so it
+    sits comfortably under the Lakebase cap.
+    """
+
+    __tablename__ = "ingredient_chemistry"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('resolved', 'ambiguous', 'not_found')",
+            name="ck_ingredient_chemistry_status",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    ingredient_key: str = Field(index=True, unique=True)
+    status: str
+    pubchem_cid: int | None = None
+    smiles: str | None = None
+    inchikey: str | None = None
+    molecular_formula: str | None = None
+    molecular_weight: float | None = None
+    iupac_name: str | None = None
+    unii: str | None = None
+    source_url: str | None = None
+    fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

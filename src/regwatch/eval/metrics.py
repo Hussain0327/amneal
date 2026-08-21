@@ -54,8 +54,8 @@ from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any
 
+from regwatch.common.blocks import split_units
 from regwatch.common.citations import has_citation, strip_sources_trailer
-from regwatch.common.sentences import split_sentences
 from regwatch.generate.rag_contract import ClaimTag
 
 # Sentence splitting is shared with the turn gate on purpose: the gate admits a
@@ -130,21 +130,21 @@ def claim_count(answer: str) -> int:
     claim-count-invariant, so without this a depth change is invisible to the
     eval: a 4-claim answer and a 10-claim answer score identically.
     """
-    return sum(1 for s in split_sentences(strip_sources_trailer(answer)) if has_citation(s))
+    return sum(1 for s in split_units(strip_sources_trailer(answer)) if has_citation(s))
 
 
 def _longest_sentence_chars(answer: str) -> int:
     """Longest single sentence in the answer, in characters.
 
-    Split with the SAME splitter the prose parser uses
-    (``common.sentences.split_sentences``), so a number read off a scorecard is
-    the number a per-sentence cap in ``prose_turn`` would actually compare
-    against. The Sources trailer is stripped first, like ``claim_count``: it is
+    Split with the SAME block-aware splitter the prose parser and its bounds
+    use (``common.blocks.split_units``: a heading, a bullet sentence and a
+    table cell are each one unit), so a number read off a scorecard is the
+    number ``prose_turn.bounds_exceeded`` would actually compare against. The Sources trailer is stripped first, like ``claim_count``: it is
     appended at render time, not authored by the model, and left in place it
     would register as one enormous sentence.
     """
     body = strip_sources_trailer(answer or "")
-    return max((len(s) for s in split_sentences(body)), default=0)
+    return max((len(s) for s in split_units(body)), default=0)
 
 
 def _content_tokens(sentence: str) -> set[str]:
@@ -160,7 +160,7 @@ def redundancy(answer: str) -> float:
     distinguishes "six facts" from "three facts said six times", and it has to
     exist BEFORE any depth target is raised or the change cannot be evaluated.
     """
-    sentences = [s for s in split_sentences(strip_sources_trailer(answer)) if has_citation(s)]
+    sentences = [s for s in split_units(strip_sources_trailer(answer)) if has_citation(s)]
     if len(sentences) < 2:
         return 0.0
     token_sets = [_content_tokens(s) for s in sentences]
@@ -358,7 +358,7 @@ def sentence_citation_rate(answer_text: str) -> float:
     # Strip a trailing "Sources" list so we don't penalize bullet citations
     # (shared with grounded_qa's memory-context strip via strip_sources_trailer).
     text = strip_sources_trailer(text)
-    sentences = [s.strip() for s in split_sentences(text) if s.strip()]
+    sentences = [s.strip() for s in split_units(text) if s.strip()]
     if not sentences:
         return 1.0
     cited = sum(1 for s in sentences if has_citation(s))

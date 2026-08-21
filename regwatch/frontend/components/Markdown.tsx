@@ -194,6 +194,15 @@ export function Markdown({
             {children}
           </a>
         ),
+    // A GFM table (the renderer's pathway matrix: options in columns, studies
+    // in rows) can be wider than the chat column. Scroll it inside its own
+    // box rather than letting it push the whole reply sideways; the body
+    // must never scroll horizontally.
+    table: ({ children }: { children?: React.ReactNode }) => (
+      <div className="prose__scroll">
+        <table>{children}</table>
+      </div>
+    ),
     // Custom hast element emitted by remarkCitationStamps. Reads the matched
     // citation back out of the data-* attributes and renders the stamp. Only
     // wired when `stampable`, so refused/meta turns never produce one.
