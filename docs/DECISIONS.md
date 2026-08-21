@@ -946,3 +946,31 @@ alone does not certify this residual.
   egress host outside `sources/policy.py`'s FDA allowlist; `sources/pubchem.py`
   carries its own fail-closed boundary (fixed base URL, quoted name only, no
   redirects, bounded timeout, transient-only retries, 5 req/s pacing).
+
+## The confidence band is cut relative to the live floor, and /settings reports that floor (Aug 21 2026)
+
+- **`GET /settings` `refusal_score_threshold` is the floor the synthesizer
+  applies, not the global field.** Prod sets only
+  `REFUSAL_SCORE_THRESHOLD_BY_PROFILE` (the live profile's measured 0.70), so
+  the Go proxy, which read only `REFUSAL_SCORE_THRESHOLD`, reported the 0.30
+  default on every request. `ConfigFromEnv` now resolves the per-profile entry
+  exactly as `grounded_qa._refusal_threshold` does (profile from
+  `RETRIEVAL_EMBEDDING_PROFILE`, alias `ACTIVE_EMBEDDING_PROFILE`, default
+  `legacy`; global as fallback). The wire shape is unchanged; only the value
+  became true. On the Python side the same rule is now one method,
+  `Settings.effective_refusal_threshold()`, used by synthesis and by
+  `regwatch status` (which prints the effective floor beside the global).
+- **The High/Moderate cut is derived from that floor, not a second constant.**
+  The fixed 0.55 cut (set in the 0.30-floor era) sat below the live 0.70
+  floor, so every served answer read High and Moderate could never occur
+  (issue #272). The cut is now one third of the way from the floor to 1.0:
+  0.80 for the live profile, ~0.53 for a 0.30 floor (continuous with the old
+  value). The 2026-08-20 calibration put all 40 gold questions at >= 0.8224,
+  so Moderate reads "cleared the floor, but under where every known-answerable
+  question landed". This is floor-relative, not measured; the
+  `threshold_sweep` harness is the path to a measured cut if one is wanted.
+- **No band until the floor is known; no numbers in the band's copy.** A
+  scored answer renders no band (and no "not recorded" row) while `/settings`
+  is in flight, rather than a band cut against a guessed floor. The tooltip
+  and its screen-reader restatement say what the band means for the reader;
+  the raw cosine stays in the evidence drawer only.

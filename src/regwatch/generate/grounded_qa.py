@@ -2790,10 +2790,9 @@ def _refusal_threshold(settings: Settings) -> float:
         The threshold for the active profile, or the global value when that
         profile has no calibrated entry yet.
     """
-    profile = (settings.active_embedding_profile or "legacy").strip()
-    return settings.refusal_score_threshold_by_profile.get(
-        profile, settings.refusal_score_threshold
-    )
+    # One resolver, shared with `regwatch status` and mirrored by the Go
+    # proxy's GET /settings, so every reader of "the floor" agrees.
+    return settings.effective_refusal_threshold()
 
 
 def _trim_evidence(

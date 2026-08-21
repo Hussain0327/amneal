@@ -208,7 +208,11 @@ def cmd_status() -> None:
             "data_dir": str(s.data_dir),
             "database": "postgres" if s.database_url else "UNSET (refuses to boot)",
             "retrieval_top_k": s.retrieval_top_k,
-            "refusal_score_threshold": s.refusal_score_threshold,
+            # The floor answers are actually gated on (per-profile entry, else
+            # the global) next to the global, so an operator reading this can
+            # see both and never mistake the 0.30 fallback for the live floor.
+            "refusal_score_threshold": s.effective_refusal_threshold(),
+            "refusal_score_threshold_global": s.refusal_score_threshold,
             "company_name": s.company_name,
         }
     )

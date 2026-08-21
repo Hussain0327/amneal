@@ -130,6 +130,22 @@ class Settings(BaseSettings):
     # Retrieval is exact, so coverage is required but an HNSW index is not.
     profile_hnsw_index_required: bool = False
 
+    def effective_refusal_threshold(self) -> float:
+        """Returns the INV-2 cosine floor the synthesizer actually applies.
+
+        The per-profile entry for the active embedding profile wins; a profile
+        with no calibrated entry falls back to the global
+        ``refusal_score_threshold``. This is the one resolver for the floor:
+        synthesis, ``regwatch status``, and the Go proxy's ``GET /settings``
+        (``effectiveRefusalThreshold`` in ``go/internal/api/config.go``) all
+        follow the same rule, so a UI cut derived from the reported floor is
+        derived from the floor answers are gated on.
+        """
+        profile = (self.active_embedding_profile or "legacy").strip()
+        return self.refusal_score_threshold_by_profile.get(
+            profile, self.refusal_score_threshold
+        )
+
     # OpenAI Responses + embeddings: gpt-5.6-terra generation and
     # text-embedding-3-large at 1024 dimensions.
     openai_api_key: str | None = None

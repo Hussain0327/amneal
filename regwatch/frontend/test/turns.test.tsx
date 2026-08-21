@@ -17,7 +17,16 @@ vi.mock("@/lib/api", async (importOriginal) => {
 import { AssistantTurn, ProvisionalDraft, UserTurn } from "@/components/Turns";
 import type { ChatMessage, Citation } from "@/lib/api";
 import { formatClock, formatFiled, parseApiDate } from "@/lib/time";
-import { confidenceTitle, nonAnswerLabel, reasonCopy, turnFromMessage, userTurn, type Turn } from "@/lib/turns";
+import {
+  confidenceBand,
+  confidenceTitle,
+  highConfidenceCut,
+  nonAnswerLabel,
+  reasonCopy,
+  turnFromMessage,
+  userTurn,
+  type Turn,
+} from "@/lib/turns";
 
 // A rehydrated history message carries only the persisted fields; the rest
 // default inside turnFromMessage. Cast keeps the test independent of the
@@ -452,13 +461,15 @@ describe("the docket margin -- provenance rail on assistant turns (B9)", () => {
   });
 
   it("renders time filed and a high-confidence dot in an aria-hidden rail, with no audit stamp", () => {
+    // Floor 0.30 puts the High cut at ~0.53; the 0.71 citation clears it.
     const { container } = render(
       <AssistantTurn
         turn={answerWithProvenance}
         sessionId={null}
         onPick={() => {}}
         onCite={() => {}}
-        busy={false} threshold={null}
+        busy={false}
+        threshold={0.3}
       />,
     );
     const margin = container.querySelector(".chat-row__margin");
@@ -477,21 +488,37 @@ describe("the docket margin -- provenance rail on assistant turns (B9)", () => {
     expect(marginalia?.querySelector(".marginalia__dot--moderate")).toBeNull();
   });
 
-  it("shows the moderate dot for a near-threshold answer", () => {
+  it("shows the moderate dot for a near-floor answer", () => {
     const turn = nonAnswerTurn({
       status: "answer",
       refused: false,
       reason: null,
       content: "A hedged claim.",
-      citations: [{ ...wireCitation("PSG_020503", 3), score: 0.41 }],
+      // Above the live 0.70 floor, under the derived 0.80 cut.
+      citations: [{ ...wireCitation("PSG_020503", 3), score: 0.74 }],
       createdAt: FILED_AT,
       meta: FIXTURE_META,
     });
     const { container } = render(
-      <AssistantTurn turn={turn} sessionId={null} onPick={() => {}} onCite={() => {}} busy={false} threshold={null} />,
+      <AssistantTurn turn={turn} sessionId={null} onPick={() => {}} onCite={() => {}} busy={false} threshold={0.7} />,
     );
     expect(container.querySelector(".marginalia__dot--moderate")).not.toBeNull();
     expect(container.querySelector(".marginalia__dot--high")).toBeNull();
+  });
+
+  it("shows no dot on a scored answer until the floor is known", () => {
+    const { container } = render(
+      <AssistantTurn
+        turn={answerWithProvenance}
+        sessionId={null}
+        onPick={() => {}}
+        onCite={() => {}}
+        busy={false}
+        threshold={null}
+      />,
+    );
+    expect(container.querySelector(".marginalia")).not.toBeNull();
+    expect(container.querySelector(".marginalia__dot")).toBeNull();
   });
 
   it("renders no confidence dot on a declined turn (a non-answer never wears one)", () => {
@@ -797,23 +824,54 @@ describe("stream-fallback notice + provenance status log (B8)", () => {
   });
 });
 
-describe("confidenceTitle -- the band grounded in the live threshold (A4)", () => {
-  it("anchors High to the fixed 0.55 cut regardless of the threshold", () => {
-    expect(confidenceTitle("High", 0.3)).toBe("Top passage score at or above 0.55");
-    expect(confidenceTitle("High", null)).toBe("Top passage score at or above 0.55");
+describe("confidenceBand -- the High cut is derived from the live floor (#272)", () => {
+  const scored = (score: number) => [{ ...wireCitation("PSG_020503", 3), score }];
+
+  it("puts the cut one third of the way from the floor to 1.0", () => {
+    expect(highConfidenceCut(0.7)).toBeCloseTo(0.8, 10);
+    // The 0.30-floor era lands on ~0.53, continuous with the old fixed 0.55.
+    expect(highConfidenceCut(0.3)).toBeCloseTo(0.5333, 3);
   });
 
-  it("names the live refusal threshold on Moderate, formatted to two decimals", () => {
-    expect(confidenceTitle("Moderate", 0.3)).toBe(
-      "Above the refusal threshold (0.30), below 0.55",
-    );
-    expect(confidenceTitle("Moderate", 0.455)).toBe(
-      "Above the refusal threshold (0.46), below 0.55",
-    );
+  it("reads an answer just above the floor as Moderate, whatever the floor is", () => {
+    // The #272 regression: with a fixed 0.55 cut under a 0.70 floor every
+    // served answer read High. A derived cut must always leave room below it.
+    for (const floor of [0.3, 0.55, 0.7, 0.9]) {
+      expect(confidenceBand(scored(floor + 0.01), floor)).toBe("Moderate");
+      expect(confidenceBand(scored(highConfidenceCut(floor)), floor)).toBe("High");
+    }
   });
 
-  it("degrades to the bare cut before /settings resolves (never fakes a number)", () => {
-    expect(confidenceTitle("Moderate", null)).toBe("Below 0.55");
+  it("bands the live profile (floor 0.70) at 0.80", () => {
+    expect(confidenceBand(scored(0.79), 0.7)).toBe("Moderate");
+    expect(confidenceBand(scored(0.8), 0.7)).toBe("High");
+    expect(confidenceBand(scored(0.82), 0.7)).toBe("High");
+  });
+
+  it("bands on the best score across citations, ignoring unscored ones", () => {
+    const mixed = [wireCitation("PSG_020503", 3), ...scored(0.72), ...scored(0.91)];
+    expect(confidenceBand(mixed, 0.7)).toBe("High");
+  });
+
+  it("returns null until the floor is known or when nothing is scored (never fakes a band)", () => {
+    expect(confidenceBand(scored(0.95), null)).toBeNull();
+    expect(confidenceBand([wireCitation("PSG_020503", 3)], 0.7)).toBeNull();
+    expect(confidenceBand([], 0.7)).toBeNull();
+  });
+});
+
+describe("confidenceTitle -- plain words, no numbers (#272)", () => {
+  it("says what each band means for the reader and what to do about it", () => {
+    expect(confidenceTitle("High")).toBe("The cited sources matched this question closely.");
+    expect(confidenceTitle("Moderate")).toContain("not closely");
+    expect(confidenceTitle("Moderate")).toContain("Check the cited pages");
+  });
+
+  it("never leaks the cosine or the floor into the tooltip", () => {
+    for (const band of ["High", "Moderate"] as const) {
+      expect(confidenceTitle(band)).not.toMatch(/\d/);
+      expect(confidenceTitle(band)).not.toMatch(/score|threshold|cosine/i);
+    }
   });
 });
 
@@ -823,10 +881,10 @@ describe("AssistantTurn -- confidence legend on cited answers (A4)", () => {
     refused: false,
     reason: null,
     content: "A cited claim.",
-    citations: [{ ...wireCitation("PSG_020503", 3), score: 0.41 }],
+    citations: [{ ...wireCitation("PSG_020503", 3), score: 0.75 }],
   });
 
-  it("titles the band with the threshold-grounded explanation", () => {
+  it("titles the band with the plain-language explanation", () => {
     const { container } = render(
       <AssistantTurn
         turn={scoredTurn}
@@ -834,12 +892,12 @@ describe("AssistantTurn -- confidence legend on cited answers (A4)", () => {
         onPick={() => {}}
         onCite={() => {}}
         busy={false}
-        threshold={0.3}
+        threshold={0.7}
       />,
     );
     const band = container.querySelector(".confidence--moderate");
-    expect(band?.getAttribute("title")).toContain("0.30");
-    expect(band?.getAttribute("title")).toContain("below 0.55");
+    expect(band?.getAttribute("title")).toBe(confidenceTitle("Moderate"));
+    expect(band?.getAttribute("title")).not.toMatch(/\d/);
   });
 
   it("restates the legend in a sr-only span (the title attr is mouse-only)", () => {
@@ -850,14 +908,47 @@ describe("AssistantTurn -- confidence legend on cited answers (A4)", () => {
         onPick={() => {}}
         onCite={() => {}}
         busy={false}
-        threshold={0.3}
+        threshold={0.7}
       />,
     );
     // Keyboard, touch, and SR users cannot reach a title attribute; the same
     // explanation must be in the accessibility tree.
     const srText = container.querySelector(".confidence .sr-only")?.textContent;
-    expect(srText).toContain("0.30");
-    expect(srText).toContain("below 0.55");
+    expect(srText).toContain(confidenceTitle("Moderate"));
+  });
+
+  it("reads High on the same turn once the floor makes the score a clear cut", () => {
+    const { container } = render(
+      <AssistantTurn
+        turn={scoredTurn}
+        sessionId={null}
+        onPick={() => {}}
+        onCite={() => {}}
+        busy={false}
+        threshold={0.3}
+      />,
+    );
+    expect(container.querySelector(".confidence--high")).not.toBeNull();
+    expect(container.querySelector(".confidence--moderate")).toBeNull();
+  });
+
+  it("renders no band and no 'not recorded' row on a scored answer before /settings resolves", () => {
+    const { container } = render(
+      <AssistantTurn
+        turn={scoredTurn}
+        sessionId={null}
+        onPick={() => {}}
+        onCite={() => {}}
+        busy={false}
+        threshold={null}
+      />,
+    );
+    // The floor is unknown, so no band can be honest; and the score IS
+    // recorded, so the explicit-absence row would be a lie.
+    expect(container.querySelector(".confidence")).toBeNull();
+    expect(container.querySelector(".marginalia__dot")).toBeNull();
+    // The answer itself still renders with its citations.
+    expect(container.querySelector(".cites")).not.toBeNull();
   });
 
   it("renders 'Confidence not recorded' when citations carry no scores", () => {

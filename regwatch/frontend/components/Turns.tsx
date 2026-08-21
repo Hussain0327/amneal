@@ -15,7 +15,14 @@ import {
   trailerMarkerPairs,
 } from "@/lib/citations";
 import { formatClock, formatFiled, parseApiDate } from "@/lib/time";
-import { confidenceBand, confidenceTitle, nonAnswerLabel, reasonCopy, type Turn } from "@/lib/turns";
+import {
+  confidenceBand,
+  confidenceTitle,
+  nonAnswerLabel,
+  reasonCopy,
+  topScore,
+  type Turn,
+} from "@/lib/turns";
 import { safeHref } from "@/lib/url";
 
 // Ask renders as a cited chat: the user's line as a bubble, the assistant as a
@@ -172,10 +179,14 @@ function AssistantShell({
   children,
   live,
   turn,
+  floor = null,
 }: {
   children: React.ReactNode;
   live: boolean;
   turn?: Turn;
+  // The live refusal floor the confidence dot is banded against; null (the
+  // default for callers without one) renders no dot rather than a guessed one.
+  floor?: number | null;
 }) {
   const filedMs = turn?.createdAt != null ? parseApiDate(turn.createdAt) : null;
   // Confidence marks belong ONLY to validated answers (answer/summary): gate
@@ -185,7 +196,7 @@ function AssistantShell({
   // depth -- a non-answer never wears a confidence mark).
   const band =
     turn && (turn.status === "answer" || turn.status === "summary")
-      ? confidenceBand(turn.citations)
+      ? confidenceBand(turn.citations, floor)
       : null;
   return (
     <div className={`chat-row${live ? " rise" : ""}`}>
@@ -228,9 +239,10 @@ export const AssistantTurn = memo(function AssistantTurn({
   onPick: (s: Suggestion) => void;
   onCite: (c: Citation) => void;
   busy: boolean;
-  // Live refusal_score_threshold from /settings (null until it resolves),
-  // grounding the confidence tooltip. A primitive, so memo's shallow compare
-  // still bails out during token streaming.
+  // Live refusal_score_threshold from /settings (null until it resolves): the
+  // floor the confidence band is derived from. Null renders no band, never one
+  // cut against a guessed floor. A primitive, so memo's shallow compare still
+  // bails out during token streaming.
   threshold: number | null;
 }) {
   if (turn.status === "clarify") {
@@ -407,9 +419,10 @@ export const AssistantTurn = memo(function AssistantTurn({
     turn.interpretation && turn.interpretation.trim() !== turn.content.trim()
       ? turn.interpretation.trim()
       : null;
-  const band = confidenceBand(turn.citations);
+  const scored = topScore(turn.citations) !== null;
+  const band = confidenceBand(turn.citations, threshold);
   return (
-    <AssistantShell live={turn.live} turn={turn}>
+    <AssistantShell live={turn.live} turn={turn} floor={threshold}>
       {interpreted && <p className="msg__interp">Interpreted as: {interpreted}</p>}
       <div className="msg__body">
         {/* Stamps render ONLY here (answer/summary), wired to the evidence drawer
@@ -442,27 +455,29 @@ export const AssistantTurn = memo(function AssistantTurn({
               disclosure's summary line. It renders on EVERY cited turn --
               there is no length or content conditional -- so its presence
               never encodes "this answer was short". The raw score still stays
-              out of the main view (drawer only); the title grounds the band in
-              the live refusal threshold. */}
+              out of the main view (drawer only); the band is cut relative to
+              the live refusal floor and the title says what it means in plain
+              words, never the number. */}
           <details className="sources">
             <summary className="sources__row">
-              {band ? (
-                <span
-                  className={`confidence confidence--${band.toLowerCase()}`}
-                  title={confidenceTitle(band, threshold)}
-                >
+              {band && (
+                <span className={`confidence confidence--${band.toLowerCase()}`} title={confidenceTitle(band)}>
                   <span className="confidence__dot" aria-hidden />
                   {band} confidence
                   {/* The title attr is mouse-only (unreachable by keyboard,
                       touch, or SR); restate the same explanation for everyone
                       else. */}
-                  <span className="sr-only">{`\u2014 ${confidenceTitle(band, threshold)}`}</span>
+                  <span className="sr-only">{`\u2014 ${confidenceTitle(band)}`}</span>
                 </span>
-              ) : (
-                // Citations without scores (older rehydrated rows): state the
-                // absence explicitly -- silently omitting the band would let an
-                // unscored answer read no differently from a scored one. Default
-                // ink-faint dot; no band modifier, so no green/amber is faked.
+              )}
+              {/* Citations without scores (older rehydrated rows): state the
+                  absence explicitly -- silently omitting the band would let an
+                  unscored answer read no differently from a scored one. Default
+                  ink-faint dot; no band modifier, so no green/amber is faked. A
+                  SCORED answer whose floor has not resolved yet (/settings
+                  still in flight) shows nothing: that gap closes on its own,
+                  and "not recorded" would be false. */}
+              {!scored && (
                 <span className="confidence confidence--none">
                   <span className="confidence__dot" aria-hidden />
                   Confidence not recorded

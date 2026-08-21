@@ -6,6 +6,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -171,6 +172,17 @@ func ConfigFromEnv() (Config, error) {
 		}
 		cfg.RefusalScoreThreshold = f
 	}
+	// The floor the synthesizer actually applies is per embedding profile
+	// (grounded_qa._refusal_threshold): REFUSAL_SCORE_THRESHOLD_BY_PROFILE
+	// keyed by the active profile, falling back to the global above. Prod
+	// sets ONLY the map (the live profile's measured 0.70), so reporting the
+	// global here told the UI the floor was 0.30 -- the confidence band and
+	// its tooltip were keyed to a number no answer is ever gated on.
+	effective, err := effectiveRefusalThreshold(cfg.RefusalScoreThreshold)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.RefusalScoreThreshold = effective
 
 	// -- step-5 CompleteQuery (PR B) --
 	cfg.RateLimitPerMinute = 30
@@ -205,6 +217,35 @@ func ConfigFromEnv() (Config, error) {
 
 // envOrDefault: pydantic-settings semantics for plain string fields -- an
 // UNSET variable takes the default; a set-but-empty value is kept as "".
+// effectiveRefusalThreshold mirrors grounded_qa._refusal_threshold: the
+// per-profile entry of REFUSAL_SCORE_THRESHOLD_BY_PROFILE for the active
+// embedding profile (RETRIEVAL_EMBEDDING_PROFILE, legacy alias
+// ACTIVE_EMBEDDING_PROFILE, default "legacy"), else the global fallback.
+// The map is the same JSON object pydantic-settings parses; malformed JSON
+// refuses boot on both sides. Map values are taken as-is, as pydantic does
+// (only the global field carries the [0, 1] validator there).
+func effectiveRefusalThreshold(global float64) (float64, error) {
+	raw := strings.TrimSpace(os.Getenv("REFUSAL_SCORE_THRESHOLD_BY_PROFILE"))
+	if raw == "" {
+		return global, nil
+	}
+	byProfile := map[string]float64{}
+	if err := json.Unmarshal([]byte(raw), &byProfile); err != nil {
+		return 0, fmt.Errorf("env REFUSAL_SCORE_THRESHOLD_BY_PROFILE must be a JSON object of profile -> float: %w", err)
+	}
+	profile := strings.TrimSpace(envOrDefault("RETRIEVAL_EMBEDDING_PROFILE", ""))
+	if profile == "" {
+		profile = strings.TrimSpace(envOrDefault("ACTIVE_EMBEDDING_PROFILE", ""))
+	}
+	if profile == "" {
+		profile = "legacy"
+	}
+	if f, ok := byProfile[profile]; ok {
+		return f, nil
+	}
+	return global, nil
+}
+
 func envOrDefault(name, def string) string {
 	if v, ok := os.LookupEnv(name); ok {
 		return v

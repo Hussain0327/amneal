@@ -183,17 +183,27 @@ export function nonAnswerLabel(
   return null;
 }
 
-// Coarse, honest confidence band from the best citation score. Answers only
-// survive the ~0.30 refusal threshold, so everything shown is at least
-// "Moderate"; a clear-cut retrieval (>=0.55) reads "High". We deliberately show
-// a BAND, not the raw float — a near-threshold answer must read visibly hedged
-// in the main view, with the number reserved for the evidence drawer. Returns
-// null when no score is on the wire (older/streamed turns) so nothing is faked.
+// Coarse, honest confidence band from the best citation score, read against
+// the floor the answer had to clear. We deliberately show a BAND, not the raw
+// float: a near-floor answer must read visibly hedged in the main view, with
+// the number reserved for the evidence drawer. Returns null when no score is
+// on the wire (older/streamed turns) OR the live floor is not known yet, so
+// nothing is faked in either direction.
 export type ConfidenceBand = "High" | "Moderate";
 
-// The High/Moderate cut on the top passage score. Shared by confidenceBand and
-// confidenceTitle so the band and the tooltip explaining it can never drift.
-const HIGH_CONFIDENCE_SCORE = 0.55;
+// The High cut sits one third of the way from the live floor to 1.0. Derived,
+// not a second constant: a fixed cut (0.55, set in the 0.30-floor era) ended
+// up BELOW the live 0.70 floor, so every served answer read High and Moderate
+// could never occur (#272). Relative to the floor it cannot drift under it
+// again when the floor is recalibrated. For the live text-embedding-3-large
+// profile (floor 0.70) the cut is 0.80; the 2026-08-20 calibration put all 40
+// gold questions at >= 0.82, so Moderate means "cleared the floor, but under
+// where every known-answerable question landed".
+const HIGH_CUT_HEADROOM_FRACTION = 1 / 3;
+
+export function highConfidenceCut(floor: number): number {
+  return floor + (1 - floor) * HIGH_CUT_HEADROOM_FRACTION;
+}
 
 export function topScore(citations: Citation[]): number | null {
   let best: number | null = null;
@@ -203,24 +213,29 @@ export function topScore(citations: Citation[]): number | null {
   return best;
 }
 
-export function confidenceBand(citations: Citation[]): ConfidenceBand | null {
+/**
+ * Bands the best citation score against the live refusal floor.
+ *
+ * `floor` is /settings' refusal_score_threshold, null until it resolves; with
+ * no floor there is no honest band, so the caller renders none rather than
+ * one computed against a guessed number.
+ */
+export function confidenceBand(citations: Citation[], floor: number | null): ConfidenceBand | null {
   const score = topScore(citations);
-  if (score === null) return null;
-  return score >= HIGH_CONFIDENCE_SCORE ? "High" : "Moderate";
+  if (score === null || floor === null) return null;
+  return score >= highConfidenceCut(floor) ? "High" : "Moderate";
 }
 
 /**
- * Plain-language grounding for a confidence band (the .confidence tooltip).
- * "Moderate" is only meaningful against the floor the answer had to clear, so
- * when the live refusal_score_threshold is known it is named exactly; before
- * /settings resolves (threshold null) the copy degrades to the bare cut
- * rather than fake a number.
+ * Plain-language grounding for a confidence band (the .confidence tooltip and
+ * its screen-reader restatement). Says what the band means for the reader and
+ * what to do about it; the cosine itself is a system detail and stays in the
+ * evidence drawer.
  */
-export function confidenceTitle(band: ConfidenceBand, threshold: number | null): string {
-  if (band === "High") return `Top passage score at or above ${HIGH_CONFIDENCE_SCORE}`;
-  return threshold != null
-    ? `Above the refusal threshold (${threshold.toFixed(2)}), below ${HIGH_CONFIDENCE_SCORE}`
-    : `Below ${HIGH_CONFIDENCE_SCORE}`;
+export function confidenceTitle(band: ConfidenceBand): string {
+  return band === "High"
+    ? "The cited sources matched this question closely."
+    : "The cited sources matched well enough to answer, but not closely. Check the cited pages before relying on this.";
 }
 
 export function userTurn(q: string): Turn {
