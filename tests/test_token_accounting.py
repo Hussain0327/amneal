@@ -14,7 +14,7 @@ from regwatch.generate.llm import (
 from tests.conftest import synth_turn_json
 
 # ---------- provider usage extraction ----------
-# Provider-level usage extraction is covered per provider (tests/test_databricks_llm_provider.py asserts the chat-completions usage mapping);
+# Provider-level usage extraction is covered by the OpenAI Responses tests;
 # here only the provider-agnostic pieces remain.
 
 
@@ -33,8 +33,8 @@ def test_llmresponse_usage_is_optional_for_existing_callers() -> None:
 
 # ---------- cost from the settings price table ----------
 
-# The default table is EMPTY (only the operator knows the Databricks serving
-# rate), so priced-model tests declare their table via LLM_MODEL_PRICES.
+# The default table is empty; priced-model tests declare their table through
+# LLM_MODEL_PRICES.
 _TEST_PRICES = '{"oss-model": {"input": 0.05, "output": 0.40}}'
 
 
@@ -47,9 +47,9 @@ def _set_prices(monkeypatch: pytest.MonkeyPatch, table: str = _TEST_PRICES) -> N
 
 def test_default_price_table_is_empty_never_a_guess() -> None:
     # No hard-coded rate may survive for a model the operator did not price.
-    from config.settings import get_settings
+    from config.settings import Settings
 
-    assert get_settings().llm_model_prices == {}
+    assert Settings(_env_file=None).llm_model_prices == {}  # type: ignore[call-arg]
     assert estimate_cost_usd("gpt-oss-120b-080525", LLMUsage(10, 10)) is None
 
 

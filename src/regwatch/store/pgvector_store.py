@@ -36,7 +36,6 @@ from sqlmodel import Field, SQLModel
 
 from regwatch.common.logging import get_logger
 from regwatch.process.embedder import (
-    Qwen3EmbeddingProvider,
     get_embedding_provider,
     get_embedding_provider_for_profile,
 )
@@ -337,19 +336,11 @@ def assert_embedding_provider_dim() -> None:
     settings = get_settings()
     active_profile_id = (settings.active_embedding_profile or "legacy").strip()
     provider = get_embedding_provider()
-    if active_profile_id == "legacy" and isinstance(provider, Qwen3EmbeddingProvider):
-        raise RuntimeError(
-            "Qwen3 cannot write directly into the unversioned legacy vector space. "
-            "Register/backfill a named embedding profile, then set "
-            "ACTIVE_EMBEDDING_PROFILE to that profile ID."
-        )
     # This check only protects the LEGACY `chunk.embedding` column, whose typmod
     # is vector(1536). It must therefore only fire when that column is what
     # serves retrieval. The exemption used to be `isinstance(provider,
-    # Qwen3EmbeddingProvider)`, which encoded "the one non-legacy provider we
-    # happen to have" rather than the actual condition, so the OpenAI cutover
-    # (2026-08-20) tripped a guard whose own error message told the operator to
-    # do exactly what they had already done -- serve through a named profile.
+    # a concrete provider class, which encoded one migration arm rather than
+    # the actual condition.
     # Key it on the active profile, which is the real invariant.
     serves_legacy_column = active_profile_id == "legacy"
     if serves_legacy_column and int(provider.dim) != EMBEDDING_DIM:
@@ -401,12 +392,6 @@ def assert_embedding_write_config(profile_id: str) -> Any:
         raise RuntimeError("embedding write preflight requires a profile id")
     if normalized == "legacy":
         provider = get_embedding_provider()
-        if isinstance(provider, Qwen3EmbeddingProvider):
-            raise RuntimeError(
-                "Qwen3 cannot write directly into the unversioned legacy vector "
-                "space. Register/backfill a named embedding profile, then set "
-                "ACTIVE_EMBEDDING_PROFILE to that profile ID."
-            )
         if int(provider.dim) != EMBEDDING_DIM:
             raise RuntimeError(
                 f"EMBEDDING_PROVIDER={provider.name!r} produces {provider.dim}-dim "

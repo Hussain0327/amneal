@@ -259,14 +259,14 @@ def _preflight_embedding_write_config() -> None:
     """Refuse an embed-during-sync run whose provider cannot write its targets.
 
     Mirrors exactly what ``_embed_chunk_rows`` will attempt per document: the
-    legacy ``chunk.embedding`` column is written unless the post-cutover skip
-    applies (a named active profile with a Qwen provider), and a named active
-    profile is always required. The optional shadow profile is deliberately
+    legacy ``chunk.embedding`` column is written only for the legacy arm, and
+    a named active profile is always required. The optional shadow profile is
+    deliberately
     not preflighted -- shadow failures degrade to a logged skip by design.
     """
     active = (get_settings().active_embedding_profile or "legacy").strip()
-    provider = get_embedding_provider()  # Refuses when EMBEDDING_PROVIDER is unset.
-    if active == "legacy" or getattr(provider, "name", "") != "qwen3":
+    get_embedding_provider()  # Refuses when EMBEDDING_PROVIDER is unset.
+    if active == "legacy":
         assert_embedding_write_config("legacy")
     if active != "legacy":
         assert_embedding_write_config(active)

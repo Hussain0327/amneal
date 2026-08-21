@@ -107,17 +107,12 @@ def test_llm_secret_preflight_fails_fast_before_watch() -> None:
     # mattered.
     steps = _steps()
     names = [s.get("name") for s in steps]
-    assert "preflight Databricks LLM config" in names, "fail-fast secret check missing"
-    assert names.index("preflight Databricks LLM config") < names.index("regwatch watch")
-    step = _step("preflight Databricks LLM config")
+    assert "preflight OpenAI config" in names, "fail-fast secret check missing"
+    assert names.index("preflight OpenAI config") < names.index("regwatch watch")
+    step = _step("preflight OpenAI config")
     # Same skip contract as the pipeline: no DB secret => clean no-op (forks).
     assert "env.DATABASE_URL != ''" in step["if"]
-    for name in (
-        "DATABRICKS_LLM_BASE_URL",
-        "DATABRICKS_LLM_TOKEN",
-        "DATABRICKS_LLM_MODEL",
-    ):
-        assert name in step["run"]
+    assert "OPENAI_API_KEY" in step["run"]
     assert "exit 1" in step["run"]
 
 

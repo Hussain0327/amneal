@@ -131,6 +131,10 @@ func ConfigFromEnv() (Config, error) {
 	// (the exact failure mode the lazy DB pool exists to avoid). So: warn
 	// via the Insecure flag (main.go logs it), never refuse.
 	insecure := os.Getenv("SENTRY_ENVIRONMENT") == "production" && !cookieSecure
+	embeddingProvider := envOrDefault("INGEST_EMBEDDING_PROVIDER", "")
+	if embeddingProvider == "" {
+		embeddingProvider = envOrDefault("EMBEDDING_PROVIDER", "")
+	}
 
 	cfg := Config{
 		CookieSecure: cookieSecure,
@@ -142,12 +146,10 @@ func ConfigFromEnv() (Config, error) {
 		// (2026-08-14 postmortem: no implicit provider defaults anywhere).
 		// Empty means unset -- the Python app refuses to boot in that state,
 		// and /settings reports "" rather than a guessed provider. LLMModel
-		// mirrors DATABRICKS_LLM_MODEL, the one serving endpoint every role
-		// uses; the retired per-role LLM_MODEL default is gone with the
-		// OpenAI-API provider path.
-		EmbeddingProvider:     envOrDefault("EMBEDDING_PROVIDER", ""),
+		// mirrors the OpenAI Responses model used by every role.
+		EmbeddingProvider:     embeddingProvider,
 		LLMProvider:           envOrDefault("LLM_PROVIDER", ""),
-		LLMModel:              envOrDefault("DATABRICKS_LLM_MODEL", ""),
+		LLMModel:              envOrDefault("OPENAI_LLM_MODEL", "gpt-5.6-terra"),
 		RefusalScoreThreshold: 0.30,
 		CompanyName:           envOrDefault("COMPANY_NAME", "Amneal"),
 	}

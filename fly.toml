@@ -59,16 +59,15 @@ kill_timeout = 30
 [env]
   # REQUIRED-EXPLICIT since the 2026-08-14 backfill postmortem: a process
   # without it refuses to boot instead of guessing. OpenAI as of 2026-08-20 --
-  # generation and embeddings both moved off the Databricks tenant by owner
-  # decision, while the DATABASE stays on Databricks Lakebase. Retrieval picks
+  # generation and embeddings use OpenAI. The database is application-owned
+  # PostgreSQL with pgvector; OpenAI receives no application state. Retrieval picks
   # its embedder from RETRIEVAL_EMBEDDING_PROFILE (a Fly secret, currently the
   # text-embedding-3-large @1024 profile); this line is what the boot assert
   # and the legacy-arm skip logic read.
   INGEST_EMBEDDING_PROVIDER = "openai"
   LLM_PROVIDER = "openai"
-  # No HNSW on the profile arm: the Lakebase branch is capped at 512 MiB and an
-  # index roughly doubles vector storage. Exact scan over ~16k vectors is well
-  # inside budget and returns perfect recall.
+  # RegWatch uses exact pgvector search, so the profile needs full coverage but
+  # does not require an HNSW index.
   PROFILE_HNSW_INDEX_REQUIRED = "false"
   # The shadow router was a blocking pre-retrieval model call whose result was
   # discarded. Off the critical Ask path since 2026-08-20.
@@ -127,9 +126,7 @@ kill_timeout = 30
   # returns {"status": "ok"} and touches no dependency -- no DB session, no
   # provider, no profile registry. That DB-free body is what keeps the fix in
   # 35102e1 intact: the END-TO-END /health check this path used to carry fired
-  # every 30s per machine and was a standing source of Lakebase activity, so
-  # the Autoscaling instance never reached its scale-to-zero window (94 of 94
-  # non-zero hourly billing buckets over four days).
+  # every 30s per machine and was a standing source of database activity.
   #
   # DB-free but NOT proxy-local. Unlike /healthz (answered by the proxy itself,
   # go/internal/proxy/proxy.go), this request still runs edge -> proxy -> 6PN

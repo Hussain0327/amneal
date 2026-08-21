@@ -8,14 +8,13 @@ them -- with a one-line FutureWarning nudge; when both are set and disagree
 the NEW name wins. Resolution is AliasChoices on the Settings fields; the
 warning policy is Settings._warn_deprecated_env_names.
 
-NOTE: the suite-wide conftest fixture sets the OLD names (EMBEDDING_PROVIDER,
-ACTIVE_EMBEDDING_PROFILE) for every test, so each test below states its own
-env explicitly via _configure.
+Each test states its own environment explicitly via _configure.
 """
 
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 
 import config.settings as cs
 import pytest
@@ -47,7 +46,7 @@ def _fresh_settings() -> tuple[cs.Settings, list[str]]:
     """
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        s = cs.Settings()  # type: ignore[call-arg]
+        s = cs.Settings(_env_file=None)  # type: ignore[call-arg]
     return s, [str(w.message) for w in caught]
 
 
@@ -70,7 +69,9 @@ def test_new_ingest_provider_name_resolves_without_warning(
 
 def test_old_ingest_provider_name_still_works_and_warns(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     _configure(monkeypatch, unset=("INGEST_EMBEDDING_PROVIDER",), EMBEDDING_PROVIDER="echo")
     s, messages = _fresh_settings()
     assert s.embedding_provider == "echo"
@@ -127,7 +128,9 @@ def test_new_retrieval_profile_name_resolves_without_warning(
 
 def test_old_retrieval_profile_name_still_works_and_warns(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     _configure(
         monkeypatch,
         unset=("RETRIEVAL_EMBEDDING_PROFILE",),

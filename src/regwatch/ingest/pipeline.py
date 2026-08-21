@@ -69,7 +69,7 @@ def _legacy_document_embeddings(texts: list[str]) -> Sequence[list[float] | None
         return []
     provider = get_embedding_provider()
     active_profile_id = (get_settings().active_embedding_profile or "legacy").strip()
-    if active_profile_id != "legacy" and getattr(provider, "name", "") == "qwen3":
+    if active_profile_id != "legacy":
         return [None] * len(texts)
     return embed_documents(provider, texts)
 

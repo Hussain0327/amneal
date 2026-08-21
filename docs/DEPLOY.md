@@ -1,117 +1,44 @@
-# DEPLOY - Lakebase + Fly.io + Vercel runbook
+# DEPLOY - RegWatch PostgreSQL + Fly.io + Vercel runbook
 
-Last updated: 2026-08-17 for the authoritative FDA corpus rollout; unrelated
-live production values were last checked 2026-08-11.
+Last updated: 2026-08-21 for the OpenAI-only runtime target.
 
-This is the production runbook. Read it top to bottom the first time; after that
-jump to the section you need. Section numbers are stable, other files link to
-them.
-
-What is running right now:
+This runbook describes the checked-in target. It does not prove that a live
+production database has been migrated or that the application has been
+deployed.
 
 ```text
-browser -- https --> Vercel (Next.js, regwatch/frontend, https://amneal.vercel.app)
-                        |  /api/* rewrite proxy (API_PROXY_TARGET)
-                        v
-                     Go proxy (Fly app "amneal", process group "proxy", public :8080)
-                        |  6PN private network (UPSTREAM_URL)
-                        v
-                     FastAPI ("regwatch serve", dual-stack :8000, process group "app")
-                        |  DATABASE_URL (psycopg v3, direct endpoint)
-                        v
-                     Databricks Lakebase Postgres + pgvector (rows, vectors, audit)
+browser -> Vercel -> Fly Go proxy -> Fly FastAPI
+                                  |-> OpenAI Responses API
+                                  |-> OpenAI Embeddings API
+                                  |-> RegWatch PostgreSQL + pgvector
 ```
 
-Both models ran in the company's own Databricks tenant from 2026-07-30 through
-2026-08-19:
+Generation is `gpt-5.6-terra` over the Responses API with medium reasoning and
+`store=false`. Embeddings are `text-embedding-3-large` at 1024 dimensions.
+Retrieval is exact pgvector search. RegWatch owns and supplies all application
+state through `DATABASE_URL`; OpenAI does not store the application
+conversation or database.
 
-- Generation: serving alias `workspace.default.regwatch`, served model
-  `gpt-oss-120b-080525`. One model did every role: router, synthesizer,
-  extractor. `LLM_PROVIDER=databricks`.
-- Embeddings: serving endpoint `workspace.default.regwatch-embed`, Qwen3, 1024
-  dimensions, active profile `ep_2e7368b354d911ea3a013c3125e276c2`. All 5,494
-  chunks were embedded on that profile (measured 2026-08-11).
+## 1. Database
 
-**As of 2026-08-20, by owner decision, both legs move to OpenAI:** generation to
-`gpt-5.6-terra` (`LLM_PROVIDER=openai`) and embeddings to
-`text-embedding-3-large` truncated to 1024 dimensions (`EMBEDDING_PROVIDER=openai`).
-This deliberately reopens data residency item D1 for those two legs -- an
-analyst question now leaves the tenant for a third-party model API on the
-normal path, which is the intended outcome of the decision, not a leak.
-`D1_ENFORCED` was never set in prod, so no armed guard was bypassed. The
-database is unchanged: Lakebase still holds every chunk and vector, in-tenant.
-Only the model calls moved. Scheduled Watch's change-summary/extraction LLM
-work moves with generation, never embeddings.
+Provision a PostgreSQL database with pgvector for RegWatch, then set
+`DATABASE_URL` for both the Go and Python services. The replacement service
+must satisfy these gates before production traffic moves:
 
-Auth is custom cookie sessions, minted by the Go proxy.
+1. TLS is required for every non-local connection.
+2. The application role can run the schema migrations and read/write every
+   RegWatch table used by the release.
+3. The `vector` extension is installed and visible to the application role.
+4. The OpenAI embedding profile is registered as
+   `text-embedding-3-large`, 1024 dimensions, unit normalized.
+5. Every serving chunk has an embedding for that profile before activation.
+6. Exact retrieval and citation evaluation pass against the replacement
+   database.
+7. Backup, restore, and rollback procedures are rehearsed.
 
-Postgres + pgvector is the only datastore. `DATABASE_URL` is mandatory and the
-app refuses to boot without it.
-
-`fly.toml` sets `EMBEDDING_PROVIDER = "qwen3"`. That satisfies the
-required-explicit boot assert (an unset provider refuses to start); the live
-query embedder itself comes from `ACTIVE_EMBEDDING_PROFILE`
-(`retrieve/retriever.py`), and only the `legacy` arm ever reads
-`EMBEDDING_PROVIDER`. Prod runs a real profile, so
-the setting now only governs the old `vector(1536)` chunk column and the boot
-dimension check in `store/pgvector_store.py`.
-
-Prerequisites on your machine: `uv`, `docker`, `flyctl`, the `vercel` CLI
-(optional, the dashboard works too), the repo checked out, and the production
-secret values listed in step 3.2.
-
----
-
-## 1. The database (Databricks Lakebase)
-
-Production Postgres is Databricks Lakebase, in the company's own tenant.
-
-- Host `ep-super-hat-d8wkrjd9.database.us-east-2.cloud.databricks.com`, us-east-2
-- Database `databricks_postgres`, app role `regwatch_app`
-- pgvector is preinstalled in the `extensions` schema
-- 5,494 chunk rows on 2026-08-11, which is exactly what `/health` reports as
-  `corpus_count`. These are the serving legacy PSG chunks, not the replacement
-  FDA corpus discovered on 2026-08-13.
-
-An older note argued for staying on Supabase
-(`docs/DATABRICKS_ADOPTION_2026-07-28.md`). That call was reversed and the move
-already happened. Anything still saying Supabase is out of date.
-
-### 1.1 What the connection string has to get right
-
-All four of these are enforced in code, so a mistake fails loudly.
-
-1. **Use the DIRECT endpoint, never the `-pooler` host.** The pooler is PgBouncer
-   in transaction mode. That breaks pgx's server-side prepared statements in the
-   Go proxy (`go/internal/store/pool.go`), and the proxy is the service holding
-   the public port, so it presents as a full edge outage. Treat the host suffix
-   as a release-gate check.
-2. **TLS is automatic.** You do not have to append `sslmode=require`: both tiers
-   add it for any non-local host (`store/db.py:_enforce_sslmode`,
-   `go/internal/store/pool.go:enforceSSLMode`). An `sslmode` you set yourself
-   wins, so appending it is harmless.
-3. **URL-encode the password.** `@` becomes `%40`, `#` becomes `%23`, and so on.
-   A bare `postgresql://` prefix is fine, both tiers normalize the scheme.
-4. **The role needs BYPASSRLS.** Boot enables deny-all row level security on
-   every public table, because Lakebase exposes a PostgREST-style Data API over
-   them. A grant-only role connects fine and then reads zero rows, so the app
-   would boot "healthy" and refuse every question. `regwatch_app` holds
-   BYPASSRLS.
-
-Two more facts worth knowing before you touch the database:
-
-- Lakebase's default `search_path` is `"$user", public` and does not include
-  `extensions`. The app role carries `ALTER ROLE regwatch_app SET search_path`.
-  Migrations and bootstrap DDL schema-qualify the `vector` type instead of
-  relying on that.
-- The RLS sweep at boot is deliberately tolerant: it skips a table it cannot
-  lock right now rather than crash-looping the fleet (the 2026-06-18 incident).
-  It is not silent, though. Anything it failed to protect is published and
-  `GET /ready` fails while the list is non-empty.
-
-**Not written down anywhere:** how to provision a fresh Lakebase instance from
-zero. Everything above describes the instance that exists. A from-scratch
-rebuild is unrehearsed, same as the restore drill in 6.5.
+Do not reuse or copy an existing production `DATABASE_URL` into logs, prompts,
+or committed files. Database provisioning, data copy, secret rotation, and the
+final production switch require explicit operator approval.
 
 ## 2. Schema and migrations
 

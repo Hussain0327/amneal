@@ -29,11 +29,10 @@ COPY go/internal ./internal
 RUN go build -trimpath -ldflags "-s -w" -o /usr/local/bin/regwatch-proxy ./cmd/proxy
 
 # One slim flavor: no torch/sentence-transformers. Run with
-# EMBEDDING_PROVIDER=qwen3 + QWEN_EMBEDDING_BASE_URL/TOKEN (+ DATABASE_URL for
-# Postgres/pgvector); the OpenAI-compatible SDK ships via the `llm` extra as
-# the Databricks serving-endpoint transport. Production runs this flavor
-# against Databricks Lakebase Postgres and embeds through the active Qwen3
-# profile. See docs/DEPLOY.md.
+# INGEST_EMBEDDING_PROVIDER=openai, LLM_PROVIDER=openai, OPENAI_API_KEY, and a
+# PostgreSQL/pgvector DATABASE_URL. The OpenAI SDK ships via the `llm` extra.
+# Retrieval serves an OpenAI text-embedding-3-large profile at 1024 dimensions.
+# See docs/DEPLOY.md.
 # EMBEDDING_PROVIDER is deliberately NOT defaulted in the image (2026-08-14
 # postmortem): every process must be told its providers explicitly or refuse
 # to boot. Smoke tests pass EMBEDDING_PROVIDER=echo explicitly.

@@ -1,30 +1,25 @@
-"""OCR for scanned pages, via the RapidOCR model-serving endpoint on Databricks.
+"""Scanned-page detection and OCR layout reconstruction helpers.
 
 PyMuPDF reads a PDF's embedded text; a scanned page has none of its own -- it's just
 an image (or an unreliable scanner-OCR layer underneath). For pages that look scanned
-we render the page to a PNG and send it to the RapidOCR endpoint (defpredict-rapidocr),
-which returns the recognized text regions with their bounding boxes. RapidOCR itself
-runs only on Databricks -- the app never installs it, it just calls the API.
+RegWatch currently has no remote OCR provider. Scanned pages fall back to any
+embedded text layer. The layout reconstruction helpers remain for local or future
+application-owned OCR input.
 
 The boxes drive parse.layout, which rebuilds paragraph blocks and tables. RapidOCR gives
 box coordinates in rendered-image pixels; we convert them to PDF points so scanned and
 digital pages share one coordinate space. Figures on a scan are found best-effort as
 large text-free regions (RapidOCR reports no images), captioned from nearby text.
 
-Where the endpoint isn't configured/reachable (e.g. plain local dev with no Databricks
-creds), OCR is skipped and the caller falls back to whatever text layer exists.
 """
 
 from __future__ import annotations
 
-import base64
 import json
 import re
 from itertools import pairwise
 
 import fitz
-import httpx
-from config.settings import get_settings
 
 from regwatch.common.logging import get_logger
 from regwatch.deficiency.parse.layout import (
@@ -41,9 +36,7 @@ log = get_logger(__name__)
 # not a digital page that happens to carry a small logo.
 _SCANNED_IMAGE_COVERAGE = 0.5
 
-# The render resolution. 200 dpi is enough for document text and keeps the
-# request payload small. (seam: _OCR_ENDPOINT removed -- regwatch wires the
-# full invocations URL via settings instead of a Databricks host + endpoint name.)
+# Region coordinates are recorded against a 200 DPI raster.
 _RENDER_DPI = 200
 
 # A text-free vertical band taller than this (in units of median text height) on a
@@ -76,38 +69,9 @@ def is_scanned_page(page: fitz.Page) -> bool:
 
 
 def ocr_page(page: fitz.Page) -> OcrResult | None:
-    """Render the page, OCR it through Databricks, and reconstruct text/tables/figures.
-
-    Returns (text, tables, blocks, figures), or None when the endpoint is not configured
-    or the call fails -- the caller then falls back to the embedded text.
-    """
-    s = get_settings()
-    # seam: regwatch wires OCR via a full invocations URL + bearer token
-    # (deficiency_ocr_invocations_url / deficiency_ocr_token) rather than
-    # upstream's databricks_host + _OCR_ENDPOINT.
-    url = getattr(s, "deficiency_ocr_invocations_url", None)
-    token = getattr(s, "deficiency_ocr_token", None)
-    if not url or not token:
-        return None  # no OCR API available (e.g. local dev without creds) -> skip
-
-    try:
-        pix = page.get_pixmap(dpi=_RENDER_DPI)
-        image_b64 = base64.b64encode(pix.tobytes("png")).decode("ascii")
-        resp = httpx.post(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
-            json={"dataframe_records": [{"image_b64": image_b64}]},
-            timeout=60.0,
-        )
-        resp.raise_for_status()
-        predictions = resp.json().get("predictions", [])
-    except Exception as exc:
-        log.warning("ocr_endpoint_failed", page=page.number + 1, error=str(exc)[:200])
-        return None
-
-    if not predictions:
-        return "", [], [], []
-    return _reconstruct_prediction(predictions[0], page)
+    """Return no remote OCR result; callers use the embedded text fallback."""
+    del page
+    return None
 
 
 def _reconstruct_prediction(payload, page: fitz.Page) -> OcrResult | None:

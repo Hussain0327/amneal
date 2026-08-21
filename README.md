@@ -144,100 +144,40 @@ flowchart TD
 
 The canonical system design is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-## Status
+## Runtime boundary
 
-regwatch runs as a **limited internal pilot**, not a generally available product.
-The deployed-system counters below were checked on 2026-08-13; the corpus
-manifest facts were updated from the 2026-08-17 operator handoff.
+The repository target is OpenAI-only for model calls:
 
-- **Deployed.** The API runs on Fly.io (app `amneal`, release v135). The frontend
-  runs on Vercel. Postgres and pgvector are on **Databricks Lakebase**, in the
-  company's own Databricks tenant. Rows, vectors, and the audit log all live in
-  that one database. The currently serving legacy PSG corpus is 5,494 chunks.
-- **The replacement authoritative FDA corpus is building but not activated.**
-  The frozen production manifest contains **140,438 source records**: 99,198
-  Drugs@FDA, 10,156 action-package, 1,795 PSG, 5 FDA BE-guidance, and 29,284
-  Orange Book records. Those are source records, not chunks or embeddings. The
-  corrected canary passed 21 / 21 and produced 499 chunks. The full backfill is
-  running document-at-a-time while the serving namespace remains `legacy`.
-  Acceptance requires every frozen-manifest record to resolve to either a
-  searchable indexed version or a narrowly evidence-backed terminal outcome;
-  every searchable chunk must then have the selected-profile vector. See
-  [`docs/AUTHORITATIVE_FDA_CORPUS.md`](docs/AUTHORITATIVE_FDA_CORPUS.md).
-- **Both model roles run on Databricks Model Serving**, in the same tenant.
-  Generation is `gpt-oss-120b` (served id `gpt-oss-120b-080525`) behind the
-  serving alias `workspace.default.regwatch`, and that one open-weight model
-  handles every LLM role (`LLM_PROVIDER=databricks`). Embeddings are Qwen3 on
-  `workspace.default.regwatch-embed`, 1024-dim, profile
-  `ep_2e7368b354d911ea3a013c3125e276c2`. It covers all 5,841 chunks -- the
-  5,494 serving legacy chunks plus the 347 canary chunks (5,841 / 5,841,
-  verified against the production database on 2026-08-14). The interactive app sends no model traffic to OpenAI; its
-  provider remains a tested LLM rollback. Scheduled Watch still uses its scoped
-  OpenAI key for public-document change summaries and extraction, never for
-  embeddings. The legacy OpenAI embedding arm is no longer refreshed by Watch
-  and needs a backfill before it can be treated as a current-corpus rollback. See
-  [`docs/DATABRICKS_ADOPTION_2026-07-28.md`](docs/DATABRICKS_ADOPTION_2026-07-28.md).
-- **Data residency (D1) is deliberately reversed for model calls, 2026-08-20.**
-  By owner decision, generation moves from Databricks `gpt-oss-120b` to OpenAI
-  `gpt-5.6-terra`, and embeddings move from Databricks Qwen3 to OpenAI
-  `text-embedding-3-large` truncated to 1024 dimensions. An analyst question now
-  leaves the company tenant for a third-party model API on the normal path --
-  that is intentional, not a leak: `D1_ENFORCED` was never set in prod, so no
-  armed residency guard was bypassed by this change. The database leg is
-  unchanged: all chunks and vectors still live in Databricks Lakebase, in-tenant.
-  Only the model calls moved. The original D1 write-up, and the since-superseded
-  "D1 is closed" record from 2026-07-30 through 2026-08-19, are archived at
-  [`docs/archive/DATA_RESIDENCY_D1.md`](docs/archive/DATA_RESIDENCY_D1.md).
-- **The daily Watch pipeline runs in production.** A GitHub Actions cron
-  ([`.github/workflows/watch-daily.yml`](.github/workflows/watch-daily.yml)) runs
-  `regwatch watch` each day and is the only driver of the daily pipeline in prod.
-  It failed from 2026-08-07 through the morning of 2026-08-10 because
-  `WATCH_DATABASE_URL` pointed at the wrong database. That was fixed on
-  2026-08-10 and the last observed pre-parity runs were green. The first run of
-  this workflow revision will intentionally fail before crawl until its six
-  profile secrets are provisioned, as described below.
-- **The polyglot migration**
-  ([`docs/POLYGLOT_TARGET_2026-07-10.md`](docs/POLYGLOT_TARGET_2026-07-10.md))
-  is through step 5. The Go proxy owns the public port and serves auth, sessions,
-  feedback, settings, and products natively. Since 2026-07-24 it also
-  orchestrates `POST /query` end to end: it persists the audit row and calls
-  Python's internal, token-gated RAG compute endpoint. Python keeps the stateless
-  RAG core. Postgres plus pgvector is the only datastore (the SQLite/Chroma
-  dual mode was deleted in R5). Remaining: legacy-path deletion, hardening step
-  R3, and steps 6 through 9.
-- **Not yet externally exposed.** The work between here and an external launch is
-  an SSO plus TLS gateway, least-privilege database credentials, and a rehearsed
-  restore drill. Tracked in [`docs/PROD_READINESS.md`](docs/PROD_READINESS.md)
-  and [`docs/ROADMAP.md`](docs/ROADMAP.md).
+- Generation uses the OpenAI Responses API with `gpt-5.6-terra`, medium
+  reasoning, and `store=false`. RegWatch supplies the conversation transcript
+  on every request; it does not use OpenAI conversation state or
+  `previous_response_id`.
+- Embeddings use OpenAI `text-embedding-3-large` with
+  `dimensions=1024`.
+- Retrieval runs exact vector search in RegWatch's PostgreSQL/pgvector database.
+  Approximate HNSW retrieval is disabled.
+- Sessions, documents, vectors, audit rows, and all other application state stay
+  in the database selected by RegWatch's `DATABASE_URL`; OpenAI does not own
+  application state.
 
-**Known open risks.**
+This describes the checked-in runtime target. Moving a live deployment to a new
+PostgreSQL host, rotating provider secrets, backfilling the OpenAI embedding
+profile, and deploying are separate operator actions and must be verified before
+calling production migrated.
 
-The Watch workflow now runs in Qwen/profile mode, requires all six profile
-settings (including `WATCH_QWEN_EMBEDDING_DIMENSION`), validates the registered
-profile before crawling, and asserts 100% coverage after an attempted ingest.
-The six repository secrets are still unprovisioned as of 2026-08-12, so this
-change fails closed before crawling until the owner sets them and verifies one
-manual run. See [`docs/SECRETS_RUNBOOK.md`](docs/SECRETS_RUNBOOK.md) section 3.4.
-
-The 0.30 refusal threshold was validated against the old OpenAI vector space. The
-space is now Qwen3 at 1024 dimensions, so that validation no longer carries over.
-It has never been checked against the space production actually serves.
-
-**Deliberate scope** (boundaries, not gaps): the reranker is a hook that is off by
-default; the eval gold set is a curated starter set, expanded by hand from real
-answer feedback; and the persist-and-cite source-freshness path is proven on
-White Paper before being generalized to Ask and Assemble.
+The authoritative FDA discovery manifest contains 140,438 source records.
+Those are source records, not chunks or embeddings. Activation still requires
+the corpus acceptance checks in
+[`docs/AUTHORITATIVE_FDA_CORPUS.md`](docs/AUTHORITATIVE_FDA_CORPUS.md).
 
 ## Quick start
 
 ```bash
-# install (dev tools + the OpenAI-compatible SDK used as Databricks transport)
+# install development tools and the OpenAI SDK
 uv sync --extra dev --extra llm
 
-# configure. Providers are REQUIRED-EXPLICIT (no defaults): production runs
-# generation and embeddings on Databricks Model Serving (LLM_PROVIDER=databricks,
-# EMBEDDING_PROVIDER=qwen3); offline tests use the echo providers. The
-# Databricks/Qwen vars are in .env.example under LLM_PROVIDER.
+# configure. Providers are required-explicit: use OpenAI for real model calls;
+# offline tests and local smoke runs use the echo providers.
 cp .env.example .env && $EDITOR .env
 
 # initialize the DB and data directories
@@ -286,36 +226,33 @@ proxies `/api/*` to the backend, so only one origin is exposed.
 
 ## How it's built
 
-One browser-visible origin, two runtimes on Fly, one datastore, and a Databricks
-model plane inside the company tenant:
+One browser-visible origin, two Fly runtimes, one RegWatch-owned datastore,
+and OpenAI for stateless model calls:
 
 ```mermaid
 flowchart LR
-    B["Browser<br/>(analyst)"] -->|"HTTPS + HttpOnly cookie"| V["Vercel<br/>Next.js 16 shell"]
-    V -->|"/api/* rewrite"| GO["Fly.io - Go proxy (public port)<br/>auth + sessions + rate limits<br/>native /query orchestration + audit"]
-    GO -->|"6PN private network"| PY["Fly.io - Python FastAPI<br/>stateless RAG core:<br/>resolve, retrieve, cite, gate"]
-    GO --> PG[("Databricks Lakebase<br/>Postgres + pgvector<br/>one DB: rows, vectors, audit")]
+    B["Browser"] --> V["Vercel / Next.js"]
+    V --> GO["Fly.io / Go proxy"]
+    GO --> PY["Fly.io / FastAPI"]
+    GO --> PG[("RegWatch PostgreSQL + pgvector")]
     PY --> PG
-    PY -->|"OpenAI-compatible API"| DBX["Databricks Model Serving<br/>gpt-oss-120b - all LLM roles<br/>qwen3 embeddings - 1024-dim"]
-    CRON["GitHub Actions cron<br/>daily watch + ingest"] --> PG
+    PY --> RESP["OpenAI Responses<br/>gpt-5.6-terra"]
+    PY --> EMB["OpenAI Embeddings<br/>text-embedding-3-large / 1024"]
 ```
 
 | Layer | Choice |
 |---|---|
-| Edge / control plane | **Go** proxy (`go/`, module `github.com/Hussain0327/amneal/go`) holds the public port. Since the step-4 polyglot cutover it serves auth, sessions, feedback, settings, and product CRUD natively (sqlc over the same Postgres) and applies rate limiting plus `Fly-Client-IP` handling. Since the step-5 cutover it also orchestrates `POST /query` natively (persists the audit row, calls Python's internal RAG compute endpoint) and relays the remaining endpoints to Python. Migration plan: [`docs/POLYGLOT_TARGET_2026-07-10.md`](docs/POLYGLOT_TARGET_2026-07-10.md) |
-| Backend (RAG core) | Python 3.11+ (managed by `uv`), FastAPI. The stateless retrieval, synthesis, and gating core behind the proxy: Ask, Assemble, White Paper, Watch, Deficiency, and query orchestration |
-| Frontend | Next.js 16 (App Router, TypeScript) plus React 18 in `regwatch/frontend/`. The five scoped surfaces render in one `(shell)` route group with one sidebar and one product-scope bar; the Compliance Studio (`/studio`) sits outside it and is fixture-backed. Talks to the API through a same-origin `/api` proxy |
-| LLM | **Moving from Databricks-hosted `gpt-oss-120b` to OpenAI `gpt-5.6-terra`** by owner decision 2026-08-20 (Chat Completions, `reasoning_effort=low`, no `temperature`). This intentionally reopens D1 for the generation leg; the database leg (Databricks Lakebase) is unchanged. Prior to the cutover, `LLM_PROVIDER=databricks` served id `gpt-oss-120b-080525` on the Model Serving alias `workspace.default.regwatch` for ALL roles (router, synthesizer, extractor). A runtime served-model guard (`D1_ENFORCED` plus `D1_ALLOWED_LLM_MODELS`) rejects any response served by a model outside the allowlist once armed, and rejects partner-hosted families (`databricks-gpt*`, `databricks-claude*`, `databricks-gemini*`) even if someone allowlists them by hand -- but `D1_ENFORCED` was never set in prod, so this guard was never armed and is not what the OpenAI cutover bypasses. Rollback means repointing `DATABRICKS_LLM_MODEL` at another verified endpoint and flipping `LLM_PROVIDER` back to `databricks` |
-| Embeddings | **Moving from Databricks-hosted Qwen3 to OpenAI `text-embedding-3-large`** (Matryoshka-truncated via the `dimensions` param) by owner decision 2026-08-20, staying at 1024-dim so the existing profile geometry and `chunk_embedding` schema are unaffected. This intentionally reopens D1 for the embeddings leg; the database leg (Databricks Lakebase) is unchanged. Prior to the cutover, prod ran Databricks-hosted Qwen3, endpoint `workspace.default.regwatch-embed`, profile `ep_2e7368b354d911ea3a013c3125e276c2`, with the whole corpus embedded on it. Profile-versioned and required-explicit: `EMBEDDING_PROVIDER` has NO default (a process without it refuses to boot; 2026-08-14 postmortem). Profile vectors live in the profile-keyed `chunk_embedding` table, written blue/green into a named profile and never in place. The older `legacy` arm is the `vector(1536)` column on `chunk`; its original OpenAI embedder was removed 2026-08-17, so it is a frozen historical space, not a rollback path — rollback is a previously promoted profile |
-| Vector store | **pgvector** in the same Postgres, everywhere (Lakebase in prod, a disposable local/CI Postgres otherwise). No other vector backend since R5 |
-| Structured store | **Postgres** via SQLModel (Lakebase in prod). `DATABASE_URL` is mandatory and the app refuses to boot without it. Schema changes ship as Alembic migrations |
-| Retrieval | Two-stage. Stage 1: vector top-k 50 (`VECTOR_TOP_K`). Stage 2: rerank to top-k 8 (`RERANK_TOP_K`); reranker off by default |
-| Ingest | Exact five-family FDA source policy; deterministic manifest; bounded and host-paced `httpx`; `selectolax`; `pdfplumber` with `pypdf` fallback; immutable source versions; per-document atomic chunk publication; deferred, resumable embedding batches |
-| Deploy | One Fly.io app, **two process groups**: the Go proxy on the public port, the Python app (dual-stack `regwatch serve`) on an internal port behind it. DB and vectors on Lakebase, frontend on Vercel, LLM and embeddings on Databricks Model Serving, daily Watch via GitHub Actions cron. Alembic (run by the Fly release command) stays the single schema authority |
-| Tooling | Python: ruff, black, mypy (strict on `src/`), pytest, import-linter layering contracts. Go: gofmt, go vet, golangci-lint, sqlc (generated store plus `sqlc vet` against a real schema). A cross-service contract suite (`tests_contract/`) boots the real Go proxy, uvicorn, and Postgres to prove the wire contract across the boundary |
+| Edge | Go proxy for auth, sessions, rate limits, query orchestration, and audit |
+| RAG core | Python, FastAPI, deterministic retrieval and citation gates |
+| Frontend | Next.js App Router and React |
+| LLM | OpenAI Responses API, `gpt-5.6-terra`, medium reasoning, `store=false` |
+| Embeddings | OpenAI `text-embedding-3-large`, 1024 dimensions |
+| Retrieval | exact pgvector search; approximate HNSW mode disabled |
+| State | RegWatch PostgreSQL selected by `DATABASE_URL`; no OpenAI application state |
+| Deploy | Fly.io backend and Vercel frontend; deployment remains operator-controlled |
 
-The LLM provider, model, reranker, and embedding provider all sit behind
-interfaces. Nothing is hard-coded in business logic.
+Provider and model access stays behind interfaces so tests can use deterministic
+echo providers without external calls.
 
 ## Compliance invariants
 
@@ -424,19 +361,17 @@ Two layers grade the answer pipeline:
 - **`uv run python -m regwatch.eval.run_eval`** scores a curated gold set
   ([`src/regwatch/eval/gold_set.jsonl`](src/regwatch/eval/gold_set.jsonl)) of
   real, must-refuse, and must-clarify questions against the live corpus. The
-  blocking floors are `recall_at_k >= 0.80` and `citation_precision >= 0.74`,
-  ratcheted to the first real measurement on the Qwen3 arm (2026-08-05). They
-  mean "no worse than the day we first measured", not "good enough".
+  blocking floors are `recall_at_k >= 0.80` and `citation_precision >= 0.74`.
+  These are regression floors, not claims that retrieval quality is complete.
   `refusal_accuracy` is still measured and printed but stopped blocking on
   2026-08-06, because Ask is deliberately moving away from refusing. The older
   `0.90 / 0.95 / 0.95` numbers are recorded as aspirational targets, never as
   gates. A run that loses more than 10 percent of its turns to transport
   failures exits without scoring, so an outage cannot pass on a shrunken
   denominator. It also exits nonzero on an empty store. In CI this runs as its
-  own workflow,
-  [`.github/workflows/databricks-eval.yml`](.github/workflows/databricks-eval.yml),
-  which prefers the Databricks arm so it measures the geometry production
-  actually serves.
+  own OpenAI-backed workflow,
+  [`.github/workflows/openai-eval.yml`](.github/workflows/openai-eval.yml),
+  which evaluates the Responses and 1024-dimension OpenAI embedding path.
 - **[`tests/test_eval_gate.py`](tests/test_eval_gate.py)** is a deterministic,
   offline gate. It seeds a fixed corpus and a faithful LLM stub, so the full
   pipeline (resolve -> filter -> retrieve -> cite -> gate) is graded on every
@@ -489,9 +424,6 @@ points:
 - [Non-technical guide](docs/NON_TECH_GUIDE.md): plain English for business and
   regulatory readers.
 - [Production readiness](docs/PROD_READINESS.md): the POC-to-production path.
-- [Databricks adoption](docs/DATABRICKS_ADOPTION_2026-07-28.md): the inference-
-  plane decision, cost model, and rollout state. Note that the "Supabase stays"
-  call in that doc was later reversed: production Postgres is Lakebase now.
 - [Decisions](docs/DECISIONS.md): append-only log of what was chosen and why.
 - [CI/CD pipeline](docs/CI_CD.md): the CI gate (Python lint/type/test, audit,
   docker build, frontend, Go proxy, schema-drift, and the cross-service contract
@@ -511,9 +443,8 @@ docker compose up --build api web          # API + UI (http://localhost:3000)
 
 Compose mounts `./data` so raw and processed PDFs survive restarts and runs
 Postgres via its `db` service. The compose stack defaults to the offline `echo`
-providers (smoke use only); for real embeddings/generation set
-`EMBEDDING_PROVIDER=qwen3` and `LLM_PROVIDER=databricks` with their endpoint
-values in `.env`. Production embeds and generates on Databricks.
+providers for smoke use. For real model calls set both providers to `openai`
+and configure the OpenAI fields documented in `.env.example`.
 See [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## License

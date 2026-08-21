@@ -372,15 +372,15 @@ def test_activation_gate_index_requirement_is_waivable(
         [chunk.content_hash for chunk in pending],
     )
 
-    # No index was ever built: the default stays fail-closed, byte-identical
-    # to the pre-flag behavior.
-    with pytest.raises(RuntimeError, match="no ready HNSW index"):
-        pg_profile_store.assert_profile_ready_for_activation(profile.profile_id)
+    # Exact retrieval does not require HNSW by default.
+    assert pg_profile_store.assert_profile_ready_for_activation(profile.profile_id) == profile
 
-    monkeypatch.setenv("PROFILE_HNSW_INDEX_REQUIRED", "false")
+    # Operators can still opt into an index requirement explicitly.
+    monkeypatch.setenv("PROFILE_HNSW_INDEX_REQUIRED", "true")
     cs.get_settings.cache_clear()
     try:
-        assert pg_profile_store.assert_profile_ready_for_activation(profile.profile_id) == profile
+        with pytest.raises(RuntimeError, match="no ready HNSW index"):
+            pg_profile_store.assert_profile_ready_for_activation(profile.profile_id)
     finally:
         cs.get_settings.cache_clear()
 

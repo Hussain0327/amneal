@@ -19,20 +19,20 @@ concurrency:
 
 jobs:
   # The blocking live eval, extracted from lint-type-test into its own job
-  # (slm-layer F15) so every live Databricks eval -- this one and the
+  # (slm-layer F15) so every live OpenAI eval -- this one and the
   # workflow_dispatch dark arm -- serializes through ONE non-canceling
   # concurrency group instead of colliding on workspace QPS or riding
   # ci-${ref}'s cancel-in-progress. NOTE for branch protection: if required
-  # checks pin job names, add "databricks-eval / eval" alongside
+  # checks pin job names, add "openai-eval / eval" alongside
   # lint-type-test so the eval stays a merge blocker.
-  databricks-eval:
-    uses: ./.github/workflows/databricks-eval.yml
+  openai-eval:
+    uses: ./.github/workflows/openai-eval.yml
     with:
       prose: false
       selective: false
     secrets: inherit
     concurrency:
-      group: databricks-eval
+      group: openai-eval
       cancel-in-progress: false
 
   lint-type-test:
@@ -43,7 +43,7 @@ jobs:
       # test_postgres_bootstrap.py skip and the prod path ships untested.
       # DATABASE_URL is absent on purpose: pytest must keep using
       # TEST_DATABASE_URL. The eval-arm credentials moved to the
-      # databricks-eval job with the eval steps.
+      # openai-eval job with the eval steps.
       TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
     services:
       postgres:
@@ -134,7 +134,7 @@ jobs:
       # Audit the union of both shipped Python closures: the public API (`llm`)
       # and the private corpus worker (`llm` + `corpus-worker`). Torch and
       # transformers remain absent because neither production image installs
-      # `local-embeddings`; both use the Databricks Qwen profile. --frozen also
+      # `local-embeddings`; both use the OpenAI profile. --frozen also
       # asserts uv.lock matches pyproject.
       - name: export shipped runtime dependency set
         run: >-

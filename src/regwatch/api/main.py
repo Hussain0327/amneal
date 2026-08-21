@@ -162,8 +162,8 @@ def _guard_test_providers(s: Settings) -> None:
         "Test-grade 'echo' provider configured "
         f"(EMBEDDING_PROVIDER={s.embedding_provider}, LLM_PROVIDER={s.llm_provider}) "
         "against a non-empty vector corpus — retrieval quality would silently degrade. "
-        "Fix: set EMBEDDING_PROVIDER=qwen3 and LLM_PROVIDER=databricks (the "
-        "production providers), or set REGWATCH_ALLOW_TEST_PROVIDERS=1 to "
+        "Fix: set INGEST_EMBEDDING_PROVIDER=openai and LLM_PROVIDER=openai, "
+        "or set REGWATCH_ALLOW_TEST_PROVIDERS=1 to "
         "explicitly allow test providers."
     )
 
@@ -211,7 +211,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # missing, must refuse to boot -- not 500 on the first embed call.
     assert_embedding_runtime_available(s.embedding_provider)
     # Same posture for generation: every answer turn synthesizes, so an unset
-    # LLM_PROVIDER (or missing DATABRICKS_LLM_* credentials) is a
+    # LLM_PROVIDER (or a missing OPENAI_API_KEY) is a
     # misconfigured deployment and refuses HERE -- not lazily, refusing every
     # question while /health reads green. Scoped to this lifespan on purpose:
     # the corpus worker (dagster-daemon) and the CLI commands never run it,
@@ -270,8 +270,8 @@ async def _handle_upstream_error(_request: Request, exc: Exception) -> JSONRespo
 def _register_upstream_error_handlers(target: FastAPI) -> None:
     """Register the 503 handler for the LLM SDK base error when importable.
 
-    The Databricks provider speaks the OpenAI-compatible SDK, so registering
-    that SDK's base error class catches all of its subclasses (timeout /
+    The Responses provider uses the OpenAI SDK, so registering its base error
+    class catches all of its subclasses (timeout /
     connection / rate-limit / 5xx status). Kept lazy so the API does not
     hard-depend on the SDK in echo-only environments (tests/CI).
     """
@@ -381,10 +381,6 @@ def _embedding_component() -> dict[str, Any]:
 
 
 def _llm_key_present(s: Settings) -> bool:
-    if s.llm_provider == "databricks":
-        # Both values are required to construct the private OpenAI-compatible
-        # client. Do not expose either value; health reports only this boolean.
-        return bool(s.databricks_llm_base_url and s.databricks_llm_token)
     if s.llm_provider == "openai":
         # Added with the 2026-08-20 cutover. Without this branch a correctly
         # configured OpenAI deployment reported key_present=false on /health --

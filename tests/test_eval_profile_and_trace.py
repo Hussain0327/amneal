@@ -352,10 +352,17 @@ def test_assert_profile_ready_rejects_incomplete_coverage(
 
 
 def test_assert_profile_ready_rejects_a_missing_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    import config.settings as cs
+
+    monkeypatch.setenv("PROFILE_HNSW_INDEX_REQUIRED", "true")
+    cs.get_settings.cache_clear()
     _patch_readiness(monkeypatch, complete=True, pending=0, index_ready=False)
-    with pytest.raises(SystemExit) as excinfo:
-        run_eval._assert_profile_ready("ep_x")
-    assert "no ready HNSW index" in str(excinfo.value)
+    try:
+        with pytest.raises(SystemExit) as excinfo:
+            run_eval._assert_profile_ready("ep_x")
+        assert "no ready HNSW index" in str(excinfo.value)
+    finally:
+        cs.get_settings.cache_clear()
 
 
 def test_assert_profile_ready_accepts_a_complete_indexed_arm(

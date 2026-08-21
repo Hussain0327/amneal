@@ -174,7 +174,7 @@ def authoritative_fda_chunk_shard(
 @dg.asset(
     deps=[authoritative_fda_chunk_shard],
     group_name="authoritative_fda",
-    kinds={"python", "qwen", "postgres"},
+    kinds={"python", "openai", "postgres"},
     description="Backfill the selected immutable embedding profile for one manifest shard.",
     partitions_def=FDA_SHARD_PARTITIONS,
     config_schema={
@@ -188,10 +188,8 @@ def authoritative_fda_chunk_shard(
             int,
             default_value=128,
             description=(
-                "Database page size per embedding write. The per-HTTP-request"
-                " input count is the separate QWEN_EMBEDDING_BATCH_SIZE"
-                " setting, which must stay at or below 24: the endpoint"
-                " rejects larger input arrays with 429."
+                "Database page size per embedding write. OpenAI request packing"
+                " is bounded separately by OPENAI_EMBEDDING_BATCH_SIZE."
             ),
         ),
     },

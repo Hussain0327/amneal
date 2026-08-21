@@ -1,15 +1,4 @@
-"""get_llm_provider factory contract: explicit config or loud refusal.
-
-The Databricks provider's own behavior lives in
-tests/test_databricks_llm_provider.py; this module pins the factory rules:
-LLM_PROVIDER has no default, unknown names refuse, and the audit label helper
-never raises.
-
-The OpenAI-API path was removed 2026-08-17 and DELIBERATELY REINSTATED by the
-2026-08-20 generation migration (gpt-5.6-terra over Chat Completions), so
-"openai" is a supported name again and is pinned positively below. Anthropic
-stays retired.
-"""
+"""OpenAI-only LLM factory contracts."""
 
 from __future__ import annotations
 
@@ -67,15 +56,9 @@ def test_openai_requires_endpoint_config(monkeypatch: pytest.MonkeyPatch) -> Non
         get_llm_provider()
 
 
-def test_databricks_requires_endpoint_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    _reload(
-        monkeypatch,
-        LLM_PROVIDER="databricks",
-        DATABRICKS_LLM_BASE_URL="",
-        DATABRICKS_LLM_TOKEN="",
-        DATABRICKS_LLM_MODEL="",
-    )
-    with pytest.raises(RuntimeError, match="DATABRICKS_LLM"):
+def test_databricks_provider_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    _reload(monkeypatch, LLM_PROVIDER="databricks")
+    with pytest.raises(ValueError, match="unknown LLM provider: databricks"):
         get_llm_provider()
 
 
@@ -89,16 +72,11 @@ def test_current_model_name_never_raises(monkeypatch: pytest.MonkeyPatch) -> Non
     _reload(monkeypatch, LLM_PROVIDER="echo")
     assert current_model_name() == "echo"
 
-    _reload(
-        monkeypatch,
-        LLM_PROVIDER="databricks",
-        DATABRICKS_LLM_MODEL="workspace.default.regwatch",
-    )
-    assert current_model_name() == "workspace.default.regwatch"
-    # Every role maps to the one served model on the Databricks path.
-    assert current_model_name(role="router") == "workspace.default.regwatch"
+    _reload(monkeypatch, LLM_PROVIDER="openai", OPENAI_LLM_MODEL="gpt-5.6-terra")
+    assert current_model_name() == "gpt-5.6-terra"
+    assert current_model_name(role="router") == "gpt-5.6-terra"
 
-    _reload(monkeypatch, LLM_PROVIDER="databricks", DATABRICKS_LLM_MODEL="")
+    _reload(monkeypatch, LLM_PROVIDER="databricks")
     assert current_model_name() == "unconfigured"
 
     _reload(monkeypatch, LLM_PROVIDER="")

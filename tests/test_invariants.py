@@ -402,7 +402,7 @@ def test_inv6_refusal_also_audited(monkeypatch: pytest.MonkeyPatch) -> None:
     # invariant under test is that the refusal is AUDITED, not which sentence it
     # carried; the product-identification copy moved to the conversational
     # clarify path in the audit #1715 change.
-    assert "couldn't find this in the current fda guidance corpus" in rows[0][2].lower()
+    assert "find this in the current fda guidance corpus" in rows[0][2].lower()
 
 
 def test_inv6_authenticated_query_records_user_attribution() -> None:

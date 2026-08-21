@@ -29,12 +29,12 @@ class ProfileEmbeddingBatch:
 
 
 def legacy_document_embeddings(texts: list[str]) -> Sequence[list[float] | None]:
-    """Embed the rollback space, or leave it NULL after a Qwen-only cutover."""
+    """Embed the legacy space only while it is the active retrieval arm."""
     if not texts:
         return []
     provider = get_embedding_provider()
     active_profile_id = (get_settings().active_embedding_profile or "legacy").strip()
-    if active_profile_id != "legacy" and getattr(provider, "name", "") == "qwen3":
+    if active_profile_id != "legacy":
         return [None] * len(texts)
     return embed_documents(provider, texts)
 

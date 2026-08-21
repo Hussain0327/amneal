@@ -7,8 +7,8 @@ name: watch-daily
 # daemon deployed (compose.yaml's scheduler is local-only), so this GitHub
 # Actions cron is the sole driver of the daily pipeline in production.
 #
-# It connects to the SAME live production Postgres the API uses (Databricks
-# Lakebase) and writes durable alerts to the DB (stream 1).
+# It connects to the same application-owned PostgreSQL/pgvector database the
+# API uses and writes durable alerts to the DB.
 #
 # It does NOT migrate the schema. The Fly deploy is the single migration authority
 # (fly.toml `[deploy] release_command = "regwatch release"` runs migrations and
@@ -21,37 +21,15 @@ name: watch-daily
 #
 # Required repository secrets (Settings -> Secrets and variables -> Actions):
 #   WATCH_DATABASE_URL  the prod Postgres URL WITH ?sslmode=require, e.g.
-#                       postgresql://<role>:<pw>@ep-<id>.database.<region>
-#                       .cloud.databricks.com:5432/databricks_postgres
-#                       ?sslmode=require (stream 2). Point it at the SAME
-#                       database the API serves, or the run writes alerts
-#                       nobody reads. A stale value here is what broke this
-#                       cron from 2026-08-07 to 2026-08-10.
-#   DATABRICKS_LLM_BASE_URL
-#   DATABRICKS_LLM_TOKEN  (repo secrets, shared with databricks-eval.yml) plus
-#                       the DATABRICKS_LLM_MODEL repo VARIABLE: the private
-#                       Databricks OpenAI-compatible serving endpoint used for
-#                       change-summary generation, optional BE extraction, and
-#                       the advisory threshold sweep's synthesizer (the
-#                       OpenAI-API provider path was removed 2026-08-17). NOT
-#                       used for embeddings: those run through the named Qwen3
-#                       profile below. Deliberately the SAME names the eval
-#                       workflow reads -- they were already provisioned
-#                       (verified 2026-08-17), so this cron needs no new
-#                       secrets; unlike the old WATCH_OPENAI_API_KEY split,
-#                       nothing gates other paid work on these names.
+#                       postgresql://<role>:<password>@<host>:5432/<database>
+#                       ?sslmode=require. Point it at the same database the API
+#                       serves, or the run writes alerts nobody reads.
+#   OPENAI_API_KEY       shared with openai-eval.yml; used for Responses
+#                       generation and text-embedding-3-large embeddings.
 #   WATCH_ACTIVE_EMBEDDING_PROFILE
 #                       the exact named profile prod serves (never `legacy`).
-#   WATCH_QWEN_EMBEDDING_BASE_URL
-#   WATCH_QWEN_EMBEDDING_TOKEN
-#   WATCH_QWEN_EMBEDDING_MODEL
-#   WATCH_QWEN_EMBEDDING_REVISION
-#   WATCH_QWEN_EMBEDDING_DIMENSION
-#                       mirror prod's QWEN_EMBEDDING_* values exactly. The
-#                       preflight requires all six settings. `regwatch init-db`
-#                       then compares the named profile's fingerprint fields
-#                       (model, revision and dimension included) with its
-#                       immutable database registration before the crawl starts.
+#                       `regwatch init-db` compares the OpenAI model and
+#                       1024-dimensional geometry with the immutable profile.
 # While WATCH_DATABASE_URL is unset, the job skips cleanly (no failures).
 #
 # Optional alerting secrets (this cron is the SOLE prod driver of the pipeline,
@@ -91,34 +69,21 @@ jobs:
     timeout-minutes: 45
     env:
       # The Postgres-mode boot guard. Watch embeds new FDA chunks in the same
-      # named Qwen3 profile the serving path reads; it does not maintain the
-      # unversioned OpenAI rollback column.
+      # named OpenAI profile the serving path reads.
       DATABASE_URL: ${{ secrets.WATCH_DATABASE_URL }}
       REQUIRE_DATABASE_URL: "true"
-      EMBEDDING_PROVIDER: "qwen3"
+      INGEST_EMBEDDING_PROVIDER: "openai"
       # GitHub Actions env is a separate surface from Fly secrets: without
-      # this, init-db's boot gate would require the qwen3 profile's HNSW
-      # index, dropped 2026-08-18 under the Lakebase 512MB size cap.
+      # this, init-db's boot gate could require an index exact search does not use.
       PROFILE_HNSW_INDEX_REQUIRED: "false"
-      # Watch change summaries/extraction use the same Databricks serving
-      # endpoint family as prod. Keep that provider boundary explicit while
-      # embeddings use the Qwen values below.
-      LLM_PROVIDER: "databricks"
-      # All six values are required when DATABASE_URL is configured. Missing
-      # provisioning fails before checkout/crawl. Registered fingerprint drift
-      # fails in the validation step before any ingest write.
-      ACTIVE_EMBEDDING_PROFILE: ${{ secrets.WATCH_ACTIVE_EMBEDDING_PROFILE }}
-      QWEN_EMBEDDING_BASE_URL: ${{ secrets.WATCH_QWEN_EMBEDDING_BASE_URL }}
-      QWEN_EMBEDDING_TOKEN: ${{ secrets.WATCH_QWEN_EMBEDDING_TOKEN }}
-      QWEN_EMBEDDING_MODEL: ${{ secrets.WATCH_QWEN_EMBEDDING_MODEL }}
-      QWEN_EMBEDDING_REVISION: ${{ secrets.WATCH_QWEN_EMBEDDING_REVISION }}
-      QWEN_EMBEDDING_DIMENSION: ${{ secrets.WATCH_QWEN_EMBEDDING_DIMENSION }}
-      # The Databricks LLM endpoint (same repo secrets/variable the eval
-      # workflow reads). Serves change summaries, extraction and the advisory
-      # sweep, never embeddings.
-      DATABRICKS_LLM_BASE_URL: ${{ secrets.DATABRICKS_LLM_BASE_URL }}
-      DATABRICKS_LLM_TOKEN: ${{ secrets.DATABRICKS_LLM_TOKEN }}
-      DATABRICKS_LLM_MODEL: ${{ vars.DATABRICKS_LLM_MODEL }}
+      LLM_PROVIDER: "openai"
+      RETRIEVAL_EMBEDDING_PROFILE: ${{ secrets.WATCH_ACTIVE_EMBEDDING_PROFILE }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: "https://api.openai.com/v1"
+      OPENAI_LLM_MODEL: "gpt-5.6-terra"
+      OPENAI_REASONING_EFFORT: "medium"
+      OPENAI_EMBEDDING_MODEL: "text-embedding-3-large"
+      OPENAI_EMBEDDING_DIMENSION: "1024"
       # entrypoint.sh runs init-db on boot; here we run alembic + watch directly,
       # so this is informational parity with the container only.
       SENTRY_ENVIRONMENT: "production"
@@ -131,50 +96,34 @@ jobs:
         if: env.DATABASE_URL == ''
         run: |
           echo "WATCH_DATABASE_URL secret not set - skipping the daily watch run."
-          echo "Set it to the prod Databricks Lakebase DIRECT endpoint URL with ?sslmode=require (never a -pooler host)."
+          echo "Set it to the application PostgreSQL endpoint with ?sslmode=require."
 
-      # Fail fast on missing/empty Databricks LLM config. Change summaries and
-      # BE extraction only exercise it on change days (the advisory sweep uses
-      # it later), so lost secrets could otherwise stay green through quiet
-      # crawls.
-      - name: preflight Databricks LLM config
+      # One OpenAI key serves both Responses generation and embeddings.
+      - name: preflight OpenAI config
         if: env.DATABASE_URL != ''
         run: |
-          is_blank() { [[ -z "$1" || "$1" =~ ^[[:space:]]+$ ]]; }
-          missing=""
-          is_blank "${DATABRICKS_LLM_BASE_URL}" && missing="${missing} secret:DATABRICKS_LLM_BASE_URL"
-          is_blank "${DATABRICKS_LLM_TOKEN}" && missing="${missing} secret:DATABRICKS_LLM_TOKEN"
-          is_blank "${DATABRICKS_LLM_MODEL}" && missing="${missing} variable:DATABRICKS_LLM_MODEL"
-          if [ -n "${missing}" ]; then
-            echo "::error::Databricks LLM configuration is unset/empty:${missing}. Change summaries and extraction use the Databricks endpoint when an FDA change lands. Restore the repo secret/variable."
+          set -euo pipefail
+          if [[ -z "${OPENAI_API_KEY//[[:space:]]/}" ]]; then
+            echo "::error::OPENAI_API_KEY is unset. No crawl or ingest was attempted."
             exit 1
           fi
 
       # A configured production DB must never run Watch without the exact
-      # named profile and every geometry-defining Qwen value. This presence and
-      # shape check runs before checkout; the DB-backed init-db gate below then
-      # compares the values with the registered immutable profile.
+      # named OpenAI profile. This shape check runs before checkout; the
+      # DB-backed init-db gate compares the fixed model/dimension with the
+      # registered immutable profile.
       - name: preflight Watch embedding profile
         if: env.DATABASE_URL != ''
         run: |
           is_blank() { [[ -z "$1" || "$1" =~ ^[[:space:]]+$ ]]; }
           missing=""
-          is_blank "${ACTIVE_EMBEDDING_PROFILE}" && missing="${missing} WATCH_ACTIVE_EMBEDDING_PROFILE"
-          is_blank "${QWEN_EMBEDDING_BASE_URL}" && missing="${missing} WATCH_QWEN_EMBEDDING_BASE_URL"
-          is_blank "${QWEN_EMBEDDING_TOKEN}" && missing="${missing} WATCH_QWEN_EMBEDDING_TOKEN"
-          is_blank "${QWEN_EMBEDDING_MODEL}" && missing="${missing} WATCH_QWEN_EMBEDDING_MODEL"
-          is_blank "${QWEN_EMBEDDING_REVISION}" && missing="${missing} WATCH_QWEN_EMBEDDING_REVISION"
-          is_blank "${QWEN_EMBEDDING_DIMENSION}" && missing="${missing} WATCH_QWEN_EMBEDDING_DIMENSION"
+          is_blank "${RETRIEVAL_EMBEDDING_PROFILE}" && missing="${missing} WATCH_ACTIVE_EMBEDDING_PROFILE"
           if [ -n "${missing}" ]; then
             echo "::error::Watch embedding-profile secrets are unset/empty:${missing}. No crawl or ingest was attempted."
             exit 1
           fi
-          if [[ ! "${ACTIVE_EMBEDDING_PROFILE}" =~ ^ep_[0-9a-f]{32}$ ]]; then
+          if [[ ! "${RETRIEVAL_EMBEDDING_PROFILE}" =~ ^ep_[0-9a-f]{32}$ ]]; then
             echo "::error::WATCH_ACTIVE_EMBEDDING_PROFILE must be a named ep_<32 lowercase hex> profile, never legacy."
-            exit 1
-          fi
-          if [[ ! "${QWEN_EMBEDDING_DIMENSION}" =~ ^[0-9]+$ ]]; then
-            echo "::error::WATCH_QWEN_EMBEDDING_DIMENSION must be an integer; got a non-numeric value."
             exit 1
           fi
 
@@ -210,7 +159,7 @@ jobs:
 
       # Explicitly run the same boot/provider gate serving uses BEFORE crawling.
       # init-db does not migrate an existing database. It verifies the schema
-      # stamp, requires complete profile coverage + a ready index, and calls
+      # stamp, requires complete profile coverage, and calls
       # get_embedding_provider_for_profile, which compares configured model,
       # dimension, revision, instruction/preprocessing, dtype and normalization
       # with the immutable profile row. Endpoint and token were presence-checked
@@ -246,7 +195,7 @@ jobs:
           from regwatch.store.db import init_db
           from regwatch.store.vector_store import profile_embedding_coverage
 
-          profile_id = os.environ["ACTIVE_EMBEDDING_PROFILE"]
+          profile_id = os.environ["RETRIEVAL_EMBEDDING_PROFILE"]
           # The Watch step already ran the full provider/readiness gate. Avoid
           # having the boot-time coverage assertion hide the exact pending count
           # this post-ingest diagnostic exists to report.
@@ -307,9 +256,9 @@ jobs:
       # a refusal cutoff. See docs/DEPLOY.md section "Refusal-threshold
       # revalidation".
       #
-      # This inherits the same active Qwen profile as serving and ingest, so
+      # This inherits the same active OpenAI profile as serving and ingest, so
       # its score distribution comes from the production geometry (the legacy
-      # OpenAI arm no longer exists).
+      # production OpenAI geometry.
       #
       # It is calibration OBSERVABILITY, NOT a gate. The sweep is read-only with
       # respect to the safety path: it never changes REFUSAL_SCORE_THRESHOLD or

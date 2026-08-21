@@ -1,4 +1,4 @@
-"""The production Watch cron must share serving's named Qwen profile.
+"""The production Watch cron must share serving's named OpenAI profile.
 
 These tests pin the workflow contract that prevents a no-change cron from
 looking healthy while a later FDA revision writes chunks outside the active
@@ -19,21 +19,11 @@ import yaml
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "watch-daily.yml"
 
 _PROFILE_ENV_TO_SECRET = {
-    "ACTIVE_EMBEDDING_PROFILE": "WATCH_ACTIVE_EMBEDDING_PROFILE",
-    "QWEN_EMBEDDING_BASE_URL": "WATCH_QWEN_EMBEDDING_BASE_URL",
-    "QWEN_EMBEDDING_TOKEN": "WATCH_QWEN_EMBEDDING_TOKEN",
-    "QWEN_EMBEDDING_MODEL": "WATCH_QWEN_EMBEDDING_MODEL",
-    "QWEN_EMBEDDING_REVISION": "WATCH_QWEN_EMBEDDING_REVISION",
-    "QWEN_EMBEDDING_DIMENSION": "WATCH_QWEN_EMBEDDING_DIMENSION",
+    "RETRIEVAL_EMBEDDING_PROFILE": "WATCH_ACTIVE_EMBEDDING_PROFILE",
 }
 
 _VALID_PROFILE_ENV = {
-    "ACTIVE_EMBEDDING_PROFILE": "ep_2e7368b354d911ea3a013c3125e276c2",
-    "QWEN_EMBEDDING_BASE_URL": "https://example.databricks.com/serving-endpoints",
-    "QWEN_EMBEDDING_TOKEN": "test-token",
-    "QWEN_EMBEDDING_MODEL": "qwen3-embedding-0-6b",
-    "QWEN_EMBEDDING_REVISION": "served-revision",
-    "QWEN_EMBEDDING_DIMENSION": "1024",
+    "RETRIEVAL_EMBEDDING_PROFILE": "ep_8caadbd608eca18b4d01086b0f793b39",
 }
 
 
@@ -63,15 +53,16 @@ def _run_profile_preflight(**overrides: str) -> subprocess.CompletedProcess[str]
     )
 
 
-def test_watch_maps_all_profile_secrets_and_uses_qwen() -> None:
+def test_watch_uses_openai_for_generation_and_embeddings() -> None:
     env = _workflow()["jobs"]["watch"]["env"]
-    assert env["EMBEDDING_PROVIDER"] == "qwen3"
-    assert env["LLM_PROVIDER"] == "databricks"
-    # The SAME repo secrets/variable the eval workflow reads: they were already
-    # provisioned, so the cron needs no new WATCH_-scoped copies.
-    for llm_env in ("DATABRICKS_LLM_BASE_URL", "DATABRICKS_LLM_TOKEN"):
-        assert env[llm_env] == f"${{{{ secrets.{llm_env} }}}}"
-    assert env["DATABRICKS_LLM_MODEL"] == "${{ vars.DATABRICKS_LLM_MODEL }}"
+    assert env["INGEST_EMBEDDING_PROVIDER"] == "openai"
+    assert env["LLM_PROVIDER"] == "openai"
+    assert env["OPENAI_API_KEY"] == "${{ secrets.OPENAI_API_KEY }}"
+    assert env["OPENAI_LLM_MODEL"] == "gpt-5.6-terra"
+    assert env["OPENAI_REASONING_EFFORT"] == "medium"
+    assert env["OPENAI_EMBEDDING_MODEL"] == "text-embedding-3-large"
+    assert env["OPENAI_EMBEDDING_DIMENSION"] == "1024"
+    assert env["PROFILE_HNSW_INDEX_REQUIRED"] == "false"
     for env_name, secret_name in _PROFILE_ENV_TO_SECRET.items():
         assert env[env_name] == f"${{{{ secrets.{secret_name} }}}}"
 
@@ -110,15 +101,9 @@ def test_profile_preflight_rejects_each_missing_value(
 
 @pytest.mark.parametrize("profile_id", ["legacy", "ep_not-a-profile", ""])
 def test_profile_preflight_rejects_legacy_or_malformed_profile_ids(profile_id: str) -> None:
-    result = _run_profile_preflight(ACTIVE_EMBEDDING_PROFILE=profile_id)
+    result = _run_profile_preflight(RETRIEVAL_EMBEDDING_PROFILE=profile_id)
     assert result.returncode != 0
     assert "WATCH_ACTIVE_EMBEDDING_PROFILE" in result.stdout
-
-
-def test_profile_preflight_rejects_non_numeric_dimension() -> None:
-    result = _run_profile_preflight(QWEN_EMBEDDING_DIMENSION="1024d")
-    assert result.returncode != 0
-    assert "WATCH_QWEN_EMBEDDING_DIMENSION must be an integer" in result.stdout
 
 
 def test_registered_profile_is_validated_before_ingest() -> None:
@@ -143,7 +128,8 @@ def test_coverage_is_checked_after_every_attempted_watch_run() -> None:
     assert "sys.exit(1)" in coverage["run"]
 
 
-def test_llm_secrets_are_for_extraction_not_embeddings() -> None:
-    run = _step("preflight Databricks LLM config")["run"]
-    assert "Change summaries and extraction use the Databricks endpoint" in run
-    assert "embed" not in run.lower()
+def test_openai_key_preflight_covers_generation_and_embeddings() -> None:
+    run = _step("preflight OpenAI config")["run"]
+
+    assert "OPENAI_API_KEY" in run
+    assert "exit 1" in run

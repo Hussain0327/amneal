@@ -11,12 +11,8 @@ production answer mode, and ``run_eval --assert-prod-mode`` refuses to score a
 run whose effective settings disagree. The manifest is the single source of
 truth -- docs cite it rather than restating the flags, so the two cannot drift.
 
-Deliberately NOT pinned here: ``qwen_embedding_dimension``. Its committed
-default (1536) does not match the served 0.6B model (1024) on purpose -- the
-value feeds the embedding-profile fingerprint, so moving it invalidates a staged
-profile (see docs/DECISIONS.md). Asserting it would fail every run for a known,
-deliberate reason and teach operators to pass --no-assert. Pin what an operator
-can actually act on.
+Embedding geometry is enforced through the immutable profile and the OpenAI
+provider configuration. This manifest pins answer-policy flags only.
 
 Pure comparison: no settings import, no DB, no network, so the rule is testable
 without a live arm.

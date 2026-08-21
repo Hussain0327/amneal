@@ -76,108 +76,51 @@ already approved, instead of dead-ending or guessing.
 
 ## 2. Deployment topology
 
-Four tiers, one browser-visible origin. Production is live on the Fly app
-`amneal` (release v104, deployed 2026-08-10). The Go proxy holds the public
-port; there are two Fly process groups, `proxy` and `app`, declared in
-`fly.toml`. The schema self-migrates on every deploy through the Fly
-`release_command` (section 9).
+The browser reaches the Next.js frontend, which proxies API requests to the Go
+edge service. The Go service and FastAPI application share one RegWatch-owned
+PostgreSQL database with pgvector. OpenAI receives only model inputs; it does
+not hold RegWatch sessions, documents, vectors, or audit records.
 
-The production database is Databricks Lakebase, unchanged and still in-tenant.
-Generation and embeddings, which ran on Databricks Model Serving inside the
-company's own Databricks tenant from 2026-07-30 through 2026-08-19, moved to
-OpenAI (`gpt-5.6-terra` for generation, `text-embedding-3-large` truncated to
-1024 dimensions for embeddings) on 2026-08-20 by owner decision. That
-deliberately reopens the data-residency question, D1, for the two model-call
-legs: an analyst's question now leaves the tenant for a third-party model API on
-the normal path. `D1_ENFORCED` was never set in prod, so no armed guard was
-bypassed by the move -- see [Section on the D1 residency
-guard](#the-d1-residency-guard) below. See
-[`DATABRICKS_ADOPTION_2026-07-28.md`](DATABRICKS_ADOPTION_2026-07-28.md) for the
-Databricks adoption call and
-[`archive/DATA_RESIDENCY_D1.md`](archive/DATA_RESIDENCY_D1.md) for the original
-threat model. Note that the adoption doc argued Supabase should stay; that call
-was reversed and the move to Lakebase already happened, and it is not part of
-the 2026-08-20 reversal -- the database leg stays exactly where it was.
-
-Postgres and pgvector are the only datastore since R5. Locally and in CI the
-same code runs against a disposable Postgres (`TEST_DATABASE_URL` for tests),
-on the same schema as prod.
-
-A TLS and SSO front door is still missing, so the app is not exposed externally.
-See [`ROADMAP.md`](ROADMAP.md).
-
-```
-                       Browser (analyst)
-                            |  HTTPS, HttpOnly session cookie
-                            v
-        +------------------------------------------+
-        |  Vercel - Next.js 16 (App Router)        |   amneal.vercel.app
-        |  server-side rewrite /api/* -> backend   |
-        +--------------------+---------------------+
-                             |  /api/:path*  ->  API_PROXY_TARGET/:path*
-                             v
-        +------------------------------------------+
-        |  Fly.io - Go proxy (public :8080)        |   amneal.fly.dev
-        |  auth, sessions, rate limits,            |   process group "proxy"
-        |  native /query orchestration + audit     |   (sqlc over Postgres)
-        +--------------------+---------------------+
-                             |  6PN private network (IPv6)
-                             v
-        +------------------------------------------+
-        |  Fly.io - FastAPI ("regwatch serve")     |   process group "app"
-        |  stateless RAG core: resolve, retrieve,  |   dual-stack :8000
-        |  synthesize, gate the citations          |
-        +------+---------------------+-------------+
-   SQLAlchemy  |                     |  OpenAI-compatible HTTPS
-   / psycopg   v                     v
-  +------------------------+   +-----------------------------------+
-  | Databricks Lakebase    |   | Databricks Model Serving          |
-  | Postgres + pgvector    |   | workspace.default.regwatch        |
-  | rows, vectors, audit   |   |   gpt-oss-120b, every LLM role    |
-  | in ONE database        |   | workspace.default.regwatch-embed  |
-  | RLS deny-all           |   |   Qwen3 embeddings, 1024-dim      |
-  +------------------------+   +-----------------------------------+
+```text
+Browser
+   |
+   v
+Vercel / Next.js
+   |
+   v
+Fly.io / Go proxy
+   |
+   v
+Fly.io / FastAPI ---------> OpenAI Responses API
+   |                         gpt-5.6-terra, reasoning=medium, store=false
+   |
+   +-----------------------> OpenAI Embeddings API
+   |                         text-embedding-3-large, dimensions=1024
+   v
+RegWatch PostgreSQL + pgvector
+rows, vectors, sessions, audit; exact vector search
 ```
 
-The Go proxy reaches the same Postgres directly (sqlc) for the surfaces it
-serves natively.
+The Go and Python services use the same `DATABASE_URL`. Local and CI runs use
+an equivalent disposable PostgreSQL database through `TEST_DATABASE_URL`.
+Production must point `DATABASE_URL` at a PostgreSQL service owned and operated
+for RegWatch; changing that external database is an operator migration, not an
+OpenAI API concern.
 
-### Single-origin proxy
+### Model and state contracts
 
-The browser only ever talks to the Next.js origin. `next.config.mjs` declares:
-
-```js
-async rewrites() {
-  return [{ source: "/api/:path*", destination: `${API_PROXY_TARGET}/:path*` }];
-}
-```
-
-What that buys: no CORS in the browser path (everything is same-origin, and the
-backend's CORS middleware is defense in depth for the credentialed cookie), no
-public API URL in the client bundle, and one origin for the whole app.
-`API_PROXY_TARGET` is a server-side env var. It defaults to
-`http://127.0.0.1:8000` for local dev, pinned to IPv4 so Node does not waste a
-failed `::1` attempt on every request.
-
-### Environments
-
-| Concern | Local / dev / CI | Production |
-|---|---|---|
-| Structured store | disposable Postgres | Databricks Lakebase Postgres, us-east-2 |
-| Vector store | pgvector in the same instance | pgvector in the same Lakebase database |
-| Embeddings | `echo` test provider (1536-dim) | Databricks Qwen3 at `workspace.default.regwatch-embed`, 1024-dim, profile `ep_2e7368b354d911ea3a013c3125e276c2` |
-| LLM | `echo` test provider | Databricks `gpt-oss-120b` at `workspace.default.regwatch`, one endpoint for every role |
-| `DATABASE_URL` | required, `TEST_DATABASE_URL` for tests | required |
-
-The OpenAI-API and Anthropic provider paths were removed on 2026-08-17: no
-turn — interactive or scheduled — can reach OpenAI. Scheduled Watch runs its
-change summaries and extraction on a watch-scoped Databricks endpoint
-(`WATCH_DATABRICKS_LLM_*` secrets). `EMBEDDING_PROVIDER` is required-explicit
-(no default; an unset value refuses to boot — the 2026-08-14 postmortem) and
-`fly.toml` sets it to `qwen3`; retrieval itself picks its arm from
-`ACTIVE_EMBEDDING_PROFILE` (section 9).
-
----
+| Concern | Contract |
+|---|---|
+| LLM provider | OpenAI Responses API |
+| LLM model | `gpt-5.6-terra` |
+| Reasoning | `medium` |
+| OpenAI response storage | disabled with `store=false` |
+| Conversation state | transcript managed and replayed by RegWatch |
+| Embedding provider | OpenAI Embeddings API |
+| Embedding model | `text-embedding-3-large` |
+| Embedding width | 1024 dimensions |
+| Retrieval | exact pgvector search |
+| Application state | RegWatch PostgreSQL, not OpenAI |
 
 ## 3. Product surfaces
 
@@ -1003,80 +946,28 @@ items, closing the loop.
 
 ## 18. Configuration
 
-One Pydantic `Settings` object (`config/settings.py`), fully `.env` driven.
-Providers are required-explicit with NO defaults (LLM: `databricks | echo`;
-embeddings: `qwen3 | echo`; a process without them refuses to boot). See
-[`.env.example`](../.env.example) for the annotated surface. The load-bearing
-knobs:
+One Pydantic `Settings` object in `config/settings.py` owns runtime
+configuration. Real model providers are required-explicit; missing provider
+names or credentials fail at startup.
 
 | Variable | Effect |
 |---|---|
-| `DATABASE_URL` | **Mandatory.** Postgres plus pgvector connection string; the app refuses to boot without it |
-| `ACTIVE_EMBEDDING_PROFILE` / `EMBEDDING_SHADOW_PROFILE` | Which named profile serves retrieval, and which one is being populated for a blue/green re-embed. Prod runs `ep_2e7368b354d911ea3a013c3125e276c2` (Qwen3, 1024-dim) |
-| `EMBEDDING_PROVIDER` | Required-explicit, no default: an unset value refuses to boot. `qwen3` (OpenAI-compatible private endpoint; the only production value) \| `echo` (test only) |
-| `QWEN_EMBEDDING_BASE_URL` / `_TOKEN` / `_MODEL` / `_DIMENSION` / `_REVISION` | The in-tenant embedding endpoint the active profile calls |
-| `LLM_PROVIDER` | Required-explicit, no default. `databricks` (prod: ONE endpoint, `DATABRICKS_LLM_MODEL`, serving every role) \| `echo` (test only) |
-| `DATABRICKS_LLM_BASE_URL` / `_TOKEN` / `_MODEL` | The in-tenant Model Serving endpoint. `_MODEL` has no default, because a placeholder would 404 every synthesis. Prod points at `workspace.default.regwatch`, which currently serves `gpt-oss-120b-080525` |
-| `DATABRICKS_REASONING_EFFORT` (`low`) | Reasoning budget sent on every role. Prod runs `low` |
-| `D1_ENFORCED` / `D1_ALLOWED_LLM_MODELS` | Residency tripwires: a boot guard against half-migrated config, plus a per-response served-model check. List BOTH the Unity Catalog alias and the served model id |
-| `REGWATCH_PROSE_SYNTHESIS` / `REGWATCH_LIVE_DRAFT` / `REGWATCH_SELECTIVE_CITATION` | The v6 prose format, live draft streaming over SSE, and the v7 selective-citation policy. All three are on in prod |
-| `SYNTHESIZER_MAX_TOKENS` (3000) | Synthesis output cap, buffered and streamed alike. A reasoning model's thinking and its answer share it |
-| `REGWATCH_ROUTE_CALL` (`off`) | Route and scope observation. `shadow` records one advisory call; `live` is reserved and still behaves as shadow |
-| `REGWATCH_ROUTE_MAX_TOKENS` (1200) | Route-call budget. Probe the served reasoning floor before enabling shadow and keep the cap above it |
-| `VECTOR_TOP_K` (50) / `RERANK_TOP_K` (8) / `RERANKER_ENABLED` (false) | Two-stage retrieval sizing |
-| `REFUSAL_SCORE_THRESHOLD` (0.30) | The refuse-over-guess line (INV-2) |
-| `AUTH_COOKIE_SECURE` / `AUTH_SESSION_TTL_HOURS` / `RATE_LIMIT_PER_MINUTE` | Auth and abuse controls |
-| `SENTRY_DSN` / `SENTRY_ENVIRONMENT` | Observability, off when unset |
-| `API_PROXY_TARGET` (frontend, server side) | Where the Next.js proxy forwards `/api/*` |
+| `DATABASE_URL` | Mandatory RegWatch PostgreSQL + pgvector connection |
+| `LLM_PROVIDER` | `openai` for real calls; `echo` for tests only |
+| `OPENAI_API_KEY` | Credential shared by Responses and Embeddings APIs |
+| `OPENAI_LLM_MODEL` | `gpt-5.6-terra` |
+| `OPENAI_REASONING_EFFORT` | `medium` |
+| `EMBEDDING_PROVIDER` | `openai` for real calls; `echo` for tests only |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-large` |
+| `OPENAI_EMBEDDING_DIMENSION` | 1024 |
+| `RETRIEVAL_EMBEDDING_PROFILE` | Named OpenAI profile used for retrieval |
+| `RETRIEVAL_MODE` | `exact`; approximate mode is refused |
+| `PROFILE_HNSW_INDEX_REQUIRED` | `false` for exact retrieval |
 
-`REGWATCH_ALLOW_TEST_PROVIDERS=1` is the only escape hatch that lets an `echo`
-provider face a real corpus. Tests and CI only.
-
-### The D1 residency guard
-
-D1 asked one question: does an analyst's question ever leave the company
-perimeter? From 2026-07-30 through 2026-08-19 it did not: generation, query and
-corpus embeddings, and the database all sat inside the company's Databricks
-tenant, and D1 was closed.
-
-**As of 2026-08-20, D1 is deliberately reversed for the two model-call legs, by
-owner decision.** Generation moved from Databricks `gpt-oss-120b` to OpenAI
-`gpt-5.6-terra`; embeddings moved from Databricks Qwen3 to OpenAI
-`text-embedding-3-large` truncated to 1024 dimensions. An analyst's question now
-leaves the company perimeter for a third-party model API on the normal path.
-The database leg did not move: all chunks and vectors still live in Databricks
-Lakebase, in-tenant, unchanged. Be precise about the split -- only the model
-calls left the tenant; the data store did not.
-
-This was not a bypassed guard. `D1_ENFORCED` was never set in prod (verified
-2026-08-11, unchanged since), so the boot-time and runtime checks below were
-never armed and blocked nothing. The reversal is a config and provider change,
-not a defeat of a live control.
-
-The guard code itself stays in the repo, because a Unity Catalog alias can be
-repointed with no deploy and a future re-migration to Databricks may want it
-armed again. Both halves of it are gated by `D1_ENFORCED`, and both are inert
-while that is off (which is prod's state today):
-
-- At boot, `D1_ENFORCED=true` would refuse a half-migrated configuration --
-  generation on Databricks while query embedding goes to OpenAI, or the
-  reverse.
-- At runtime, every completion and stream would be checked against
-  `D1_ALLOWED_LLM_MODELS` using the model id the endpoint reports, not the name
-  in config, and would reject partner-hosted families
-  (`databricks-gpt*`, `databricks-claude*`, `databricks-gemini*`) even if
-  someone allowlists them by hand, because those carry the partner's retention
-  terms.
-- An off-allowlist response would raise a dedicated `D1ResidencyError`, which
-  the streaming path deliberately excludes from the SSE fallback retry. None of
-  this fires today because the guard is unarmed and OpenAI is now the intended
-  provider, not a violation to be caught.
-
-The original threat model, and the 2026-07-30 to 2026-08-19 "D1 is closed"
-record, are archived at
-[`archive/DATA_RESIDENCY_D1.md`](archive/DATA_RESIDENCY_D1.md).
-
----
+The OpenAI LLM request always sets `store=false`. RegWatch sends the
+applicable transcript explicitly and does not configure an OpenAI conversation
+or `previous_response_id`. See `.env.example` for the complete
+annotated configuration surface.
 
 ## 19. Design principles
 

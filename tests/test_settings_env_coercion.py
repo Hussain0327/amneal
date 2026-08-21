@@ -28,7 +28,7 @@ def _settings(**overrides: object) -> Settings:
 @pytest.mark.parametrize("blank", ["", "   ", "\t"])
 def test_blank_dimension_falls_back_to_default(blank: str) -> None:
     """The exact CI failure: '' is not a valid integer, and it crashed on import."""
-    assert _settings(qwen_embedding_dimension=blank).qwen_embedding_dimension == 1536
+    assert _settings(openai_embedding_dimension=blank).openai_embedding_dimension == 1024
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
@@ -41,16 +41,15 @@ def test_blank_model_falls_back_to_default(blank: str) -> None:
     broke a test that was only ever meant to prove the fallback fires.
     """
     assert (
-        _settings(qwen_embedding_model=blank).qwen_embedding_model
-        == _settings().qwen_embedding_model
+        _settings(openai_embedding_model=blank).openai_embedding_model == "text-embedding-3-large"
     )
 
 
 def test_real_values_still_parse() -> None:
     """The fallback must not swallow a configured value. Prod runs 1024."""
-    s = _settings(qwen_embedding_dimension="1024", qwen_embedding_model="custom/model")
-    assert s.qwen_embedding_dimension == 1024
-    assert s.qwen_embedding_model == "custom/model"
+    s = _settings(openai_embedding_dimension="2048", openai_embedding_model="custom/model")
+    assert s.openai_embedding_dimension == 2048
+    assert s.openai_embedding_model == "custom/model"
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
@@ -79,38 +78,35 @@ def test_route_shadow_settings_accept_staged_values_and_reject_typos() -> None:
 def test_a_genuinely_invalid_dimension_still_fails() -> None:
     """Blank means 'unset'; garbage still means garbage."""
     with pytest.raises(ValidationError):
-        _settings(qwen_embedding_dimension="not-a-number")
+        _settings(openai_embedding_dimension="not-a-number")
 
 
 def test_blank_reasoning_effort_is_still_meaningful() -> None:
     """The reason the fallback is opt-in per field.
 
-    DATABRICKS_REASONING_EFFORT documents "" as "send no parameter", for
-    endpoints that reject the field. It must normalize to None, NOT fall back
-    to the "low" default -- that would silently re-add a parameter an operator
-    removed on purpose during an incident.
+    OpenAI settings treat blank workflow interpolation as unset and retain the
+    selected medium default.
     """
-    assert _settings(databricks_reasoning_effort="").databricks_reasoning_effort is None
-    assert _settings().databricks_reasoning_effort == "low"
+    assert _settings(openai_reasoning_effort="").openai_reasoning_effort == "medium"
+    assert _settings().openai_reasoning_effort == "medium"
 
 
 def test_whole_provider_block_blank_constructs(monkeypatch: pytest.MonkeyPatch) -> None:
     """The workflow shape end to end: every optional provider var set to ''."""
     for name in (
-        "QWEN_EMBEDDING_BASE_URL",
-        "QWEN_EMBEDDING_TOKEN",
-        "QWEN_EMBEDDING_MODEL",
-        "QWEN_EMBEDDING_DIMENSION",
-        "DATABRICKS_LLM_BASE_URL",
-        "DATABRICKS_LLM_TOKEN",
-        "DATABRICKS_LLM_MODEL",
-        "DATABRICKS_SERVING_RUNTIME_VERSION",
+        "OPENAI_API_KEY",
+        "OPENAI_LLM_MODEL",
+        "OPENAI_REASONING_EFFORT",
+        "OPENAI_EMBEDDING_MODEL",
+        "OPENAI_EMBEDDING_DIMENSION",
     ):
         monkeypatch.setenv(name, "")
     s = _settings()
-    assert s.qwen_embedding_dimension == 1536
-    assert s.qwen_embedding_base_url is None
-    assert s.databricks_llm_base_url is None
+    assert s.openai_embedding_dimension == 1024
+    assert s.openai_embedding_model == "text-embedding-3-large"
+    assert s.openai_llm_model == "gpt-5.6-terra"
+    assert s.openai_reasoning_effort == "medium"
+    assert s.openai_api_key is None
 
 
 def test_blank_artifact_credentials_preserve_workload_identity() -> None:

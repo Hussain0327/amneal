@@ -1,44 +1,12 @@
-"""INV-1 in REAL Qwen3 geometry: no cross-drug leak, cite-or-drop.
+"""Opt-in INV-1 check against real OpenAI embedding geometry.
 
-The rest of the suite runs ``EMBEDDING_PROVIDER=echo`` (conftest forces it), so
-the cross-drug guard is only ever proven against hash-noise vectors. Echo
-geometry is degenerate: two unrelated drugs' chunks are near-orthogonal by
-construction, which is the EASY case. This test re-proves INV-1 against the
-LIVE production space -- the Databricks-served Qwen3 profile arm -- where FDA
-PSG boilerplate genuinely pulls unrelated drugs close together. That is the
-space the ``normalized_name`` retrieval filter actually has to defend against.
+The normal suite uses deterministic echo vectors. This test instead registers
+an OpenAI text-embedding-3-large profile at 1024 dimensions, embeds two drugs
+that share FDA boilerplate, and proves product scoping prevents cross-drug
+retrieval and citation leakage.
 
-HISTORY: until 2026-08-17 this file proved INV-1 in the OpenAI-1536 ROLLBACK
-space (text-embedding-3-small), because nothing yet re-proved the live
-1024-dim Qwen geometry -- a gap its own docstring recorded. The OpenAI
-embedding provider was then removed outright (prod embeds through Qwen only),
-so this test now targets the live geometry directly: it registers a profile
-from the runner's QWEN_* settings, seeds both drugs through the REAL endpoint,
-and asks through the production profile arm. Do not delete this file: echo
-geometry cannot stand in for it (an audit on 2026-08-13 nearly removed it as
-dead when its pointer went stale).
-
-It is an EXTRA, opt-in test, gated on a DEDICATED flag so it never conscripts
-the standard CI pytest step into live Databricks spend. CI exports live
-Qwen/Databricks credentials for the eval/seed steps of other workflows, so
-gating on mere credential-presence would silently fire billable embed calls on
-every PR/push and -- worse -- turn the whole required suite RED on any
-endpoint 429/5xx/timeout. Instead this mirrors the codebase's live-test
-precedent (test_pgvector_store.py / test_postgres_bootstrap.py gate on a
-separate TEST_DATABASE_URL): the live path runs ONLY when
-``RUN_LIVE_QWEN_GEOMETRY=1`` is explicitly set alongside the endpoint values.
-The only network calls are the Qwen embeddings of the seed chunks + query; the
-synthesizer LLM is stubbed (no LLM spend, and the answer-side INV-1 logic
-under test -- citation validation against the retrieved set -- is unaffected).
-A transport failure on those calls degrades to skip, not a suite failure
-(engineering standard: every external call has a defined behavior when it
-fires).
-
-Run it once locally with:
-    RUN_LIVE_QWEN_GEOMETRY=1 QWEN_EMBEDDING_BASE_URL=... \\
-        QWEN_EMBEDDING_TOKEN=... QWEN_EMBEDDING_MODEL=qwen3-embedding-0-6b \\
-        QWEN_EMBEDDING_DIMENSION=1024 .venv/bin/python -m pytest \\
-        tests/test_inv1_real_geometry.py -q
+It runs only when RUN_LIVE_OPENAI_GEOMETRY=1 and OPENAI_API_KEY are present.
+The synthesizer is stubbed, so the only external spend is embeddings.
 """
 
 from __future__ import annotations
@@ -56,7 +24,6 @@ from regwatch.store.db import init_db
 from regwatch.store.embedding_profiles import EmbeddingProfileSpec
 from regwatch.store.vector_store import (
     add_chunks,
-    ensure_profile_hnsw_index,
     register_embedding_profile,
     upsert_profile_embeddings,
 )
@@ -65,21 +32,17 @@ pytestmark = pytest.mark.invariants
 
 # Dedicated opt-in flag; see the module docstring for why credential-presence
 # alone must never enable this.
-_RUN_LIVE = os.environ.get("RUN_LIVE_QWEN_GEOMETRY") == "1"
-# conftest._isolate_env (autouse) BLANKS the QWEN_* endpoint values in
-# os.environ via monkeypatch before any test body runs, so the operator's real
-# values must be captured at IMPORT time (before that fixture fires) to
-# restore them inside the test. Only read when opted in, so unrelated exported
-# credentials never enable this.
-_REAL_QWEN_ENV: dict[str, str] = (
+_RUN_LIVE = os.environ.get("RUN_LIVE_OPENAI_GEOMETRY") == "1"
+# Capture the opted-in OpenAI values before conftest blanks the API key.
+_REAL_OPENAI_ENV: dict[str, str] = (
     {
         name: os.environ.get(name, "")
         for name in (
-            "QWEN_EMBEDDING_BASE_URL",
-            "QWEN_EMBEDDING_TOKEN",
-            "QWEN_EMBEDDING_MODEL",
-            "QWEN_EMBEDDING_DIMENSION",
-            "QWEN_EMBEDDING_REVISION",
+            "OPENAI_BASE_URL",
+            "OPENAI_API_KEY",
+            "OPENAI_EMBEDDING_MODEL",
+            "OPENAI_EMBEDDING_DIMENSION",
+            "OPENAI_EMBEDDING_REVISION",
         )
     }
     if _RUN_LIVE
@@ -130,31 +93,32 @@ _DRUG_B_SHORT = "PSG_021202"
 
 
 def _live_profile_spec() -> EmbeddingProfileSpec:
-    """A registrable profile matching the runner's live Qwen settings."""
+    """A registrable profile matching the runner's live OpenAI settings."""
     from config.settings import get_settings
 
     from regwatch.process.chunker import CHUNKING_VERSION
     from regwatch.process.embedder import (
-        QWEN3_DOCUMENT_PREPROCESSING_VERSION,
+        OPENAI_DOCUMENT_PREPROCESSING_VERSION,
+        OPENAI_QUERY_INSTRUCTION_VERSION,
     )
 
     settings = get_settings()
     return EmbeddingProfileSpec(
-        provider="qwen3",
-        model=settings.qwen_embedding_model,
-        revision=settings.qwen_embedding_revision,
-        dimension=settings.qwen_embedding_dimension,
+        provider="openai",
+        model=settings.openai_embedding_model or "text-embedding-3-large",
+        revision=(settings.openai_embedding_revision or settings.openai_embedding_model or ""),
+        dimension=settings.openai_embedding_dimension,
         dtype="float32",
         normalization="l2",
-        query_instruction_version=settings.qwen_embedding_query_instruction_version,
-        preprocessing_version=QWEN3_DOCUMENT_PREPROCESSING_VERSION,
+        query_instruction_version=OPENAI_QUERY_INSTRUCTION_VERSION,
+        preprocessing_version=OPENAI_DOCUMENT_PREPROCESSING_VERSION,
         chunking_version=CHUNKING_VERSION,
         serving_runtime_version="live-geometry-test",
     )
 
 
 def _seed_real(profile_id: str, provider: Any) -> None:
-    """Seed both drugs with REAL Qwen vectors (the one allowed network call).
+    """Seed both drugs with real OpenAI vectors.
 
     Mirrors tests/test_cross_drug_leak.py::_seed but through the profile arm:
     chunk rows carry no legacy vector (embeddings=None, the post-cutover prod
@@ -204,8 +168,8 @@ def _stub_synth(text: str) -> Any:
     return _LLM()
 
 
-def _reload_with_live_qwen(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Restore the operator's real QWEN_* env that conftest blanked.
+def _reload_with_live_openai(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Restore the opted-in OpenAI environment that conftest blanked.
 
     Same mechanism as tests/test_provider_guard.py::_reload_settings: set env
     via monkeypatch (auto-reverted) then clear the settings LRU so the next
@@ -213,33 +177,23 @@ def _reload_with_live_qwen(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     import config.settings as cs
 
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "qwen3")
-    for name, value in _REAL_QWEN_ENV.items():
+    monkeypatch.setenv("INGEST_EMBEDDING_PROVIDER", "openai")
+    for name, value in _REAL_OPENAI_ENV.items():
         if value:
             monkeypatch.setenv(name, value)
     cs.get_settings.cache_clear()
 
 
 @pytest.mark.skipif(
-    not (
-        _RUN_LIVE
-        and _REAL_QWEN_ENV.get("QWEN_EMBEDDING_BASE_URL")
-        and _REAL_QWEN_ENV.get("QWEN_EMBEDDING_TOKEN")
-    ),
-    reason=(
-        "set RUN_LIVE_QWEN_GEOMETRY=1 with QWEN_EMBEDDING_BASE_URL/TOKEN to "
-        "run the real-geometry test"
-    ),
+    not (_RUN_LIVE and _REAL_OPENAI_ENV.get("OPENAI_API_KEY")),
+    reason="set RUN_LIVE_OPENAI_GEOMETRY=1 with OPENAI_API_KEY to run this test",
 )
-def test_inv1_no_cross_drug_leak_real_qwen_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_inv1_no_cross_drug_leak_real_openai_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
     import config.settings as cs
 
-    _reload_with_live_qwen(monkeypatch)
+    _reload_with_live_openai(monkeypatch)
     init_db(assert_provider=False)
     profile = register_embedding_profile(_live_profile_spec())
-    # concurrently=False: a CONCURRENTLY build cannot run inside the test
-    # engine's transaction, and the distinction is irrelevant here.
-    ensure_profile_hnsw_index(profile.profile_id, concurrently=False)
     provider = get_embedding_provider_for_profile(profile)
 
     # The network calls (embedding the seed chunks, then the query inside
@@ -249,10 +203,10 @@ def test_inv1_no_cross_drug_leak_real_qwen_geometry(monkeypatch: pytest.MonkeyPa
     try:
         _seed_real(profile.profile_id, provider)
     except httpx.HTTPError as exc:  # pragma: no cover - network-dependent
-        pytest.skip(f"Qwen embedding call failed ({exc!r}); skipping real-geometry test")
+        pytest.skip(f"OpenAI embedding call failed ({exc!r}); skipping real-geometry test")
 
     # Serve retrieval through the profile arm, exactly like production.
-    monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", profile.profile_id)
+    monkeypatch.setenv("RETRIEVAL_EMBEDDING_PROFILE", profile.profile_id)
     cs.get_settings.cache_clear()
 
     # A grounded answer that cites drug A's real chunk. If the retrieval filter
@@ -271,10 +225,10 @@ def test_inv1_no_cross_drug_leak_real_qwen_geometry(monkeypatch: pytest.MonkeyPa
             "What bioequivalence study design does FDA recommend for albuterol sulfate?"
         )
     except httpx.HTTPError as exc:  # pragma: no cover - network-dependent
-        pytest.skip(f"Qwen embedding call failed ({exc!r}); skipping real-geometry test")
+        pytest.skip(f"OpenAI embedding call failed ({exc!r}); skipping real-geometry test")
 
     # INV-1a: retrieval was scoped to drug A -- NOT ONE drug-B chunk surfaced,
-    # in real Qwen geometry where the shared BE boilerplate makes B cosine-near.
+    # in real OpenAI geometry where the shared BE boilerplate makes B cosine-near.
     retrieved_shorts = {r["short_name"] for r in result.retrieved}
     assert _DRUG_B_SHORT not in retrieved_shorts, retrieved_shorts
     assert retrieved_shorts <= {_DRUG_A_SHORT}, retrieved_shorts

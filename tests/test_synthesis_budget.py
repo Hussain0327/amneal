@@ -100,18 +100,18 @@ def test_the_ceiling_is_single_sourced() -> None:
     assert _settings().synthesizer_max_tokens < SYNTH_MAX_TOKENS_CEILING
 
 
-def test_reasoning_effort_defaults_to_low_and_rejects_typos() -> None:
+def test_reasoning_effort_defaults_to_medium_and_rejects_typos() -> None:
     """A typo'd effort level must fail at boot, not 400 every request."""
-    assert _settings().databricks_reasoning_effort == "low"
-    assert _settings(databricks_reasoning_effort="HIGH").databricks_reasoning_effort == "high"
-    with pytest.raises(ValidationError, match="DATABRICKS_REASONING_EFFORT"):
-        _settings(databricks_reasoning_effort="ultra")
+    assert _settings().openai_reasoning_effort == "medium"
+    assert _settings(openai_reasoning_effort="HIGH").openai_reasoning_effort == "high"
+    with pytest.raises(ValidationError, match="OPENAI_REASONING_EFFORT"):
+        _settings(openai_reasoning_effort="ultra")
 
 
 @pytest.mark.parametrize("value", ["", "   "])
-def test_blank_reasoning_effort_means_send_no_parameter(value: str) -> None:
-    """Unset is a real configuration: some endpoints reject the parameter."""
-    assert _settings(databricks_reasoning_effort=value).databricks_reasoning_effort is None
+def test_blank_reasoning_effort_uses_the_medium_default(value: str) -> None:
+    """Blank deployment variables preserve the checked-in reasoning level."""
+    assert _settings(openai_reasoning_effort=value).openai_reasoning_effort == "medium"
 
 
 # ---------- the cap on the wire ----------

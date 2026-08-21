@@ -32,10 +32,10 @@ def find_similar_deficiencies(query_text: str, top_k: int | None = None) -> list
     if kb_count() == 0:
         log.info("deficiency_kb_empty")
         return []
-    provider = get_embedding_provider("qwen3")
+    provider = get_embedding_provider("openai")
     if int(provider.dim) != KB_EMBEDDING_DIM:
         raise RuntimeError(
-            f"qwen3 embedding provider is configured for {provider.dim} dims; "
+            f"OpenAI embedding provider is configured for {provider.dim} dims; "
             f"deficiency_kb stores vector({KB_EMBEDDING_DIM})"
         )
     matches = search_similar(provider.embed_query(query_text), top_k=k)

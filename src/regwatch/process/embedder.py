@@ -1,9 +1,9 @@
-"""Embedding providers with explicit query/document semantics.
+"""OpenAI embedding provider with explicit query/document semantics.
 
 A provider returns unit-norm float vectors. Retrieval queries and indexed
-documents have separate methods because instruction-tuned models such as Qwen3
-embed them asymmetrically. ``embed()`` remains the document-style compatibility
-surface for older providers and callers.
+documents have separate methods so provider-specific behavior cannot leak
+between the two paths. ``embed()`` remains the document-style compatibility
+surface for older callers.
 """
 
 from __future__ import annotations
@@ -25,36 +25,6 @@ from regwatch.common.logging import get_logger
 
 log = get_logger(__name__)
 
-# The served Databricks endpoint (`workspace.default.regwatch-embed`, served
-# entity `qwen3-embedding-0-6b-112025`), not a HuggingFace repo id: the old
-# Qwen/Qwen3-Embedding-4B value was never deployed anywhere.
-QWEN3_EMBEDDING_MODEL = "qwen3-embedding-0-6b"
-QWEN3_QUERY_INSTRUCTION_VERSION = "regwatch-regulatory-retrieval-v1"
-QWEN3_DOCUMENT_PREPROCESSING_VERSION = "raw-text-v1"
-QWEN3_QUERY_INSTRUCTION = (
-    "Given a pharmaceutical regulatory question, retrieve FDA product-specific "
-    "guidance passages containing the evidence needed to answer it."
-)
-_QWEN3_PROVIDER_NAMES = frozenset(
-    {
-        "qwen",
-        "qwen3",
-        "qwen3-embedding",
-        "qwen3-embedding-4b",
-        "databricks-qwen3",
-    }
-)
-_QWEN3_PROFILE_PROVIDER_NAMES = _QWEN3_PROVIDER_NAMES | frozenset({"databricks", "vllm"})
-
-# Conservative bulk-embedding defaults, sized against the Databricks endpoint's
-# per-request cap measured live on 2026-08-13: ~140-token inputs passed at 24
-# per request and 429'd at 32. The cap behaves as a token budget, not an input
-# count, so token-aware packing is the primary guard and the item cap is a
-# backstop. config/settings.py mirrors these defaults for the env vars; a test
-# pins the two together.
-QWEN3_DEFAULT_BATCH_SIZE = 8
-QWEN3_DEFAULT_REQUEST_TOKEN_BUDGET = 3000
-
 # OpenAI embeddings (migration target). text-embedding-3-large is natively
 # 3072-dim; production serves it Matryoshka-truncated to 1024 through the API's
 # `dimensions` parameter, which is what keeps the vector footprint inside the
@@ -66,7 +36,7 @@ OPENAI_DEFAULT_DIMENSION = 1024
 # hard 400, so refuse locally instead of paying the round trip.
 OPENAI_MAX_DIMENSION = 3072
 # OpenAI embeddings are SYMMETRIC: queries and passages get byte-identical
-# handling. A Qwen-style "Instruct: ...\nQuery:" preamble would embed the
+# handling. An instruction preamble would embed the
 # instruction text itself into the query vector and skew every cosine score
 # against passage vectors that never saw it. This constant records "no
 # instruction" as a versioned policy so an embedding profile can pin it.
@@ -150,11 +120,10 @@ def _query_embedding_cache_key(provider: Any, query: str) -> tuple[str, ...] | N
     """Value-based identity of everything that determines a query vector.
 
     Returns None -- which bypasses the cache -- unless the provider exposes its
-    full geometry: name, model, dim, query instruction text and version. Of the
-    in-repo providers only Qwen3EmbeddingProvider (the production Ask path)
-    does; echo is compute-only and has no instruction fields. A provider whose
-    geometry cannot be read here must never share entries with one whose
-    geometry can.
+    full geometry: name, model, dim, query instruction text and version. The
+    OpenAI provider exposes all five; echo is compute-only and has no
+    instruction fields. A provider whose geometry cannot be read here must
+    never share entries with one whose geometry can.
     """
     name = getattr(provider, "name", None)
     model = getattr(provider, "model", None)
@@ -289,352 +258,6 @@ def _full_jitter_delay_s(base_s: float, cap_s: float, retry_index: int) -> float
 
 
 @lru_cache(maxsize=8)
-def _shared_qwen_http_client(base_url: str, token: str, timeout_s: float) -> httpx.Client:
-    """One connection-pooled client per Qwen endpoint/credential tuple."""
-    return httpx.Client(
-        base_url=f"{base_url.rstrip('/')}/",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-        timeout=timeout_s,
-    )
-
-
-class Qwen3EmbeddingProvider:
-    """A Qwen3 embedding model through an OpenAI-compatible serving endpoint.
-
-    The deployed target is the 0.6B (``workspace.default.regwatch-embed``); the
-    provider itself is model-agnostic, so the dimension bound below is the
-    widest any Qwen3 embedding model accepts, not a claim about which one is
-    served.
-
-    The production target is a Databricks-served endpoint, while the same
-    request shape works with vLLM's ``/v1/embeddings`` API. The configured
-    ``base_url`` is the OpenAI API root (for example
-    ``http://embedder:8000/v1``); this provider appends ``embeddings``.
-
-    Queries receive Qwen's required one-sentence task instruction. Documents
-    remain byte-for-byte raw. ``embed()`` deliberately aliases document
-    semantics for backward compatibility, so query call sites must use
-    ``embed_query``.
-    """
-
-    name = "qwen3"
-    default_model = QWEN3_EMBEDDING_MODEL
-    default_dim = 1536
-    query_instruction_version_default = QWEN3_QUERY_INSTRUCTION_VERSION
-
-    _max_attempts: ClassVar[int] = 6
-    _backoff_base_s: ClassVar[float] = 1.0
-    _backoff_cap_s: ClassVar[float] = 30.0
-    _unit_norm_tolerance: ClassVar[float] = 1e-3
-    # Deliberately low chars-per-token divisor (English runs ~4): overestimating
-    # cost shrinks batches, which only costs extra requests, never a 429.
-    _chars_per_token_estimate: ClassVar[int] = 3
-    # The endpoint reports rate limiting and the size cap with the same bare
-    # 429, so an ambiguous 429 gets this many same-size attempts (with backoff
-    # between) before splitting is used as the probe that tells the two apart.
-    _split_after_attempts: ClassVar[int] = 2
-    _size_rejection_markers: ClassVar[tuple[str, ...]] = (
-        "token",
-        "too large",
-        "payload",
-        "context length",
-        "input length",
-        "input size",
-    )
-
-    def __init__(
-        self,
-        *,
-        client: Any = None,
-        base_url: str | None = None,
-        token: str | None = None,
-        model: str = QWEN3_EMBEDDING_MODEL,
-        dim: int = 1536,
-        query_instruction: str = QWEN3_QUERY_INSTRUCTION,
-        query_instruction_version: str = QWEN3_QUERY_INSTRUCTION_VERSION,
-        batch_size: int = QWEN3_DEFAULT_BATCH_SIZE,
-        request_token_budget: int = QWEN3_DEFAULT_REQUEST_TOKEN_BUDGET,
-        timeout_s: float = 60.0,
-    ) -> None:
-        self._client = client
-        self.base_url = (base_url or "").strip() or None
-        self._token = (token or "").strip() or None
-        self.model = model.strip()
-        self.dim = int(dim)
-        self.query_instruction = query_instruction.strip()
-        self.query_instruction_version = query_instruction_version.strip()
-        self.batch_size = int(batch_size)
-        self.request_token_budget = int(request_token_budget)
-        self.timeout_s = float(timeout_s)
-
-        if not self.model:
-            raise ValueError("Qwen embedding model must not be empty")
-        if not 32 <= self.dim <= 2560:
-            raise ValueError("Qwen3 embedding dimension must be in [32, 2560]")
-        if not self.query_instruction:
-            raise ValueError("Qwen query instruction must not be empty")
-        if not self.query_instruction_version:
-            raise ValueError("Qwen query instruction version must not be empty")
-        if not 1 <= self.batch_size <= 512:
-            raise ValueError("Qwen embedding batch size must be in [1, 512]")
-        if not 1 <= self.request_token_budget <= 65536:
-            raise ValueError("Qwen embedding request token budget must be in [1, 65536]")
-        if self.timeout_s <= 0:
-            raise ValueError("Qwen embedding timeout must be positive")
-
-    def _client_or_create(self) -> Any:
-        if self._client is not None:
-            return self._client
-        if not self.base_url:
-            raise RuntimeError(
-                "EMBEDDING_PROVIDER=qwen3 requires QWEN_EMBEDDING_BASE_URL to be set"
-            )
-        if not self._token:
-            raise RuntimeError("EMBEDDING_PROVIDER=qwen3 requires QWEN_EMBEDDING_TOKEN to be set")
-        self._client = _shared_qwen_http_client(
-            self.base_url,
-            self._token,
-            self.timeout_s,
-        )
-        return self._client
-
-    @staticmethod
-    def _status_code(exc: Exception) -> int | None:
-        status = getattr(exc, "status_code", None)
-        if isinstance(status, int):
-            return status
-        response = getattr(exc, "response", None)
-        status = getattr(response, "status_code", None)
-        return status if isinstance(status, int) else None
-
-    @classmethod
-    def _is_retryable(cls, exc: Exception) -> bool:
-        status = cls._status_code(exc)
-        if status is not None:
-            return status == 429 or status >= 500
-        return isinstance(exc, httpx.TransportError)
-
-    def _request_once(self, client: Any, batch: list[str]) -> Any:
-        payload = {
-            "model": self.model,
-            "input": batch,
-            "dimensions": self.dim,
-        }
-        embeddings_api = getattr(client, "embeddings", None)
-        create = getattr(embeddings_api, "create", None)
-        if callable(create):
-            return create(**payload)
-
-        post = getattr(client, "post", None)
-        if not callable(post):
-            raise TypeError("Qwen embedding client must expose embeddings.create(...) or post(...)")
-        response = post("embeddings", json=payload)
-        response.raise_for_status()
-        return response.json()
-
-    @classmethod
-    def _estimate_tokens(cls, text: str) -> int:
-        """Conservative token overestimate for request packing."""
-        divisor = cls._chars_per_token_estimate
-        return max(1, (len(text) + divisor - 1) // divisor)
-
-    def _pack_spans(self, texts: list[str]) -> list[tuple[int, int]]:
-        """Greedy consecutive packing under the token budget and item cap.
-
-        An input whose estimate alone exceeds the budget gets its own span, so
-        its rejection cannot poison neighboring chunks.
-        """
-        spans: list[tuple[int, int]] = []
-        start = 0
-        tokens = 0
-        for index, text in enumerate(texts):
-            cost = self._estimate_tokens(text)
-            if index > start and (
-                index - start >= self.batch_size or tokens + cost > self.request_token_budget
-            ):
-                spans.append((start, index))
-                start = index
-                tokens = 0
-            tokens += cost
-        spans.append((start, len(texts)))
-        return spans
-
-    @classmethod
-    def _rejection_text(cls, exc: Exception) -> str:
-        parts = [str(exc)]
-        body = getattr(exc, "body", None)
-        if body is not None:
-            parts.append(str(body))
-        response = getattr(exc, "response", None)
-        if response is not None:
-            try:
-                text = response.text
-            except Exception:  # an unread streamed body must not mask the original error
-                text = None
-            if isinstance(text, str):
-                parts.append(text)
-        return " ".join(parts).lower()
-
-    @classmethod
-    def _is_size_rejection(cls, exc: Exception) -> bool:
-        """Whether the endpoint rejected the request for its size, not its rate.
-
-        413 is unambiguous. Databricks reports both rate limits and the
-        per-request cap as 429 REQUEST_LIMIT_EXCEEDED, so 400/429 bodies are
-        sniffed for size/token wording; a bare 429 stays classified as rate.
-        """
-        status = cls._status_code(exc)
-        if status == 413:
-            return True
-        if status not in (400, 429):
-            return False
-        text = cls._rejection_text(exc)
-        return any(marker in text for marker in cls._size_rejection_markers)
-
-    def _should_split(self, exc: Exception, attempt: int, batch_len: int) -> bool:
-        if batch_len <= 1:
-            return False
-        if self._is_size_rejection(exc):
-            return True
-        return self._status_code(exc) == 429 and attempt >= self._split_after_attempts
-
-    def _embed_span(
-        self,
-        client: Any,
-        texts: list[str],
-        start: int,
-        stop: int,
-    ) -> list[list[float]]:
-        """Embed ``texts[start:stop]`` as one request, splitting on size rejections.
-
-        Rate-limit and transient errors back off and retry the same batch. A
-        size-classified rejection - or a 429 that survives backoff - splits the
-        batch in half instead of re-sending an identical oversized request. A
-        single input that is still rejected for size raises
-        ``EmbeddingInputTooLargeError`` naming its absolute index.
-        """
-        batch = list(texts[start:stop])
-        for attempt in range(1, self._max_attempts + 1):
-            try:
-                response = self._request_once(client, batch)
-            except Exception as exc:
-                if self._should_split(exc, attempt, len(batch)):
-                    mid = start + (len(batch) + 1) // 2
-                    left = self._embed_span(client, texts, start, mid)
-                    return left + self._embed_span(client, texts, mid, stop)
-                if len(batch) == 1 and self._is_size_rejection(exc):
-                    raise EmbeddingInputTooLargeError(
-                        start,
-                        self._estimate_tokens(batch[0]),
-                        self.request_token_budget,
-                    ) from exc
-                if attempt >= self._max_attempts or not self._is_retryable(exc):
-                    if (
-                        len(batch) == 1
-                        and self._status_code(exc) == 429
-                        and self._estimate_tokens(batch[0]) > self.request_token_budget
-                    ):
-                        # Isolated over-budget input that never cleared 429:
-                        # the size cap is the overwhelmingly likely cause.
-                        raise EmbeddingInputTooLargeError(
-                            start,
-                            self._estimate_tokens(batch[0]),
-                            self.request_token_budget,
-                        ) from exc
-                    raise
-                time.sleep(
-                    _full_jitter_delay_s(self._backoff_base_s, self._backoff_cap_s, attempt - 1)
-                )
-            else:
-                return self._validated_batch(response, len(batch))
-        raise RuntimeError("unreachable")  # pragma: no cover
-
-    @staticmethod
-    def _response_field(value: Any, field: str) -> Any:
-        if isinstance(value, Mapping):
-            return value.get(field)
-        return getattr(value, field, None)
-
-    def _validated_batch(self, response: Any, expected_count: int) -> list[list[float]]:
-        raw_data = self._response_field(response, "data")
-        if raw_data is None:
-            raise RuntimeError("Qwen embeddings response is missing data")
-        try:
-            items = list(raw_data)
-        except TypeError as exc:
-            raise RuntimeError("Qwen embeddings response data is not a sequence") from exc
-        if len(items) != expected_count:
-            raise RuntimeError(
-                f"Qwen embeddings returned {len(items)} vectors for {expected_count} inputs"
-            )
-
-        indexed: list[tuple[int, Any]] = []
-        for item in items:
-            raw_index = self._response_field(item, "index")
-            try:
-                index = int(raw_index)
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError("Qwen embedding item has an invalid index") from exc
-            indexed.append((index, item))
-        indexed.sort(key=lambda pair: pair[0])
-        indices = [index for index, _ in indexed]
-        if indices != list(range(expected_count)):
-            raise RuntimeError(
-                f"Qwen embeddings returned invalid indices {indices!r} for {expected_count} inputs"
-            )
-
-        vectors: list[list[float]] = []
-        for _index, item in indexed:
-            raw_embedding = self._response_field(item, "embedding")
-            try:
-                vector = [float(value) for value in raw_embedding]
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError("Qwen embedding is not a numeric vector") from exc
-            if len(vector) != self.dim:
-                raise RuntimeError(
-                    f"Qwen embedding has {len(vector)} dims, expected {self.dim} ({self.model})"
-                )
-            if not all(math.isfinite(value) for value in vector):
-                raise RuntimeError("Qwen embedding contains a non-finite value")
-            norm = math.sqrt(math.fsum(value * value for value in vector))
-            if not math.isclose(
-                norm,
-                1.0,
-                rel_tol=self._unit_norm_tolerance,
-                abs_tol=self._unit_norm_tolerance,
-            ):
-                raise RuntimeError(
-                    f"Qwen embedding is not unit norm: norm={norm:.8f}, "
-                    f"tolerance={self._unit_norm_tolerance}"
-                )
-            vectors.append(vector)
-        return vectors
-
-    def _embed_inputs(self, texts: list[str]) -> list[list[float]]:
-        if not texts:
-            return []
-        client = self._client_or_create()
-        out: list[list[float]] = []
-        for start, stop in self._pack_spans(texts):
-            out.extend(self._embed_span(client, texts, start, stop))
-        return out
-
-    def embed_query(self, query: str) -> list[float]:
-        instructed = f"Instruct: {self.query_instruction}\nQuery:{query}"
-        return self._embed_inputs([instructed])[0]
-
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return self._embed_inputs(texts)
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        """Backward-compatible document embedding; never instruct documents."""
-        return self.embed_documents(texts)
-
-
-@lru_cache(maxsize=8)
 def _shared_openai_http_client(base_url: str, token: str, timeout_s: float) -> httpx.Client:
     """One connection-pooled client per OpenAI endpoint/credential tuple."""
     return httpx.Client(
@@ -656,8 +279,7 @@ _OPENAI_RENORMALIZED_LOGGED = False
 class OpenAIEmbeddingProvider:
     """OpenAI ``/v1/embeddings`` (the text-embedding-3 family).
 
-    Deliberately NOT a subclass of, or a copy of, the Qwen arm. Three
-    differences are load-bearing for retrieval correctness:
+    Three behaviors are load-bearing for retrieval correctness:
 
     * **No instruction prefix.** ``embed_query`` sends the query verbatim.
       See OPENAI_QUERY_INSTRUCTION_VERSION for why prefixing corrupts scores.
@@ -669,8 +291,8 @@ class OpenAIEmbeddingProvider:
       instead of raising. Only a zero, NaN, or infinite vector is fatal.
     * **Large batches.** OpenAI takes up to 2048 inputs per request.
 
-    The client is duck-typed the same way as the Qwen arm: an injected object
-    exposing ``embeddings.create(**payload)`` is used if present, otherwise
+    The client is duck-typed: an injected object exposing
+    ``embeddings.create(**payload)`` is used if present, otherwise
     ``post("embeddings", json=payload)``. The OpenAI SDK is deliberately not
     imported -- an import-linter contract confines it to the LLM client seam.
     """
@@ -787,8 +409,8 @@ class OpenAIEmbeddingProvider:
         """Whether the request was refused for its size rather than its rate.
 
         OpenAI reports rate limiting as a bare 429 and an oversized request as
-        a 400 whose message names the context length or the input count, so
-        unlike the Databricks endpoint the two are separable without probing.
+        a 400 whose message names the context length or the input count, so the
+        two are separable without probing.
         """
         status = cls._status_code(exc)
         if status == 413:
@@ -885,8 +507,8 @@ class OpenAIEmbeddingProvider:
     def _normalize(self, vector: list[float]) -> list[float]:
         """Scales one vector to unit norm, refusing only degenerate ones.
 
-        Unlike the Qwen arm, a norm away from 1.0 is expected here rather than
-        a bug: truncating a unit vector to its first ``dimensions`` components
+        A norm away from 1.0 is expected here rather than a bug: truncating a
+        unit vector to its first ``dimensions`` components
         shortens it, so an assertion would fire on healthy output. Zero, NaN
         and infinite vectors ARE still fatal -- they cannot be scaled and would
         poison every cosine comparison silently.
@@ -1004,7 +626,6 @@ def _require_provider_name(name: str | None) -> str:
         raise RuntimeError(
             "EMBEDDING_PROVIDER is not set and has no default. Set "
             "EMBEDDING_PROVIDER=openai (text-embedding-3-large), "
-            "EMBEDDING_PROVIDER=qwen3 (the Databricks serving endpoint) "
             "or EMBEDDING_PROVIDER=echo (tests only); this process refuses to "
             "guess an embedding space."
         )
@@ -1014,23 +635,10 @@ def _require_provider_name(name: str | None) -> str:
 def assert_embedding_runtime_available(name: str | None = None) -> None:
     """Boot-time fail-fast: the configured provider must be fully usable.
 
-    The Qwen provider reads its endpoint credentials lazily on first
-    ``embed()``, so a process missing QWEN_EMBEDDING_BASE_URL/TOKEN would
-    otherwise boot cleanly, report healthy, and then fail every query/ingest
-    at embed time. The API lifespan and the corpus preflight call this so the
-    misconfiguration refuses to start with the same remediation message the
-    lazy path would raise. An unset EMBEDDING_PROVIDER refuses here too.
+    The API lifespan and corpus preflight call this so missing OpenAI
+    configuration refuses at boot instead of on the first query or ingest.
     """
     resolved = _require_provider_name(name)
-    if resolved in _QWEN3_PROVIDER_NAMES:
-        settings = get_settings()
-        if not str(getattr(settings, "qwen_embedding_base_url", "") or "").strip():
-            raise RuntimeError(
-                "EMBEDDING_PROVIDER=qwen3 requires QWEN_EMBEDDING_BASE_URL to be set"
-            )
-        if not str(getattr(settings, "qwen_embedding_token", "") or "").strip():
-            raise RuntimeError("EMBEDDING_PROVIDER=qwen3 requires QWEN_EMBEDDING_TOKEN to be set")
-        return
     if resolved in _OPENAI_PROVIDER_NAMES:
         settings = get_settings()
         if not str(getattr(settings, "openai_api_key", "") or "").strip():
@@ -1047,64 +655,6 @@ def assert_embedding_runtime_available(name: str | None = None) -> None:
         raise ValueError(f"unknown embedding provider: {resolved}")
 
 
-def _configured_qwen3_model() -> str:
-    settings = get_settings()
-    return str(
-        getattr(settings, "qwen_embedding_model", QWEN3_EMBEDDING_MODEL) or QWEN3_EMBEDDING_MODEL
-    )
-
-
-def _configured_qwen3_dimension() -> int:
-    return int(getattr(get_settings(), "qwen_embedding_dimension", None) or 1536)
-
-
-def _configured_qwen3_query_instruction_version() -> str:
-    settings = get_settings()
-    return str(
-        getattr(
-            settings,
-            "qwen_embedding_query_instruction_version",
-            QWEN3_QUERY_INSTRUCTION_VERSION,
-        )
-        or QWEN3_QUERY_INSTRUCTION_VERSION
-    )
-
-
-def _build_qwen3_provider(
-    *,
-    model: str,
-    dim: int,
-    query_instruction_version: str,
-) -> EmbeddingProvider:
-    """Builds the Qwen3 arm with an EXPLICIT geometry.
-
-    Credentials, batching and timeouts come from settings; model, dimension
-    and instruction version are passed in, so the profile path can demand its
-    own geometry rather than inheriting whatever the environment happens to
-    say.
-    """
-    settings = get_settings()
-    return Qwen3EmbeddingProvider(
-        base_url=getattr(settings, "qwen_embedding_base_url", None),
-        token=getattr(settings, "qwen_embedding_token", None),
-        model=model,
-        dim=dim,
-        query_instruction=str(
-            getattr(settings, "qwen_embedding_query_instruction", QWEN3_QUERY_INSTRUCTION)
-            or QWEN3_QUERY_INSTRUCTION
-        ),
-        query_instruction_version=query_instruction_version,
-        batch_size=int(
-            getattr(settings, "qwen_embedding_batch_size", None) or QWEN3_DEFAULT_BATCH_SIZE
-        ),
-        request_token_budget=int(
-            getattr(settings, "qwen_embedding_request_token_budget", None)
-            or QWEN3_DEFAULT_REQUEST_TOKEN_BUDGET
-        ),
-        timeout_s=float(getattr(settings, "llm_timeout_s", None) or 60.0),
-    )
-
-
 def _configured_openai_model() -> str:
     return str(getattr(get_settings(), "openai_embedding_model", "") or "").strip()
 
@@ -1116,7 +666,7 @@ def _configured_openai_dimension() -> int:
 
 
 def _build_openai_provider(*, model: str, dim: int) -> EmbeddingProvider:
-    """Builds the OpenAI arm with an EXPLICIT geometry (see _build_qwen3_provider)."""
+    """Build the OpenAI provider with explicit embedding geometry."""
     settings = get_settings()
     raw_retries = getattr(settings, "openai_max_retries", None)
     return OpenAIEmbeddingProvider(
@@ -1138,12 +688,6 @@ def get_embedding_provider(name: str | None = None) -> EmbeddingProvider:
     name = _require_provider_name(name)
     if name == "echo":
         return EchoEmbeddingProvider()
-    if name in _QWEN3_PROVIDER_NAMES:
-        return _build_qwen3_provider(
-            model=_configured_qwen3_model(),
-            dim=_configured_qwen3_dimension(),
-            query_instruction_version=_configured_qwen3_query_instruction_version(),
-        )
     if name in _OPENAI_PROVIDER_NAMES:
         model = _configured_openai_model()
         if not model:
@@ -1199,26 +743,6 @@ def _assert_configuration_matches_profile(
         )
 
 
-def _qwen3_provider_for_profile(profile: Any) -> EmbeddingProvider:
-    assert_embedding_runtime_available("qwen3")
-    configured = {
-        "model": _configured_qwen3_model(),
-        "dimension": _configured_qwen3_dimension(),
-        "revision": str(getattr(get_settings(), "qwen_embedding_revision", "") or ""),
-        "query_instruction_version": _configured_qwen3_query_instruction_version(),
-        "preprocessing_version": QWEN3_DOCUMENT_PREPROCESSING_VERSION,
-    }
-    _assert_configuration_matches_profile(profile, configured, endpoint="Qwen")
-    # Built from the PROFILE, not from settings. The check above proves the two
-    # agree today; sourcing the geometry here from the profile means a future
-    # loosening of that check cannot silently reintroduce ambient drift.
-    return _build_qwen3_provider(
-        model=str(getattr(profile, "model", "")),
-        dim=int(getattr(profile, "dimension", 0)),
-        query_instruction_version=str(getattr(profile, "query_instruction_version", "")),
-    )
-
-
 def _openai_provider_for_profile(profile: Any) -> EmbeddingProvider:
     assert_embedding_runtime_available("openai")
     settings = get_settings()
@@ -1243,13 +767,10 @@ def _openai_provider_for_profile(profile: Any) -> EmbeddingProvider:
 def get_embedding_provider_for_profile(profile: Any) -> EmbeddingProvider:
     """Build a provider that exactly matches one immutable embedding profile.
 
-    Dispatch is on ``profile.provider`` and nothing else. Qwen3@1024 and
-    OpenAI@1024 are the same width, so a factory that read the profile's
-    provider and then built one fixed arm anyway would return vectors from the
-    wrong embedding space with no error at any layer: they would write, index
-    and query cleanly, and simply retrieve nonsense. That is the single most
-    dangerous failure mode of the OpenAI migration, so it is a dispatch, not a
-    validation.
+    Dispatch is on ``profile.provider`` and nothing else. Different models at
+    1024 dimensions are still different embedding spaces, so a factory that
+    ignored the provider could write and query cleanly while retrieving
+    nonsense.
 
     Profile-backed retrieval and backfill must not use the global legacy
     provider by accident. The serving endpoint is configured outside the
@@ -1260,10 +781,8 @@ def get_embedding_provider_for_profile(profile: Any) -> EmbeddingProvider:
     profile_provider = str(getattr(profile, "provider", "") or "").strip().lower()
     if profile_provider in _OPENAI_PROFILE_PROVIDER_NAMES:
         return _openai_provider_for_profile(profile)
-    if profile_provider in _QWEN3_PROFILE_PROVIDER_NAMES:
-        return _qwen3_provider_for_profile(profile)
-    raise RuntimeError(
+    raise ValueError(
         f"embedding profile {getattr(profile, 'profile_id', '<unknown>')} uses "
-        f"unsupported provider {profile_provider!r}; supported providers are "
-        "OpenAI and Qwen3 (served by Databricks or vLLM)"
+        f"unsupported embedding profile provider {profile_provider!r}; "
+        "supported provider is OpenAI"
     )
