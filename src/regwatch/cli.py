@@ -1313,3 +1313,65 @@ def cmd_route_shadow_report(
 
 if __name__ == "__main__":
     app()
+
+
+@app.command("chemistry-backfill")
+def cmd_chemistry_backfill(
+    limit: int = typer.Option(0, help="Stop after this many PubChem lookups (0 = all)."),
+    refresh: bool = typer.Option(False, help="Re-query names that already have a row."),
+    only: str = typer.Option("", help="Look up this one ingredient name and nothing else."),
+) -> None:
+    """Resolve every corpus ingredient name to its PubChem identity (offline).
+
+    This is the ONLY writer of ``ingredient_chemistry`` and the only place the
+    app ever talks to PubChem. Each name is looked up exactly as the corpus
+    spells it; when that salt/form is unknown to PubChem, the salt-stripped
+    parent is looked up and stored under its own key, and the Ask surface
+    labels it "parent compound shown". Ambiguous names are stored as such and
+    draw nothing. Transport failures stop the run without writing.
+    """
+    from regwatch.common.text_normalize import stripped_name
+    from regwatch.sources import pubchem
+    from regwatch.store import chemistry
+    from regwatch.store.db import session_scope
+
+    with session_scope() as s:
+        if only:
+            targets = chemistry.ingredient_keys(only)
+        else:
+            known = set() if refresh else chemistry.known_keys(s)
+            targets = [k for k in chemistry.corpus_ingredient_keys(s) if k not in known]
+    if limit > 0:
+        targets = targets[:limit]
+    rprint(f"resolving {len(targets)} ingredient name(s) against PubChem")
+
+    looked_up = 0
+    client = pubchem.build_client()
+    try:
+        for key in targets:
+            try:
+                rec = pubchem.resolve(key, client=client)
+            except pubchem.PubChemError as exc:
+                rprint(f"[red]stopped[/red] pubchem unreachable at {key!r}: {exc}")
+                raise typer.Exit(code=2) from exc
+            records = [rec]
+            parent = stripped_name(key)
+            if rec.status != pubchem.STATUS_RESOLVED and parent and parent != key:
+                try:
+                    records.append(pubchem.resolve(parent, client=client))
+                except pubchem.PubChemError as exc:
+                    rprint(f"[red]stopped[/red] pubchem unreachable at {parent!r}: {exc}")
+                    raise typer.Exit(code=2) from exc
+            with session_scope() as s:
+                for item in records:
+                    chemistry.record(s, item)
+            looked_up += 1
+            rprint(
+                f"  {key}: {rec.status}" + (f" (cid {rec.pubchem_cid})" if rec.pubchem_cid else "")
+            )
+    finally:
+        client.close()
+
+    with session_scope() as s:
+        counts = chemistry.count_by_status(s)
+    rprint(f"[green]ok[/green] {looked_up} looked up; table now {counts}")
