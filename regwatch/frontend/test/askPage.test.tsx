@@ -286,8 +286,8 @@ describe("AskPage — run()/stop() orchestration", () => {
   );
 });
 
-describe("AskPage -- fallback notice + status log persist onto the settled turn (B8)", () => {
-  it("keeps the fallback notice and all status frames after a MID-DRAFT fallback settles", async () => {
+describe("AskPage -- fallback notice on the settled turn (B8)", () => {
+  it("keeps the fallback notice after a MID-DRAFT fallback settles, with no status docket", async () => {
     const user = userEvent.setup();
     const stream = pendingStream();
     const { container } = render(<AskPage />);
@@ -307,18 +307,16 @@ describe("AskPage -- fallback notice + status log persist onto the settled turn 
     expect(container.querySelector(".msg__fallback")?.textContent).toBe(
       "Connection dropped mid-draft \u2014 the answer was re-run over a fresh request and may differ from the draft.",
     );
-    // statusFrames STATE is cleared in run()'s finally -- only the closure-local
-    // copy stamped onto the turn can render these.
-    // Children of the (closed) Provenance details are still queryable in jsdom.
-    const frames = [...container.querySelectorAll(".prov__log li")].map((li) => li.textContent);
-    expect(frames).toEqual([
-      "Resolving product...",
-      "Searching 1,795 documents...",
-      STREAM_FALLBACK_STATUS,
-    ]);
+    // The SSE frames narrate the machine, so the settled turn no longer prints
+    // them as a numbered docket -- the transport fact the analyst needs is the
+    // notice above, not the pipeline's own log. Children of the (closed)
+    // Provenance details are still queryable in jsdom, so an absent node here
+    // is real absence, not a folded one.
+    expect(container.querySelector(".prov__log")).toBeNull();
+    expect(container.textContent).not.toContain("Searching 1,795 documents...");
   });
 
-  it("logs the retry but shows no notice when the stream fell back with no draft painted", async () => {
+  it("shows no notice and no status docket when the stream fell back with no draft painted", async () => {
     const user = userEvent.setup();
     const stream = pendingStream();
     const { container } = render(<AskPage />);
@@ -335,14 +333,8 @@ describe("AskPage -- fallback notice + status log persist onto the settled turn 
 
     // Nothing was withdrawn, so the turn must not claim a draft was lost...
     expect(container.querySelector(".msg__fallback")).toBeNull();
-    // ...while the retry itself stays on the record: the status log is
-    // provenance and is NOT gated on the notice.
-    const frames = [...container.querySelectorAll(".prov__log li")].map((li) => li.textContent);
-    expect(frames).toEqual([
-      "Resolving product...",
-      "Searching 1,795 documents...",
-      STREAM_FALLBACK_STATUS,
-    ]);
+    // ...and the retry leaves no numbered docket behind it either.
+    expect(container.querySelector(".prov__log")).toBeNull();
   });
 
   it("shows no fallback notice when the stream 502s before the first token (#224)", async () => {
@@ -377,8 +369,8 @@ describe("AskPage -- fallback notice + status log persist onto the settled turn 
     await screen.findByText(ANSWER_TEXT);
 
     expect(container.querySelector(".msg__fallback")).toBeNull();
-    // The status log itself is not gated on the fallback.
-    expect(container.querySelectorAll(".prov__log li")).toHaveLength(2);
+    // A clean run leaves no status docket under the answer either.
+    expect(container.querySelector(".prov__log")).toBeNull();
   });
 });
 

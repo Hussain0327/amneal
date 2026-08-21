@@ -355,7 +355,7 @@ main:focus {
   gap: 0.5rem;
   width: 1.7rem;
 }
-/* Marginalia (time filed, audit no, confidence dot) exist only on the wide
+/* Marginalia (time filed, confidence dot) exist only on the wide
    rail -- hidden by default, revealed by the min-width query. */
 .marginalia {
   display: none;
@@ -432,14 +432,17 @@ main:focus {
 .msg__body--draft .prose h4 {
   color: inherit;
 }
+/* A one-word caption, not a promise about verification: the pulsing dot is
+   already the liveness signal, and the SR-facing "the verified answer will
+   follow" lives in the aria-live milestone (page.tsx). Sentence case in the
+   body face -- an uppercase tracked mono tag under a half-written sentence
+   read like a machine state label. */
 .msg__drafting {
   display: inline-flex;
   align-items: center;
   gap: 0.42rem;
   margin: 0.55rem 0 0;
-  font-size: 0.66rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-size: 0.78rem;
   color: var(--ink-faint);
 }
 .msg__drafting-dot {
@@ -538,16 +541,16 @@ main:focus {
   font-style: italic;
 }
 /* Coarse confidence band on a cited answer — High/Moderate, never the raw
-   float. Reads hedged near the refusal threshold. */
+   float. Reads hedged near the refusal threshold. It now sits inside the
+   Sources summary row (.sources__row), so it carries no margin of its own and
+   drops the uppercase mono register: a stamped block under every answer read
+   as a machine verdict rather than a colleague's aside. */
 .confidence {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  margin: 0.7rem 0 0;
-  font-family: var(--font-mono), monospace;
-  font-size: 0.66rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  margin: 0;
+  font-size: 0.78rem;
   color: var(--ink-soft);
 }
 .confidence__dot {
@@ -673,6 +676,18 @@ main:focus {
   cursor: pointer;
   color: var(--ink-faint);
 }
+/* The quiet row: confidence band and source count on one line, the whole line
+   being the Sources disclosure's trigger. Deliberately NOT a flex container --
+   `display: flex` on a <summary> suppresses the native disclosure marker, and
+   the marker is the only affordance saying this row opens. Inline flow with a
+   margin gap keeps both. */
+.sources__row {
+  font-size: 0.78rem;
+}
+.sources__count {
+  margin-left: 0.6rem;
+  color: var(--ink-faint);
+}
 .prov {
   margin-top: 1rem;
 }
@@ -708,17 +723,6 @@ main:focus {
   margin: 0;
   min-width: 0;
   overflow-wrap: anywhere;
-}
-/* The SSE status frames the answer settled through, numbered like a docket log.
-   list-style is restated because the Tailwind preflight strips it. */
-.prov__log {
-  margin: 0.45rem 0 0;
-  padding-left: 1.5rem;
-  list-style: decimal;
-  font-family: var(--font-mono), ui-monospace, monospace;
-  font-size: 0.7rem;
-  line-height: 1.5;
-  color: var(--ink-faint);
 }
 
 /* Clarify options + example prompts: soft pills, matching the mockup. */
@@ -1336,8 +1340,8 @@ button.chip:disabled {
   margin: 0.7rem 0;
   padding-left: 1.3rem;
 }
-/* Restated because the Tailwind preflight strips list-style (same reason as
-   .prov__log) — without this the gold ::marker below never renders. */
+/* Restated because the Tailwind preflight strips list-style -- without this the
+   gold ::marker below never renders. */
 .prose ul {
   list-style: disc;
 }
@@ -2208,8 +2212,8 @@ button.chip:disabled {
 /* ---------- The docket margin (>=1100px) ----------
    First min-width query in the file (the app is desktop-first; the 860px block
    above handles narrow screens): on wide viewports the assistant avatar column
-   grows into a period-correct marginal rail -- time filed, audit number,
-   confidence dot -- set right-aligned against the message column. Promotes the
+   grows into a period-correct marginal rail -- time filed and the confidence
+   dot -- set right-aligned against the message column. Promotes the
    provenance already on the wire into the page's identity; below 1100px the
    rail collapses back to the bare avatar (.marginalia stays display:none). */
 @media (min-width: 1100px) {

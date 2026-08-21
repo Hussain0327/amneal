@@ -321,7 +321,7 @@ describe("AssistantTurn -- duplicated wire citations collapse to one display lis
       <AssistantTurn turn={turn} sessionId={null} onPick={() => {}} onCite={() => {}} busy={false} threshold={null} />,
     );
     expect(container.querySelectorAll(".cite")).toHaveLength(2);
-    expect(container.querySelector(".sources summary")?.textContent).toBe("Sources \u00b7 2");
+    expect(container.querySelector(".sources__count")?.textContent).toBe("2 sources");
     expect(container.querySelectorAll(".ref")).toHaveLength(2);
     // Duplicates never demote the turn to the ungrounded register.
     expect(container.querySelector(".msg__ungrounded")).toBeNull();
@@ -398,7 +398,19 @@ describe("ProvisionalDraft — the streaming draft (INV-1/INV-2)", () => {
     expect(container.querySelector(".cite")).toBeNull();
     expect(container.querySelector(".cite-stamp")).toBeNull();
     expect(container.querySelector(".confidence")).toBeNull();
-    expect(container.textContent).toContain("Drafting live");
+  });
+
+  it("captions the draft with a bare 'Drafting', not a sentence about verification", () => {
+    const { container } = render(<ProvisionalDraft text="Half a sent" />);
+    const caption = container.querySelector(".msg__drafting");
+    // textContent includes the aria-hidden dot span, which contributes nothing.
+    expect(caption?.textContent).toBe("Drafting");
+    // The old caption promised the verified answer in the visual layer; that
+    // promise now lives only in the aria-live milestone (page.tsx), since the
+    // whole draft row is aria-hidden.
+    expect(container.textContent).not.toContain("verified answer follows");
+    // The pulsing dot is the liveness signal and stays decorative.
+    expect(container.querySelector(".msg__drafting-dot")?.getAttribute("aria-hidden")).toBe("true");
   });
 
   it("renders as markdown (same typography it settles into) with zero interactive stamps", () => {
@@ -439,7 +451,7 @@ describe("the docket margin -- provenance rail on assistant turns (B9)", () => {
     meta: FIXTURE_META,
   });
 
-  it("renders time filed, audit number, and a high-confidence dot in an aria-hidden rail", () => {
+  it("renders time filed and a high-confidence dot in an aria-hidden rail, with no audit stamp", () => {
     const { container } = render(
       <AssistantTurn
         turn={answerWithProvenance}
@@ -456,7 +468,11 @@ describe("the docket margin -- provenance rail on assistant turns (B9)", () => {
     const marginalia = margin?.querySelector(".marginalia");
     expect(marginalia?.getAttribute("aria-hidden")).toBe("true");
     expect(marginalia?.querySelector(".marginalia__time")?.textContent).toBe(formatClock(FILED_AT));
-    expect(marginalia?.querySelector(".marginalia__audit")?.textContent).toBe("#4218");
+    // The "#<audit_id>" stamp is gone: an id beside every reply read as a case
+    // file. The value is still on the visible audit line and in Provenance.
+    expect(marginalia?.querySelector(".marginalia__audit")).toBeNull();
+    expect(marginalia?.textContent).not.toContain("4218");
+    expect(container.querySelector(".prov__grid")?.textContent).toContain("#4218");
     expect(marginalia?.querySelector(".marginalia__dot--high")).not.toBeNull();
     expect(marginalia?.querySelector(".marginalia__dot--moderate")).toBeNull();
   });
@@ -583,7 +599,8 @@ describe("bibliography-style answers -- trailer split + bare markers (INV-1)", (
     );
     expect(container.querySelector(".msg__body")?.textContent).not.toContain("Sources:");
     // The real reference list is still there, numbered from the validated set.
-    expect(container.querySelector(".sources summary")?.textContent).toBe("Sources · 2");
+    expect(container.querySelector(".sources__count")?.textContent).toBe("2 sources");
+    expect(container.querySelectorAll(".ref")).toHaveLength(2);
   });
 
   it("resolves listed bare markers into stamps and leaves unlisted ones literal", () => {
@@ -749,7 +766,10 @@ describe("stream-fallback notice + provenance status log (B8)", () => {
     expect(container.querySelector(".msg__fallback")).toBeNull();
   });
 
-  it("lists the settled run's status frames inside Provenance, in order", () => {
+  it("prints no status-frame docket in Provenance even when the turn carries frames", () => {
+    // The SSE frames narrate the machine's own progress; a numbered log under
+    // every reply made the record read like a pipeline transcript. Provenance
+    // keeps only what an analyst can act on (Audit / Model / Filed / Trace).
     const turn = nonAnswerTurn({
       ...citedOverrides,
       statusLog: ["Resolving product...", "Searching 1,795 documents..."],
@@ -757,24 +777,23 @@ describe("stream-fallback notice + provenance status log (B8)", () => {
     const { container } = render(
       <AssistantTurn turn={turn} sessionId={null} onPick={() => {}} onCite={() => {}} busy={false} threshold={null} />,
     );
-    const items = container.querySelectorAll(".prov .prov__log li");
-    expect([...items].map((li) => li.textContent)).toEqual([
-      "Resolving product...",
-      "Searching 1,795 documents...",
-    ]);
+    expect(container.querySelector(".prov__log")).toBeNull();
+    expect(container.querySelector(".prov ol")).toBeNull();
+    expect(container.querySelector(".prov")?.textContent).not.toContain("Resolving product...");
   });
 
-  it("renders no status log when the turn carries no frames (rehydrated history)", () => {
+  it("keeps the acted-on Provenance rows (the Model row is the only record of the engine)", () => {
+    const turn = nonAnswerTurn({
+      ...citedOverrides,
+      statusLog: ["Resolving product..."],
+    });
     const { container } = render(
-      <AssistantTurn
-        turn={nonAnswerTurn(citedOverrides)}
-        sessionId={null}
-        onPick={() => {}}
-        onCite={() => {}}
-        busy={false} threshold={null}
-      />,
+      <AssistantTurn turn={turn} sessionId={null} onPick={() => {}} onCite={() => {}} busy={false} threshold={null} />,
     );
-    expect(container.querySelector(".prov__log")).toBeNull();
+    const labels = [...container.querySelectorAll(".prov__row dt")].map((dt) => dt.textContent);
+    expect(labels).toContain("Audit");
+    expect(labels).toContain("Model");
+    expect(labels).toContain("Trace");
   });
 });
 
@@ -865,6 +884,90 @@ describe("AssistantTurn -- confidence legend on cited answers (A4)", () => {
     // The explicit-absence row must not wear a band color.
     expect(container.querySelector(".confidence--high")).toBeNull();
     expect(container.querySelector(".confidence--moderate")).toBeNull();
+    // Absence still shares the quiet row, so an unscored answer is laid out
+    // exactly like a scored one -- only the words differ.
+    expect(container.querySelector(".sources__row .confidence--none")).not.toBeNull();
+    expect(container.querySelector(".sources__count")?.textContent).toBe("1 source");
+  });
+});
+
+describe("AssistantTurn -- the quiet row (band + source count on one line)", () => {
+  const scoredTurn = nonAnswerTurn({
+    status: "answer",
+    refused: false,
+    reason: null,
+    content: "A cited claim.",
+    citations: [
+      { ...wireCitation("PSG_020503", 3), score: 0.41 },
+      { ...wireCitation("PSG_021730", 4), score: 0.41 },
+    ],
+    meta: FIXTURE_META,
+  });
+
+  it("puts the band and the source count in the same Sources summary element", () => {
+    const { container } = render(
+      <AssistantTurn
+        turn={scoredTurn}
+        sessionId={null}
+        onPick={() => {}}
+        onCite={() => {}}
+        busy={false}
+        threshold={0.3}
+      />,
+    );
+    const row = container.querySelector(".sources > summary.sources__row");
+    expect(row).not.toBeNull();
+    expect(row?.querySelector(".confidence")?.textContent).toContain("Moderate confidence");
+    expect(row?.querySelector(".sources__count")?.textContent).toBe("2 sources");
+    // Exactly one such row per cited turn -- the confidence line no longer has
+    // a block of its own above the chips.
+    expect(container.querySelectorAll(".confidence")).toHaveLength(1);
+    expect(container.querySelectorAll(".sources__row")).toHaveLength(1);
+  });
+
+  it("keeps the chips above it -- the only above-the-fold human source names", () => {
+    const { container } = render(
+      <AssistantTurn
+        turn={scoredTurn}
+        sessionId={null}
+        onPick={() => {}}
+        onCite={() => {}}
+        busy={false}
+        threshold={0.3}
+      />,
+    );
+    const chips = container.querySelector(".cites");
+    const row = container.querySelector(".sources");
+    expect(chips).not.toBeNull();
+    expect(container.querySelectorAll(".cite")).toHaveLength(2);
+    // DOCUMENT_POSITION_FOLLOWING === 4: the row comes after the chips.
+    expect(chips?.compareDocumentPosition(row as Node)).toBe(4);
+  });
+
+  it("renders the row on a one-citation answer too (presence never encodes length)", () => {
+    // The row is unconditional on a cited turn: an analyst must not be able to
+    // read "short answer" off its absence, or "long answer" off its presence.
+    const short = nonAnswerTurn({
+      status: "answer",
+      refused: false,
+      reason: null,
+      content: "Yes.",
+      citations: [{ ...wireCitation("PSG_020503", 3), score: 0.71 }],
+      meta: FIXTURE_META,
+    });
+    const { container } = render(
+      <AssistantTurn
+        turn={short}
+        sessionId={null}
+        onPick={() => {}}
+        onCite={() => {}}
+        busy={false}
+        threshold={0.3}
+      />,
+    );
+    const row = container.querySelector("summary.sources__row");
+    expect(row?.querySelector(".confidence--high")?.textContent).toContain("High confidence");
+    expect(row?.querySelector(".sources__count")?.textContent).toBe("1 source");
   });
 });
 
