@@ -203,6 +203,18 @@ def test_render_rebuilds_heading_paragraphs_bullets_and_the_matrix() -> None:
     )
 
 
+def test_a_lead_in_line_ending_in_a_colon_gets_no_extra_period() -> None:
+    """Prod #2511 rendered "two BE pathways:." -- the legacy "." was appended
+    to a colon-terminated lead-in above a table."""
+    text = (
+        "The PSG provides two BE pathways:\n\n| Study | Option I |\n|---|---|\n| PK BE | Yes [1] |"
+    )
+    turn = _admit(text, _passages())
+    rendered = tg.render_answer(turn)
+    assert rendered.startswith("The PSG provides two BE pathways:\n\n| Study | Option I |")
+    assert ":." not in rendered
+
+
 def test_deep_headings_fold_to_two_registers() -> None:
     turn = _admit("# One\n\n#### Four\n\nA fact [1].", _passages())
     rendered = tg.render_answer(turn)

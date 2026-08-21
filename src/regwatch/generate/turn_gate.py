@@ -1252,6 +1252,11 @@ def render_answer(turn: AdmittedTurn) -> str:
         if body and body[-1] in ".!?":
             terminator = body[-1]
             body = body[:-1].rstrip()
+        elif body and body[-1] in ":;":
+            # A lead-in to the list or table that follows ("The PSG provides
+            # two BE pathways:") is already terminated; appending the legacy
+            # "." rendered "pathways:." in prod (#2511, 2026-08-21).
+            terminator = ""
         if claim.pairs:
             rendered.append((claim, f"{body} {_marker(claim.pairs)}{terminator}"))
         else:
