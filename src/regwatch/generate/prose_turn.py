@@ -30,6 +30,15 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from regwatch.common.blocks import (
+    LINE_TERMINATED_KINDS,
+    PARAGRAPH,
+    Block,
+    Unit,
+    is_label,
+    segment,
+    split_units,
+)
 from regwatch.common.citations import iter_psg_citations
 from regwatch.common.sentences import split_sentences
 
@@ -71,14 +80,31 @@ _BRACKET_BODY = re.compile(r"\[([^\[\]]*)\]")
 _TRAILING_GROUP = re.compile(
     r"^(?P<body>.*?)(?P<group>(?:\s*\[[^\[\]]*\])+)\s*(?P<punct>[.!?])$", re.DOTALL
 )
+# 2026-08-21: a heading, a bullet or a table cell is terminated by its LINE (or
+# cell) end, not by a period -- "| Yes [1] |" and "- SAC (B/M/E) [1]" have no
+# terminator to put the marker before. Same position rule (the run of brackets
+# must touch the end of the unit), optional punctuation. Used ONLY for units
+# whose block kind is in LINE_TERMINATED_KINDS; a paragraph sentence keeps the
+# strict grammar, so F4 is unchanged there.
+_TRAILING_GROUP_LINE = re.compile(
+    r"^(?P<body>.*?)(?P<group>(?:\s*\[[^\[\]]*\])+)\s*(?P<punct>[.!?]?)$", re.DOTALL
+)
 
 # Sentence-initial marker reattachment: "study is required. [1] Next" puts the
 # marker AFTER the terminator, so the sentence split would orphan it onto the
 # following sentence. Moving the group before the terminator pre-split keeps
 # the marker bound to the sentence it actually cites. Numeric markers only: the
 # pair grammar has no documented post-terminator placement to repair.
+# Horizontal whitespace only between the terminator and the group, and the
+# trailing run is CAPTURED rather than swallowed: since 2026-08-21 this runs
+# on the whole raw text before block segmentation, and a newline after the
+# marker is the boundary to the next heading/bullet/table line. Eating it
+# (the old ``\s*``) re-welded "required. [1]\n## Heading" into one paragraph
+# -- the exact defect the block layer exists to remove (review finding).
 _MARKER_AFTER_PUNCT = re.compile(
-    r"(?P<punct>[.!?])\s*(?P<group>(?:\[\s*\d+\s*(?:,\s*\d+\s*)*\]\s*)+)"
+    r"(?P<punct>[.!?])[^\S\n]*"
+    r"(?P<group>(?:\[\s*\d+\s*(?:,\s*\d+\s*)*\][^\S\n]*)+)"
+    r"(?P<tail>\s*)"
 )
 
 ClaimKind = Literal["source_fact", "reasoning", "conversation"]
@@ -101,6 +127,10 @@ class ProseClaim(BaseModel):
     kind: ClaimKind
     cite_indices: list[int] = Field(default_factory=list)
     raw_markers: list[str] = Field(default_factory=list)
+    # Which markdown container the sentence came from (common.blocks). The
+    # default is the legacy "one flat paragraph", so every v6 consumer and
+    # every persisted shape that predates the field reads unchanged.
+    block: Block = Field(default=PARAGRAPH)
 
 
 class ParsedProseTurn(BaseModel):
@@ -154,7 +184,10 @@ def bounds_exceeded(text: str) -> str | None:
     so a sentence measured here is the sentence the parser will emit.
     """
     body = text or ""
-    if any(len(s) > PROSE_MAX_SENTENCE_CHARS for s in split_sentences(body)):
+    # Block-aware units, not bare sentences: a table has no terminal
+    # punctuation, so the sentence splitter read a whole 6x4 matrix as ONE
+    # sentence and a legitimate answer could breach the per-sentence bound.
+    if any(len(s) > PROSE_MAX_SENTENCE_CHARS for s in split_units(body)):
         return "sentence_too_long"
     if len(body) > PROSE_MAX_ANSWER_CHARS:
         return "answer_too_long"
@@ -200,7 +233,7 @@ def to_claims(parsed: ParsedProseTurn, passages: list[RetrievedPassage]) -> tupl
                 continue
             unresolved_seen.add(token)
             cites.append((f"UNRESOLVED_{token}", 1))
-        claims.append(ParsedClaim(text=claim.text, cites=tuple(cites)))
+        claims.append(ParsedClaim(text=claim.text, cites=tuple(cites), block=claim.block))
     return tuple(claims)
 
 
@@ -209,7 +242,10 @@ def _reattach_markers(text: str) -> str:
 
     def repl(match: re.Match[str]) -> str:
         brackets = "".join(_BRACKET.findall(match.group("group")))
-        return f" {brackets}{match.group('punct')} "
+        tail = match.group("tail")
+        # Keep a line break that followed the group; collapse anything else
+        # to the single space the sentence splitter expects.
+        return f" {brackets}{match.group('punct')}" + (tail if "\n" in tail else " ")
 
     return _MARKER_AFTER_PUNCT.sub(repl, text)
 
@@ -254,8 +290,11 @@ def _resolve_group(
     return deduped, raw_markers
 
 
-def _classify_uncited(text: str) -> ClaimKind:
-    """Epistemic kind for a sentence with no trailing marker.
+def _classify_uncited_legacy(text: str, block: Block = PARAGRAPH) -> ClaimKind:
+    """v6 epistemic kind for a sentence with no trailing marker.
+
+    ``block`` is accepted for signature parity with the selective classifier
+    and deliberately ignored: v6 forbids markdown and its bytes are pinned.
 
     MATERIALITY GUARD (finding F3): the lexicon runs on reasoning AND
     conversation sentences, because a MODEL-authored frame must not launder a
@@ -361,11 +400,11 @@ def _is_evidence_observation(text: str) -> bool:
     return bool(_EVIDENCE_DEIXIS_RE.search(body) and _ABSENCE_REPORT_RE.search(body))
 
 
-def _classify_uncited_selective(text: str) -> ClaimKind:
+def _classify_uncited_selective(text: str, block: Block = PARAGRAPH) -> ClaimKind:
     """v7 epistemic kind for a sentence with no trailing marker (B.10.3.3).
 
     Reachable only when the caller passes ``selective=True`` (v6 stays on
-    ``_classify_uncited``, byte-identical). Two lexicons, not one: a bald
+    ``_classify_uncited_legacy``, byte-identical). Two lexicons, not one: a bald
     obligation/permission word (MATERIALITY_WORDS) OR an attribution verb
     reporting what a source SAYS (SOURCE_ASSERTION_WORDS) reclassifies the
     sentence back to an unsupported source_fact, on the gate's drop-or-correct
@@ -376,14 +415,49 @@ def _classify_uncited_selective(text: str) -> ClaimKind:
     materiality word ("does NOT state this directly") without asserting
     anything (P0/F3) -- scanning it whole would fail the recommended frame
     100% of the time.
+
+    2026-08-21: for a LABEL (heading, table header or row label -- see
+    ``blocks.is_label``) the attribution scan masks ``turn_gate.
+    LABEL_TOPIC_WORDS`` only ("Recommended BE design" is what every PSG
+    heading is called); "Exempt", "waived", "FDA recommends ..." still fire
+    on a label. The materiality lexicon is never masked.
+    ``turn_gate.render_answer``'s render-time scan mirrors this exactly.
     """
     frame, body = frame_split(text)
     scan = _despan(body if frame else text)
     if _is_first_person_observation(text) or _is_evidence_observation(text):
         return "reasoning" if frame else "conversation"
-    if materiality_trigger(scan) is not None or source_assertion_trigger(scan) is not None:
+    if materiality_trigger(scan) is not None:
+        return "source_fact"
+    if source_assertion_trigger(scan, label=is_label(block)) is not None:
         return "source_fact"
     return "reasoning" if frame else "conversation"
+
+
+def _units(text: str, *, selective: bool) -> list[Unit]:
+    """The claim-sized units of a completion, in document order.
+
+    v7 (``selective=True``) reads the markdown shape first (``common.blocks``):
+    a heading is its own unit instead of being welded onto the sentence below
+    it, each list item and table cell is a unit, and the block tag rides along
+    so the renderer can rebuild the structure.
+
+    Marker reattachment runs on the WHOLE text before segmentation, exactly
+    as v6 does: ``segment`` sentence-splits inside each paragraph/item, so a
+    post-terminator "[1]" must already sit before its period by then or the
+    split orphans it (review finding, 2026-08-21). The regex cannot cross a
+    block boundary in practice -- a list marker, a pipe or a heading hash
+    always intervenes between one block's terminator and the next block's
+    bracket -- so the marker never migrates into another container.
+
+    v6 (``selective=False``) keeps the flat sentence split byte-for-byte --
+    every unit carries the default PARAGRAPH block -- because the v6 prompt
+    forbids markdown and its ledger bytes are pinned.
+    """
+    reattached = _reattach_markers(text)
+    if not selective:
+        return [Unit(sentence, PARAGRAPH) for sentence in split_sentences(reattached)]
+    return segment(reattached)
 
 
 def parse(
@@ -401,19 +475,25 @@ def parse(
     exactly; ``selective=True`` (v7) is the only way to reach
     ``_classify_uncited_selective``.
     """
-    classify_uncited = _classify_uncited_selective if selective else _classify_uncited
+    classify_uncited = _classify_uncited_selective if selective else _classify_uncited_legacy
     text = raw_text or ""
     if " ".join(text.split()) == PROSE_NO_EVIDENCE_SENTINEL:
         return ParsedProseTurn(turn_type="NO_EVIDENCE")
 
-    sentences = split_sentences(_reattach_markers(text))
+    units = _units(text, selective=selective)
 
     # Truncation rule: an unterminated final sentence is a cut-off draft, not a
     # claim. It is dropped BEFORE marker extraction, and a material tail is
-    # surfaced so the caller treats the parse like a material drop.
+    # surfaced so the caller treats the parse like a material drop. A heading,
+    # bullet or cell ends with its line, so only a PARAGRAPH tail can be
+    # unterminated.
     truncated_material = False
-    if sentences and sentences[-1].strip()[-1:] not in (".", "!", "?"):
-        tail = sentences.pop()
+    if (
+        units
+        and units[-1].block.kind not in LINE_TERMINATED_KINDS
+        and units[-1].text.strip()[-1:] not in (".", "!", "?")
+    ):
+        tail = units.pop().text
         truncated_material = materiality_trigger(tail) is not None
 
     # First index wins for a duplicated (name, page) header, mirroring
@@ -425,14 +505,16 @@ def parse(
 
     claims: list[ProseClaim] = []
     leftover: list[str] = []
-    for sentence in sentences:
-        flat = " ".join(sentence.split())
-        match = _TRAILING_GROUP.match(flat)
+    for unit in units:
+        flat = " ".join(unit.text.split())
+        block = unit.block
+        grammar = _TRAILING_GROUP_LINE if block.kind in LINE_TERMINATED_KINDS else _TRAILING_GROUP
+        match = grammar.match(flat)
         if match is None:
             if "[" in flat or "]" in flat:
                 leftover.append(flat)
                 continue
-            claims.append(ProseClaim(text=flat, kind=classify_uncited(flat)))
+            claims.append(ProseClaim(text=flat, kind=classify_uncited(flat, block), block=block))
             continue
 
         resolved = _resolve_group(match.group("group"), passages, pair_index)
@@ -453,6 +535,7 @@ def parse(
                 kind="source_fact",
                 cite_indices=cite_indices,
                 raw_markers=raw_markers,
+                block=block,
             )
         )
 

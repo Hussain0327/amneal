@@ -244,7 +244,7 @@ def test_v7_echo_answer_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
     route = _only_route_json()
     assert route["prompt"]["version"] == "7"
     turn = route["turn"]
-    assert turn["renderer_version"] == 2
+    assert turn["renderer_version"] == tg.RENDERER_VERSION_SELECTIVE
     assert turn["claims"][1]["kind"] == "conversation"
     assert turn["claims"][1]["cites"] == []
     assert turn["kind_counts"] == {"source_fact": 1, "conversation": 1}
@@ -274,7 +274,7 @@ def test_v7_served_conversational_decline(monkeypatch: pytest.MonkeyPatch) -> No
     assert result.answer != get_settings().refusal_text
     turn = _only_route_json()["turn"]
     assert turn["verdict"] == "conversational_decline"
-    assert turn["renderer_version"] == 2
+    assert turn["renderer_version"] == tg.RENDERER_VERSION_SELECTIVE
     assert "decline_guard" not in turn
 
 
@@ -343,7 +343,7 @@ def test_v7_decline_guard_fallback_end_to_end(monkeypatch: pytest.MonkeyPatch) -
         "get_llm_provider",
         lambda *a, **k: _stub_llm("A fed study is not required for this product."),
     )
-    monkeypatch.setattr(pt, "_classify_uncited_selective", lambda text: "conversation")
+    monkeypatch.setattr(pt, "_classify_uncited_selective", lambda text, block=None: "conversation")
 
     result = qa_mod.ask(_QUESTION)
 

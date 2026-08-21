@@ -3236,6 +3236,9 @@ def _synthesize_and_admit(
             # CONDITIONAL: emitted only under v7, so v6's ledger bytes (and
             # tests/test_prose_synthesis.py's exact-dict pin) never move.
             synth_telemetry["prose_parse"]["kinds"] = [c.kind for c in parsed_prose.claims]
+            # Presentation forensics (2026-08-21): which markdown container
+            # each parsed claim came from, positional against `kinds`.
+            synth_telemetry["prose_parse"]["blocks"] = [c.block.kind for c in parsed_prose.claims]
 
         killed_material: str | None = None
         for killed in parsed_prose.leftover_brackets:

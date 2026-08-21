@@ -1377,7 +1377,7 @@ def test_ledger_selective_mode_carries_kind_counts() -> None:
         prompt_version="7",
         renderer_version=tg.RENDERER_VERSION_SELECTIVE,
     )
-    assert row["renderer_version"] == 2
+    assert row["renderer_version"] == 3  # 3 since 2026-08-21: structured renderer
     assert row["kind_counts"] == {"source_fact": 1, "conversation": 1}
     assert "decline_guard" not in row
 

@@ -2,7 +2,7 @@
 
 Append-only. What was picked, why, and when.
 
-Last updated: 2026-08-20.
+Last updated: 2026-08-21.
 
 Old entries are left as they were written. When something later changed, a dated
 follow-up line goes under the original entry instead of editing the original
@@ -873,3 +873,76 @@ alone does not certify this residual.
   wrong conclusions during the investigation that led to this entry. Renamed
   to `ix_chunk_legacy_embedding_hnsw` via a reversible Alembic migration; see
   `migrations/versions/`.
+
+## Presentation is rebuilt from block-tagged claims; chemistry is a registry figure (Aug 21 2026)
+
+- **Why.** The 2026-08-20 gate change made markdown tolerated, not rendered:
+  the gate stripped a heading's `#` so the claim survived, but the sentence
+  splitter had already welded the heading (no terminal punctuation) onto the
+  sentence below it, and every GFM table collapsed into one unterminated
+  string. The renderer then wrote "Recommended BE design for albuterol ...
+  FDA's draft PSG recommends" as one run-on line.
+- **What was picked.** A block segmenter (`common/blocks.py`) reads the
+  markdown SHAPE first -- paragraph, heading, bullet/numbered item, table
+  cell -- and sentences second. Every claim still is one sentence (or one
+  heading, or one cell) with its own marker, so INV-1 and "one claim = one
+  assertion" are untouched; what is new is a `Block` tag on `ParsedClaim`,
+  `AdmittedClaim` and `DroppedClaim` that `render_answer` uses to write real
+  headings, lists and GFM tables from the ADMITTED claims alone. v6 and the
+  v5 JSON front door are byte-identical (default block = flat paragraph).
+  `RENDERER_VERSION_SELECTIVE` 2 -> 3; the v7 ledger gains a per-claim
+  `block` record.
+- **Three narrow policy differences for structural units, all deliberate.**
+  (1) A LABEL (heading, table header cell, row label) has the descriptive
+  topic vocabulary masked in the attribution scan (`turn_gate.
+  LABEL_TOPIC_WORDS`: recommended/recommendation(s), requirement(s),
+  specified, stated, notes) and nothing else: a label has no predicate, and
+  "Recommended BE design"/"Requirements" are the vocabulary of every PSG
+  heading -- running the full lexicon on labels drops the heading from
+  nearly every structured answer. The deontic/exemption words (exempt,
+  waived, no, shall, should, permitted ...) and every verb of saying still
+  fire on a label, so a bare "Exempt" row label or "## FDA recommends ..."
+  heading is dropped (adversarial review, same day). The materiality lexicon
+  is never masked.
+  (2) A bad cite on a heading or a cell is dropped, never re-stamped by token
+  overlap (a cell is a few words; overlap is least trustworthy exactly there).
+  (3) Dropping a heading or a cell is PARTIAL with the disclosure line, never
+  MATERIAL_DROP: a grid cell is not part of a sentence flow, so removing it
+  cannot invert the prose around it the way a dropped qualifier can; the grid
+  keeps a visible hole. Bullets are sentences and keep the full policy.
+  Placeholder cells (`--`, `N/A`, dashes) are structure, not claims.
+- **Alternatives rejected.** Letting a heading inherit the citations of the
+  paragraph under it (an uncited assertion riding a real marker -- the exact
+  hole INV-1 closes). Keeping the strict sentence policy for labels (measured
+  on the production shape: the heading is dropped and the answer carries a
+  spurious "statements were omitted" line). Row-level table claims (loses
+  per-cell binding, which is the whole point of a pathway matrix).
+- **Known residual, accepted.** The parser's truncated-tail rule (an
+  unterminated final sentence is a cut-off draft) applies to paragraph tails
+  only; a final bullet, heading or cell legitimately ends without
+  punctuation, and popping it would delete the last item of every
+  list-ending answer. A token-limit cutoff never reaches the parser (both
+  providers raise on `finish_reason="length"`, `generate/llm.py`); a model
+  that stops mid-word with `finish_reason="stop"` inside a final bullet now
+  renders the visible fragment where v6 deleted it silently. Neither is a
+  disclosure regression (v6 disclosed nothing there either); the provider
+  seam owns truncation.
+- **Prompt.** `GROUNDED_QA_SYSTEM_V7` now asks for a table when the guidance
+  offers several options (options in columns, study types in rows), a marker
+  inside each cell that states a source fact, `--` for a cell that does not
+  apply, and treats a heading/row label as the model's own words unless it
+  ends with a marker. Prompt hash moved; version stays 7.
+- **Chemistry figure: the safety rule comes first.** A structure is a FIGURE,
+  never a citable fact and never model-authored. It comes from exactly one
+  place: an offline registry lookup of the active-ingredient NAME against
+  PubChem (`regwatch chemistry-backfill`, the only writer of
+  `ingredient_chemistry`, migration 0026), stored with its CID, and drawn in
+  the browser from the stored SMILES. Ambiguous names (several CIDs) and
+  misses store no structure. `GET /chemistry/structures` is a DB read with no
+  egress; the figure is absent from the turn payload and from the answer
+  body, lives in the evidence drawer and a compact strip above the citation
+  chips, carries "Structure from PubChem; not part of the cited guidance",
+  and uses no gold (gold means sourced on this surface). PubChem is a new
+  egress host outside `sources/policy.py`'s FDA allowlist; `sources/pubchem.py`
+  carries its own fail-closed boundary (fixed base URL, quoted name only, no
+  redirects, bounded timeout, transient-only retries, 5 req/s pacing).
