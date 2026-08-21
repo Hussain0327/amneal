@@ -72,9 +72,13 @@ export function ProvisionalDraft({ text }: { text: string }) {
             anchor -- links stay inert text until the validated turn lands. */}
         <Markdown plainLinks>{deferredText}</Markdown>
       </div>
-      <p className="msg__drafting code">
+      {/* A bare word plus the pulsing dot. The whole draft row is aria-hidden
+          in page.tsx, so this caption is decoration for sighted readers only;
+          the SR-facing promise ("the verified answer will follow") lives in the
+          aria-live milestone there and must stay the primary signal. */}
+      <p className="msg__drafting">
         <span className="msg__drafting-dot" aria-hidden />
-        {"Drafting live \u2014 the verified answer follows."}
+        Drafting
       </p>
     </>
   );
@@ -156,9 +160,12 @@ function CiteChip({
 //
 // The docket margin: on wide viewports (>=1100px, see globals.css) the avatar
 // column grows into a marginal rail carrying the turn's provenance -- time
-// filed, audit no, confidence dot. aria-hidden: it restates data already read
-// out by the message body / audit line, and it derives from the identity-
-// stable turn object so the memo'd AssistantTurn adds no per-token work.
+// filed and the confidence dot. The audit number was dropped: an id stamped
+// beside every reply read as a case file, and the value is still in the folded
+// Provenance record (plus the visible AuditLine on the branches that render
+// one). aria-hidden: the rail restates data already read out by the message
+// body, and derives from the identity-stable turn object so the memo'd
+// AssistantTurn adds no per-token work.
 // `turn` is optional so a caller without one (in-flight slot, bare fixtures)
 // keeps the plain avatar.
 function AssistantShell({
@@ -186,12 +193,15 @@ function AssistantShell({
         <span className="avatar" aria-hidden>
           RW
         </span>
-        {turn && (filedMs !== null || turn.meta) && (
+        {/* Gated on what the rail actually shows. With the audit stamp gone,
+            `turn.meta` alone contributes nothing, and keeping it in the gate
+            would emit an empty rail on a meta-only turn. */}
+        {turn && (filedMs !== null || band !== null) && (
           <div className="marginalia" aria-hidden="true">
             {filedMs !== null && turn.createdAt != null && (
               <span className="marginalia__time">{formatClock(turn.createdAt)}</span>
             )}
-            {turn.meta && <span className="marginalia__audit">#{turn.meta.audit_id}</span>}
+            {/* No audit stamp here -- see the note above the component. */}
             {band && (
               <span className={`marginalia__dot marginalia__dot--${band.toLowerCase()}`} />
             )}
@@ -412,30 +422,6 @@ export const AssistantTurn = memo(function AssistantTurn({
 
       {hasCitations ? (
         <>
-          {/* Coarse, honest confidence — a near-threshold answer reads hedged.
-              The raw score stays out of the main view (drawer only); the title
-              grounds the band in the live refusal threshold. */}
-          {band ? (
-            <p
-              className={`confidence confidence--${band.toLowerCase()}`}
-              title={confidenceTitle(band, threshold)}
-            >
-              <span className="confidence__dot" aria-hidden />
-              {band} confidence
-              {/* The title attr is mouse-only (unreachable by keyboard, touch,
-                  or SR); restate the same explanation for everyone else. */}
-              <span className="sr-only">{`\u2014 ${confidenceTitle(band, threshold)}`}</span>
-            </p>
-          ) : (
-            // Citations without scores (older rehydrated rows): state the
-            // absence explicitly -- silently omitting the band would let an
-            // unscored answer read no differently from a scored one. Default
-            // ink-faint dot; no band modifier, so no green/amber is faked.
-            <p className="confidence confidence--none">
-              <span className="confidence__dot" aria-hidden />
-              Confidence not recorded
-            </p>
-          )}
           {/* The compact structure strip -- only when every citation on the
               turn names one product (see sharedProduct above). Fetches on
               its own; renders nothing while loading, on error, or with
@@ -451,9 +437,40 @@ export const AssistantTurn = memo(function AssistantTurn({
               />
             ))}
           </div>
+          {/* One quiet row instead of a stamped verdict block: the coarse
+              confidence band and the source count share the Sources
+              disclosure's summary line. It renders on EVERY cited turn --
+              there is no length or content conditional -- so its presence
+              never encodes "this answer was short". The raw score still stays
+              out of the main view (drawer only); the title grounds the band in
+              the live refusal threshold. */}
           <details className="sources">
-            <summary className="kicker">
-              Sources {"\u00b7"} {deduped.length}
+            <summary className="sources__row">
+              {band ? (
+                <span
+                  className={`confidence confidence--${band.toLowerCase()}`}
+                  title={confidenceTitle(band, threshold)}
+                >
+                  <span className="confidence__dot" aria-hidden />
+                  {band} confidence
+                  {/* The title attr is mouse-only (unreachable by keyboard,
+                      touch, or SR); restate the same explanation for everyone
+                      else. */}
+                  <span className="sr-only">{`\u2014 ${confidenceTitle(band, threshold)}`}</span>
+                </span>
+              ) : (
+                // Citations without scores (older rehydrated rows): state the
+                // absence explicitly -- silently omitting the band would let an
+                // unscored answer read no differently from a scored one. Default
+                // ink-faint dot; no band modifier, so no green/amber is faked.
+                <span className="confidence confidence--none">
+                  <span className="confidence__dot" aria-hidden />
+                  Confidence not recorded
+                </span>
+              )}
+              <span className="sources__count">
+                {deduped.length === 1 ? "1 source" : `${deduped.length} sources`}
+              </span>
             </summary>
             <div className="mt-2">
               {deduped.map((c, i) => (
@@ -522,16 +539,11 @@ export const AssistantTurn = memo(function AssistantTurn({
               </dd>
             </div>
           </dl>
-          {/* The SSE docket log this answer settled through -- the live ticker
-              is ephemeral, so the folded provenance keeps the record for the
-              audit-minded (history persists no frames; rehydrated turns skip). */}
-          {turn.statusLog.length > 0 && (
-            <ol className="prov__log">
-              {turn.statusLog.map((frame, i) => (
-                <li key={`${i}-${frame}`}>{frame}</li>
-              ))}
-            </ol>
-          )}
+          {/* No SSE status-frame docket here. The frames narrate the machine's
+              own progress, they are already shown live by the ticker, and a
+              numbered log under every reply made the record read like a
+              transcript of the pipeline rather than an answer. The turn still
+              carries `statusLog` for callers that want it. */}
         </details>
       )}
     </AssistantShell>
