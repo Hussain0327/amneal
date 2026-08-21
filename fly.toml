@@ -96,6 +96,19 @@ kill_timeout = 30
   # delete this line + deploy, or re-set the secret to "false" for instant
   # rollback without a CI cycle.
   GO_NATIVE_QUERY = "true"
+  # The two flags that select the SERVED synthesis prompt. Both have been on in
+  # prod as Fly secrets since 2026-08-10 (#179/#182), but the code defaults are
+  # false, so an unset or cleared secret silently reinstated the v6
+  # cite-or-refuse prompt with its NO_EVIDENCE sentinel -- a policy rollback
+  # with no deploy and no diff. Pinning them here makes false a deliberate act.
+  # Same precedence note as GO_NATIVE_QUERY above: a Fly SECRET of the same name
+  # still wins over [env], so an incident rollback is `fly secrets set
+  # REGWATCH_SELECTIVE_CITATION=false` with no CI cycle, and the secrets can be
+  # unset once this line deploys (the overlap window is identical either way).
+  # The code defaults in config/settings.py stay false on purpose: the eval lane
+  # and the ledger pin the flag-off bytes.
+  REGWATCH_PROSE_SYNTHESIS = "true"
+  REGWATCH_SELECTIVE_CITATION = "true"
   # B4: SENTRY_DSN is a Fly secret (`fly secrets set SENTRY_DSN=...`). Without
   # it the app boots but logs a loud warning -- errors would otherwise vanish.
   #

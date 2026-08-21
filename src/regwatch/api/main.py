@@ -86,6 +86,7 @@ from regwatch.common.text_normalize import stripped_name
 from regwatch.deficiency.runner import run_deficiency_analysis, run_studio_check
 from regwatch.generate.grounded_qa import QAResult, QueryStatusLiteral, ask, compute_turn
 from regwatch.generate.llm import assert_llm_runtime_available
+from regwatch.generate.prompts import active_grounded_qa_prompt
 from regwatch.generate.rag_contract import AuditPayload, RagOutcome, SessionPatch
 from regwatch.ingest.psg_crawler import (
     BROWSER_UA,
@@ -218,6 +219,17 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # the corpus worker (dagster-daemon) and the CLI commands never run it,
     # so non-generating entrypoints gain no generation requirement.
     assert_llm_runtime_available(s.llm_provider)
+    # Which synthesis prompt this process will serve is a FLAG read, not a build
+    # artifact: a secret flip swaps v7 for v6 with no deploy, and until now the
+    # only record of the answer policy in force was inferred from audit rows
+    # after the fact. One line at boot, with the same identity fields the
+    # per-turn llm_prompt line carries, so a machine's log says it outright.
+    log.info(
+        "qa_prompt_active",
+        prose=s.prose_synthesis_enabled,
+        selective=s.selective_citation_enabled,
+        **active_grounded_qa_prompt().log_fields(),
+    )
     yield
 
 
