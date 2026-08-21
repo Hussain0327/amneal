@@ -42,7 +42,6 @@ _REAL_OPENAI_ENV: dict[str, str] = (
             "OPENAI_API_KEY",
             "OPENAI_EMBEDDING_MODEL",
             "OPENAI_EMBEDDING_DIMENSION",
-            "OPENAI_EMBEDDING_REVISION",
         )
     }
     if _RUN_LIVE
@@ -103,10 +102,11 @@ def _live_profile_spec() -> EmbeddingProfileSpec:
     )
 
     settings = get_settings()
+    model = settings.openai_embedding_model or "text-embedding-3-large"
     return EmbeddingProfileSpec(
         provider="openai",
-        model=settings.openai_embedding_model or "text-embedding-3-large",
-        revision=(settings.openai_embedding_revision or settings.openai_embedding_model or ""),
+        model=model,
+        revision=model,
         dimension=settings.openai_embedding_dimension,
         dtype="float32",
         normalization="l2",

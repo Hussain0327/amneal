@@ -27,9 +27,9 @@ budget (GAP-5).
 
 Five stack flavors exist because the scenario matrix needs boot-time env
 differences (settings are lru_cached in the app): base, low_score
-(REFUSAL_SCORE_THRESHOLD=1.0), dead_provider (the OpenAI-compatible SDK's
-Databricks transport pointed at a
-reserved closed port), rate_limited (RATE_LIMIT_PER_MINUTE=1), forced_refusal
+(REFUSAL_SCORE_THRESHOLD=1.0), dead_provider (the OpenAI Responses client
+pointed at a reserved closed port), rate_limited (RATE_LIMIT_PER_MINUTE=1),
+forced_refusal
 (REGWATCH_ECHO_FORCE_REFUSAL=1: echo emits a NO_EVIDENCE turn, making the
 synthesis-time model decline wire-reachable). Each flavor is its own uvicorn +
 proxy pair; all share the one Postgres. Stacks boot lazily and live for the
@@ -273,7 +273,10 @@ def pytest_configure(config: pytest.Config) -> None:
     os.environ.update(
         {
             "DATABASE_URL": _TEST_DB_URL,
+            "INGEST_EMBEDDING_PROVIDER": "echo",
             "EMBEDDING_PROVIDER": "echo",
+            "RETRIEVAL_EMBEDDING_PROFILE": "legacy",
+            "ACTIVE_EMBEDDING_PROFILE": "legacy",
             "LLM_PROVIDER": "echo",
             "REGWATCH_ALLOW_TEST_PROVIDERS": "1",
             "RATE_LIMIT_PER_MINUTE": "0",
@@ -586,9 +589,9 @@ _FLAVOR_OVERRIDES: dict[str, dict[str, str]] = {
     # retrieval refuses with low_top_score while resolution still succeeds.
     "low_score": {"REFUSAL_SCORE_THRESHOLD": "1.0"},
     "dead_provider": {
-        "LLM_PROVIDER": "databricks",
-        "DATABRICKS_LLM_TOKEN": "dapi-test-dead",
-        "DATABRICKS_LLM_MODEL": "gpt-oss-test",
+        "LLM_PROVIDER": "openai",
+        "OPENAI_API_KEY": "sk-test-dead",
+        "OPENAI_LLM_MODEL": "gpt-5.6-terra",
     },
     # LANDMINE: TRUNCATE ... RESTART IDENTITY reuses user id 1 for every test's
     # first seeded user while the in-app query limiter (keyed "user:{id}") lives
@@ -737,7 +740,10 @@ class Harness:
                 # venv is editable and may point at a different worktree whose
                 # schema head has advanced independently.
                 "PYTHONPATH": os.pathsep.join((str(_REPO_ROOT / "src"), str(_REPO_ROOT))),
+                "INGEST_EMBEDDING_PROVIDER": "echo",
                 "EMBEDDING_PROVIDER": "echo",
+                "RETRIEVAL_EMBEDDING_PROFILE": "legacy",
+                "ACTIVE_EMBEDDING_PROFILE": "legacy",
                 "LLM_PROVIDER": "echo",
                 # The lifespan guard refuses echo providers over a non-empty
                 # corpus unless explicitly allowed -- this suite seeds corpora
@@ -811,7 +817,7 @@ class Harness:
             # network-free provider death. The https scheme satisfies the
             # settings TLS validator; the TCP connect fails before any TLS
             # handshake, so no certificate is ever needed.
-            overrides["DATABRICKS_LLM_BASE_URL"] = f"https://127.0.0.1:{self.closed_port}"
+            overrides["OPENAI_BASE_URL"] = f"https://127.0.0.1:{self.closed_port}"
 
         uvicorn_port = self._free_port()
         edge_port = self._free_port()
