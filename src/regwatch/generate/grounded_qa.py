@@ -452,6 +452,15 @@ _DRILL_DOWN_WORDS = frozenset(
     }
 )
 
+# The drill-down words that ask for MORE, not merely for a continuation. A
+# strict subset of _DRILL_DOWN_WORDS (pinned by a test) because that set exists
+# to decide query re-anchoring and therefore includes bare back-references
+# ("it", "that", "so"): firing the depth turn on "is it fasting?" would fight
+# the prompt's shortest-answer default on a question that wants one line.
+_DEPTH_REQUEST_WORDS = frozenset(
+    {"detail", "details", "elaborate", "expand", "explain", "further", "more"}
+)
+
 _SUMMARY_TERMS = frozenset({"summarize", "summary", "overview", "recap"})
 
 _SCOPE_WARNING_PHRASES = (
@@ -538,6 +547,23 @@ _BOUNDS_REPAIR_TURN: dict[str, tuple[LLMMessage, ...]] = {
     ),
 }
 
+# The extra turn appended when the user asks the previous answer to go deeper
+# (audit RC7). Depth, not width: evidence width stays at the configured
+# rerank_top_k, because raising k pushes the weakest survivors of the 50-wide
+# stage toward the citation-precision floor and answers a different question.
+#
+# Same mechanism as _BOUNDS_REPAIR_TURN and for the same reason: appended AFTER
+# the built messages, so an ordinary turn's prompt bytes (and its fingerprint)
+# are untouched and only a depth turn carries the extra message.
+_DEPTH_TURN = LLMMessage(
+    role="user",
+    content=(
+        "The user is asking for more depth on the previous answer. Go into "
+        "detail, keep every marker rule, and do not repeat what was already "
+        "said."
+    ),
+)
+
 # Audit-only reason codes. Greppable, and deliberately distinct from
 # malformed_structure so the ~12% prod parse-failure baseline stays comparable
 # and a bounds breach never hides inside it.
@@ -614,6 +640,27 @@ def _looks_like_follow_up(question: str) -> bool:
         return True
     tokens = {t for t in re.split(r"[^a-z0-9]+", q) if t}
     return bool(tokens & _FOLLOW_UP_PRONOUNS) and len(tokens) <= 8
+
+
+def _asks_for_more_depth(question: str) -> bool:
+    """Reports whether the question is a drill-down asking for more depth.
+
+    Both halves are required. A first-turn "explain the fasting design" is an
+    ordinary question, not a request to expand an answer that does not exist
+    yet; and a follow-up like "is it fasting?" back-references the thread
+    without asking for anything longer. The caller adds the third condition
+    (usable history), because with no prior answer there is nothing to deepen.
+
+    Args:
+        question: The user's literal question.
+
+    Returns:
+        True when the question reads as a follow-up and names a depth word.
+    """
+    if not _looks_like_follow_up(question):
+        return False
+    tokens = {t for t in re.split(r"[^a-z0-9]+", question.lower()) if t}
+    return bool(tokens & _DEPTH_REQUEST_WORDS)
 
 
 def _is_summary_request(question: str) -> bool:
@@ -3001,11 +3048,17 @@ def _synthesize_and_admit(
     # user row is excluded by turn_id (the shell bakes that into the loader).
     # With no usable history the block is "" so the prompt is byte-identical to
     # the single-turn form, which protects the eval.
+    #
+    # The wrapper's wording moved with the register rules (audit RC6): the old
+    # "context ONLY -- use it to resolve pronouns and ellipsis" licensed exactly
+    # one use of the thread and left restating the prior answer unaddressed. The
+    # two rules that carry the invariant are unchanged and now say so directly:
+    # never cite it, never attribute it to FDA.
     recent_block = _format_recent(_recent_turns())
     recent_context = (
-        "Recent conversation (context ONLY — use it to resolve pronouns and "
-        "ellipsis in the question; it is NOT a source and MUST NOT be cited or "
-        "treated as fact):\n<untrusted_recent_conversation>\n"
+        "Recent conversation (you may build on it and need not repeat it; it is "
+        "not a source: never cite it, and never restate it as something FDA "
+        "said):\n<untrusted_recent_conversation>\n"
         f"{recent_block}\n</untrusted_recent_conversation>\n\n"
         if recent_block
         else ""
@@ -3092,6 +3145,16 @@ def _synthesize_and_admit(
     # fill it in during the call, and every branch below reads it afterwards.
     synth_telemetry: dict[str, Any] = {"max_output_tokens": settings.synthesizer_max_tokens}
     synth_route: RouteJson = {"synthesis": synth_telemetry}
+
+    # Depth control (RC7). Appended to synth_messages rather than passed to one
+    # call, so a bounds repair on a depth turn still carries the ask; the
+    # repair's own message lands after it. recent_block is the third condition:
+    # a first turn has no previous answer to go deeper on. Prose arms only --
+    # the v5 arm ends with a TRAILING schema system message it is built to read
+    # last, and its flag-off prompt bytes are pinned by the eval lane.
+    if prose_mode and recent_block and _asks_for_more_depth(question):
+        synth_messages.append(_DEPTH_TURN)
+        synth_telemetry["depth_turn"] = True
 
     def _run_synthesis(messages: list[LLMMessage]) -> LLMResponse:
         """Issues one synthesis completion over ``messages``.
