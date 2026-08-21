@@ -5,6 +5,7 @@ import { memo, useDeferredValue } from "react";
 import { AnswerFeedback } from "@/components/AnswerFeedback";
 import { Markdown } from "@/components/Markdown";
 import { RecencyBadge } from "@/components/RecencyBadge";
+import { StructurePlate } from "@/components/StructurePlate";
 import type { Citation, Suggestion } from "@/lib/api";
 import {
   citationLabels,
@@ -372,6 +373,14 @@ export const AssistantTurn = memo(function AssistantTurn({
   // form produce the same human label, and only a turn-wide view can tell that
   // and add the application number to both.
   const chipLabels = citationLabels(deduped);
+  // The compact structure strip mounts only when every distinct citation on
+  // the turn names the SAME product -- an answer spanning two ingredients
+  // must not label a single structure card as if it spoke for both.
+  const firstProduct = deduped[0]?.product_name ?? null;
+  const sharedProduct =
+    firstProduct !== null && deduped.every((c) => c.product_name === firstProduct)
+      ? firstProduct
+      : null;
   // The model-authored "Sources:" bibliography duplicates the UI's own
   // reference list (built from the VALIDATED citations), so on a cited turn the
   // prose ends where the trailer begins — and the trailer's numbering is what
@@ -427,6 +436,11 @@ export const AssistantTurn = memo(function AssistantTurn({
               Confidence not recorded
             </p>
           )}
+          {/* The compact structure strip -- only when every citation on the
+              turn names one product (see sharedProduct above). Fetches on
+              its own; renders nothing while loading, on error, or with
+              nothing stored, so it never delays the answer. */}
+          {sharedProduct && <StructurePlate ingredient={sharedProduct} compact />}
           <div className="cites">
             {deduped.map((c, i) => (
               <CiteChip

@@ -427,6 +427,11 @@ main:focus {
 .msg__body--draft .prose li::marker {
   color: inherit;
 }
+/* The mono kicker (structured-claims) is muted the same way -- it must not
+   read as a settled subsection heading before the answer validates. */
+.msg__body--draft .prose h4 {
+  color: inherit;
+}
 .msg__drafting {
   display: inline-flex;
   align-items: center;
@@ -1395,6 +1400,62 @@ button.chip:disabled {
   color: var(--ink-2);
 }
 
+/* ---------- Structured answers: scrollable tables, the pathway matrix, and
+   the mono kicker heading (structured-claims). A GFM table can be wider than
+   the chat column -- Markdown.tsx already wraps every table in this box, so
+   the reply body itself never scrolls horizontally. */
+.prose__scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 1rem 0;
+  -webkit-overflow-scrolling: touch;
+}
+.prose__scroll > table {
+  /* The table's own margin would double up with the wrapper's. */
+  margin: 0;
+}
+/* Pathway matrix (Ask answers only -- scoped to .msg__body so the dossier
+   and Studio tables keep their own layout): the first column is the row
+   label, so it stays put while the option columns scroll underneath it. */
+.msg__body .prose th:first-child,
+.msg__body .prose td:first-child {
+  position: sticky;
+  left: 0;
+  background: var(--paper);
+}
+.msg__body .prose th:first-child {
+  /* Header first cell reads as a header, same as every other th. */
+  background: var(--paper-3);
+}
+.msg__body .prose th {
+  white-space: nowrap;
+}
+.msg__body .prose td {
+  white-space: normal;
+  color: var(--ink);
+}
+/* The backend leaves a genuinely empty cell for "not applicable" rather than
+   inventing text -- an en dash reads the absence without the model having to
+   author one. */
+.msg__body .prose td:empty::before {
+  content: "\2013";
+  color: var(--ink-faint);
+}
+.msg__body .prose td .cite-stamp {
+  margin: 0;
+}
+/* The mono kicker register for a structured subsection -- NOT a smaller
+   serif heading like h1-h3; it reads as a label, not as more prose gravitas. */
+.prose h4 {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  font-weight: 600;
+  margin: 1.2rem 0 0.4rem;
+}
+
 /* ---------- History rows (inside the docket panel) ---------- */
 .hist {
   display: flex;
@@ -2250,6 +2311,103 @@ button.chip:disabled {
 .evidence__link {
   align-self: flex-start;
   font-size: 0.8rem;
+}
+
+/* ---------- Chemistry structure plate (structured-claims) -------------------
+   A USP-monograph-style card: a citation's active ingredient, drawn from
+   PubChem, in the evidence drawer (full) and as a compact strip under an
+   answer that names one product. Deliberately carries NO gold anywhere --
+   gold means "sourced guidance" on this surface, and a structure is
+   chemistry, not a citation (see components/StructurePlate.tsx). */
+.plate {
+  display: block;
+  margin: 0.9rem 0;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--edge);
+  border-radius: 2px; /* square, like the stamp -- not a rounded pill */
+  background: var(--paper-bright);
+}
+.plate + .plate {
+  margin-top: 0.6rem;
+}
+.plate__art {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 9rem;
+  padding: 0 0.5rem;
+}
+/* smiles-drawer emits a viewBox and no intrinsic size, so an unconstrained
+   svg scales to the full column width. Cap the HEIGHT and let width follow
+   the aspect ratio; overflow stays visible so an edge atom label ("HO" at
+   the far left of albuterol) is never clipped by the viewBox. */
+.plate__art svg {
+  height: 9rem;
+  width: auto;
+  max-width: 100%;
+  overflow: visible;
+}
+.plate__cap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: 0.6rem;
+}
+.plate__name {
+  font-family: var(--font-display), serif;
+  font-size: 1.02rem;
+  color: var(--ink);
+}
+.plate__meta {
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+}
+.plate__src {
+  /* NOT .link -- .link is gold, and nothing on this card may be. A hairline
+     underline in --ink-2 instead. */
+  width: fit-content;
+  font-size: 0.72rem;
+  color: var(--ink-2);
+  text-decoration: none;
+  border-bottom: 1px solid var(--edge);
+  transition: border-color 0.15s ease;
+}
+.plate__src:hover {
+  border-bottom-color: var(--ink-2);
+}
+.plate__note {
+  font-size: 0.74rem;
+  font-style: italic;
+  color: var(--ink-soft);
+}
+
+/* Compact variant: the strip under an answer -- shorter art, one caption
+   line, no note (the full drawer card is where that detail belongs). */
+/* The compact strip under an answer: art on the left, caption on one line
+   to the right -- a monograph's running header, not a second card. */
+.plate--compact {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.5rem 0.8rem;
+}
+.plate--compact .plate__art {
+  flex: none;
+  min-height: 0;
+  width: 12rem;
+  height: 6.5rem;
+  padding: 0;
+}
+.plate--compact .plate__art svg {
+  height: 6.5rem;
+}
+.plate--compact .plate__cap {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.8rem;
+  margin-top: 0;
+  min-width: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -366,11 +366,14 @@ async function postMultipart<T>(
   return handle<T>(res, "POST", path, gate);
 }
 
-async function getJSON<T>(path: string): Promise<T> {
+// signal is optional and forwarded to fetchWithTimeout's existing caller-signal
+// composition: every pre-existing call site omits it and is unaffected.
+async function getJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
   const res = await fetchWithTimeout(
     `${apiBase()}${path}`,
     { credentials: "include" },
     DEFAULT_TIMEOUT_MS,
+    signal,
   );
   return handle<T>(res, "GET", path, true);
 }
@@ -1040,4 +1043,42 @@ export function listDeficiencyRuns(): Promise<DeficiencyRunList> {
 
 export function getDeficiencyRun(runId: number): Promise<DeficiencyRunDetail> {
   return getJSON<DeficiencyRunDetail>(`/deficiency/runs/${runId}`);
+}
+
+// --- Chemistry structures (the answer-panel structure plate) ----------------
+// Not yet in the generated OpenAPI snapshot, so hand-mirrored like the
+// deficiency routes above (re-derive from api-types.ts once the backend lane
+// adds it and CI regenerates). GET /chemistry/structures?ingredient=<name>
+// looks up whatever PubChem-sourced structures are stored for a citation's own
+// product_name; `match` is "exact" (the product's own salt/form) or "parent"
+// (the salt was stripped to reach a stored structure). `structures` may be
+// empty when nothing is stored -- StructurePlate renders nothing in that case,
+// same as on a non-200 or network error, so it never delays or blocks the answer.
+export interface ChemistryStructure {
+  readonly name: string;
+  readonly pubchem_cid: number;
+  readonly smiles: string;
+  readonly inchikey: string | null;
+  readonly molecular_formula: string | null;
+  readonly molecular_weight: number | null;
+  readonly iupac_name: string | null;
+  readonly unii: string | null;
+  readonly match: "exact" | "parent";
+  readonly source_url: string;
+  readonly fetched_at: string;
+}
+
+interface ChemistryStructuresResponse {
+  readonly ingredient: string;
+  readonly structures: ChemistryStructure[];
+}
+
+export function fetchStructures(
+  ingredient: string,
+  signal?: AbortSignal,
+): Promise<ChemistryStructure[]> {
+  return getJSON<ChemistryStructuresResponse>(
+    `/chemistry/structures?ingredient=${encodeURIComponent(ingredient)}`,
+    signal,
+  ).then((r) => r.structures);
 }
