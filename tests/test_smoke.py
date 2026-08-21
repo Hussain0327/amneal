@@ -200,20 +200,17 @@ def test_llm_provider_unset_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
         get_llm_provider()
 
 
-def test_llm_provider_databricks_requires_endpoint_config(
+def test_llm_provider_databricks_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "databricks")
-    monkeypatch.setenv("DATABRICKS_LLM_BASE_URL", "")
-    monkeypatch.setenv("DATABRICKS_LLM_TOKEN", "")
-    monkeypatch.setenv("DATABRICKS_LLM_MODEL", "")
     import config.settings as cs
 
     cs.get_settings.cache_clear()
     cs.settings = cs.get_settings()
     from regwatch.generate.llm import get_llm_provider
 
-    with pytest.raises(RuntimeError, match="DATABRICKS_LLM"):
+    with pytest.raises(ValueError, match="unknown LLM provider: databricks"):
         get_llm_provider()
 
 

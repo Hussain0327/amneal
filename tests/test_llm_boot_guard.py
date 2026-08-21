@@ -31,19 +31,17 @@ def test_unset_llm_provider_refuses_api_boot(monkeypatch: pytest.MonkeyPatch) ->
         pass
 
 
-def test_databricks_llm_without_credentials_refuses_api_boot(
+def test_databricks_llm_provider_refuses_api_boot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # conftest already blanks BASE_URL/TOKEN; blank MODEL too so a developer's
-    # host env can never leak a value in and green-light this boot.
-    _reload_settings(
-        monkeypatch,
-        LLM_PROVIDER="databricks",
-        DATABRICKS_LLM_BASE_URL="",
-        DATABRICKS_LLM_TOKEN="",
-        DATABRICKS_LLM_MODEL="",
-    )
-    with pytest.raises(RuntimeError, match="DATABRICKS_LLM_BASE_URL"), TestClient(app):
+    _reload_settings(monkeypatch, LLM_PROVIDER="databricks")
+    with (
+        pytest.raises(
+            ValueError,
+            match="unknown LLM provider: databricks",
+        ),
+        TestClient(app),
+    ):
         pass
 
 

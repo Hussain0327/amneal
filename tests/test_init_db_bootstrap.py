@@ -1,17 +1,14 @@
 """The bootstrap path through init_db: schema without the K6 provider assert.
 
-`embedding-profile-register` and `embedding-profile-index` necessarily run
-BEFORE a serving-ready embedding provider can exist -- one mints the profile id,
-the other builds the HNSW index that activation-readiness requires. Both call
-init_db purely to get the schema; neither embeds or searches.
+`embedding-profile-register` runs before a serving-ready embedding profile can
+exist, because it mints the profile id. It calls init_db purely to get the
+schema and does not embed or search.
 
 Before init_db grew `assert_provider`, both were unreachable in a default
-environment: with EMBEDDING_PROVIDER unset the provider resolution refuses
+environment: with INGEST_EMBEDDING_PROVIDER unset the provider resolution refuses
 outright (required-explicit since 2026-08-17; before that the silent
 local-bge-small fallback failed the legacy vector(1536) dim branch), and with
-EMBEDDING_PROVIDER=qwen3 the "Qwen3 cannot write into the legacy space" branch
-fires instead, because ACTIVE_EMBEDDING_PROFILE cannot yet name a profile that
-has not been registered.
+the OpenAI provider cannot write into the retired legacy vector space.
 
 This went unnoticed because every real-DB fixture sets a 1536-dim provider to
 get past that same assert (tests/test_embedding_profiles.py), and because the
@@ -19,7 +16,7 @@ CI eval steps that call these commands had never once executed.
 
 The same flag now covers the REPAIR commands too (embedding-profile-list,
 -coverage, -backfill and authoritative-corpus-status, -embed). Postmortem #224:
-on 2026-08-13 ACTIVE_EMBEDDING_PROFILE named an incomplete profile, so
+on 2026-08-13 the active embedding profile was incomplete, so
 assert_profile_ready_for_activation failed closed inside every command an
 operator reached for while diagnosing it -- including the backfill that WAS the
 fix. The three tests at the bottom of this file pin all sides of that: the
@@ -58,20 +55,23 @@ _LEGACY_DIM = 1536
 def _ci_spec() -> EmbeddingProfileSpec:
     """The spec CI registers, built from committed defaults."""
     from regwatch.process.chunker import CHUNKING_VERSION
-    from regwatch.process.embedder import QWEN3_DOCUMENT_PREPROCESSING_VERSION
+    from regwatch.process.embedder import (
+        OPENAI_DOCUMENT_PREPROCESSING_VERSION,
+        OPENAI_QUERY_INSTRUCTION_VERSION,
+    )
 
     settings = get_settings()
     return EmbeddingProfileSpec(
-        provider="qwen3",
-        model=settings.qwen_embedding_model,
-        revision=settings.qwen_embedding_revision,
-        dimension=settings.qwen_embedding_dimension,
+        provider="openai",
+        model=settings.openai_embedding_model or "text-embedding-3-large",
+        revision=settings.openai_embedding_model or "text-embedding-3-large",
+        dimension=settings.openai_embedding_dimension,
         dtype="float32",
         normalization="l2",
-        query_instruction_version=settings.qwen_embedding_query_instruction_version,
-        preprocessing_version=QWEN3_DOCUMENT_PREPROCESSING_VERSION,
+        query_instruction_version=OPENAI_QUERY_INSTRUCTION_VERSION,
+        preprocessing_version=OPENAI_DOCUMENT_PREPROCESSING_VERSION,
         chunking_version=CHUNKING_VERSION,
-        serving_runtime_version="databricks-model-service-2026-07-29",
+        serving_runtime_version="openai-api-v1",
     )
 
 
@@ -143,15 +143,13 @@ def test_bootstrap_call_is_memoized_across_repeat_bootstrap_calls(
 def test_register_succeeds_with_the_default_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     """The exact CI condition, end to end through the CLI.
 
-    NO EMBEDDING_PROVIDER at all is what a credential-free CI runner has (the
+    No ingest provider at all is what a credential-free CI runner has (the
     variable is required-explicit with no default), and an earlier form of this
-    state is what made `prepare databricks eval arm` exit 1 on its first-ever
-    execution. The bootstrap flag must keep these commands runnable there.
+    bootstrap flag must keep profile registration runnable there.
 
     Both values are set EXPLICITLY rather than deleted. pydantic-settings reads
     the repo `.env` as well as the process environment, so monkeypatch.delenv
-    would leave a developer's `.env` (EMBEDDING_PROVIDER=qwen3,
-    ACTIVE_EMBEDDING_PROFILE=ep_...) supplying the values and the test would
+    would leave a developer's `.env` supplying the values and the test would
     silently exercise a different branch of the same guard locally than it does
     in CI. setenv wins over the file; delenv does not.
     """
@@ -160,8 +158,8 @@ def test_register_succeeds_with_the_default_provider(monkeypatch: pytest.MonkeyP
     from regwatch.store import db, pgvector_store
 
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "")
-    monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", "legacy")
+    monkeypatch.setenv("INGEST_EMBEDDING_PROVIDER", "")
+    monkeypatch.setenv("RETRIEVAL_EMBEDDING_PROFILE", "legacy")
     cs.get_settings.cache_clear()
     db.reset_for_tests()
     pgvector_store.reset_for_tests()
@@ -176,7 +174,7 @@ def test_register_succeeds_with_the_default_provider(monkeypatch: pytest.MonkeyP
             [
                 "embedding-profile-register",
                 "--serving-runtime-version",
-                "databricks-model-service-2026-07-29",
+                "openai-api-v1",
                 "--id-only",
             ],
         )
@@ -191,7 +189,7 @@ def test_register_succeeds_with_the_default_provider(monkeypatch: pytest.MonkeyP
             [
                 "embedding-profile-register",
                 "--serving-runtime-version",
-                "databricks-model-service-2026-07-29",
+                "openai-api-v1",
                 "--id-only",
             ],
         )
@@ -207,15 +205,10 @@ def test_register_succeeds_with_the_default_provider(monkeypatch: pytest.MonkeyP
 def test_empty_profile_with_a_built_index_is_activatable(monkeypatch: pytest.MonkeyPatch) -> None:
     """The invariant CI's step ordering rests on.
 
-    `regwatch seed` runs with the profile ACTIVE, so its init_db() calls
-    assert_profile_ready_for_activation -- which wants a valid HNSW index. CI
-    therefore builds the index BEFORE seeding, against an empty corpus. That is
-    only sound because coverage of 0/0 counts as complete
-    (ProfileEmbeddingCoverage.complete is total == embedded).
+    A newly registered profile with no chunks has complete 0/0 coverage.
 
-    Tighten `complete` to require total > 0 and CI breaks in the seed step with
-    an error naming coverage, three steps away from the change that caused it.
-    This test fails at the actual cause instead.
+    Tightening `complete` to require total > 0 would prevent an empty database
+    from preparing its serving profile.
     """
     import config.settings as cs
 
@@ -224,8 +217,8 @@ def test_empty_profile_with_a_built_index_is_activatable(monkeypatch: pytest.Mon
     from regwatch.store.vector_store import ensure_profile_hnsw_index, register_embedding_profile
 
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "")
-    monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", "legacy")
+    monkeypatch.setenv("INGEST_EMBEDDING_PROVIDER", "")
+    monkeypatch.setenv("RETRIEVAL_EMBEDDING_PROFILE", "legacy")
     cs.get_settings.cache_clear()
     db.reset_for_tests()
     pgvector_store.reset_for_tests()
@@ -242,8 +235,7 @@ def test_empty_profile_with_a_built_index_is_activatable(monkeypatch: pytest.Mon
         # irrelevant to what is being asserted.
         ensure_profile_hnsw_index(profile.profile_id, concurrently=False)
 
-        # No chunks exist. This must still pass, or CI's index-before-seed
-        # ordering is unsound.
+        # No chunks exist. Coverage is complete and the optional index is ready.
         assert_profile_ready_for_activation(profile.profile_id)
     finally:
         cs.get_settings.cache_clear()
@@ -266,8 +258,8 @@ def test_serving_path_still_refuses_an_unset_provider(
     from regwatch.store import db, pgvector_store
 
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "")
-    monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", "legacy")
+    monkeypatch.setenv("INGEST_EMBEDDING_PROVIDER", "")
+    monkeypatch.setenv("RETRIEVAL_EMBEDDING_PROFILE", "legacy")
     cs.get_settings.cache_clear()
     db.reset_for_tests()
     pgvector_store.reset_for_tests()
@@ -283,16 +275,16 @@ def test_serving_path_still_refuses_an_unset_provider(
 def _wedge_spec() -> EmbeddingProfileSpec:
     """A registrable profile with a 3-dim geometry, so a fake backfill stays readable."""
     return EmbeddingProfileSpec(
-        provider="databricks",
-        model="Qwen/Qwen3-Embedding-4B",
+        provider="openai",
+        model="text-embedding-3-large",
         revision="0123456789abcdef",
         dimension=3,
         dtype="float32",
         normalization="l2",
-        query_instruction_version="psg-retrieval-v1",
+        query_instruction_version="none",
         preprocessing_version="text-v1",
         chunking_version="page-window-1000-v1",
-        serving_runtime_version="vllm-0.19.0",
+        serving_runtime_version="openai-api-v1",
     )
 
 
@@ -300,10 +292,10 @@ def _wedge_on_an_incomplete_profile(monkeypatch: pytest.MonkeyPatch) -> str:
     """Rebuild the 2026-08-13 outage state; return the wedged profile id.
 
     Registers a profile, seeds one chunk, embeds NOTHING for that profile, then
-    points ACTIVE_EMBEDDING_PROFILE at it and drops both init_db memos so the
+    points RETRIEVAL_EMBEDDING_PROFILE at it and drops both init_db memos so the
     next call re-runs the assert against this database.
 
-    EMBEDDING_PROVIDER=echo is 1536-dim and network-free, so the legacy-geometry
+    INGEST_EMBEDDING_PROVIDER=echo is 1536-dim and network-free, so the legacy-geometry
     branch of assert_embedding_provider_dim passes and the profile-readiness
     branch -- the one under test -- is what fires. Every value is set
     EXPLICITLY, for the reason given at the top of this file: pydantic-settings
@@ -315,8 +307,8 @@ def _wedge_on_an_incomplete_profile(monkeypatch: pytest.MonkeyPatch) -> str:
     from regwatch.store import db, pgvector_store, vector_store
 
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
-    monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", "legacy")
+    monkeypatch.setenv("INGEST_EMBEDDING_PROVIDER", "echo")
+    monkeypatch.setenv("RETRIEVAL_EMBEDDING_PROFILE", "legacy")
     cs.get_settings.cache_clear()
     db.reset_for_tests()
     pgvector_store.reset_for_tests()
@@ -335,7 +327,7 @@ def _wedge_on_an_incomplete_profile(monkeypatch: pytest.MonkeyPatch) -> str:
         metadatas=[{"doc_id": 1, "version_id": 10, "page": 1, "normalized_name": "drug a"}],
     )
 
-    monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", profile.profile_id)
+    monkeypatch.setenv("RETRIEVAL_EMBEDDING_PROFILE", profile.profile_id)
     cs.get_settings.cache_clear()
     db.reset_for_tests()
     pgvector_store.reset_for_tests()
@@ -360,7 +352,7 @@ def test_an_incomplete_active_profile_wedges_plain_init_db(
     """The deadlock the repair flag exists for, pinned at its cause.
 
     Without this the two tests below could pass vacuously: if the guard ever
-    stopped firing on an incomplete ACTIVE_EMBEDDING_PROFILE, "the repair
+    stopped firing on an incomplete active profile, "the repair
     commands still run" would prove nothing.
     """
     from regwatch.store import db

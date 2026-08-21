@@ -1,0 +1,141 @@
+name: openai-eval
+
+on:
+  workflow_call:
+    inputs:
+      prose:
+        description: Enable the v6 prose synthesis arm.
+        type: boolean
+        default: false
+        required: false
+      selective:
+        description: Enable v7 selective citation; requires prose.
+        type: boolean
+        default: false
+        required: false
+      assert_prod_mode:
+        description: Refuse to score settings that differ from prod_mode.json.
+        type: boolean
+        default: false
+        required: false
+  workflow_dispatch:
+    inputs:
+      prose:
+        description: Enable the v6 prose synthesis arm.
+        type: boolean
+        default: true
+        required: false
+      selective:
+        description: Enable v7 selective citation; requires prose.
+        type: boolean
+        default: false
+        required: false
+      assert_prod_mode:
+        description: Refuse to score settings that differ from prod_mode.json.
+        type: boolean
+        default: false
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openai-eval
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: https://api.openai.com/v1
+      OPENAI_LLM_MODEL: gpt-5.6-terra
+      OPENAI_REASONING_EFFORT: medium
+      OPENAI_EMBEDDING_MODEL: text-embedding-3-large
+      OPENAI_EMBEDDING_DIMENSION: "1024"
+      INGEST_EMBEDDING_PROVIDER: openai
+      LLM_PROVIDER: openai
+      PROFILE_HNSW_INDEX_REQUIRED: "false"
+      REGWATCH_PROSE_SYNTHESIS: ${{ inputs.prose && '1' || '' }}
+      REGWATCH_SELECTIVE_CITATION: ${{ inputs.selective && '1' || '' }}
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: preflight OpenAI config
+        run: |
+          set -euo pipefail
+          if [[ -z "${OPENAI_API_KEY//[[:space:]]/}" ]]; then
+            echo "::error::OPENAI_API_KEY is unset; live eval did not run."
+            exit 1
+          fi
+
+      - name: guard selective requires prose
+        if: ${{ inputs.selective && !inputs.prose }}
+        run: |
+          echo "::error::selective requires prose"
+          exit 1
+
+      - name: install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          version: latest
+          enable-cache: true
+
+      - name: install python
+        run: uv python install 3.12
+
+      - name: sync deps
+        run: uv sync --extra dev --extra llm
+
+      - name: register OpenAI embedding profile
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: |
+          set -euo pipefail
+          profile_id="$(uv run regwatch embedding-profile-register \
+            --provider openai \
+            --serving-runtime-version openai-api-v1 \
+            --id-only)"
+          echo "EVAL_PROFILE_ID=${profile_id}" >> "${GITHUB_ENV}"
+
+      - name: seed vector store
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: |
+          set -euo pipefail
+          export RETRIEVAL_EMBEDDING_PROFILE="${EVAL_PROFILE_ID}"
+          uv run regwatch seed
+
+      - name: eval OpenAI arm
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: |
+          set -euo pipefail
+          export RETRIEVAL_EMBEDDING_PROFILE="${EVAL_PROFILE_ID}"
+          uv run python -m regwatch.eval.run_eval \
+            --profile "${EVAL_PROFILE_ID}" \
+            --check-thresholds \
+            --out eval-scorecard.json \
+            ${{ inputs.assert_prod_mode && '--assert-prod-mode' || '' }}
+
+      - name: upload eval scorecard
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ inputs.selective && 'dark-eval-scorecard-v7' || (inputs.prose && 'dark-eval-scorecard' || 'eval-scorecard') }}
+          path: eval-scorecard.json
+          if-no-files-found: ignore

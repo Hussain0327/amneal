@@ -13,17 +13,16 @@ x-regwatch-environment: &regwatch-environment
   # official CRA template file)" marker. The template is gitignored (internal).
   WHITEPAPER_TEMPLATE_PATH: /app/data/templates/cra_white_paper_template.docx
   # Postgres-only since R5: defaults to the compose `db` service (pgvector
-  # image, same as CI). To run against the hosted database instead, point at the
-  # Databricks Lakebase DIRECT endpoint URL with ?sslmode=require. Never a
-  # `-pooler` host: docs/DEPLOY.md treats that as a release gate.
+  # image, same as CI). To run against hosted PostgreSQL, use its direct TLS URL
+  # with ?sslmode=require.
   DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/postgres}
   # Providers are REQUIRED-EXPLICIT (2026-08-14 postmortem): nothing defaults.
-  # Real embeddings/generation: set EMBEDDING_PROVIDER=qwen3 with
-  # QWEN_EMBEDDING_BASE_URL/TOKEN, and LLM_PROVIDER=databricks with
-  # DATABRICKS_LLM_* in .env. The echo defaults below exist for the offline
+  # Real embeddings/generation: set INGEST_EMBEDDING_PROVIDER=openai,
+  # LLM_PROVIDER=openai, and OPENAI_API_KEY in .env. The echo defaults exist for
+  # the offline
   # smoke stack only; the API refuses echo against a seeded corpus unless
   # REGWATCH_ALLOW_TEST_PROVIDERS=1 is set deliberately.
-  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-echo}
+  INGEST_EMBEDDING_PROVIDER: ${INGEST_EMBEDDING_PROVIDER:-echo}
   LLM_PROVIDER: ${LLM_PROVIDER:-echo}
 
 services:

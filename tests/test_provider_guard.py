@@ -45,21 +45,18 @@ def test_echo_with_seeded_corpus_boots_with_override() -> None:
 
 
 def test_real_providers_do_not_trip_the_echo_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Names only — the guard must not instantiate any model. Tested at the
-    # guard function directly: a full qwen3 boot additionally requires a named
-    # profile with complete coverage, which is separate machinery from what
-    # this guard decides.
+    # Names only: the guard must not instantiate either OpenAI client.
     from regwatch.api import main as api_main
 
     # Seed under conftest's echo env FIRST: the store's lazy dim assert runs on
-    # first write, and qwen3-with-legacy would (correctly) refuse there. What
-    # is under test is only the echo guard's decision on real provider NAMES.
+    # first write. What is under test is only the echo guard's decision on real
+    # provider names.
     _seed_one_chunk()
     _reload_settings(
         monkeypatch,
         REGWATCH_ALLOW_TEST_PROVIDERS="0",
-        EMBEDDING_PROVIDER="qwen3",
-        LLM_PROVIDER="databricks",
+        INGEST_EMBEDDING_PROVIDER="openai",
+        LLM_PROVIDER="openai",
     )
     api_main._guard_test_providers(cs.get_settings())  # must not raise
 
@@ -85,7 +82,7 @@ def test_unset_embedding_provider_refuses_to_boot(monkeypatch: pytest.MonkeyPatc
     """
     from regwatch.store import db as db_module
 
-    _reload_settings(monkeypatch, EMBEDDING_PROVIDER="")
+    _reload_settings(monkeypatch, INGEST_EMBEDDING_PROVIDER="")
     db_module.reset_for_tests()  # Force init_db to re-run the provider assert.
     with pytest.raises(RuntimeError, match="EMBEDDING_PROVIDER is not set"), TestClient(app):
         pass
@@ -110,11 +107,11 @@ def test_unset_database_url_refuses_to_boot(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_retired_provider_name_refuses_to_boot(monkeypatch: pytest.MonkeyPatch) -> None:
-    # local-bge-small and openai were removed 2026-08-17; a machine still
-    # configured with one must refuse loudly, never fall back.
+    # A machine configured with a retired local provider must refuse loudly,
+    # never fall back.
     from regwatch.store import db as db_module
 
-    _reload_settings(monkeypatch, EMBEDDING_PROVIDER="local-bge-small")
+    _reload_settings(monkeypatch, INGEST_EMBEDDING_PROVIDER="local-bge-small")
     db_module.reset_for_tests()
     with pytest.raises(ValueError, match="unknown embedding provider"), TestClient(app):
         pass
@@ -144,34 +141,36 @@ def test_wrong_dim_provider_refuses_the_1536_dim_datastore(
     db_module.reset_for_tests()
 
 
-def test_qwen3_in_legacy_arm_refuses_to_boot(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Qwen writes named profiles; pointing it at the unversioned legacy column
-    # would mix vector spaces, so the boot assert refuses the combination.
+def test_qwen3_provider_refuses_to_boot(monkeypatch: pytest.MonkeyPatch) -> None:
     from regwatch.store import db as db_module
 
-    _reload_settings(monkeypatch, EMBEDDING_PROVIDER="qwen3")
+    _reload_settings(monkeypatch, INGEST_EMBEDDING_PROVIDER="qwen3")
     db_module.reset_for_tests()
-    with pytest.raises(RuntimeError, match="legacy vector space"), TestClient(app):
+    with (
+        pytest.raises(
+            ValueError,
+            match="unknown embedding provider: qwen3",
+        ),
+        TestClient(app),
+    ):
         pass
     db_module.reset_for_tests()
 
 
-def test_qwen3_without_endpoint_config_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_qwen3_runtime_provider_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     from regwatch.process.embedder import assert_embedding_runtime_available
 
     _reload_settings(
         monkeypatch,
-        EMBEDDING_PROVIDER="qwen3",
-        QWEN_EMBEDDING_BASE_URL="",
-        QWEN_EMBEDDING_TOKEN="",
+        INGEST_EMBEDDING_PROVIDER="qwen3",
     )
-    with pytest.raises(RuntimeError, match="QWEN_EMBEDDING_BASE_URL"):
+    with pytest.raises(ValueError, match="unknown embedding provider: qwen3"):
         assert_embedding_runtime_available()
 
 
 def test_unset_provider_refuses_at_factory(monkeypatch: pytest.MonkeyPatch) -> None:
     from regwatch.process.embedder import get_embedding_provider
 
-    _reload_settings(monkeypatch, EMBEDDING_PROVIDER="")
+    _reload_settings(monkeypatch, INGEST_EMBEDDING_PROVIDER="")
     with pytest.raises(RuntimeError, match="EMBEDDING_PROVIDER is not set"):
         get_embedding_provider()

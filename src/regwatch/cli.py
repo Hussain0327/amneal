@@ -201,10 +201,10 @@ def cmd_status() -> None:
             "active_embedding_profile": s.active_embedding_profile,
             "retrieval_corpus": s.retrieval_corpus,
             "embedding_shadow_profile": s.embedding_shadow_profile,
-            "qwen_embedding_model": s.qwen_embedding_model,
-            "qwen_embedding_dimension": s.qwen_embedding_dimension,
+            "openai_embedding_model": s.openai_embedding_model,
+            "openai_embedding_dimension": s.openai_embedding_dimension,
             "llm_provider": s.llm_provider,
-            "databricks_llm_model": s.databricks_llm_model,
+            "openai_llm_model": s.openai_llm_model,
             "data_dir": str(s.data_dir),
             "database": "postgres" if s.database_url else "UNSET (refuses to boot)",
             "retrieval_top_k": s.retrieval_top_k,
@@ -429,7 +429,7 @@ def cmd_authoritative_corpus_embed(
 # query_instruction_version / preprocessing_version against those exact
 # literals and REFUSES on any disagreement, so a second definition here would
 # mint profiles that the factory then rejects at load time.
-_KNOWN_EMBEDDING_PROVIDERS = frozenset({"qwen3", "openai"})
+_KNOWN_EMBEDDING_PROVIDERS = frozenset({"openai"})
 
 
 @app.command("embedding-profile-register")
@@ -439,18 +439,14 @@ def cmd_embedding_profile_register(
         "--serving-runtime-version",
         help="Immutable serving runtime/deployment version, e.g. vllm-0.10.2.",
     ),
-    provider: str = typer.Option("qwen3", "--provider", help="qwen3 or openai."),
+    provider: str = typer.Option("openai", "--provider", help="OpenAI embeddings."),
     model: str = typer.Option(
         "", "--model", help="Defaults to the provider's configured *_EMBEDDING_MODEL."
     ),
     revision: str = typer.Option(
         "",
         "--revision",
-        help=(
-            "Defaults to QWEN_EMBEDDING_REVISION for qwen3. OpenAI serves versioned "
-            "model names directly and exposes no separate revision hash, so the "
-            "openai default is the model name itself."
-        ),
+        help=("Defaults to the OpenAI embedding model name."),
     ),
     dimension: int = typer.Option(
         0,
@@ -462,11 +458,7 @@ def cmd_embedding_profile_register(
     query_instruction_version: str = typer.Option(
         "",
         "--query-instruction-version",
-        help=(
-            "Defaults to Qwen's asymmetric retrieval instruction for qwen3, or the "
-            "no-instruction sentinel for openai. Never silently carries one "
-            "provider's default over into the other's profile."
-        ),
+        help=("Defaults to OpenAI's no-instruction sentinel."),
     ),
     preprocessing_version: str = typer.Option("", "--preprocessing-version"),
     chunking_version: str = typer.Option("", "--chunking-version"),
@@ -479,7 +471,7 @@ def cmd_embedding_profile_register(
         ),
     ),
 ) -> None:
-    """Register one immutable embedding profile (qwen3 or openai) and print its ID.
+    """Register one immutable OpenAI embedding profile and print its ID.
 
     Registration is content-addressed and idempotent: the id is a hash of the
     spec, so re-running with identical arguments returns the same id and writes
@@ -491,33 +483,21 @@ def cmd_embedding_profile_register(
     from regwatch.process.embedder import (
         OPENAI_DOCUMENT_PREPROCESSING_VERSION,
         OPENAI_QUERY_INSTRUCTION_VERSION,
-        QWEN3_DOCUMENT_PREPROCESSING_VERSION,
     )
     from regwatch.store.embedding_profiles import EmbeddingProfileSpec
     from regwatch.store.vector_store import register_embedding_profile
 
     settings = get_settings()
     normalized_provider = provider.strip().lower()
-    if normalized_provider == "openai":
-        default_model = settings.openai_embedding_model or ""
-        default_revision = default_model
-        default_dimension = settings.openai_embedding_dimension
-        default_query_instruction_version = OPENAI_QUERY_INSTRUCTION_VERSION
-    elif normalized_provider == "qwen3":
-        default_model = settings.qwen_embedding_model
-        default_revision = settings.qwen_embedding_revision
-        default_dimension = settings.qwen_embedding_dimension
-        default_query_instruction_version = settings.qwen_embedding_query_instruction_version
-    else:
+    if normalized_provider != "openai":
         allowed = ", ".join(sorted(_KNOWN_EMBEDDING_PROVIDERS))
         rprint(f"[red]error[/red] unknown --provider {provider!r}; expected one of: {allowed}")
         raise typer.Exit(code=2)
-
-    default_preprocessing_version = (
-        OPENAI_DOCUMENT_PREPROCESSING_VERSION
-        if normalized_provider == "openai"
-        else QWEN3_DOCUMENT_PREPROCESSING_VERSION
-    )
+    default_model = settings.openai_embedding_model or ""
+    default_revision = default_model
+    default_dimension = settings.openai_embedding_dimension
+    default_query_instruction_version = OPENAI_QUERY_INSTRUCTION_VERSION
+    default_preprocessing_version = OPENAI_DOCUMENT_PREPROCESSING_VERSION
 
     final_model = model or default_model
     final_revision = revision or default_revision

@@ -60,7 +60,7 @@ class ScopeNotResolved(ValueError):
 
 
 class ApproximateSearchNotPermitted(ValueError):
-    """ANN was requested on a filtered (compliance-sensitive) query."""
+    """Approximate vector search is disabled for RegWatch retrieval."""
 
 
 @dataclass(frozen=True)
@@ -105,11 +105,10 @@ def assert_mode_permitted(mode: RetrievalMode, scope: RetrievalScope) -> None:
             "EXACT_SCOPED requires a resolved product filter "
             f"(one of {sorted(_PRODUCT_SCOPE_KEYS)}); got filter keys {list(scope.filter_keys)}"
         )
-    if mode is RetrievalMode.ANN_RERANKED and scope.filter_keys:
+    if mode is RetrievalMode.ANN_RERANKED:
         raise ApproximateSearchNotPermitted(
-            "ANN_RERANKED cannot be combined with a metadata filter: pgvector applies "
-            "the filter after the approximate scan and can silently drop matches. "
-            f"Got filter keys {list(scope.filter_keys)}"
+            "ANN_RERANKED is disabled: RegWatch requires exact pgvector search "
+            f"for every scope; got filter keys {list(scope.filter_keys)}"
         )
 
 

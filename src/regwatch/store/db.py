@@ -768,9 +768,8 @@ def init_db(*, assert_provider: bool = True) -> None:
     commands that necessarily run before a serving-ready provider can exist:
 
       * ``embedding-profile-register`` mints the profile id, so it cannot name
-        an ACTIVE_EMBEDDING_PROFILE that does not exist yet; with the default
-        provider it trips the dimension branch, and with EMBEDDING_PROVIDER=qwen3
-        it trips the "Qwen3 cannot write into the legacy space" branch instead.
+        an active embedding profile that does not exist yet. The maintenance
+        path still validates the selected profile before writing vectors.
       * ``embedding-profile-index`` BUILDS the HNSW index that
         assert_profile_ready_for_activation requires be already built.
       * authoritative corpus sync creates pending chunks; status diagnoses

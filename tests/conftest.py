@@ -226,11 +226,19 @@ def _reset_database() -> None:
 def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     # Network-free providers by default. Echo's 1536-dim output matches the
     # pgvector chunk column, so ingest/query tests embed for real.
+    monkeypatch.setenv("INGEST_EMBEDDING_PROVIDER", "echo")
     monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
     monkeypatch.setenv("LLM_PROVIDER", "echo")
+    monkeypatch.setenv("RETRIEVAL_EMBEDDING_PROFILE", "legacy")
     monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", "legacy")
     monkeypatch.setenv("EMBEDDING_SHADOW_PROFILE", "")
     monkeypatch.setenv("REGWATCH_RETRIEVAL_CORPUS", "legacy")
+    # Host .env files may enable the production prose contract. Tests default
+    # to the structured fixture contract and opt into prose explicitly.
+    monkeypatch.setenv("REGWATCH_PROSE_SYNTHESIS", "false")
+    monkeypatch.setenv("REGWATCH_SELECTIVE_CITATION", "false")
+    monkeypatch.setenv("REGWATCH_LIVE_DRAFT", "false")
+    monkeypatch.setenv("LLM_MODEL_PRICES", "{}")
     # Rate limiting off by default; rate-limit tests opt in explicitly.
     monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", "0")
     # The API fail-fast guard rejects echo providers over a non-empty corpus;
@@ -238,10 +246,7 @@ def _isolate_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[No
     monkeypatch.setenv("REGWATCH_ALLOW_TEST_PROVIDERS", "1")
     # Pydantic-settings would otherwise load real keys from `.env`; clear them
     # so tests run from a clean slate regardless of the host's .env.
-    monkeypatch.setenv("QWEN_EMBEDDING_BASE_URL", "")
-    monkeypatch.setenv("QWEN_EMBEDDING_TOKEN", "")
-    monkeypatch.setenv("DATABRICKS_LLM_BASE_URL", "")
-    monkeypatch.setenv("DATABRICKS_LLM_TOKEN", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
     # Operator tuning knobs with default-value assertions in the suite. A dev
     # who exports these mid-incident (exactly what .env.example suggests) must
     # not see local-only failures CI can't reproduce.

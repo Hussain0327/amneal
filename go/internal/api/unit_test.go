@@ -182,8 +182,9 @@ func TestConfigFromEnvGuardsAndDefaults(t *testing.T) {
 
 func TestConfigFromEnvPublicSettings(t *testing.T) {
 	for _, name := range []string{"AUTH_COOKIE_SECURE", "TRUST_PROXY_HEADERS", "AUTH_SESSION_TTL_HOURS",
-		"CORS_ALLOW_ORIGINS_CSV", "SENTRY_ENVIRONMENT", "EMBEDDING_PROVIDER", "LLM_PROVIDER",
-		"DATABRICKS_LLM_MODEL", "RETRIEVAL_TOP_K", "REFUSAL_SCORE_THRESHOLD", "COMPANY_NAME"} {
+		"CORS_ALLOW_ORIGINS_CSV", "SENTRY_ENVIRONMENT", "INGEST_EMBEDDING_PROVIDER",
+		"EMBEDDING_PROVIDER", "LLM_PROVIDER", "OPENAI_LLM_MODEL", "RETRIEVAL_TOP_K",
+		"REFUSAL_SCORE_THRESHOLD", "COMPANY_NAME"} {
 		// t.Setenv registers restoration of the original value; the Unsetenv
 		// after it gives the UNSET state envOrDefault distinguishes from "".
 		t.Setenv(name, "")
@@ -196,20 +197,20 @@ func TestConfigFromEnvPublicSettings(t *testing.T) {
 	// Mirrors of config/settings.py: providers are required-explicit, so the
 	// unset state is the EMPTY STRING here, never a guessed provider.
 	if cfg.EmbeddingProvider != "" || cfg.LLMProvider != "" ||
-		cfg.LLMModel != "" || cfg.RetrievalTopK != nil ||
+		cfg.LLMModel != "gpt-5.6-terra" || cfg.RetrievalTopK != nil ||
 		cfg.RefusalScoreThreshold != 0.30 || cfg.CompanyName != "Amneal" {
 		t.Fatalf("settings defaults: %+v", cfg)
 	}
 
 	// Prod values (fly.toml [env] + app-wide secrets reach proxy machines).
-	t.Setenv("EMBEDDING_PROVIDER", "qwen3")
-	t.Setenv("DATABRICKS_LLM_MODEL", "workspace.default.regwatch")
+	t.Setenv("INGEST_EMBEDDING_PROVIDER", "openai")
+	t.Setenv("OPENAI_LLM_MODEL", "gpt-5.6-terra")
 	t.Setenv("RETRIEVAL_TOP_K", "8")
 	cfg, err = ConfigFromEnv()
 	if err != nil {
 		t.Fatalf("overrides: %v", err)
 	}
-	if cfg.EmbeddingProvider != "qwen3" || cfg.LLMModel != "workspace.default.regwatch" ||
+	if cfg.EmbeddingProvider != "openai" || cfg.LLMModel != "gpt-5.6-terra" ||
 		cfg.RetrievalTopK == nil || *cfg.RetrievalTopK != 8 {
 		t.Fatalf("settings overrides: %+v", cfg)
 	}

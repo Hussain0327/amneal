@@ -76,44 +76,34 @@ def test_health() -> None:
 def test_health_reports_the_profile_arm_not_the_legacy_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The prod bug this fixes: /health answered "openai" while queries were in
-    fact embedded by the Databricks-hosted profile model.
-
-    Retrieval branches on ACTIVE_EMBEDDING_PROFILE and only the "legacy" arm
-    ever reads EMBEDDING_PROVIDER, so with a profile active the raw setting is
-    inert -- and reporting it inverts the residency answer an operator came for.
-    """
+    """Health reports the named profile provider used by retrieval."""
     import config.settings as cs
 
     from regwatch.api import main as api_main
 
     profile_id = "ep_" + "a" * 32
-    monkeypatch.setenv("EMBEDDING_PROVIDER", "echo")
-    monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", profile_id)
+    monkeypatch.setenv("INGEST_EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("RETRIEVAL_EMBEDDING_PROFILE", profile_id)
     # Non-echo LLM so the echo warning below can only come from the embedding
-    # side -- otherwise the LLM arm masks what this test is checking. The boot
-    # guard validates databricks credentials in the lifespan now, so fake but
-    # complete DATABRICKS_LLM_* values are required to boot at all.
-    monkeypatch.setenv("LLM_PROVIDER", "databricks")
-    monkeypatch.setenv("DATABRICKS_LLM_BASE_URL", "https://dbx.example/serving-endpoints")
-    monkeypatch.setenv("DATABRICKS_LLM_TOKEN", "dapi-test-fake")
-    monkeypatch.setenv("DATABRICKS_LLM_MODEL", "databricks-test-model")
+    # side -- otherwise the LLM arm masks what this test is checking.
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     cs.get_settings.cache_clear()
 
     class _Profile:
-        provider = "qwen3"
+        provider = "openai"
 
     monkeypatch.setattr(
         "regwatch.store.embedding_profiles.get_embedding_profile",
         lambda _pid: _Profile(),
     )
+    monkeypatch.setattr(
+        "regwatch.store.pgvector_store.assert_embedding_provider_dim",
+        lambda: None,
+    )
     try:
         body = _open().get("/health").json()
-        assert body["components"]["embedding"] == {"provider": "qwen3", "profile": profile_id}
-        # The stale setting must not leak back in under any key.
-        assert "echo" not in str(body["components"]["embedding"])
-        # EMBEDDING_PROVIDER=echo is INERT while a profile is active, so it must
-        # not raise the degraded-quality warning about a provider nothing uses.
+        assert body["components"]["embedding"] == {"provider": "openai", "profile": profile_id}
         assert not any("echo" in w for w in body["warnings"])
     finally:
         cs.get_settings.cache_clear()
@@ -134,13 +124,17 @@ def test_health_embedding_component_degrades_instead_of_raising(
     import config.settings as cs
 
     profile_id = "ep_" + "b" * 32
-    monkeypatch.setenv("ACTIVE_EMBEDDING_PROFILE", profile_id)
+    monkeypatch.setenv("RETRIEVAL_EMBEDDING_PROFILE", profile_id)
     cs.get_settings.cache_clear()
 
     def _boom(_pid: str) -> None:
         raise KeyError("unknown embedding profile")
 
     monkeypatch.setattr("regwatch.store.embedding_profiles.get_embedding_profile", _boom)
+    monkeypatch.setattr(
+        "regwatch.store.pgvector_store.assert_embedding_provider_dim",
+        lambda: None,
+    )
     try:
         r = _open().get("/health")
         assert r.status_code in (200, 503)
@@ -157,18 +151,15 @@ def test_health_no_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     # PRESENCE only, never a value.
     import config.settings as cs
 
-    monkeypatch.setenv("LLM_PROVIDER", "databricks")
-    monkeypatch.setenv("DATABRICKS_LLM_BASE_URL", "https://dbx.example/serving-endpoints")
-    monkeypatch.setenv("DATABRICKS_LLM_TOKEN", "dapi-test-secret-do-not-leak")
-    # The lifespan boot guard requires a complete databricks credential set.
-    monkeypatch.setenv("DATABRICKS_LLM_MODEL", "databricks-test-model")
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-secret-do-not-leak")
     cs.get_settings.cache_clear()
     r = _open().get("/health")
     assert r.status_code == 200
     body = r.json()
-    assert body["components"]["llm"] == {"provider": "databricks", "key_present": True}
-    assert "dapi-test-secret-do-not-leak" not in r.text
-    assert "databricks_llm_token" not in r.text
+    assert body["components"]["llm"] == {"provider": "openai", "key_present": True}
+    assert "openai-test-secret-do-not-leak" not in r.text
+    assert "openai_api_key" not in r.text
 
 
 def test_health_unhealthy_when_vector_store_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:

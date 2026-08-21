@@ -15,7 +15,6 @@ on failure, and (the positive control) gated post-audit bytes on success.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,7 +22,6 @@ from sqlalchemy import func
 from sqlmodel import select
 
 from regwatch.generate import grounded_qa as qa_mod
-from regwatch.generate.llm import DatabricksProvider
 from regwatch.process.embedder import get_embedding_provider
 from regwatch.store.db import init_db, session_scope
 from regwatch.store.models import QueryLog
@@ -183,62 +181,3 @@ def test_token_sink_only_ever_gets_gated_already_audited_bytes(
     assert "".join(tokens) == result.answer
     assert turn not in "".join(tokens)  # never the raw model draft
     assert audited_at_first_token == [True]
-
-
-def _d1_armed_provider() -> DatabricksProvider:
-    """A real DatabricksProvider whose endpoint reports an off-perimeter model.
-
-    The configured name is allowlisted (as the boot validator demands), so only
-    the runtime served-model check can catch this.
-    """
-    response = SimpleNamespace(
-        id="db-response",
-        object="chat.completion",
-        created=1,
-        model="databricks-claude-sonnet-5",
-        choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(content="An answer [PSG_020503, p.3]."),
-                finish_reason="stop",
-            )
-        ],
-        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
-    )
-    client = SimpleNamespace(
-        chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kw: response))
-    )
-    return DatabricksProvider(
-        model="workspace.default.regwatch",
-        base_url="https://workspace.example/serving-endpoints",
-        token="token",
-        role="synthesizer",
-        d1_enforced=True,
-        d1_allowed_models=("workspace.default.regwatch",),
-        client=client,
-    )
-
-
-def test_d1_violation_degrades_to_an_audited_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A residency failure must land in the SAME audited boundary as a transport
-    failure: refuse the answer, keep the turn on the record (INV-6), and never
-    leak the exception text (which names models, not prompts) to the user."""
-    _seed_corpus()
-    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _d1_armed_provider())
-
-    result = qa_mod.ask("What study design is recommended?")
-
-    assert result.refused is True
-    assert result.status == "error"
-    assert result.citations == []
-    assert "temporarily unavailable" in result.answer
-    # The off-perimeter answer is never served, and the guard's own message
-    # (which names the served model) never reaches the analyst.
-    assert "PSG_020503" not in result.answer
-    assert "databricks-claude-sonnet-5" not in result.answer
-
-    assert result.audit_id is not None
-    with session_scope() as s:
-        row = s.get(QueryLog, result.audit_id)
-        assert row is not None
-        assert row.status == "error"
-        assert row.refused is True

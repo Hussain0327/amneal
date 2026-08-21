@@ -89,9 +89,13 @@ def test_exact_scoped_without_a_product_fails_closed():
         )
 
 
-def test_ann_with_a_filter_is_refused():
-    """pgvector applies metadata filters AFTER the approximate scan, so an
-    ANN+filter combination can silently drop matching rows."""
+def test_ann_is_refused_for_every_scope():
+    """RegWatch retrieval is exact; ANN is not an executable runtime mode."""
+    with pytest.raises(ApproximateSearchNotPermitted):
+        assert_mode_permitted(
+            RetrievalMode.ANN_RERANKED,
+            RetrievalScope.from_filters(None),
+        )
     with pytest.raises(ApproximateSearchNotPermitted):
         assert_mode_permitted(
             RetrievalMode.ANN_RERANKED,

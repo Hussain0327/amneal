@@ -48,9 +48,7 @@ local-embeddings = [
     "torch>=2.13.0,<3",
     "transformers<6",
 ]
-# The OpenAI-compatible SDK is the Databricks serving-endpoint transport, not
-# an openai.com dependency; the OpenAI/Anthropic provider paths were removed
-# 2026-08-17.
+# OpenAI Responses API transport.
 llm = [
     "openai>=2.53.0",
 ]

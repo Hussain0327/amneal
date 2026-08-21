@@ -151,7 +151,7 @@ def build(profile_id: str, thresholds: dict[str, float]) -> RunFingerprint:
         },
         models={
             "llm_provider": s.llm_provider,
-            "llm_model": getattr(s, "databricks_llm_model", None) or "unconfigured",
+            "llm_model": getattr(s, "openai_llm_model", None) or "unconfigured",
         },
         thresholds=dict(thresholds),
         commit=sha,
