@@ -289,6 +289,40 @@ def test_the_same_uncited_deontic_sentence_in_a_bullet_still_refuses() -> None:
     assert turn.verdict == tg.VERDICT_MATERIAL_DROP
 
 
+# The shape the v7 table paragraph asks for since #272: a condition that used
+# to be written into a cell now follows the table as its own sentence.
+_TABLE_THEN_SENTENCE = (
+    "| Pathway | In vivo |\n"
+    "|---|---|\n"
+    "| Waiver | Possible [1] |\n"
+    "\n"
+    "A waiver may be granted with BCS Class I documentation [1].\n"
+)
+
+
+def test_a_condition_routed_out_of_a_cell_renders_as_prose_after_the_table() -> None:
+    """The parser puts the routed sentence in its own paragraph group and the
+    renderer writes the table, a blank line, then the sentence."""
+    turn = _admit(_TABLE_THEN_SENTENCE, _passages())
+    assert turn.verdict == tg.VERDICT_ANSWER
+    assert turn.admitted[-1].block.kind == blocks.BLOCK_PARAGRAPH
+    assert (
+        "| Waiver | Possible [PSG_020503, p.3] |\n"
+        "\n"
+        "A waiver may be granted with BCS Class I documentation [PSG_020503, p.3]."
+    ) in tg.render_answer(turn)
+
+
+def test_a_routed_condition_that_loses_its_marker_refuses_the_whole_turn() -> None:
+    """The cost of routing: a dropped cell is structural and folds to PARTIAL,
+    while a dropped paragraph sentence carrying a materiality word is
+    MATERIAL_DROP for the whole turn. Pinned so the escalation is visible."""
+    text = _TABLE_THEN_SENTENCE.replace("documentation [1].", "documentation.")
+    turn = _admit(text, _passages())
+    assert turn.verdict == tg.VERDICT_MATERIAL_DROP
+    assert turn.material_word == "may"
+
+
 @pytest.mark.parametrize(
     ("text", "kept"),
     [
