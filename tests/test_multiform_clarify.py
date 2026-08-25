@@ -27,14 +27,14 @@ from typing import Any
 
 import pytest
 from config.settings import get_settings
-from sqlalchemy import func
+from sqlalchemy import event, func
 from sqlmodel import select
 
 from regwatch.generate import grounded_qa as qa_mod
 from regwatch.generate.llm import LLMResponse
 from regwatch.process.embedder import get_embedding_provider
 from regwatch.retrieve.retriever import RetrievedPassage
-from regwatch.store.db import init_db, session_scope
+from regwatch.store.db import get_engine, init_db, session_scope
 from regwatch.store.models import PsgDocument, PsgVersion, QueryLog
 from regwatch.store.vector_store import add_chunks
 from tests.conftest import synth_turn_json
@@ -618,9 +618,15 @@ def test_pre_retrieval_clarify_still_audits_empty_retrieved(
         assert list(row.retrieved_json or []) == []
 
 
-def test_followup_fetches_session_filters_once(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_followup_reads_the_session_row_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """A carried-over follow-up needs the session filters at two sites (product,
-    then form/route); the turn must fetch the ChatSession row exactly ONCE."""
+    then form/route); the turn must READ the ChatSession row exactly ONCE.
+
+    Counts real SQL rather than calls into a module-level reader: ask() now
+    pre-loads the turn's context in the single transaction that opens the turn,
+    so a counter on qa_mod.get_session_filters would sit on a function this
+    path no longer calls and would pass at zero, for the wrong reason.
+    """
     _stub(monkeypatch)
     # Two products, so the follow-up does NOT hit the single-product-corpus
     # fallback -- the resolver returns none and BOTH carry-over sites run.
@@ -635,17 +641,30 @@ def test_followup_fetches_session_filters_once(monkeypatch: pytest.MonkeyPatch) 
     )
     assert second.status == "answer"
 
-    calls = {"n": 0}
-    from regwatch.common.conversation import get_session_filters as real_get_session_filters
+    statements: list[str] = []
 
-    def _counting(session_id: str | None) -> dict[str, Any]:
-        calls["n"] += 1
-        return real_get_session_filters(session_id)
+    def _capture(
+        conn: Any,
+        cursor: Any,
+        statement: str,
+        parameters: Any,
+        context: Any,
+        executemany: Any,
+    ) -> None:
+        statements.append(" ".join(statement.split()))
 
-    monkeypatch.setattr(qa_mod, "get_session_filters", _counting)
-
-    third = qa_mod.ask("What about dissolution?", session_id=first.session_id)
+    engine = get_engine()
+    event.listen(engine, "before_cursor_execute", _capture)
+    try:
+        third = qa_mod.ask("What about dissolution?", session_id=first.session_id)
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture)
 
     assert third.status == "answer"
     assert {p["short_name"] for p in third.retrieved} == {"PSG_020001"}
-    assert calls["n"] == 1  # one row read per turn, not one per carry-over site
+    # Everything before the audit INSERT is the turn's READ path. (The post-turn
+    # filter carry-over write reads the row again on purpose; those independent
+    # best-effort writes are deliberately out of scope here.)
+    audit_at = next(i for i, s in enumerate(statements) if "INSERT INTO query_log" in s)
+    reads = [s for s in statements[:audit_at] if "FROM chat_session" in s]
+    assert len(reads) == 1  # one row read per turn, not one per carry-over site

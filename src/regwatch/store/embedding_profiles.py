@@ -247,11 +247,25 @@ Index("ix_chunk_embedding_chunk_id", chunk_embedding_table.c.chunk_id)
 
 _schema_ready = False
 _schema_lock = Lock()
+# Two per-process memos for answers the search path re-asks Postgres on every
+# query but that CANNOT change while this process lives: the profile row
+# (profile_id is sha256(spec)[:32] and an UPDATE is rejected by trigger) and the
+# schema pgvector is installed into. Both are populated strictly AFTER a
+# successful read, so a timeout or connectivity failure caches nothing and the
+# next call retries. No lock: each write is a single dict/global assignment of
+# an identical immutable value, matching the unlocked _metadata_values_cache
+# prior art in pgvector_store.
+_profile_cache: dict[str, EmbeddingProfile] = {}
+_vector_schema: tuple[Engine, str] | None = None
 
 
 def reset_for_tests() -> None:
-    global _schema_ready
+    global _schema_ready, _vector_schema
     _schema_ready = False
+    # Both memos belong to the database being swapped out; carrying either into
+    # the next one would serve a profile row read from a different Postgres.
+    _profile_cache.clear()
+    _vector_schema = None
 
 
 def content_hash(text: str) -> str:
@@ -360,11 +374,31 @@ def register_embedding_profile(spec: EmbeddingProfileSpec) -> EmbeddingProfile:
         # Cryptographic collision or externally-corrupted row: never silently
         # reuse an ID for a different vector geometry.
         raise RuntimeError(f"embedding profile ID collision for {spec.profile_id}")
+    # The verified row is already in hand, so a register-then-search flow pays
+    # zero profile lookups.
+    _profile_cache[profile.profile_id] = profile
     return profile
 
 
 def get_embedding_profile(profile_id: str) -> EmbeddingProfile:
+    """Resolve one immutable profile row, memoized for the life of the process.
+
+    Args:
+        profile_id: An ``ep_`` prefix followed by 32 lowercase hex characters.
+
+    Returns:
+        The registered profile.
+
+    Raises:
+        ValueError: If ``profile_id`` is not a well-formed profile ID.
+        KeyError: If no profile is registered under that ID.
+    """
     _validate_profile_id(profile_id)
+    cached = _profile_cache.get(profile_id)
+    if cached is not None:
+        # A hit can only have been written by a call that already ran
+        # _ensure_ready() in this process, so skipping it here changes nothing.
+        return cached
     _ensure_ready()
     with _engine().connect() as conn:
         row = (
@@ -381,8 +415,13 @@ def get_embedding_profile(profile_id: str) -> EmbeddingProfile:
             .one_or_none()
         )
     if row is None:
+        # A miss is deliberately NOT cached: a profile registered later in this
+        # same process must still resolve, and an unknown ID must not be able to
+        # grow the memo.
         raise KeyError(f"unknown embedding profile: {profile_id}")
-    return _profile_from_row(row)
+    profile = _profile_from_row(row)
+    _profile_cache[profile_id] = profile
+    return profile
 
 
 def list_embedding_profiles() -> list[EmbeddingProfile]:
@@ -621,6 +660,13 @@ def profile_embedding_coverage(profile_id: str) -> ProfileEmbeddingCoverage:
 
 
 def _vector_extension_schema(engine: Engine) -> str:
+    global _vector_schema
+    cached = _vector_schema
+    # Keyed on the engine OBJECT, held by strong reference: an id() key can
+    # collide once a disposed engine is collected, and a module-wide single
+    # value would let the migration engine read the app engine's answer.
+    if cached is not None and cached[0] is engine:
+        return cached[1]
     with engine.connect() as conn:
         schema = conn.execute(
             sa_text(
@@ -631,7 +677,9 @@ def _vector_extension_schema(engine: Engine) -> str:
         ).scalar()
     if schema not in {"public", "extensions"}:
         raise RuntimeError(f"unsupported pgvector extension schema: {schema!r}")
-    return str(schema)
+    resolved = str(schema)
+    _vector_schema = (engine, resolved)
+    return resolved
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:

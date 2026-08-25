@@ -48,18 +48,20 @@ from regwatch.common.citations import strip_all_citations, strip_sources_trailer
 from regwatch.common.conversation import (
     SESSION_ORIGIN_THREAD,
     PriorTurn,
-    SessionOriginError,
-    SessionOwnershipError,
-    ensure_session,
-    get_recent_turns,
-    get_session_filters,
-    new_turn_id,
+    TurnContext,
+    open_turn,
+    read_turn_context,
     record_message,
     update_session_filters,
 )
 from regwatch.common.logging import get_logger
 from regwatch.common.observability import capture_exception
-from regwatch.common.stage_timing import TurnTimings, collect_stage_timings, stage
+from regwatch.common.stage_timing import (
+    TurnTimings,
+    collect_stage_timings,
+    stage,
+    timed_stage,
+)
 from regwatch.common.text_normalize import canonical_name
 from regwatch.generate import prose_turn
 from regwatch.generate import turn_gate as tg
@@ -744,6 +746,7 @@ def _audit_retrieved(passages: list[RetrievedPassage]) -> list[dict[str, Any]]:
     ]
 
 
+@timed_stage("provenance")
 def _enrich_citation_recency(citations: list[Citation]) -> list[Citation]:
     """Resolves each citation's revision date BEFORE the turn is persisted.
 
@@ -764,6 +767,11 @@ def _enrich_citation_recency(citations: list[Citation]) -> list[Citation]:
     Returns:
         The same citations with ``recommended_date`` and ``diff_summary``
         resolved, in the same order.
+
+    Timed as the ``provenance`` stage on the FUNCTION rather than around the
+    ``fetch_citation_recency`` call inside it, so the key is deterministic on
+    every answer turn: an empty citation list still records ~0 instead of
+    dropping the key.
     """
     if not citations:
         return citations
@@ -985,6 +993,7 @@ def _retrieval_query(
     return f"{strip_all_citations(prior).strip()[:400]} {question}".strip()
 
 
+@timed_stage("provenance")
 def _doc_count(normalized_name: str) -> int:
     """Counts the PSG documents on file for one product.
 
@@ -993,6 +1002,11 @@ def _doc_count(normalized_name: str) -> int:
 
     Returns:
         The document count, or 0 when the product has none.
+
+    Timed at the leaf because its only call site is an expression inside
+    ``_interpretation_for``, which is itself evaluated in a ``_decline``
+    argument list -- so the count runs BEFORE ``_decline``'s own route and
+    guidance spans, never inside them.
     """
     with session_scope() as session:
         return int(
@@ -2442,11 +2456,22 @@ def _resolve_and_carry_over(
             # (romidepsin scores ~60, under the 82 threshold) yields neither
             # candidate, so a follow-up naming it still carries over. Closing
             # that needs a drug-name detector the resolver does not have.
-            suggestions = suggest_products(question)
-            # One local Drugs@FDA lookup, two answers: the corpus generics behind
-            # a brand name (the long-standing did-you-mean), and whether the name
-            # is a real drug this corpus simply does not carry.
-            external = lookup_external_drug(question)
+            # Both lookups are route work, so they share the `route` span. The
+            # drug lookup gets a dotted child on top because it owns the one
+            # uncached DB round trip here: `resolver.lookup_external_drug`
+            # SELECTs the local FdaDocument table, while the normalized_name
+            # DISTINCT both lookups need is TTL-cached and already warmed by
+            # the suggest_products call above. "External" names a drug OUTSIDE
+            # THIS CORPUS, not an outbound network call -- nothing on this path
+            # leaves the process except to Postgres.
+            with stage("route"):
+                suggestions = suggest_products(question)
+                # One local Drugs@FDA lookup, two answers: the corpus generics
+                # behind a brand name (the long-standing did-you-mean), and
+                # whether the name is a real drug this corpus simply does not
+                # carry.
+                with stage("route.external_drug"):
+                    external = lookup_external_drug(question)
             brand_matches = external.corpus_products
             session_filters = _session_filters()
             # PR12: ask the live route call whether this IS the genuine elliptical
@@ -2726,11 +2751,15 @@ def _pre_retrieval_route(
     # more than one remains, CLARIFY which form before retrieving.
     if resolved_name:
         try:
-            combos = current_dosage_form_routes(
-                resolved_name,
-                dosage_form=state.active_filters.get("dosage_form"),
-                route=state.active_filters.get("route"),
-            )
+            # The span sits INSIDE the try so it closes before the except
+            # handler's _decline runs: _decline opens its own top-level spans,
+            # and nesting them inside this one would double-count.
+            with stage("route"):
+                combos = current_dosage_form_routes(
+                    resolved_name,
+                    dosage_form=state.active_filters.get("dosage_form"),
+                    route=state.active_filters.get("route"),
+                )
         except Exception as exc:
             # This enumeration is a CORRECTNESS guard (it prevents the wrong-form
             # citation blend), so unlike the best-effort session/memory reads it
@@ -3246,7 +3275,11 @@ def _synthesize_and_admit(
                 with _best_effort("on_draft_reset_failed"):
                     _emit_draft_reset()
             try:
-                response = _run_synthesis([*synth_messages, *_BOUNDS_REPAIR_TURN[breach]])
+                # The repair is a SECOND full synthesis round trip. It belongs
+                # to the existing key (repeats sum, and `counts` records the
+                # retry), not to a new one.
+                with stage("synthesis"):
+                    response = _run_synthesis([*synth_messages, *_BOUNDS_REPAIR_TURN[breach]])
             except Exception as exc:
                 log.warning("qa_provider_error", error=str(exc), error_type=type(exc).__name__)
                 capture_exception(exc)
@@ -3283,9 +3316,10 @@ def _synthesize_and_admit(
     admitted: AdmittedTurn | GateFailure
     parsed_prose: prose_turn.ParsedProseTurn | None = None
     if prose_mode:
-        parsed_prose = prose_turn.parse(
-            answer, passages=evidence_passages, selective=selective_mode
-        )
+        with stage("gate"):
+            parsed_prose = prose_turn.parse(
+                answer, passages=evidence_passages, selective=selective_mode
+            )
         # Nested under the existing "synthesis" telemetry block on purpose: the
         # route_json top-level key set is a contract, and the parse record is
         # synthesis forensics (INV-6) -- what the parser killed and why.
@@ -3329,39 +3363,45 @@ def _synthesize_and_admit(
                 guide=False,
             )
 
-        if parsed_prose.turn_type == "ANSWER" and not parsed_prose.claims:
-            # Reason string kept as malformed_structure so the ops greps and the
-            # ~12% prod baseline stay comparable; in prose mode it means "no
-            # sentences parsed", not "schema violation".
-            admitted = GateFailure(
-                "malformed_structure", "no sentences parsed from prose completion"
-            )
-        elif selective_mode:
-            admitted = admit_claims(
-                parsed_prose.turn_type,
-                prose_turn.to_claims(parsed_prose, evidence_passages),
-                passages=evidence_passages,
-                question=question,
-                correct=True,
-                downgrade_uncited=False,
-                kinds=[c.kind for c in parsed_prose.claims],
-                selective=True,
-            )
-        else:
-            admitted = admit_claims(
-                parsed_prose.turn_type,
-                prose_turn.to_claims(parsed_prose, evidence_passages),
-                passages=evidence_passages,
-                question=question,
-                # v6 branch. Re-stamp correction is live (v6 is still cite or
-                # refuse, and a corrected claim is a CITED claim); the
-                # uncited-downgrade path is not. Serving uncited prose is v7's
-                # policy, and v7 gets there through selective=True above.
-                correct=True,
-                downgrade_uncited=False,
-            )
+        # One span over the whole admit chain: the three arms are mutually
+        # exclusive, none of them returns, and none reaches _decline, so a
+        # single with-block covers the gate's cost without nesting anything.
+        with stage("gate"):
+            if parsed_prose.turn_type == "ANSWER" and not parsed_prose.claims:
+                # Reason string kept as malformed_structure so the ops greps and
+                # the ~12% prod baseline stay comparable; in prose mode it means
+                # "no sentences parsed", not "schema violation".
+                admitted = GateFailure(
+                    "malformed_structure", "no sentences parsed from prose completion"
+                )
+            elif selective_mode:
+                admitted = admit_claims(
+                    parsed_prose.turn_type,
+                    prose_turn.to_claims(parsed_prose, evidence_passages),
+                    passages=evidence_passages,
+                    question=question,
+                    correct=True,
+                    downgrade_uncited=False,
+                    kinds=[c.kind for c in parsed_prose.claims],
+                    selective=True,
+                )
+            else:
+                admitted = admit_claims(
+                    parsed_prose.turn_type,
+                    prose_turn.to_claims(parsed_prose, evidence_passages),
+                    passages=evidence_passages,
+                    question=question,
+                    # v6 branch. Re-stamp correction is live (v6 is still cite or
+                    # refuse, and a corrected claim is a CITED claim); the
+                    # uncited-downgrade path is not. Serving uncited prose is
+                    # v7's policy, and v7 gets there through selective=True
+                    # above.
+                    correct=True,
+                    downgrade_uncited=False,
+                )
     else:
-        admitted = admit_turn(answer, passages=evidence_passages, question=question)
+        with stage("gate"):
+            admitted = admit_turn(answer, passages=evidence_passages, question=question)
 
     if isinstance(admitted, GateFailure):
         # A parse failure asserts something about the MACHINE, never about the
@@ -3411,7 +3451,8 @@ def _synthesize_and_admit(
     decline_text: str | None = None
     decline_guard: str | None = None
     if admitted.verdict == tg.VERDICT_CONVERSATIONAL_DECLINE:
-        decline_text, decline_guard = tg.render_decline(admitted)
+        with stage("gate"):
+            decline_text, decline_guard = tg.render_decline(admitted)
         if decline_guard is not None:
             # The parser and the gate disagreed (a caller passing kinds that do
             # not match the texts) and defense in depth fired. Never serves the
@@ -3527,7 +3568,8 @@ def _synthesize_and_admit(
             guide=False,
         )
 
-    rendered_answer = tg.render_answer(admitted)
+    with stage("gate"):
+        rendered_answer = tg.render_answer(admitted)
     # Enrich once, here, so the SAME citations reach the audit row, the chat
     # history and the wire. Doing it on the response path only was what made
     # provenance decay on reload.
@@ -3614,9 +3656,12 @@ def ask_core(
     (answer, refusal, clarify, meta, error) returns a triple and the ``ask()``
     shell -- later, the Go control plane -- performs the writes. Reads are
     allowed: retrieval reads the vector store, the resolver reads products, and
-    session context arrives through the two shell-owned loaders, invoked lazily
-    at exactly the pre-split call points so turns that never carry context over
-    still skip the reads.
+    session context arrives through the two shell-owned loaders, called at
+    exactly the pre-split call points. WHETHER those calls are lazy is the
+    shell's business, not the core's: ``compute_turn`` passes readers that fire
+    the DB read on first need, so a turn that never carries context over still
+    skips it, while ``ask()`` passes constants over context the single
+    transaction that opened the turn already read.
 
     Args:
         question: The user's literal question.
@@ -3819,7 +3864,12 @@ def ask_core(
             route_json["retrieval"] = cast(RetrievalBlock, dict(state.retrieval_block))
         if route_extra:
             route_json.update(route_extra)
-        _finalize_route_shadow(reason=reason, response_mode=response_mode)
+        # Wrapped at the CALL SITE rather than in the body: the body is ~45
+        # lines and a with-block there would reindent all of it for no behavior
+        # change. This span is the last route work a declining turn does, and
+        # it closes before the guidance span below opens.
+        with stage("route"):
+            _finalize_route_shadow(reason=reason, response_mode=response_mode)
         _attach_route_shadow(state, route_json)
         kw.setdefault("model_name", model_name)
         outcome, audit = maker(
@@ -3878,9 +3928,14 @@ def ask_core(
             audit.model_name = router_model_name
             log.info("llm_prompt", role="router", **QUERY_GUIDANCE_PROMPT.log_fields())
             try:
-                guide_response = _complete_structured(
-                    get_llm_provider(role="router"), request.messages, max_tokens=600
-                )
+                # INSIDE the existing try, so the D1ResidencyError re-raise and
+                # the generic provider-error handler below are untouched. A
+                # router that times out still records a large guidance_ms
+                # instead of vanishing into the unattributed remainder.
+                with stage("guidance"):
+                    guide_response = _complete_structured(
+                        get_llm_provider(role="router"), request.messages, max_tokens=600
+                    )
             except D1ResidencyError:
                 # Same fail-closed residency behavior as grounded synthesis: the
                 # outer audited pipeline boundary converts this into status=error.
@@ -3968,15 +4023,19 @@ def ask_core(
             or None
         )
         log.info("llm_prompt", role="router", **ROUTE_PROMPT.log_fields())
-        state.route_shadow = observe_route(
-            provider_factory=lambda: get_llm_provider(role="router"),
-            configured_model_name=current_model_name(role="router"),
-            configured_mode=settings.route_call_mode,
-            question=question,
-            recent_turns=_route_history(route_shadow_recent_turns),
-            trusted_product_context=trusted_product,
-            max_tokens=settings.route_call_max_tokens,
-        )
+        # REGWATCH_ROUTE_CALL=shadow is live in prod, so this is a full router
+        # round trip on every turn. The dotted child isolates it from the
+        # deterministic route work that shares the parent key.
+        with stage("route"), stage("route.model"):
+            state.route_shadow = observe_route(
+                provider_factory=lambda: get_llm_provider(role="router"),
+                configured_model_name=current_model_name(role="router"),
+                configured_mode=settings.route_call_mode,
+                question=question,
+                recent_turns=_route_history(route_shadow_recent_turns),
+                trusted_product_context=trusted_product,
+                max_tokens=settings.route_call_max_tokens,
+            )
         if context_failures:
             state.route_shadow.audit["context_failures"] = context_failures
         if state.route_shadow.error is not None:
@@ -3998,7 +4057,8 @@ def ask_core(
     if not isinstance(routed, TurnState):
         return routed
 
-    _finalize_route_shadow(reason="retrieval", response_mode=state.response_mode)
+    with stage("route"):
+        _finalize_route_shadow(reason="retrieval", response_mode=state.response_mode)
 
     grouped = _retrieve_and_group(
         state,
@@ -4113,7 +4173,7 @@ def ask(
             invisible to /sessions. That is for internal callers like the
             dossier, whose synthetic Q&A must not appear in the caller's chat
             history.
-        origin: Forwarded to ``ensure_session``, landing ONLY when the session row
+        origin: Forwarded to ``open_turn``, landing ONLY when the session row
             is newly CREATED this call; an existing session's origin never
             changes underneath it (issue #208). "assistant" means the
             conversation is kept (readable, deletable) but stays out of the work
@@ -4162,51 +4222,40 @@ def ask(
     # remainder (persistence included), which is the number this exists to
     # expose.
     with collect_stage_timings() as timings:
-        # Session bookkeeping is best-effort: a DB hiccup here must never stop the query
-        # from being processed and audited (INV-6). Degrade to a fresh id on failure.
-        # The user-message write stays HERE, before compute, so a core exception still
-        # leaves the question in the chat history exactly as before the split.
-        try:
-            with stage("session_write"):
-                session_id = ensure_session(
-                    session_id, user_id=user_id if bind_session else None, origin=origin
-                )
-                turn_id = turn_id or new_turn_id()
-                record_message(
-                    session_id=session_id,
-                    turn_id=turn_id,
-                    role="user",
-                    content=question,
-                    filters=filters,
-                )
-        except SessionOwnershipError:
-            # Lost an ownership race after the API's pre-check. Abort rather than
-            # write this caller's turns into another user's session (the API maps
-            # this to its ownership 404).
-            raise
-        except SessionOriginError:
-            # An origin outside SESSION_ORIGINS: a programming error in the caller
-            # (the API boundary already validates), not the transient DB hiccup the
-            # generic degrade below exists for. Propagate -- folding it into a
-            # fresh-id degrade would hide the bad call instead of surfacing it.
-            # Caught by its own type, not by ValueError: the try also wraps the
-            # record_message write, and re-raising every ValueError from there
-            # would narrow that degrade path for reasons unrelated to origin.
-            raise
-        except Exception:
-            log.warning("session_setup_failed", exc_info=True)
-            turn_id = turn_id or new_turn_id()
-            # Degrade to a FRESH id, never the requested one: after a failed bind
-            # (e.g. a lost create race on a client-chosen id) the requested session
-            # may belong to someone else, so later writes must not target it.
-            session_id = turn_id
+        # ONE transaction opens the turn: the session upsert, the user-message
+        # write, and both context reads. Still best-effort -- a DB hiccup here
+        # must never stop the query being processed and audited (INV-6), so
+        # open_turn degrades to a fresh id with empty context -- but now atomic,
+        # so a mid-way failure leaves no orphan session row behind. The
+        # user-message write stays HERE, before compute, so a core exception
+        # still leaves the question in the chat history exactly as before the
+        # split. SessionOwnershipError and SessionOriginError propagate out of
+        # open_turn untouched: they are caller bugs, not the DB hiccup the
+        # degrade exists for.
+        #
+        # The stage is named session_open, not session_write: the span now
+        # covers two reads as well as the two writes, and session_write_ms is
+        # already being differenced against latency_ms on historical rows, so
+        # redefining that key in place would make before/after rows quietly
+        # incomparable.
+        with stage("session_open"):
+            ctx = open_turn(
+                question=question,
+                session_id=session_id,
+                turn_id=turn_id,
+                user_id=user_id if bind_session else None,
+                origin=origin,
+                filters=filters,
+                recent_limit=3,
+            )
+        sid, tid = ctx.session_id, ctx.turn_id
 
         # Session context enters the core through loaders the SHELL owns (the core
-        # never touches conversation storage). The loader bodies resolve
-        # get_session_filters/get_recent_turns as module globals at CALL time so
-        # tests that monkeypatch them on this module keep working; a future HTTP
-        # shell passes constants over pre-loaded request data instead.
-        sid, tid = session_id, turn_id
+        # never touches conversation storage). On the RELAY path they are constants
+        # over data open_turn already loaded -- exactly the "a future HTTP shell
+        # passes pre-loaded request data" case the core was designed for -- so the
+        # module-global monkeypatch contract holds for compute_turn's loaders only,
+        # and a test that needs to intercept this path patches conv.open_turn.
         try:
             outcome, audit, patch = ask_core(
                 question,
@@ -4215,8 +4264,8 @@ def ask(
                 filters=filters,
                 k=k,
                 user_id=user_id,
-                load_session_filters=lambda: get_session_filters(sid),
-                load_recent_turns=lambda: get_recent_turns(sid, limit=3, exclude_turn_id=tid),
+                load_session_filters=lambda: ctx.filters,
+                load_recent_turns=lambda: ctx.recent_turns,
                 on_progress=on_progress,
                 on_draft=on_draft,
                 on_draft_reset=on_draft_reset,
@@ -4275,11 +4324,41 @@ def compute_turn(
     """
     get_settings()
     current_model_name(role="synthesizer")
+
+    context_memo: TurnContext | None = None
+
+    def _session_context() -> TurnContext:
+        """Reads both halves of this turn's session context, at most once.
+
+        Go already wrote the session row, so there is no write here to
+        piggyback on -- but the two reads ask_core needs still share one
+        transaction instead of opening one each. Fired on FIRST NEED by either
+        loader, so a turn that branches early (greeting, meta) still pays
+        nothing at all.
+
+        Timed as a TOP-LEVEL stage: every ask_core site that can trigger it
+        sits outside the retrieve and synthesis spans, so it is sequential with
+        them and measured_total_ms stays a true sum. Nesting it inside either
+        span would double-count it.
+
+        Returns:
+            The turn's carry-over filters and conversation memory, empty on a
+            degraded read.
+        """
+        nonlocal context_memo
+        if context_memo is None:
+            with stage("session_context"):
+                context_memo = read_turn_context(
+                    session_id=session_id, turn_id=turn_id, recent_limit=3
+                )
+        return context_memo
+
     # The native path is where production traffic actually flows, so it gets
     # the same stage timings as the relay path. Go owns the write, and it
     # persists this route_json verbatim, so the block reaches query_log
-    # unchanged. There is no session_write stage here: Go performed that write
-    # before calling, and its own timing belongs to Go.
+    # unchanged. There is no session_open stage here: Go performed that write
+    # before calling, and its own timing belongs to Go. The reads this path
+    # does own are stamped as session_context.
     with collect_stage_timings() as timings:
         try:
             outcome, audit, patch = ask_core(
@@ -4289,10 +4368,8 @@ def compute_turn(
                 filters=filters,
                 k=k,
                 user_id=user_id,
-                load_session_filters=lambda: get_session_filters(session_id),
-                load_recent_turns=lambda: get_recent_turns(
-                    session_id, limit=3, exclude_turn_id=turn_id
-                ),
+                load_session_filters=lambda: _session_context().filters,
+                load_recent_turns=lambda: _session_context().recent_turns,
             )
         except Exception as exc:
             log.warning("qa_pipeline_error", error=str(exc), error_type=type(exc).__name__)

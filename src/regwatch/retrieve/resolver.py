@@ -31,6 +31,7 @@ from sqlalchemy import func, or_
 from sqlmodel import select
 
 from regwatch.common.logging import get_logger
+from regwatch.common.stage_timing import timed_stage
 from regwatch.common.text_normalize import canonical_name, split_ingredients, stripped_name
 from regwatch.store.db import session_scope
 from regwatch.store.models import FdaDocument
@@ -221,6 +222,7 @@ def _is_comparison(q: str) -> bool:
     return any(re.search(rf"\b{re.escape(tok)}\b", q) for tok in _COMPARISON_TOKENS)
 
 
+@timed_stage("route")
 def resolve_product(
     question: str,
     *,
@@ -230,6 +232,11 @@ def resolve_product(
 
     ``products`` defaults to the distinct ``normalized_name`` values in the
     vector store (injectable for tests). See module docstring for the contract.
+
+    Timed at the LEAF rather than at its call sites: one of the three is inside
+    a boolean ``if`` condition (the meta gate) that cannot take a with-block
+    without restructuring it. Every call site is sequential with the retrieve
+    and synthesis spans, so ``route`` stays summable.
     """
     known = products if products is not None else distinct_metadata_values("normalized_name")
     if not known:

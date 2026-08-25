@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from config.settings import get_settings
-from sqlalchemy import desc, func, inspect
+from sqlalchemy import desc, func
 from sqlmodel import col, select
 
 from regwatch.common.stage_timing import stage
@@ -25,7 +25,7 @@ from regwatch.process.embedder import (
 )
 from regwatch.retrieve.mode import RetrievalMode, RetrievalScope, default_mode_for_scope
 from regwatch.sources.policy import allowed_source_families
-from regwatch.store.db import get_engine, session_scope
+from regwatch.store.db import session_scope, table_exists
 from regwatch.store.models import PsgDocument, PsgVersion
 from regwatch.store.vector_store import (
     Hit,
@@ -132,9 +132,7 @@ def _current_version_ids_for_filters(filters: dict[str, Any] | None) -> list[int
     real app, once `psg_document` exists, normal retrieval must be scoped to the
     latest `psg_version` rows so superseded chunks cannot be cited.
     """
-    engine = get_engine()
-    inspector = inspect(engine)
-    if not inspector.has_table("psg_document") or not inspector.has_table("psg_version"):
+    if not table_exists("psg_document") or not table_exists("psg_version"):
         return None
 
     filters = filters or {}

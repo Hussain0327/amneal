@@ -25,6 +25,15 @@ import (
 // pool WITHOUT them would quietly reintroduce that incident class. Same env
 // names, same defaults, same "empty or 0 disables" semantics as
 // config/settings.py, so one ops override reaches both runtimes.
+//
+// Pool sizing and liveness are deliberately NOT set below, so pgx's defaults
+// apply: MaxConns max(4, NumCPU), MaxConnLifetime 1h, MaxConnIdleTime 30m,
+// HealthCheckPeriod 1m, and a checkout ping only when IdleDuration > 1s.
+// Python now uses that same idle-gated ping policy in place of SQLAlchemy's
+// pool_pre_ping, but with a 30s gate (DB_POOL_IDLE_PING_S) rather than pgx's
+// 1s: Python's is a deliberate latency choice sized against Lakebase's 60s
+// minimum scale-to-zero suspend, while pgx's 1s is simply its default. The two
+// numbers differ on purpose -- do not "fix" one to match the other.
 const (
 	defaultStatementTimeout = "30s" // DB_STATEMENT_TIMEOUT
 	defaultIdleInTxTimeout  = "60s" // DB_IDLE_IN_TX_TIMEOUT

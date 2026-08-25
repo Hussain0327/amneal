@@ -35,7 +35,7 @@ import pytest
 from sqlmodel import col, select
 
 from regwatch.common.audit import log_query
-from regwatch.common.conversation import record_message, update_session_filters
+from regwatch.common.conversation import open_turn, record_message, update_session_filters
 from regwatch.generate import grounded_qa as qa_mod
 from regwatch.generate.rag_contract import AuditPayload, RagOutcome, SessionPatch
 from regwatch.process.embedder import get_embedding_provider
@@ -48,16 +48,18 @@ from tests.test_invariants import _meta, _seed_corpus, _stub_llm
 pytestmark = pytest.mark.invariants
 
 # Everything in grounded_qa that persists (writes) plus the module-level session
-# READ functions: the core must reach session context ONLY through the injected
+# READ seam: the core must reach session context ONLY through the injected
 # loaders, so touching any of these from inside ask_core is a purity breach.
+# `open_turn` is the shell's opening transaction (session upsert + user message
+# + both reads) and `read_turn_context` is the native path's combined read; the
+# two per-helper readers no longer exist in this module's namespace.
 _FORBIDDEN_IN_CORE = (
     "log_query",
     "_log_query_or_skip",
-    "ensure_session",
+    "open_turn",
     "record_message",
     "update_session_filters",
-    "get_session_filters",
-    "get_recent_turns",
+    "read_turn_context",
 )
 
 
@@ -225,6 +227,13 @@ def test_shell_write_order_audit_before_assistant_message(
         events.append(("log_query", audit_id))
         return audit_id
 
+    def _rec_open(**kw: Any) -> Any:
+        # The user row is written inside open_turn's single opening
+        # transaction now, not through record_message, so the ordering probe
+        # sits on that seam instead.
+        events.append(("message:user", None))
+        return open_turn(**kw)
+
     def _rec_msg(**kw: Any) -> str:
         events.append((f"message:{kw['role']}", kw.get("audit_id")))
         return record_message(**kw)
@@ -234,6 +243,7 @@ def test_shell_write_order_audit_before_assistant_message(
         update_session_filters(session_id, filters)
 
     monkeypatch.setattr(qa_mod, "log_query", _rec_log)
+    monkeypatch.setattr(qa_mod, "open_turn", _rec_open)
     monkeypatch.setattr(qa_mod, "record_message", _rec_msg)
     monkeypatch.setattr(qa_mod, "update_session_filters", _rec_update)
 

@@ -12,6 +12,7 @@ pre-Postgres era.
 from __future__ import annotations
 
 import importlib.util
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,9 +21,11 @@ from threading import Lock
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from config.settings import Settings, get_settings
-from sqlalchemy import Engine, inspect, text
+from sqlalchemy import Engine, event, inspect, text
 from sqlalchemy.engine import URL, make_url
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.engine.interfaces import DBAPIConnection
+from sqlalchemy.exc import DBAPIError, InvalidatePoolError
+from sqlalchemy.pool import ConnectionPoolEntry, PoolProxiedConnection
 from sqlmodel import Session, SQLModel, create_engine
 
 from regwatch.common.logging import get_logger
@@ -49,6 +52,11 @@ _provider_asserted = False
 # non-empty. Written only by _record_unprotected_tables; read via
 # unprotected_public_tables().
 _unprotected_tables: tuple[str, ...] = ()
+# Tables PROVEN to exist in this process (see table_exists). Presence only: a
+# table can appear under a running process, but nothing drops one under a live
+# app, so a cached True stays true while a cached False would latch a hot
+# process into the catalog-absent branch forever.
+_known_tables: set[str] = set()
 
 # K4: the pgvector chunk store. The embedding column is raw DDL (the `vector`
 # type comes from the pgvector extension); everything else is the chunk
@@ -223,10 +231,21 @@ def _pg_connect_args(s: Settings) -> dict[str, str | int]:
 
     ``connect_timeout`` (store-1) bounds the TCP/TLS handshake to the public
     Lakebase endpoint. The GUC ``options`` only take effect AFTER a session
-    exists, and ``pool_pre_ping`` opens a fresh connection on every checkout —
-    so without this keyword a stalled handshake hangs the request thread
-    forever. psycopg v3 honors the libpq ``connect_timeout`` keyword natively;
-    it is integer seconds, and '0'/'' omits it (handshake unbounded).
+    exists, and the checkout liveness listener (_register_pool_idle_ping) opens
+    a fresh connection whenever its ping fails, so without this keyword a
+    stalled handshake hangs the request thread forever. psycopg v3 honors the
+    libpq ``connect_timeout`` keyword natively; it is integer seconds, and
+    '0'/'' omits it (handshake unbounded).
+
+    ``keepalives*`` bound the other stall: a connection PARKED in the pool whose
+    peer vanished silently. See the block that sets them.
+
+    Note the case none of this covers, unchanged by the move off pool_pre_ping:
+    ``idle_in_transaction_session_timeout`` (60 s, the 2026-06-18 fix) lets the
+    server kill a connection that is CHECKED OUT. No checkout-time liveness
+    check ever saw that -- pre-ping did not either. It is detected by
+    ``is_disconnect`` on the next statement, and the broken connection is
+    discarded rather than parked, so it can never be handed to a later checkout.
     """
     args: dict[str, str | int] = {}
     opts = [
@@ -245,6 +264,16 @@ def _pg_connect_args(s: Settings) -> dict[str, str | int]:
         # Integer seconds per libpq; a non-numeric value is operator config rot
         # — fail loudly at engine construction rather than silently unbounded.
         args["connect_timeout"] = int(connect_timeout)
+    if s.db_keepalives_idle_s > 0:
+        # A pooled connection can sit parked for db_pool_recycle_s (1800 s) on
+        # the public Fly -> Lakebase path. TCP keepalives hold NAT/firewall
+        # state open and make the kernel declare a vanished peer dead within
+        # idle + 3*10 s, so the next ping or statement fails immediately instead
+        # of blocking a request thread on TCP retransmission.
+        args["keepalives"] = 1
+        args["keepalives_idle"] = s.db_keepalives_idle_s
+        args["keepalives_interval"] = 10
+        args["keepalives_count"] = 3
     return args
 
 
@@ -264,26 +293,130 @@ def _migration_connect_args(s: Settings) -> dict[str, str]:
     return {"options": f"-c lock_timeout={lock_timeout}"}
 
 
+# Key under which the checkin timestamp is parked in ConnectionPoolEntry.info.
+# That dict lives exactly as long as the underlying DBAPI connection --
+# SQLAlchemy clears it whenever a connection is replaced -- which is why a
+# MISSING stamp safely means "brand new connection, cannot be stale".
+_POOL_IDLE_STAMP = "_rw_pool_last_checkin"
+
+
+def _ping_pooled_connection(engine: Engine, dbapi_connection: DBAPIConnection) -> None:
+    """Round-trips one pooled connection, or raises to force a reconnect.
+
+    Args:
+        engine: Engine whose dialect issues the ping (``SELECT 1`` on psycopg).
+        dbapi_connection: The raw pooled connection about to be handed out.
+
+    Raises:
+        InvalidatePoolError: The connection did not answer. Deliberate parity
+            with what ``pool_pre_ping`` itself raised, so ONE failed ping
+            discards the whole stale pool generation instead of every other
+            parked connection failing in turn at its own checkout.
+    """
+    try:
+        alive = engine.dialect.do_ping(dbapi_connection)
+    except Exception as exc:
+        # Dialect.do_ping RAISES on a dead socket (it is the private
+        # _do_ping_w_event wrapper that swallows disconnects into False), and a
+        # non-DBAPI error escaping here would poison every checkout in the
+        # process. Convert everything into the reconnect path.
+        raise InvalidatePoolError() from exc
+    if not alive:
+        raise InvalidatePoolError()
+
+
+def _register_pool_idle_ping(engine: Engine, idle_ping_s: int) -> None:
+    """Arms a checkout liveness ping gated on how long the connection idled.
+
+    The replacement for ``pool_pre_ping``: stamp a monotonic timestamp on
+    checkin, and on checkout ping only when the connection has been parked for
+    at least ``idle_ping_s``. Every checkout inside one request follows its
+    checkin by milliseconds, so the pings collapse to at most one per lull.
+
+    Registering a checkout listener is what preserves the old safety net:
+    SQLAlchemy arms its checkout retry loop when the pool has a checkout
+    listener OR ``_pre_ping``, so a raised InvalidatePoolError still invalidates
+    the pool generation and transparently reconnects BEFORE the caller's first
+    statement.
+
+    30 s is sized against the most aggressive cutoff the platform allows, not
+    against a measured one: Lakebase guarantees a 24 h idle timeout but suspends
+    a scale-to-zero endpoint after as little as 60 s of inactivity, and a
+    connection used 30 s ago proves the endpoint was awake 30 s ago.
+
+    Args:
+        engine: Engine to attach the pool listeners to. Attach BEFORE the engine
+            is published, or a concurrent checkout runs unguarded.
+        idle_ping_s: Idle seconds required before a checkout pings. 0 or less
+            pings on every checkout -- exactly the old pool_pre_ping behavior,
+            and the rollback that needs no deploy.
+    """
+
+    @event.listens_for(engine, "checkin")
+    def _stamp_idle_start(
+        dbapi_connection: DBAPIConnection | None,
+        connection_record: ConnectionPoolEntry,
+    ) -> None:
+        # checkin dispatches with a None connection when the record was already
+        # invalidated; there is nothing being parked in that case.
+        if dbapi_connection is not None:
+            connection_record.info[_POOL_IDLE_STAMP] = time.monotonic()
+
+    @event.listens_for(engine, "checkout")
+    def _ping_when_idle(
+        dbapi_connection: DBAPIConnection,
+        connection_record: ConnectionPoolEntry,
+        connection_proxy: PoolProxiedConnection,
+    ) -> None:
+        # Total by construction -- a dict get, a float compare, one call -- so
+        # nothing but the ping itself can raise out of a checkout.
+        last_checkin = connection_record.info.get(_POOL_IDLE_STAMP)
+        # A missing stamp means this DBAPI connection was created by this very
+        # checkout, so it cannot have gone stale.
+        if last_checkin is not None and time.monotonic() - float(last_checkin) >= idle_ping_s:
+            _ping_pooled_connection(engine, dbapi_connection)
+        # Re-stamp as a fallback: if checkin never fires (the record is
+        # invalidated mid-scope) an ancient timestamp must not survive.
+        connection_record.info[_POOL_IDLE_STAMP] = time.monotonic()
+
+
 def get_engine() -> Engine:
     global _engine
     if _engine is None:
         with _engine_lock:
             if _engine is None:
                 s = get_settings()
-                # Hosted Postgres (Lakebase DIRECT endpoint — never the
+                # Hosted Postgres (Lakebase DIRECT endpoint, never the
                 # `-pooler` host, which is PgBouncer transaction mode): small
-                # pool, pre-ping to survive server-side recycling, and
-                # per-connection timeouts (see _pg_connect_args) so a stalled
-                # transaction can never hold a lock indefinitely.
-                _engine = create_engine(
+                # pool, and per-connection timeouts (see _pg_connect_args) so a
+                # stalled transaction can never hold a lock indefinitely.
+                #
+                # Liveness is NOT pool_pre_ping. That paid a full round trip on
+                # EVERY checkout: 24 of one traced ask turn's 61 round trips,
+                # 575 ms of its 5.4 s, spent proving a connection returned
+                # milliseconds earlier was still alive. _register_pool_idle_ping
+                # keeps the same check but gates it on actual idleness, and a
+                # checkout listener arms the identical reconnect machinery
+                # pre-ping used. pgx (the Go edge fronting this same endpoint)
+                # has shipped this policy as its default since v5.
+                #
+                # pool_use_lifo keeps a serial workload on ONE hot connection
+                # rather than rotating through five that each go cold, which is
+                # what makes the idle gate actually skip.
+                engine = create_engine(
                     _enforce_sslmode(_required_database_url()),
                     echo=False,
-                    pool_pre_ping=True,
                     pool_size=5,
                     max_overflow=5,
+                    pool_use_lifo=True,
                     pool_recycle=s.db_pool_recycle_s,
                     connect_args=_pg_connect_args(s),
                 )
+                _register_pool_idle_ping(engine, s.db_pool_idle_ping_s)
+                # Publish only once the listeners are attached, still inside
+                # _engine_lock, so no thread can check out from an unlistened
+                # engine.
+                _engine = engine
     return _engine
 
 
@@ -294,6 +427,32 @@ def engine_dialect() -> str:
     somehow not Postgres must be visibly wrong, not silently plausible.
     """
     return get_engine().dialect.name
+
+
+def table_exists(name: str) -> bool:
+    """Whether ``name`` exists, caching PRESENCE only and never absence.
+
+    The asymmetry is deliberate. Tables appear under a running process (the
+    fresh-Postgres create_all + stamp-head bootstrap, test fixtures), so a
+    negative must stay live and keep probing; tables are never dropped under a
+    live app, so a positive can be answered from memory, and a stale positive
+    only produces a loud SQL error. A cached negative is the direction that
+    causes harm: for ``psg_document`` it would silently disable current-version
+    scoping in retrieval and let superseded PSG chunks be cited.
+
+    Args:
+        name: Unqualified table name to probe in the active database.
+
+    Returns:
+        True if the table exists now, or was observed at any earlier point in
+        this process; False otherwise.
+    """
+    if name in _known_tables:
+        return True
+    if not inspect(get_engine()).has_table(name):
+        return False
+    _known_tables.add(name)
+    return True
 
 
 def _alembic_config() -> Config:
@@ -808,6 +967,25 @@ def init_db(*, assert_provider: bool = True) -> None:
 
 @contextmanager
 def session_scope() -> Iterator[Session]:
+    """Yields a Session: commit on clean exit, rollback and re-raise on error.
+
+    Deliberately has NO retry, and must not grow one. The ONLY retry in this
+    stack lives inside SQLAlchemy's checkout (see _register_pool_idle_ping),
+    strictly BEFORE this scope's first statement -- that placement is what makes
+    it idempotent, because a reconnect there cannot replay work that has not run
+    yet. Re-entering this with-body would replay whatever it already committed
+    (a single ask turn commits ~10 times), so a disconnect detected mid-scope
+    must surface to the caller instead. A @contextmanager structurally cannot
+    re-enter its body, so the invariant holds as long as nobody wraps callers in
+    a blanket retry.
+
+    The rollback below cannot mask that error: SQLAlchemy skips the actual
+    ROLLBACK once the pooled connection is known invalid, so the original
+    OperationalError (connection_invalidated=True) is what propagates.
+
+    Yields:
+        A Session bound to the process engine. Always closed.
+    """
     session = Session(get_engine())
     try:
         yield session
@@ -832,6 +1010,9 @@ def reset_for_tests() -> None:
     # The recorded set belongs to the database being swapped out; carrying it
     # into the next one would gate /ready on a finding from a different DB.
     _unprotected_tables = ()
+    # Every schema-dropping fixture routes through here, and the observations
+    # in this set belong to the database being swapped out.
+    _known_tables.clear()
     from regwatch.store import embedding_profiles
 
     embedding_profiles.reset_for_tests()

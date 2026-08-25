@@ -15,6 +15,7 @@ from regwatch.common.stage_timing import (
     collect_stage_timings,
     record_stage,
     stage,
+    timed_stage,
 )
 
 
@@ -75,7 +76,7 @@ def test_nested_stages_are_reported_but_not_double_counted() -> None:
 def test_measured_total_is_wall_clock_coverage_not_sum_of_work() -> None:
     """The contract for `measured_total_ms`, stated as a test.
 
-    Top-level stages are the SEQUENTIAL critical path (session_write ->
+    Top-level stages are the SEQUENTIAL critical path (session_open ->
     retrieve -> synthesis) and may be summed. Anything dotted is a child span
     inside a parent's wall clock and is diagnostic only. This matters because
     siblings can run CONCURRENTLY: embedding and version scoping deliberately
@@ -85,7 +86,7 @@ def test_measured_total_is_wall_clock_coverage_not_sum_of_work() -> None:
     remainder -- the exact quantity this instrument exists to measure.
     """
     with collect_stage_timings() as timings:
-        record_stage("session_write", 180.0)
+        record_stage("session_open", 180.0)
         record_stage("retrieve", 400.0)
         record_stage("retrieve.embed_and_scope", 300.0)
         record_stage("retrieve.vector_search", 100.0)
@@ -172,6 +173,46 @@ def test_worker_threads_do_not_write_into_the_turns_dict() -> None:
     block = timings.as_route_json()
     assert "scope_from_worker_ms" not in block
     assert block["embed_and_scope_ms"] == 20
+
+
+def test_timed_stage_decorator_matches_the_context_manager() -> None:
+    """The decorator form must be `stage()` with different syntax, nothing more.
+
+    It exists only so a long function with early returns (resolve_product) or
+    one called from an expression position (_doc_count) can be instrumented
+    without a reindent. If it swallowed an exception or changed a return value
+    it would be altering turns rather than measuring them -- the two ways
+    instrumentation could do harm.
+    """
+
+    @timed_stage("route")
+    def _resolve(value: int, *, double: bool = False) -> int:
+        """Doc kept so functools.wraps has something to preserve."""
+        return value * 2 if double else value
+
+    @timed_stage("route")
+    def _boom() -> None:
+        raise RuntimeError("resolver down")
+
+    # functools.wraps: the wrapped function stays introspectable.
+    assert _resolve.__name__ == "_resolve"
+    assert _resolve.__doc__ == "Doc kept so functools.wraps has something to preserve."
+
+    # Inert with no scope open, and the return value is untouched.
+    assert _resolve(21, double=True) == 42
+
+    with collect_stage_timings() as timings:
+        assert _resolve(7) == 7
+        try:
+            _boom()
+        except RuntimeError:
+            pass
+        else:  # pragma: no cover - the decorator must never suppress.
+            raise AssertionError("timed_stage suppressed the exception")
+    block = timings.as_route_json()
+    # Both calls landed under the given name, and repeats summed like stage().
+    assert "route_ms" in block
+    assert block["counts"] == {"route": 2}
 
 
 def test_stage_count_is_bounded() -> None:

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from regwatch.store.embedding_profiles import (
@@ -19,6 +20,12 @@ from regwatch.store.embedding_profiles import (
 
 TEST_DATABASE_URL = (os.environ.get("TEST_DATABASE_URL") or "").strip()
 LEGACY_DIM = 1536
+# Substrings that identify the two per-process memos' underlying round trips.
+# Both are the full SELECT prefix, not just a table name: the lazy-schema DDL
+# mentions `embedding_profile` and the bootstrap probes `pg_extension`, so a
+# bare table name would let those make an assertion pass vacuously.
+_PROFILE_SELECT = "FROM embedding_profile WHERE profile_id"
+_EXTENSION_SELECT = "FROM pg_extension e"
 
 
 def _spec(
@@ -124,6 +131,62 @@ def pg_profile_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     pgvector_store.reset_for_tests()
 
 
+@contextmanager
+def _capture(engine: Any) -> Iterator[list[str]]:
+    """Collects every SQL statement executed on ``engine`` inside the block.
+
+    Args:
+        engine: The shared engine; profile search, the lazy-schema sweep and any
+            worker thread all run on it, so one listener sees them all.
+
+    Yields:
+        The live list of statement texts, in execution order.
+    """
+    statements: list[str] = []
+
+    def _record(
+        conn: Any,
+        cursor: Any,
+        statement: str,
+        parameters: Any,
+        context: Any,
+        executemany: Any,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _record)
+    try:
+        yield statements
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+
+
+def _warm_profile_embeddings(vector_store: Any, model: str) -> Any:
+    """Registers one profile over the two seeded chunks and embeds them."""
+    profile = vector_store.register_embedding_profile(_spec(model=model))
+    pending = vector_store.pending_profile_chunks(profile.profile_id)
+    vector_store.upsert_profile_embeddings(
+        profile.profile_id,
+        [chunk.chunk_id for chunk in pending],
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        [chunk.content_hash for chunk in pending],
+    )
+    return profile
+
+
+def _cold_memos_warm_schema() -> None:
+    """Clears both memos while keeping the lazy-schema sweep latched.
+
+    reset_for_tests also drops ``_schema_ready``; re-running ``_ensure_ready``
+    immediately puts the DDL sweep back to where a warm process has it, so the
+    statements captured next can only come from the memoized lookups themselves.
+    """
+    from regwatch.store import embedding_profiles
+
+    embedding_profiles.reset_for_tests()
+    embedding_profiles._ensure_ready()
+
+
 def _seed_two_chunks(vector_store: Any) -> None:
     vector_store.add_chunks(
         ids=["chunk-a", "chunk-b"],
@@ -136,7 +199,7 @@ def _seed_two_chunks(vector_store: Any) -> None:
 def test_profile_registry_is_idempotent_and_database_immutable(
     pg_profile_store: Any,
 ) -> None:
-    from regwatch.store import db
+    from regwatch.store import db, embedding_profiles
 
     spec = _spec()
     first = pg_profile_store.register_embedding_profile(spec)
@@ -154,6 +217,10 @@ def test_profile_registry_is_idempotent_and_database_immutable(
             {"profile_id": first.profile_id},
         )
 
+    # The point of this assertion is that POSTGRES rejected the UPDATE, so it
+    # has to re-read the row. get_embedding_profile memoizes per process; without
+    # this the assert would read RAM and pass no matter what the database did.
+    embedding_profiles.reset_for_tests()
     assert pg_profile_store.get_embedding_profile(first.profile_id) == first
 
 
@@ -572,3 +639,93 @@ def test_boot_coverage_numerator_and_denominator_share_one_universe(
     coverage = embedding_profiles.profile_embedding_coverage(profile.profile_id)
     assert coverage.total_chunks == 1
     assert coverage.embedded_chunks == 1
+
+
+def test_second_profile_search_issues_only_the_search_statements(
+    pg_profile_store: Any,
+) -> None:
+    """A warm profile search must re-ask Postgres nothing it already knows.
+
+    The profile row is trigger-immutable and the pgvector extension does not
+    move schemas under a running process, so both lookups belong in RAM. Only
+    the two statements that actually search may reach the wire.
+    """
+    from regwatch.store import db
+
+    _seed_two_chunks(pg_profile_store)
+    profile = _warm_profile_embeddings(pg_profile_store, "memo-search")
+    _cold_memos_warm_schema()
+    engine = db.get_engine()
+
+    with _capture(engine) as first:
+        hits_first = pg_profile_store.similarity_search_profile(
+            profile.profile_id,
+            [1.0, 0.0, 0.0],
+            k=2,
+        )
+    with _capture(engine) as second:
+        hits_second = pg_profile_store.similarity_search_profile(
+            profile.profile_id,
+            [1.0, 0.0, 0.0],
+            k=2,
+        )
+
+    # Positive control: the cold call really did pay both round trips, so a
+    # listener that never attached cannot fake the assertions below.
+    assert [s for s in first if _PROFILE_SELECT in s]
+    assert [s for s in first if _EXTENSION_SELECT in s]
+
+    assert [s for s in second if _PROFILE_SELECT in s] == []
+    assert [s for s in second if _EXTENSION_SELECT in s] == []
+    assert [s for s in second if "pg_catalog.pg_class" in s] == []
+    assert len(second) == 2
+    assert second[0] == "SET LOCAL enable_indexscan = off"
+    assert "chunk_embedding" in second[1]
+    # The memo must not have short-circuited the search itself.
+    assert [hit.chunk_id for hit in hits_second] == [hit.chunk_id for hit in hits_first]
+    assert [hit.chunk_id for hit in hits_second] == ["chunk-a", "chunk-b"]
+
+
+def test_reset_for_tests_reprobes_profile_and_extension_schema(
+    pg_profile_store: Any,
+) -> None:
+    """Invalidation seam: a DATABASE_URL swap must not serve the old DB's row."""
+    from regwatch.store import db
+
+    _seed_two_chunks(pg_profile_store)
+    profile = _warm_profile_embeddings(pg_profile_store, "memo-reset")
+    engine = db.get_engine()
+    pg_profile_store.similarity_search_profile(profile.profile_id, [1.0, 0.0, 0.0], k=2)
+
+    _cold_memos_warm_schema()
+    with _capture(engine) as after_reset:
+        pg_profile_store.similarity_search_profile(profile.profile_id, [1.0, 0.0, 0.0], k=2)
+
+    assert [s for s in after_reset if _PROFILE_SELECT in s]
+    assert [s for s in after_reset if _EXTENSION_SELECT in s]
+
+
+def test_register_populates_the_cache_and_a_miss_is_never_cached(
+    pg_profile_store: Any,
+) -> None:
+    """Misses stay uncached so register-then-use works inside one process."""
+    from regwatch.store import db, embedding_profiles
+
+    spec = _spec(model="memo-register")
+    with pytest.raises(KeyError):
+        pg_profile_store.get_embedding_profile(spec.profile_id)
+
+    # Asserted on the memo DIRECTLY, because register_embedding_profile
+    # overwrites the entry: a negative cache would be invisible to the
+    # round-trip assertions below, yet in production it would make a profile
+    # another process registers a moment later permanently unresolvable for the
+    # life of the machine, and let an unknown id grow the dict.
+    assert spec.profile_id not in embedding_profiles._profile_cache
+
+    registered = pg_profile_store.register_embedding_profile(spec)
+    engine = db.get_engine()
+    with _capture(engine) as after_register:
+        resolved = pg_profile_store.get_embedding_profile(spec.profile_id)
+
+    assert resolved == registered
+    assert [s for s in after_register if _PROFILE_SELECT in s] == []
