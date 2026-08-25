@@ -25,9 +25,54 @@ jobs:
   # ci-${ref}'s cancel-in-progress. NOTE for branch protection: if required
   # checks pin job names, add "openai-eval / eval" alongside
   # lint-type-test so the eval stays a merge blocker.
+  # Path gate for the live eval (2026-08-25). The eval exercises the Python
+  # retrieval/synthesis path only, so a PR that touches nothing it imports
+  # (frontend, Go, docs, CI plumbing -- ~40% of recent PRs) cannot change its
+  # result, yet every such PR paid ~5 min, live OpenAI tokens, and a slot in
+  # the serialized `openai-eval` concurrency group (run 632 queued 18 min
+  # behind it). Plain git rather than a third-party paths action: this repo
+  # pins every action by SHA and a diff against the PR base is ten lines.
+  # push-to-main and workflow_dispatch always evaluate. The decision is passed
+  # INTO the reusable workflow (input `run`) rather than skipping this caller
+  # job, so the `openai-eval / eval` check run still exists -- as `skipped`,
+  # which branch protection treats as satisfied -- instead of never reporting.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      eval: ${{ steps.filter.outputs.eval }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: decide whether the eval can be affected
+        id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "eval=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # HEAD is the PR merge commit whose first parent is BASE_SHA, so this
+          # diff is exactly the PR's own change set. The public repo needs no
+          # token to fetch one commit by SHA.
+          git fetch --quiet --depth=1 origin "$BASE_SHA"
+          changed="$(git diff --name-only "$BASE_SHA" HEAD)"
+          printf '%s\n' "$changed"
+          if printf '%s\n' "$changed" | grep -qE '^(src/|config/|migrations/|pyproject\.toml$|uv\.lock$|\.github/workflows/(ci|openai-eval)\.yml$)'; then
+            echo "eval=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "eval=false" >> "$GITHUB_OUTPUT"
+          fi
+
   openai-eval:
+    needs: changes
     uses: ./.github/workflows/openai-eval.yml
     with:
+      run: ${{ needs.changes.outputs.eval == 'true' }}
       prose: false
       selective: false
     secrets: inherit
@@ -162,6 +207,9 @@ jobs:
   # into the ONE context branch protection requires, so the required-check
   # name is unchanged.
   docker-image:
+    # Without an explicit name GitHub renders every include value, e.g.
+    # "docker-image (api, ., Dockerfile, regwatch:ci)".
+    name: docker-image (${{ matrix.name }})
     runs-on: ubuntu-latest
     strategy:
       # Every leg reports: a web-image CVE must not hide an API-image one.
