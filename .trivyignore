@@ -60,6 +60,20 @@ GHSA-rgw5-rvv9-x895
 CVE-2026-69192
 GHSA-mwp4-54f8-5fhr
 
+# --- web image: node-tar DoS via crafted long-path archive --------------------
+# usr/local/lib/node_modules/npm/node_modules/tar@7.5.19 (fixed 7.5.21), npm's
+# OWN bundled copy from `npm install -g npm@11.18.0`. Same story as the two
+# entries above: no lockfile reaches it, and as of 2026-08-25 NO npm release
+# bundles a fixed tar -- 11.19.0 (newest 11.x) and 12.0.2 (needs Node >=22)
+# both still ship 7.5.19, so neither a pin bump nor a Node 22 base helps. npm
+# only invokes tar at build time (`npm ci`), on registry tarballs whose
+# integrity package-lock.json pins; the running app (`npm run dev`) never
+# extracts an archive. Denial of service only, not code execution. Drop when
+# npm rebundles tar>=7.5.21 (check: tar -xzO package/node_modules/tar/package.json
+# from the npm tarball).
+CVE-2026-73566
+GHSA-r292-9mhp-454m
+
 # --- web image: Go stdlib CVEs inside esbuild's bundled Go binary ------------
 # esbuild ships as a pre-compiled Go binary (@esbuild/<platform>/bin/esbuild),
 # pulled in transitively by vite/vitest as a dev/build dependency. Trivy flags
