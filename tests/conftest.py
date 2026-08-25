@@ -13,18 +13,28 @@ alembic_version (~33ms). Tests that deliberately wreck the schema (the
 bootstrap suite drops it, stamps wrong revisions, ...) are self-healing for
 their neighbors: each test first checks the alembic stamp and rebuilds the
 schema from scratch only when it is missing or wrong.
+
+Parallelism (pytest-xdist, ``-n N --dist loadfile``): every worker gets its
+OWN database, ``<db>_gw0``, ``<db>_gw1``, ... derived from TEST_DATABASE_URL,
+created on first use next to the base database. The reset model above is
+per-database, so workers cannot wreck each other; ``loadfile`` keeps one
+module's tests on one worker so module-level state stays coherent. The
+worker databases persist between runs on purpose (the stamp check rebuilds
+a stale one) -- drop them like any other disposable test database.
 """
 
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import DBAPIError
 
 from regwatch.common import ratelimit
 from regwatch.process import embedder as embedder_module
@@ -64,7 +74,64 @@ def synth_turn_json(
     )
 
 
-_TEST_DB_URL = (os.environ.get("TEST_DATABASE_URL") or "").strip()
+_BASE_DB_URL = (os.environ.get("TEST_DATABASE_URL") or "").strip()
+# pytest-xdist exports this in every worker process before conftest import;
+# it is unset on the controller and in a plain serial run.
+_XDIST_WORKER = os.environ.get("PYTEST_XDIST_WORKER", "")
+
+
+def _worker_scoped(url: str, worker: str) -> str:
+    """Returns ``url`` with its database name suffixed by the worker id.
+
+    Two workers sharing one database would DROP/TRUNCATE under each other, so
+    each gets ``<db>_<worker>``. A serial run (no worker) keeps ``url``.
+    """
+    if not worker or not url:
+        return url
+    parsed = make_url(url)
+    scoped = parsed.set(database=f"{parsed.database}_{worker}")
+    # str(URL) masks the password; the engine needs the real one.
+    return scoped.render_as_string(hide_password=False)
+
+
+_TEST_DB_URL = _worker_scoped(_BASE_DB_URL, _XDIST_WORKER)
+if _XDIST_WORKER and _TEST_DB_URL:
+    # Nine test modules snapshot TEST_DATABASE_URL at import, and the boot
+    # tests exec a real `regwatch serve`; every one of them must see THIS
+    # worker's database. conftest imports before any test module, so this
+    # rewrite is visible to all of them.
+    os.environ["TEST_DATABASE_URL"] = _TEST_DB_URL
+
+
+def _ensure_worker_database(base_url: str, scoped_url: str) -> None:
+    """Creates this worker's database if it does not exist yet.
+
+    Runs through the base (maintenance) database with autocommit, since
+    CREATE DATABASE cannot run inside a transaction. Retried with backoff
+    because several workers issue it at the same moment on a fresh server
+    and Postgres may report the shared template as in use.
+    """
+    name = make_url(scoped_url).database
+    engine = create_engine(base_url, isolation_level="AUTOCOMMIT")
+    try:
+        for attempt in range(5):
+            try:
+                with engine.connect() as conn:
+                    exists = conn.execute(
+                        text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                        {"name": name},
+                    ).scalar()
+                    if not exists:
+                        conn.execute(text(f'CREATE DATABASE "{name}"'))
+                return
+            except DBAPIError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.5 * (attempt + 1))
+    finally:
+        engine.dispose()
+
+
 # Hosts we accept as "definitely a disposable database". The host .env carries
 # the LIVE production Lakebase URL in DATABASE_URL; this guard makes it
 # structurally impossible for the suite (which drops schemas and truncates
@@ -101,6 +168,8 @@ def pytest_configure(config: pytest.Config) -> None:
             "parameters: libpq gives them precedence over the URL's netloc, "
             "which would bypass the local-host guard."
         )
+    if _XDIST_WORKER:
+        _ensure_worker_database(_BASE_DB_URL, _TEST_DB_URL)
 
 
 def create_user(
