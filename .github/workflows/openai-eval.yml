@@ -3,6 +3,14 @@ name: openai-eval
 on:
   workflow_call:
     inputs:
+      run:
+        description: >-
+          Run the eval at all. ci.yml passes false for PRs whose diff cannot
+          reach the eval path; the job then reports `skipped`, which branch
+          protection accepts, instead of never reporting.
+        type: boolean
+        default: true
+        required: false
       prose:
         description: Enable the v6 prose synthesis arm.
         type: boolean
@@ -45,6 +53,10 @@ concurrency:
 
 jobs:
   eval:
+    # workflow_dispatch has no `run` input, and GitHub's loose comparison
+    # makes an absent input equal to false, so dispatch is allowed through
+    # explicitly rather than by comparing against false.
+    if: ${{ inputs.run || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -101,6 +113,44 @@ jobs:
       - name: sync deps
         run: uv sync --extra dev --extra llm
 
+      # Seeded-corpus cache (2026-08-25). `regwatch seed` crawls the live FDA
+      # catalog (A-Z listing pages + five PSG PDFs) and embeds every chunk
+      # through OpenAI on EVERY run: ~133 s, tokens, and a spurious gate
+      # failure whenever one FDA page 503s. The seeded database is a function
+      # of the ingest/chunk/embed code, the schema, the lockfile, and the
+      # embedding model -- all in the key -- plus the FDA catalog itself,
+      # which the YYYY-MM component re-reads at least monthly. No restore-keys
+      # on purpose: a near-miss is a different code version, and scoring
+      # against it would be measuring the wrong thing. Saved only from
+      # push-to-main runs (PR-scope cache writes are what blew the 10 GB cap);
+      # PRs read main's copy and miss exactly when they change something in
+      # the key, which is when a live re-seed is the right answer.
+      - name: seed cache key
+        id: seedkey
+        run: >-
+          echo "key=eval-seed-${{ hashFiles('src/regwatch/ingest/**', 'src/regwatch/process/**', 'src/regwatch/store/**', 'migrations/**', 'uv.lock') }}-${OPENAI_EMBEDDING_MODEL}-${OPENAI_EMBEDDING_DIMENSION}-$(date -u +%Y-%m)"
+          >> "$GITHUB_OUTPUT"
+
+      - name: restore seeded corpus
+        id: seedcache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: eval-seed
+          key: ${{ steps.seedkey.outputs.key }}
+
+      # Restore BEFORE registration: the dump carries the schema, the
+      # alembic stamp, the profile row, and the embeddings, into an otherwise
+      # empty service database. psql ships on the runner and reads dumps from
+      # a newer pg_dump fine.
+      - name: load seeded corpus (cache hit)
+        if: steps.seedcache.outputs.cache-hit == 'true'
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f eval-seed/corpus.sql
+
+      # Content-addressed and idempotent (the id is a hash of the spec), so on
+      # a cache hit this resolves to the profile the restored embeddings
+      # belong to; on a miss it mints it before the seed.
       - name: register OpenAI embedding profile
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
@@ -113,12 +163,36 @@ jobs:
           echo "EVAL_PROFILE_ID=${profile_id}" >> "${GITHUB_ENV}"
 
       - name: seed vector store
+        if: steps.seedcache.outputs.cache-hit != 'true'
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: |
           set -euo pipefail
           export RETRIEVAL_EMBEDDING_PROFILE="${EVAL_PROFILE_ID}"
           uv run regwatch seed
+
+      # pg_dump must come from the same pg17 lineage as the service (the
+      # runner's own client refuses newer servers), so run it from the
+      # already-pinned service image -- the exact pattern
+      # scripts/gen-store-schema.sh uses. Dumped right after the seed, before
+      # the eval writes its own rows.
+      - name: dump seeded corpus (cache miss)
+        if: steps.seedcache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p eval-seed
+          docker run --rm --network host -e PGPASSWORD=postgres \
+            pgvector/pgvector:pg17 \
+            pg_dump 'postgresql://postgres@localhost:5432/postgres' \
+            --no-owner --no-privileges > eval-seed/corpus.sql
+          ls -l eval-seed
+
+      - name: save seeded corpus (main only)
+        if: github.event_name == 'push' && steps.seedcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: eval-seed
+          key: ${{ steps.seedkey.outputs.key }}
 
       - name: eval OpenAI arm
         env:
