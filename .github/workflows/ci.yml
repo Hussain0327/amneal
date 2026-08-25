@@ -19,12 +19,18 @@ concurrency:
 
 jobs:
   # The blocking live eval, extracted from lint-type-test into its own job
-  # (slm-layer F15) so every live OpenAI eval -- this one and the
-  # workflow_dispatch dark arm -- serializes through ONE non-canceling
-  # concurrency group instead of colliding on workspace QPS or riding
-  # ci-${ref}'s cancel-in-progress. NOTE for branch protection: if required
-  # checks pin job names, add "openai-eval / eval" alongside
-  # lint-type-test so the eval stays a merge blocker.
+  # (slm-layer F15). It USED to serialize every live eval -- this one and the
+  # workflow_dispatch dark arm -- through one non-canceling `openai-eval`
+  # concurrency group, to avoid colliding on the previous provider's
+  # workspace QPS. Dropped 2026-08-25: GitHub keeps at most ONE pending job
+  # per group and cancels the previously pending one when another queues, so
+  # any burst of PRs while a dispatch ran turned a required check red for
+  # nothing (#278 at 15:50Z, #280 at 16:07Z, both `cancelled` with zero
+  # steps). Under the current provider's org-level rate limits a few
+  # concurrent evals are nothing, and the workflow-level ci-${ref} group
+  # above already cancels a superseded run on the same ref. Dispatch runs
+  # keep their own per-event group in openai-eval.yml. Branch protection
+  # requires "openai-eval / eval"; a path-gated skip still satisfies it.
   # Path gate for the live eval (2026-08-25). The eval exercises the Python
   # retrieval/synthesis path only, so a PR that touches nothing it imports
   # (frontend, Go, docs, CI plumbing -- ~40% of recent PRs) cannot change its
@@ -84,9 +90,6 @@ jobs:
       selective: true
       assert_prod_mode: true
     secrets: inherit
-    concurrency:
-      group: openai-eval
-      cancel-in-progress: false
 
   lint-type-test:
     runs-on: ubuntu-latest

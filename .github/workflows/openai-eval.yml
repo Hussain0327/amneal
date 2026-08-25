@@ -47,8 +47,14 @@ on:
 permissions:
   contents: read
 
+# Per event AND ref (2026-08-25), never one shared group: GitHub cancels the
+# previously PENDING job in a group when another queues, which turned PR
+# evals red whenever a dispatch run held the group. Dispatch runs still
+# serialize among themselves (same event, same ref, no cancel); PR and push
+# evals get their own group, and ci.yml's ci-${ref} group handles superseded
+# pushes on the same ref.
 concurrency:
-  group: openai-eval
+  group: openai-eval-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
