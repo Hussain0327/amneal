@@ -8,11 +8,19 @@ name: deploy
 #
 # Required repository secret (Settings -> Secrets and variables -> Actions):
 #   FLY_API_TOKEN   Fly deploy token (`fly tokens create deploy`). Absent =>
-#                   the deploy step fails loudly; nothing partial ships.
+#                   the deploy step fails loudly; nothing partial ships. A
+#                   deploy token may push to the app's own registry
+#                   namespace, which the push step below relies on.
 #
-# The image is re-scanned with Trivy here (same gate as ci.yml's docker-build
-# job) so a CVE/secret that the security DB learned about AFTER CI ran still
-# blocks the release. flyctl then builds remotely and rolls the app machines.
+# Ship-what-you-scanned (2026-08-25): the image is built ONCE here (from the
+# CI layer cache), re-scanned with Trivy (same gate as ci.yml's docker-image
+# job, so a CVE/secret the security DB learned about AFTER CI ran still blocks
+# the release), pushed to registry.fly.io under the commit's SHA, and rolled
+# with `flyctl deploy --image` -- so the bytes Trivy passed are the bytes the
+# machines boot. Until this change flyctl rebuilt the image on Fly's remote
+# builder after the scan: same Dockerfile, but `apt-get upgrade` at build time
+# meant the scanned image and the shipped image were never guaranteed equal,
+# and every deploy paid for two builds.
 
 on:
   workflow_run:
@@ -57,6 +65,12 @@ jobs:
       github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
+    env:
+      # The registry reference the whole job revolves around: built, scanned,
+      # pushed, and deployed under the validated commit's SHA, so the tag on
+      # the running machines names the exact source. head_sha is a trusted
+      # 40-hex git SHA from GitHub context, not attacker-controllable text.
+      IMAGE_REF: registry.fly.io/amneal:sha-${{ github.event.workflow_run.head_sha }}
     steps:
       # Check out the precise commit CI validated. head_sha is a trusted 40-hex
       # git SHA from GitHub context (not attacker-controllable free text), so it
@@ -67,16 +81,34 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
 
+      # Buildx for the GHA layer-cache backend. workflow_run runs in the
+      # default-branch context, which can READ the `api` scope ci.yml's
+      # push-to-main run just refreshed, so the dependency layers are cache
+      # hits; no cache-to (this trigger's saves would silently no-op anyway).
+      - name: set up buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
+
+      # load:true puts the image in the local daemon for Trivy and for the push
+      # below. Both tags name ONE image: `regwatch:deploy` keeps the scan
+      # invocation identical to ci.yml's, IMAGE_REF is what ships.
       - name: docker build (API image)
-        run: docker build -t regwatch:deploy .
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: .
+          load: true
+          tags: |
+            regwatch:deploy
+            ${{ env.IMAGE_REF }}
+          cache-from: type=gha,scope=api
 
       # Restore Trivy's vuln DB (~100MB) so the pre-deploy re-scan reuses the
       # copy ci.yml's push-to-main runs saved, instead of re-downloading it on
       # every deploy. RESTORE-ONLY by design: workflow_run is a low-trust
       # trigger with read-only access to the default-branch cache scope, so a
       # save here would silently no-op -- hence the explicit restore sub-action
-      # and no post-scan chown handoff in this workflow. Trivy still refreshes
-      # the DB when its own metadata says it is past TTL.
+      # and no post-scan chown handoff in this workflow. ci.yml keys the DB per
+      # UTC day; the prefix below restores the newest one. Trivy still
+      # refreshes the DB when its own metadata says it is past TTL.
       - name: restore trivy DB cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -86,11 +118,11 @@ jobs:
             trivy-db-
 
       # Re-scan before shipping, honoring ./.trivyignore. Semantics mirror
-      # ci.yml's docker-build Trivy step EXACTLY: fail on FIXABLE CRITICAL/HIGH
+      # ci.yml's docker-image Trivy step EXACTLY: fail on FIXABLE CRITICAL/HIGH
       # vulns (--ignore-unfixed) plus any embedded secret (--scanners vuln,secret,
       # which ignores --ignore-unfixed and gates the same way). --exit-code 1
-      # fails the job -> no deploy. Trivy caches its DB across runs. Tag pinned
-      # in lockstep with ci.yml (same scanner everywhere -- a finding here that
+      # fails the job -> nothing is pushed, nothing deploys. Tag pinned in
+      # lockstep with ci.yml (same scanner everywhere -- a finding here that
       # CI's scan could not see, or vice versa, would be pure version skew);
       # the vuln DB itself is fetched fresh at scan time, so pinning the tag
       # does not stale the gate. Bump both files together, deliberately.
@@ -120,10 +152,24 @@ jobs:
         with:
           version: "0.4.71"  # no leading v
 
-      # flyctl builds remotely and runs fly.toml [deploy] release_command
-      # (`regwatch release`) before the rolling machine replace. That one-off
-      # command migrates to head, then runs the full serving-readiness guard so
-      # deterministic DB/profile drift aborts before ANY machine is replaced.
+      # Push the scanned image to the app's registry namespace. `flyctl auth
+      # docker` writes a docker credential for registry.fly.io from
+      # FLY_API_TOKEN (env, never inlined). Only reached when the scan above
+      # passed, so the registry never holds an image the gate rejected.
+      - name: push scanned image to registry.fly.io
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          flyctl auth docker
+          docker push "$IMAGE_REF"
+          docker image inspect -f 'pushed {{index .RepoDigests 0}}' "$IMAGE_REF"
+
+      # flyctl rolls the pushed image: it still runs fly.toml [deploy]
+      # release_command (`regwatch release`) in a one-off machine before the
+      # rolling machine replace -- that one-off command migrates to head, then
+      # runs the full serving-readiness guard so deterministic DB/profile drift
+      # aborts before ANY machine is replaced. No remote build happens.
       # The token is passed via env (never inlined) per the
       # workflow-injection-safe pattern.
       #
@@ -132,13 +178,14 @@ jobs:
       # Fly fails to boot the release machine within its ~60s start deadline --
       # the 2026-06-29 incident) and fails fast on everything else. No flyctl
       # flag extends that start deadline, so a bounded retry is the only lever.
+      # With `--image` the wrapper omits its build-location flag.
       - name: flyctl deploy
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         # `bash scripts/...` (not `./scripts/...`) so the deploy never depends on
         # the committed exec bit surviving every checkout/patch path, and matches
         # exactly how the test drives the script.
-        run: bash scripts/fly-deploy.sh
+        run: bash scripts/fly-deploy.sh --image "$IMAGE_REF"
 
       # A green `flyctl deploy` is NOT proof the app is serving. Deploy v137
       # returned 0 while BOTH app machines were crash-looping: fly.toml's
@@ -153,3 +200,12 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: bash scripts/fly-verify-machines.sh wait
+
+      # Observability for the ship-what-you-scanned claim: the image reference
+      # the app is now running, next to IMAGE_REF above, in the same log.
+      - name: show deployed image
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          echo "expected: $IMAGE_REF"
+          flyctl image show -a amneal

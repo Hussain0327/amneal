@@ -291,13 +291,16 @@ What it does, in order:
 
 1. Checks out `workflow_run.head_sha`, the exact commit CI validated, even if
    `main` has since moved on.
-2. Rebuilds the API image and re-scans it with the same pinned
+2. Builds the API image once (from the `api` layer-cache scope CI's
+   push-to-main run refreshed) and re-scans it with the same pinned
    `aquasec/trivy:0.72.0` gate CI used, so a CVE or secret the vuln DB learned
    about after CI ran still blocks the release.
-3. Deploys with flyctl (the binary is pinned to `0.4.71`, not just the installer
-   action), wrapped in `scripts/fly-deploy.sh`, which retries only transient Fly
-   platform errors such as "machine still starting" and fails fast on everything
-   else.
+3. Pushes the scanned image to `registry.fly.io/amneal:sha-<commit>` and deploys
+   it by reference with flyctl (the binary is pinned to `0.4.71`, not just the
+   installer action), wrapped in `scripts/fly-deploy.sh`, which retries only
+   transient Fly platform errors such as "machine still starting" and fails fast
+   on everything else. No remote build happens: the bytes Trivy passed are the
+   bytes the machines boot, and the job logs `flyctl image show` after the roll.
 4. Fly runs `fly.toml [deploy] release_command = "regwatch release"` in a
    one-off machine before the rolling replace. It migrates the live schema to
    the build's head and then runs the full serving-readiness guard, so profile
