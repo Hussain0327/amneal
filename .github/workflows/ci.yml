@@ -68,13 +68,21 @@ jobs:
             echo "eval=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # The gate scores what PRODUCTION serves (2026-08-25): prose synthesis +
+  # selective citation, asserted against config/prod_mode.json so a drift
+  # between the two fails the run instead of silently scoring a retired arm.
+  # Until this flip the blocking eval ran the v5 arm while prod had served v7
+  # since 2026-08-10. Cleared by dispatch run 32868188531 (dark-eval
+  # scorecard v7: n=62, recall@k 0.88, faithfulness 0.86, refusal accuracy
+  # 0.89, 0 forbidden violations, thresholds green).
   openai-eval:
     needs: changes
     uses: ./.github/workflows/openai-eval.yml
     with:
       run: ${{ needs.changes.outputs.eval == 'true' }}
-      prose: false
-      selective: false
+      prose: true
+      selective: true
+      assert_prod_mode: true
     secrets: inherit
     concurrency:
       group: openai-eval
