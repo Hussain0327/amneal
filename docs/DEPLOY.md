@@ -281,9 +281,10 @@ recommended: without it the app boots but logs a loud
 ### 3.3 Deploy
 
 The normal path is automatic. Every green `ci` run on `main` triggers
-`deploy.yml`, which rebuilds the image, re-scans it with Trivy, and ships via
-`scripts/fly-deploy.sh`. Fly runs the migration release command first (see
-section 2). The current release is **v104**, deployed 2026-08-10.
+`deploy.yml`, which builds the image once, re-scans it with Trivy, pushes it to
+`registry.fly.io/amneal:sha-<commit>`, and ships that exact image via
+`scripts/fly-deploy.sh --image`. Fly runs the migration release command first
+(see section 2). The current release is **v104**, deployed 2026-08-10.
 
 Manual deploys (`fly deploy`, or `bash scripts/fly-deploy.sh` from the exact
 commit) are for recovery only.

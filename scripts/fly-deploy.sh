@@ -31,6 +31,11 @@
 #   FLY_DEPLOY_BASE_DELAY_SECONDS  backoff base; <=0 disables the sleep (def 15)
 #   FLY_DEPLOY_MAX_DELAY_SECONDS   backoff cap in seconds (default 60)
 #
+# BUILD MODE: with no `--image`, flyctl builds on Fly's remote builder
+# (--remote-only). With `--image REF` (deploy.yml since 2026-08-25) there is
+# no build at all -- flyctl rolls the already-pushed, already-scanned image --
+# so the build flag is omitted; the retry contract is identical either way.
+#
 # Run from the repo root (where fly.toml lives); the deploy workflow does.
 set -euo pipefail
 
@@ -51,8 +56,9 @@ MAX_DELAY_SECONDS="${FLY_DEPLOY_MAX_DELAY_SECONDS:-60}"
 # reads "release_command failed running on machine ..." and is not matched here.
 # Matched case-insensitively against the whole captured deploy output.
 #
-# The 50x branch exists for Fly control-plane / remote-builder gateway blips
-# (deploys run `flyctl deploy --remote-only`), whose flyctl error shape is a Go
+# The 50x branch exists for Fly control-plane / builder / registry gateway
+# blips (the machines API, and registry.fly.io on `--image` deploys), whose
+# flyctl error shape is a Go
 # HTTP error: the API host, then the status, ADJACENTLY ("Post
 # https://api.machines.dev: 503 Service Unavailable"). Host-anchored 2026-07-16:
 # a bare 50x phrase also matches an echoed health-CHECK body -- the live
@@ -91,6 +97,19 @@ is_transient_error() {
   grep -qiE "$TRANSIENT_ERROR_RE" "$1"
 }
 
+# Exit 0 (true) iff the argv deploys a prebuilt image (`--image REF`,
+# `--image=REF`, or `-i REF`), in which case flyctl must not be told how to
+# build.
+deploys_prebuilt_image() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --image|--image=*|-i) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # Seconds to wait before the next attempt: capped exponential backoff with full
 # jitter. $1 is the 1-based attempt number. Echoes 0 when backoff is disabled
 # (BASE_DELAY_SECONDS<=0), which the test uses to run without sleeping.
@@ -111,9 +130,14 @@ backoff_seconds() {
 
 main() {
   local outfile attempt rc delay
+  local -a build_flags=()
   outfile="$(mktemp "${TMPDIR:-/tmp}/fly-deploy.XXXXXX")"
   # shellcheck disable=SC2064  # expand outfile now: it is fixed for this run.
   trap "rm -f '$outfile'" EXIT
+
+  if ! deploys_prebuilt_image "$@"; then
+    build_flags=(--remote-only)
+  fi
 
   attempt=1
   while : ; do
@@ -123,7 +147,9 @@ main() {
     # can classify the failure). PIPESTATUS[0] preserves flyctl's real exit code
     # past the tee. set +e so a nonzero deploy doesn't trip `set -e` here.
     set +e
-    flyctl deploy --remote-only "$@" 2>&1 | tee "$outfile"
+    # ${arr[@]+"${arr[@]}"}: expands to nothing when the array is empty
+    # without tripping `set -u` on bash 3.2 (macOS /bin/bash runs the test).
+    flyctl deploy ${build_flags[@]+"${build_flags[@]}"} "$@" 2>&1 | tee "$outfile"
     rc="${PIPESTATUS[0]}"
     set -e
 

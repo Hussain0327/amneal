@@ -85,8 +85,9 @@ def _run(
     fail_message: str,
     fail_messages: str | None = None,
     max_attempts: int = 3,
+    script_args: tuple[str, ...] = (),
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-    """Invoke fly-deploy.sh with a stub ``flyctl`` first on PATH."""
+    """Invoke fly-deploy.sh (with ``script_args``) and a stub ``flyctl`` first on PATH."""
     bindir, log, counter = _make_flyctl_stub(tmp_path)
     env = dict(os.environ)
     env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
@@ -99,7 +100,11 @@ def _run(
     env["FLY_DEPLOY_MAX_ATTEMPTS"] = str(max_attempts)
     env["FLY_DEPLOY_BASE_DELAY_SECONDS"] = "0"  # never sleep in tests
     proc = subprocess.run(
-        ["bash", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=60
+        ["bash", str(SCRIPT), *script_args],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     invocations = log.read_text().splitlines() if log.exists() else []
     return proc, invocations
@@ -110,6 +115,30 @@ def test_succeeds_first_attempt_without_retry(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     assert len(invocations) == 1, invocations
     assert invocations[0] == "deploy --remote-only"
+
+
+@pytest.mark.parametrize(
+    "image_args",
+    [
+        ("--image", "registry.fly.io/amneal:sha-abc123"),
+        ("--image=registry.fly.io/amneal:sha-abc123",),
+        ("-i", "registry.fly.io/amneal:sha-abc123"),
+    ],
+    ids=["long", "long-equals", "short"],
+)
+def test_prebuilt_image_deploy_omits_remote_only(
+    tmp_path: Path, image_args: tuple[str, ...]
+) -> None:
+    """deploy.yml ships the image CI already built and scanned. With --image
+    there is nothing to build, so the build-location flag must not be sent; the
+    args are otherwise forwarded verbatim and the retry contract still applies."""
+    proc, invocations = _run(
+        tmp_path, fail_times=1, fail_message=TRANSIENT_MSG, script_args=image_args
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(invocations) == 2, invocations  # transient retry still works
+    assert invocations[0] == "deploy " + " ".join(image_args)
+    assert "--remote-only" not in invocations[0]
 
 
 @pytest.mark.parametrize(
