@@ -40,14 +40,55 @@ RUN go build -trimpath -ldflags "-s -w" -o /usr/local/bin/regwatch-proxy ./cmd/p
 # so pin the exact multi-arch index digest for a reproducible, tamper-evident
 # build. Bump the digest; resolve with:  docker manifest inspect python:3.12-slim
 # (the index/list digest, not a per-arch child). Keep PYTHON_VERSION as
-# documentation only.
+# documentation only. The SAME digest is used for both Python stages below so
+# the .venv built in one runs unchanged in the other.
 ARG PYTHON_VERSION=3.12
+
+# Python build stage (root, throwaway). Everything that needs a compiler or
+# uv happens here; only /app/.venv crosses into the runtime stage. Two stages
+# instead of one (2026-08-25): the old single-stage image ended with
+# `chown -R regwatch:regwatch /app`, and overlayfs copies every file it
+# re-owns into a NEW layer -- so every commit shipped a second ~290 MB copy of
+# the .venv on top of the cached one, bloating the image and the CI layer
+# cache alike. Here ownership is set by COPY --chown at copy time, which adds
+# no layer, and build-essential never enters the shipped image at all.
+FROM python:3.12-slim@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e AS python-build
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    VIRTUAL_ENV=/app/.venv \
+    PATH="/app/.venv/bin:${PATH}"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+
+# Lockfile first so the dependency layer stays cached across source edits.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --extra llm --no-dev --no-install-project
+
+# uv installs the project itself EDITABLE (hatchling backend), so this second
+# sync only adds a .pth pointing at /app/src plus the dist-info: the .venv
+# bytes stay identical across source-only commits and the runtime stage's
+# COPY of it keeps hitting cache.
+COPY README.md alembic.ini ./
+COPY config ./config
+COPY migrations ./migrations
+COPY scripts ./scripts
+COPY src ./src
+RUN uv sync --frozen --extra llm --no-dev
+
+# Runtime stage: what ships and what Trivy scans.
 FROM python:3.12-slim@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
     VIRTUAL_ENV=/app/.venv \
     PATH="/app/.venv/bin:${PATH}" \
     DATA_DIR=/app/data \
@@ -61,7 +102,6 @@ RUN apt-get update \
     # HIGH/CRITICAL CVE, which is exactly the set this keeps at zero.
     && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
-        build-essential \
         ca-certificates \
         curl \
         libgomp1 \
@@ -70,37 +110,32 @@ RUN apt-get update \
 # Run as an unprivileged user (defense in depth: a compromised process cannot
 # write outside its own tree or escalate via root). Fixed uid/gid 1001 so the
 # identity is stable across rebuilds. Everything the app writes lives under
-# /app (the .venv, DATA_DIR=/app/data and its children); ownership is set after
-# the build copies, just before USER below.
+# /app (DATA_DIR=/app/data and its children; the entrypoint runs `mkdir -p`
+# there and `regwatch init-db` as this user), so /app and /app/data are
+# created and handed over HERE, non-recursively, before anything is copied
+# in; the copies below carry their ownership via --chown. On a compose
+# bind-mount (./data:/app/data) the host owns the mount, so the developer's
+# dir must be writable by uid 1001 there. Pre-creating /app/data makes the
+# writable root explicit even on a fresh (ephemeral) Fly disk.
 RUN groupadd --system --gid 1001 regwatch \
-    && useradd --system --uid 1001 --gid 1001 --home-dir /app --no-create-home regwatch
-
-RUN pip install --no-cache-dir uv
+    && useradd --system --uid 1001 --gid 1001 --home-dir /app --no-create-home regwatch \
+    && mkdir -p "$DATA_DIR" \
+    && chown regwatch:regwatch /app "$DATA_DIR"
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --extra llm --no-dev --no-install-project
-
-COPY README.md alembic.ini ./
-COPY config ./config
-COPY migrations ./migrations
-COPY scripts ./scripts
-COPY src ./src
-COPY docker/entrypoint.sh /usr/local/bin/regwatch-entrypoint
-
-# Compilers and kernel headers are build-only. Leaving build-essential in the
-# runtime image shipped linux-libc-dev (and its fixable kernel CVEs) even though
-# neither the Python app nor the static Go proxy uses it.
-RUN chmod +x /usr/local/bin/regwatch-entrypoint \
-    && uv sync --frozen --extra llm --no-dev \
-    && apt-get purge -y --auto-remove build-essential \
-    && rm -rf /var/lib/apt/lists/*
+COPY --from=python-build --chown=regwatch:regwatch /app/.venv ./.venv
+COPY --chown=regwatch:regwatch README.md alembic.ini ./
+COPY --chown=regwatch:regwatch config ./config
+COPY --chown=regwatch:regwatch migrations ./migrations
+COPY --chown=regwatch:regwatch scripts ./scripts
+COPY --chown=regwatch:regwatch src ./src
+COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/regwatch-entrypoint
 
 # Static proxy binary. Ships inert: the phase-3 "proxy" process group
 # (docs/GO_PROXY_ROLLOUT.md) will exec it through the entrypoint; no fly.toml
 # group runs it today. Copied after the python layers on purpose: a Go-only
-# change must not invalidate the uv dependency cache above.
+# change must not invalidate the .venv layer above.
 COPY --from=proxy-build /usr/local/bin/regwatch-proxy /usr/local/bin/regwatch-proxy
 
 # The CRA White Paper Word template is gitignored (internal artifact) and is
@@ -112,14 +147,6 @@ COPY --from=proxy-build /usr/local/bin/regwatch-proxy /usr/local/bin/regwatch-pr
 # template file)". See docs/DEPLOY.md and src/regwatch/whitepaper/docx_writer.py.
 EXPOSE 8000
 
-# Hand /app (the .venv + everything the entrypoint writes under DATA_DIR) to the
-# unprivileged user, then drop privileges. The entrypoint runs `mkdir -p` under
-# DATA_DIR and `regwatch init-db` as this user, so /app must be writable by it;
-# pre-creating /app/data makes the writable root explicit even on a fresh
-# (ephemeral) Fly disk. On a compose bind-mount (./data:/app/data) the host owns
-# the mount, so the developer's dir must be writable by uid 1001 there.
-RUN mkdir -p "$DATA_DIR" \
-    && chown -R regwatch:regwatch /app
 USER regwatch
 
 ENTRYPOINT ["regwatch-entrypoint"]

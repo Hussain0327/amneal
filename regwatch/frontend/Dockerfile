@@ -17,32 +17,39 @@ RUN apt-get update \
 # cross-spawn under /usr/local/lib/node_modules/npm) carry fixable CRITICAL/HIGH
 # CVEs that trivy flags. Pin a known-good npm whose bundled set is patched:
 # 11.18.0 ships tar 7.5.19 (CVE-2026-59873/-59874), brace-expansion 5.0.7
-# (CVE-2026-13149), undici 6.27.0 (CVE-2026-12151 — this pin previously had to
+# (CVE-2026-13149), undici 6.27.0 (CVE-2026-12151 -- this pin previously had to
 # patch npm's bundled undici in place; 11.18.0 bundles the fixed one, so that
 # surgery is gone), glob 13, minimatch 10, and drops cross-spawn. npm 12 needs
 # Node >=22, so 11.18.0 is the newest pin this node:20 base can take. This is
-# npm's own toolchain, not the app — app deps are pinned by package-lock.json
+# npm's own toolchain, not the app -- app deps are pinned by package-lock.json
 # below. Bump this pin when a future CVE forces it; don't float to @latest, which
 # would re-pull an unverified npm on every build (supply-chain surface).
 RUN npm install -g npm@11.18.0
 
 ENV NEXT_TELEMETRY_DISABLED=1
 
+# Drop privileges BEFORE installing: the node base image ships a built-in
+# unprivileged `node` user (uid 1000). The dev server writes .next/ under /app
+# and (in compose) into the node_modules volume, so /app must be owned by
+# `node` -- handed over here, non-recursively, and every copy below carries
+# --chown. The old trailing `chown -R node:node /app` made overlayfs re-copy
+# the whole ~190 MB node_modules tree into a new layer on every commit
+# (2026-08-25). On a compose bind-mount (./regwatch/frontend:/app) the host
+# owns the tree, so that dir must be writable by uid 1000 there.
+RUN mkdir -p /app && chown node:node /app
+
 WORKDIR /app
+USER node
 
-COPY package.json package-lock.json ./
-RUN npm ci
+# Lockfile first so the install layer stays cached across source edits. npm's
+# download cache goes to a scratch dir removed in the same layer: nothing
+# reads it after install and it would otherwise ship inside the image.
+COPY --chown=node:node package.json package-lock.json ./
+RUN npm ci --cache /tmp/npm-cache \
+    && rm -rf /tmp/npm-cache
 
-COPY . .
+COPY --chown=node:node . .
 
 EXPOSE 3000
-
-# Drop privileges: the node base image ships a built-in unprivileged `node`
-# user (uid 1000). The dev server writes .next/ under /app and (in compose) into
-# the node_modules volume, so /app must be owned by `node`. On a compose
-# bind-mount (./regwatch/frontend:/app) the host owns the tree, so that dir must
-# be writable by uid 1000 there.
-RUN chown -R node:node /app
-USER node
 
 CMD ["npm", "run", "dev", "--", "--hostname", "0.0.0.0"]

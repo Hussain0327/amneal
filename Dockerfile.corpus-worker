@@ -4,12 +4,43 @@
 # serving API image: Tesseract, Dagster, and object-storage clients never enter
 # the public request surface. The digest matches the reviewed API base image.
 ARG PYTHON_VERSION=3.12
+
+# Python build stage (root, throwaway): compiler + uv live here only, and just
+# /app/.venv crosses into the runtime stage. Same two-stage shape and same
+# reason as the API Dockerfile (2026-08-25): a trailing `chown -R /app` made
+# overlayfs re-copy the whole ~325 MB .venv into a new layer on every commit.
+FROM python:3.12-slim@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e AS python-build
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    VIRTUAL_ENV=/app/.venv \
+    PATH="/app/.venv/bin:${PATH}"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --extra llm --extra corpus-worker --no-dev --no-install-project
+
+# The project installs EDITABLE (a .pth to /app/src), so this sync leaves the
+# .venv bytes identical across source-only commits.
+COPY README.md alembic.ini ./
+COPY config ./config
+COPY migrations ./migrations
+COPY src ./src
+RUN uv sync --frozen --extra llm --extra corpus-worker --no-dev
+
+# Runtime stage: what ships and what Trivy scans.
 FROM python:3.12-slim@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
     VIRTUAL_ENV=/app/.venv \
     PATH="/app/.venv/bin:${PATH}" \
     DATA_DIR=/app/data \
@@ -22,35 +53,30 @@ RUN apt-get update \
     # HIGH/CRITICAL CVE, which is exactly the set this keeps at zero.
     && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
-        build-essential \
         ca-certificates \
         tesseract-ocr \
         tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
+# Unprivileged uid/gid 1001, as in the API image. The three roots the worker
+# writes to (corpus data, OCR scratch, Dagster storage) are created and
+# handed over here, non-recursively; everything copied in below carries its
+# ownership via --chown, so no recursive chown layer follows.
 RUN groupadd --system --gid 1001 regwatch \
-    && useradd --system --uid 1001 --gid 1001 --home-dir /app --no-create-home regwatch
-
-RUN pip install --no-cache-dir uv
+    && useradd --system --uid 1001 --gid 1001 --home-dir /app --no-create-home regwatch \
+    && mkdir -p "$DATA_DIR" "$FDA_CORPUS_TEMP_DIR" "$DAGSTER_HOME" \
+    && chown regwatch:regwatch /app "$DATA_DIR" "$FDA_CORPUS_TEMP_DIR" "$DAGSTER_HOME"
 
 WORKDIR /app
-COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --extra llm --extra corpus-worker --no-dev --no-install-project
 
-COPY README.md alembic.ini ./
-COPY config ./config
-COPY migrations ./migrations
-COPY src ./src
-COPY docker/entrypoint.sh /usr/local/bin/regwatch-entrypoint
-COPY docker/dagster.yaml /app/dagster/dagster.yaml
-COPY docker/workspace.yaml /app/dagster/workspace.yaml
-
-RUN chmod +x /usr/local/bin/regwatch-entrypoint \
-    && uv sync --frozen --extra llm --extra corpus-worker --no-dev \
-    && apt-get purge -y --auto-remove build-essential \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p "$DATA_DIR" "$FDA_CORPUS_TEMP_DIR" "$DAGSTER_HOME" \
-    && chown -R regwatch:regwatch /app
+COPY --from=python-build --chown=regwatch:regwatch /app/.venv ./.venv
+COPY --chown=regwatch:regwatch README.md alembic.ini ./
+COPY --chown=regwatch:regwatch config ./config
+COPY --chown=regwatch:regwatch migrations ./migrations
+COPY --chown=regwatch:regwatch src ./src
+COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/regwatch-entrypoint
+COPY --chown=regwatch:regwatch docker/dagster.yaml /app/dagster/dagster.yaml
+COPY --chown=regwatch:regwatch docker/workspace.yaml /app/dagster/workspace.yaml
 
 USER regwatch
 ENTRYPOINT ["regwatch-entrypoint"]
