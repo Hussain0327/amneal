@@ -974,3 +974,28 @@ alone does not certify this residual.
   is in flight, rather than a band cut against a guessed floor. The tooltip
   and its screen-reader restatement say what the band means for the reader;
   the raw cosine stays in the evidence drawer only.
+
+## Table cells stay short; conditions move to a sentence after the table (Aug 25 2026)
+
+- **The v7 table paragraph now names an outlet, not a second bound.** Of the
+  9 table answers served since #269, 3 (#2512, #2520, #2524) carried full
+  sentences in cells. Two were depth turns, where the extra user turn from
+  #274 asks for more and the paragraph said nowhere to put it; the third kept
+  a load-bearing condition whole in the cell under the verb-fidelity rule.
+  "One short phrase per cell" had already lost to both pressures, so
+  restating it (the wording first proposed in #272) would not win. One
+  sentence now follows it: "Put any condition or explanation in a sentence
+  after the table, not in the cell, even when the user asks for more depth."
+  Version stays 7; the sha256 moves on its own, as it did for #274.
+- **The cost is a severity step, and it is pinned.** A dropped cell is
+  structural and folds to PARTIAL with a disclosure; a dropped paragraph
+  sentence that carries a materiality word is MATERIAL_DROP for the whole
+  turn. Routing a condition out of a cell moves it from the lenient path to
+  the strict one if the model fumbles its marker. Two tests in
+  `tests/test_structured_claims.py` pin both legs so the escalation is
+  visible rather than latent.
+- **Nothing offline proves obedience.** The tests pin bytes and pipeline
+  shape. Whether cells get shorter is a prod measurement on the table-bearing
+  subset of `query_log`, which held 9 rows when this shipped; no user traffic
+  reached the live prompt between Aug 22 and Aug 25, so the "day of traffic"
+  gate in #272 could not close on its own.

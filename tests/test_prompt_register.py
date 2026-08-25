@@ -131,7 +131,7 @@ def test_v7_declines_in_its_own_words_rule_survives() -> None:
     )
 
 
-# ---------- RC6: the paragraphs this change does NOT own ----------
+# ---------- RC6: the paragraphs this change does NOT own, and #272's ----------
 
 
 def test_presentation_sentence_is_untouched() -> None:
@@ -152,6 +152,18 @@ def test_per_sentence_marker_paragraph_is_untouched() -> None:
         "after it carries one. Repeat the same number as often as you need."
         in prompts.GROUNDED_QA_SYSTEM_V7
     )
+
+
+def test_table_paragraph_routes_conditions_to_a_sentence_after_the_table() -> None:
+    """Issue #272: 3 of the 9 table answers served since #269 carried full
+    sentences in cells, 2 of them on depth turns. "One short phrase per cell"
+    had already lost to that pressure, so the fix names the outlet instead of
+    restating the bound. Byte pin only: obedience is a prod measurement."""
+    assert (
+        "one short phrase per cell. Put any condition or explanation in a "
+        "sentence after the table, not in the cell, even when the user asks "
+        "for more depth. Each cell that states what a source says"
+    ) in _FLAT_V7
 
 
 def test_v7_identity_stays_version_7() -> None:
