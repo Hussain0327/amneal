@@ -15,19 +15,22 @@ against the SAME adversarial input: a claim that re-cites a prior turn's page.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 
 import pytest
 from config.settings import get_settings
+from sqlalchemy import event, text
 from sqlalchemy.exc import IntegrityError
+from sqlmodel import select
 
 from regwatch.common import conversation as conv
 from regwatch.common.citations import has_citation
 from regwatch.common.conversation import PriorTurn, get_recent_turns
 from regwatch.generate import grounded_qa as qa_mod
 from regwatch.generate.llm import LLMResponse
-from regwatch.store.db import init_db, session_scope
-from regwatch.store.models import ChatMessage, ChatSession
+from regwatch.store.db import get_engine, init_db, session_scope
+from regwatch.store.models import ChatMessage, ChatSession, QueryLog
 from tests.conftest import synth_turn_json
 from tests.test_invariants import _meta, _seed_corpus, _stub_llm
 
@@ -304,6 +307,226 @@ def test_get_recent_turns_degrades_to_empty_on_db_error(
 
     assert get_recent_turns("sess-any", limit=3) == []
     assert "get_recent_turns_failed" in recorder.events
+
+
+# ---------- open_turn: the whole turn opened in one transaction ----------
+
+
+def test_open_turn_matches_the_legacy_readers() -> None:
+    """Both pre-loaded reads mean exactly what the per-helper readers meant.
+
+    Pins the recent-turn window semantics, oldest-first order, the
+    answer/summary-only rule, _safe_filters key filtering and -- critically --
+    that the user message open_turn itself just wrote is excluded from its own
+    context.
+    """
+    init_db()
+    sid = "sess-open-parity"
+    conv.ensure_session(sid)
+    conv.update_session_filters(sid, {"normalized_name": "estradiol", "dosage_form": "Gel"})
+    _seed_turn(sid, q="Q1", a="A1", status="answer", order=1)
+    _seed_turn(sid, q="Q2", a="declined", status="refused", order=2)
+    _seed_turn(sid, q="Q3", a="C3", status="clarify", order=3)
+    _seed_turn(sid, q="Q4", a="A4", status="summary", order=4)
+
+    ctx = conv.open_turn(question="What about dissolution?", session_id=sid)
+
+    assert ctx.degraded is False
+    assert ctx.session_id == sid
+    assert ctx.filters == {"normalized_name": "estradiol", "dosage_form": "Gel"}
+    assert ctx.filters == conv.get_session_filters(sid)
+    assert ctx.recent_turns == get_recent_turns(sid, limit=3, exclude_turn_id=ctx.turn_id)
+    # refused + clarify dropped, this turn's own user row excluded, oldest-first.
+    assert [t.question for t in ctx.recent_turns] == ["Q1", "Q4"]
+
+
+def test_open_turn_commits_the_user_message_before_compute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The user question is COMMITTED (not merely flushed) before the core runs.
+
+    So a core exception still leaves the question in the chat history and
+    /sessions shows it while the answer is still streaming. The probe reads in
+    its OWN transaction, which can only see the row if the opening scope had
+    already committed.
+    """
+    _seed_corpus([("Fasting BE study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_GROUNDED_TURN))
+    question = "What study design is recommended?"
+    real_core = qa_mod.ask_core
+    seen: dict[str, bool] = {}
+
+    def _probe(*args: Any, **kwargs: Any) -> Any:
+        with session_scope() as s:
+            rows = list(s.exec(select(ChatMessage).where(ChatMessage.role == "user")))
+            seen["visible"] = any(m.content == question for m in rows)
+        return real_core(*args, **kwargs)
+
+    monkeypatch.setattr(qa_mod, "ask_core", _probe)
+
+    result = qa_mod.ask(question)
+
+    assert seen["visible"] is True
+    assert result.status == "answer"
+
+
+def test_open_turn_degrades_to_a_fresh_session_and_empty_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """INV-6: a DB hiccup in bookkeeping never stops the query being answered.
+
+    Same degrade the shell used to own, moved verbatim into open_turn: a FRESH
+    id (never the requested one, which may belong to someone else), no context,
+    and the SAME `session_setup_failed` event name so nothing operational
+    breaks.
+    """
+
+    class _LogRecorder:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def warning(self, event_name: str, **kwargs: object) -> None:
+            self.events.append(event_name)
+
+    def boom() -> object:
+        raise RuntimeError("db down")
+
+    _seed_corpus([("Fasting BE study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_GROUNDED_TURN))
+    recorder = _LogRecorder()
+    monkeypatch.setattr(conv, "session_scope", boom)
+    monkeypatch.setattr(conv, "log", recorder)
+
+    ctx = conv.open_turn(question="Anything at all?", session_id="sess-degrade")
+
+    assert ctx.degraded is True
+    assert ctx.session_id == ctx.turn_id != "sess-degrade"
+    assert ctx.filters == {}
+    assert ctx.recent_turns == []
+    assert "session_setup_failed" in recorder.events
+
+    # With that same outage in place the turn still answers and still audits.
+    result = qa_mod.ask("What study design is recommended?")
+    assert result.status == "answer"
+    with session_scope() as s:
+        assert len(list(s.exec(select(QueryLog)))) == 1
+
+
+def test_open_turn_propagates_ownership_and_origin_errors() -> None:
+    """The two exceptions that must NOT degrade into a fresh id.
+
+    An ownership race lost after the API's pre-check aborts with nothing
+    written; a bad origin is a caller bug caught before any I/O at all.
+    """
+    init_db()
+    sid = "sess-open-owned"
+    conv.ensure_session(sid, user_id="user-1")
+
+    with pytest.raises(conv.SessionOwnershipError):
+        conv.open_turn(
+            question="Whose session is this?",
+            session_id=sid,
+            turn_id="turn-lost-race",
+            user_id="user-2",
+        )
+    with session_scope() as s:
+        rows = list(s.exec(select(ChatMessage).where(ChatMessage.turn_id == "turn-lost-race")))
+        assert rows == []
+
+    statements: list[str] = []
+
+    def _capture(
+        conn: Any,
+        cursor: Any,
+        statement: str,
+        parameters: Any,
+        context: Any,
+        executemany: Any,
+    ) -> None:
+        statements.append(statement)
+
+    engine = get_engine()
+    event.listen(engine, "before_cursor_execute", _capture)
+    try:
+        with pytest.raises(conv.SessionOriginError):
+            conv.open_turn(question="Anything at all?", origin="bogus")
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture)
+    assert statements == []  # origin is validated before the scope opens
+
+
+def test_open_turn_history_failure_does_not_roll_back_the_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The memory read is best-effort; it cannot cost the turn its own writes.
+
+    Folding `get_recent_turns` into the write transaction widened its blast
+    radius: an ABORTED history statement (statement_timeout, an admin cancel, a
+    serialization failure) would take the session upsert and the user message
+    with it, orphaning the turn out of its thread. The savepoint is what keeps
+    the one-transaction win and the documented memory contract at once, so this
+    aborts the transaction for real -- a Python-only raise would pass with no
+    savepoint at all.
+    """
+
+    class _LogRecorder:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def warning(self, event_name: str, **kwargs: object) -> None:
+            self.events.append(event_name)
+
+    init_db()
+    sid = "sess-history-abort"
+    recorder = _LogRecorder()
+
+    def _aborting_read(s: Any, session_id: str, **kwargs: Any) -> Any:
+        # 22012: Postgres marks the whole transaction aborted, so every later
+        # statement fails 25P02 until something rolls back to a savepoint.
+        s.execute(text("SELECT 1 / 0"))
+        raise AssertionError("unreachable: the division must raise")
+
+    monkeypatch.setattr(conv, "_recent_rows", _aborting_read)
+    monkeypatch.setattr(conv, "log", recorder)
+
+    ctx = conv.open_turn(question="What about dissolution?", session_id=sid)
+
+    assert ctx.degraded is False
+    assert ctx.session_id == sid
+    assert ctx.recent_turns == []
+    assert "get_recent_turns_failed" in recorder.events
+    assert "session_setup_failed" not in recorder.events
+    # Both writes COMMITTED despite the aborted read: without the savepoint the
+    # commit itself fails and neither row exists.
+    with session_scope() as s:
+        assert s.get(ChatSession, sid) is not None
+        rows = list(s.exec(select(ChatMessage).where(ChatMessage.session_id == sid)))
+        assert [m.content for m in rows] == ["What about dissolution?"]
+
+
+def test_open_turn_leaves_the_session_unowned_when_user_id_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """bind_session=False parity for the dossier and whitepaper callers.
+
+    Their synthetic Q&A must not appear in anyone's chat history, so the
+    bookkeeping session stays unowned (invisible to /sessions) while the audit
+    row still carries the attribution. Fails if open_turn ever starts binding
+    the owner itself instead of taking the shell's already-resolved user_id.
+    """
+    _seed_corpus([("Fasting BE study with 36 subjects.", _meta(1, 3, "PSG_020503"))])
+    monkeypatch.setattr(qa_mod, "get_llm_provider", lambda *a, **k: _stub_llm(_GROUNDED_TURN))
+
+    result = qa_mod.ask(
+        "What study design is recommended?", user_id="user-dossier", bind_session=False
+    )
+
+    assert result.status == "answer"
+    with session_scope() as s:
+        row = s.get(ChatSession, result.session_id)
+        assert row is not None and row.user_id is None
+        audit = s.get(QueryLog, result.audit_id)
+        assert audit is not None and audit.user_id == "user-dossier"
 
 
 # ---------- prompt shaping ----------

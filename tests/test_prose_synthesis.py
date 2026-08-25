@@ -602,3 +602,22 @@ def test_a_normal_turn_still_takes_exactly_one_completion(
     result, calls = _run_with(monkeypatch, [_CLEAN])
     assert not result.refused
     assert len(calls) == 1
+
+
+def test_the_bounds_repair_attempt_is_counted_as_synthesis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repaired turn pays for TWO provider round trips; the ledger says so.
+
+    The repair used to run outside the `synthesis` stage, so a breached turn
+    reported one completion's worth of synthesis_ms while charging the user for
+    two -- and the missing second call landed in the unattributed remainder.
+    Both attempts now share the one key (repeats sum) and `counts` records the
+    retry, which is what makes an inflated synthesis_ms explainable.
+    """
+    _v7_mode(monkeypatch)
+    result, calls = _run_with(monkeypatch, [_OVERSIZE, _CLEAN])
+    assert not result.refused, f"v7 repair did not recover the turn: {result.reason}"
+    assert len(calls) == 2
+    timings = _only_route_json()["timings"]
+    assert timings["counts"]["synthesis"] == 2, timings

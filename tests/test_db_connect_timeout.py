@@ -1,14 +1,11 @@
-"""store-1: the Postgres engines must bound the TCP/TLS connection handshake.
+"""store-1: the Postgres engine must bound the TCP/TLS connection handshake.
 
-``statement_timeout`` only bounds a query AFTER a session exists, and
-``pool_pre_ping`` opens a fresh connection on every checkout — so without a
-libpq ``connect_timeout`` a stalled handshake to the public Supabase pooler
-hangs the request thread forever. These tests assert ``connect_timeout`` (equal
-to the configured value, integer seconds) is present in the connect_args used
-to build BOTH Postgres engine paths: ``store/db.py``'s engine and
-``pgvector_store``'s fallback engine. The fallback test also pins store-7 — the
-fallback now inherits ``sslmode=require`` and the GUC timeouts from the same
-hardening path.
+``statement_timeout`` only bounds a query AFTER a session exists, and the pool's
+checkout liveness listener opens a fresh connection whenever its ping fails --
+so without a libpq ``connect_timeout`` a stalled handshake to the public
+Lakebase endpoint hangs the request thread forever. These tests assert
+``connect_timeout`` (equal to the configured value, integer seconds) is present
+in the connect_args ``store/db.py`` builds its engine with.
 
 Each test would fail if the fix were reverted: drop ``connect_timeout`` from
 ``_pg_connect_args`` and the assertions below break.
@@ -19,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from config.settings import Settings
+from sqlalchemy import Engine, create_engine
 
 
 def test_pg_connect_args_includes_connect_timeout() -> None:
@@ -68,10 +66,13 @@ def test_db_engine_is_built_with_connect_timeout(monkeypatch: Any) -> None:
 
     captured: dict[str, Any] = {}
 
-    def fake_create_engine(url: Any, **kwargs: Any) -> Any:
+    def fake_create_engine(url: Any, **kwargs: Any) -> Engine:
         captured["url"] = url
         captured["kwargs"] = kwargs
-        return object()  # never connected; we only inspect construction args
+        # A REAL engine, never connected: get_engine registers pool event
+        # listeners on what create_engine returns, so a bare sentinel no longer
+        # stands in for one. Construction args are still all we inspect.
+        return create_engine("postgresql+psycopg://u:p@127.0.0.1:1/none")
 
     settings = Settings(
         database_url="postgresql+psycopg://u:p@aws-1-us-east-1.pooler.supabase.com:5432/postgres",
@@ -83,11 +84,13 @@ def test_db_engine_is_built_with_connect_timeout(monkeypatch: Any) -> None:
     try:
         db.get_engine()
         assert captured["kwargs"]["connect_args"]["connect_timeout"] == 10
-        # Parity anchor for the pgvector fallback test below: both Postgres
-        # engines must recycle pooled connections on the same schedule.
+        # Pooled connections are recycled on a fixed lifetime schedule.
         assert captured["kwargs"]["pool_recycle"] == settings.db_pool_recycle_s
+        # connect_timeout now exists to bound the reconnect the CHECKOUT
+        # LISTENER triggers (tests/test_db_pool_staleness.py). Re-adding
+        # pool_pre_ping would pay a round trip on every checkout again, so pin
+        # its absence here too.
+        assert "pool_pre_ping" not in captured["kwargs"]
     finally:
         # Leave no fake engine cached for other tests in this file/process.
-        db._engine = None
-        db._schema_ready = False
-        db._provider_asserted = False
+        db.reset_for_tests()

@@ -88,6 +88,14 @@ _TEXT_METADATA_COLUMNS = (
 )
 _METADATA_COLUMNS = _INT_METADATA_COLUMNS + _TEXT_METADATA_COLUMNS
 
+# The production DISTINCT statement, shared with the plan-shape test so an
+# EXPLAIN assertion can never drift from what the app actually runs. Formatted
+# with a column name that the caller has already checked against
+# _TEXT_METADATA_COLUMNS -- never with caller-supplied text.
+_DISTINCT_METADATA_SQL = (
+    "SELECT DISTINCT {column} FROM chunk WHERE {column} IS NOT NULL AND {column} != ''"
+)
+
 
 class Chunk(SQLModel, table=True):
     """K4 chunk row: text, citation/filter metadata, and the legacy vector."""
@@ -110,10 +118,14 @@ class Chunk(SQLModel, table=True):
     page: int | None = Field(default=None)
     section_path: str | None = Field(default=None)
     normalized_name: str | None = Field(default=None, index=True)
-    dosage_form: str | None = Field(default=None)
-    route: str | None = Field(default=None)
+    # Indexed since 0027, unlike the other _TEXT_METADATA_COLUMNS: these three
+    # are retriever._CASE_FOLDED_FILTER_KEYS, so a filtered turn runs
+    # distinct_metadata_values over them and an unindexed column costs a full
+    # scan of the 252 MB table (392 ms / 105 ms measured 2026-08-25).
+    dosage_form: str | None = Field(default=None, index=True)
+    route: str | None = Field(default=None, index=True)
     source_url: str | None = Field(default=None)
-    psg_type: str | None = Field(default=None)
+    psg_type: str | None = Field(default=None, index=True)
     appl_no: str | None = Field(default=None, index=True)
     short_name: str | None = Field(default=None)
     source_family: str | None = Field(default=None, index=True)
@@ -215,8 +227,8 @@ def ensure_schema(engine: Engine) -> None:
     call explicitly; the store also runs it lazily on first use.
     """
     _ensure_extension(engine)
-    # Creates the table plus the btree indexes declared on the model
-    # (doc_id, version_id, normalized_name, appl_no).
+    # Creates the table plus every btree index the Chunk model declares with
+    # index=True (the list below mirrors them).
     SQLModel.metadata.tables["chunk"].create(engine, checkfirst=True)
     # Self-heal the HNSW index plus the model-declared btree indexes:
     # Table.create with checkfirst=True skips indexes entirely when the table
@@ -260,6 +272,9 @@ def ensure_schema(engine: Engine) -> None:
                 "source_family",
                 "document_type",
                 "appl_no",
+                "dosage_form",
+                "route",
+                "psg_type",
             )
         ),
     )
@@ -874,9 +889,7 @@ def distinct_metadata_values(key: str) -> set[str]:
     with get_engine().connect() as conn:
         rows = conn.execute(
             # `key` is rejected above unless it is in _TEXT_METADATA_COLUMNS.
-            sa_text(
-                f"SELECT DISTINCT {key} FROM chunk WHERE {key} IS NOT NULL AND {key} != ''"  # noqa: S608
-            )
+            sa_text(_DISTINCT_METADATA_SQL.format(column=key))
         ).scalars()
         out = {str(v) for v in rows}
     _metadata_values_cache[key] = (time.monotonic(), frozenset(out))

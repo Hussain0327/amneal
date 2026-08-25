@@ -577,7 +577,135 @@ def test_bootstrap_creates_chunk_table_and_indexes(pg_db: ModuleType) -> None:
         "ix_chunk_doc_id",
         "ix_chunk_version_id",
         "ix_chunk_appl_no",
+        # 0027: the three retriever._CASE_FOLDED_FILTER_KEYS columns. The
+        # create_all route must build them too, or every fresh init-db database
+        # (CI's store-schema-drift bootstrap included) seq-scans `chunk` on a
+        # filtered turn while a migrated prod does not.
+        "ix_chunk_dosage_form",
+        "ix_chunk_route",
+        "ix_chunk_psg_type",
     } <= set(index_defs)
+
+
+# The three columns migration 0027 indexes: retriever._CASE_FOLDED_FILTER_KEYS.
+_FILTER_INDEX_COLUMNS = ("dosage_form", "route", "psg_type")
+_FILTER_INDEX_NAMES = {f"ix_chunk_{column}" for column in _FILTER_INDEX_COLUMNS}
+# Chunk indexes 0027 must NOT touch -- a downgrade that over-drops is a defect.
+_PRE_0027_CHUNK_INDEX_NAMES = {
+    "ix_chunk_normalized_name",
+    "ix_chunk_appl_no",
+    "ix_chunk_doc_id",
+}
+
+
+def _chunk_index_names(db_module: ModuleType) -> set[str]:
+    with db_module.get_engine().connect() as conn:
+        return {
+            row[0]
+            for row in conn.execute(
+                text("SELECT indexname FROM pg_indexes WHERE tablename = 'chunk'")
+            )
+        }
+
+
+def test_distinct_metadata_query_uses_index_only_scan(pg_db: ModuleType) -> None:
+    """0027's real payload: the production DISTINCT must reach an index.
+
+    Asserting the index EXISTS only proves DDL ran; the planner must also be
+    able to use it for this exact statement. The two `enable_*` GUCs are cost
+    discouragements, not prohibitions, so on a near-empty fixture table a
+    missing (or wrong-column, or predicate-incompatible) index still yields
+    `Seq Scan on chunk` and this fails; bitmapscan is off only so the surviving
+    access path is named, since an empty table makes a bitmap heap scan the
+    cheaper way to reach the same index. Plain EXPLAIN, never ANALYZE: a cold
+    visibility map must not make it flaky, and no timing is asserted.
+    """
+    from regwatch.store.pgvector_store import _DISTINCT_METADATA_SQL
+
+    pg_db.init_db()
+    with pg_db.get_engine().begin() as conn:
+        conn.execute(text("SET LOCAL enable_seqscan = off"))
+        conn.execute(text("SET LOCAL enable_bitmapscan = off"))
+        for column in _FILTER_INDEX_COLUMNS:
+            plan = "\n".join(
+                row[0]
+                for row in conn.execute(
+                    text("EXPLAIN " + _DISTINCT_METADATA_SQL.format(column=column))
+                )
+            )
+            name = f"ix_chunk_{column}"
+            # Index Only Scan on pg17; pg18's btree skip scan can render the
+            # same access path as a plain Index Scan. Either proves usability;
+            # pinning the whole plan would only pin the server version.
+            assert (
+                f"Index Only Scan using {name}" in plan or f"Index Scan using {name}" in plan
+            ), plan
+
+
+def test_migration_0027_chunk_filter_indexes_round_trips(pg_db: ModuleType) -> None:
+    """0027 is reversible and drops exactly the three indexes it created.
+
+    Head advancement is a rollback hazard here (init_db refuses to boot against
+    an unrecognised stamp), so an operator rolling back to the 0026 image must
+    be able to run `alembic downgrade 0026_ingredient_chemistry` first.
+    """
+    from alembic import command
+
+    pg_db.init_db()  # create_all + stamp head
+    cfg = pg_db._alembic_config()
+    assert _chunk_index_names(pg_db) >= _FILTER_INDEX_NAMES
+
+    command.downgrade(cfg, "0026_ingredient_chemistry")
+    after_downgrade = _chunk_index_names(pg_db)
+    assert not (_FILTER_INDEX_NAMES & after_downgrade)
+    # The DROPs are name-scoped: create_all's other chunk indexes survive.
+    assert after_downgrade >= _PRE_0027_CHUNK_INDEX_NAMES
+    assert _stamped_revision(pg_db) == "0026_ingredient_chemistry"
+
+    command.upgrade(cfg, "head")
+    restored = _chunk_index_names(pg_db)
+    assert restored >= _FILTER_INDEX_NAMES
+    assert restored >= _PRE_0027_CHUNK_INDEX_NAMES
+    assert _stamped_revision(pg_db) == pg_db._head_revision(cfg)
+
+
+def test_migration_0027_failure_rolls_back_the_whole_release(pg_db: ModuleType) -> None:
+    """A failed 0027 also un-does the revisions that ran before it in that run.
+
+    This is why 0027 builds its indexes transactionally instead of
+    CONCURRENTLY. migrations/env.py wraps an entire `alembic upgrade head` in
+    ONE transaction, so a CONCURRENTLY build's `autocommit_block` would commit
+    every revision already applied in the same release. A database several
+    revisions behind (a restored branch) could then fail here -- on lock
+    contention, or on the 512 MiB Lakebase cap -- and be left stamped at 0026,
+    a revision the still-serving OLD image's boot guard does not recognise,
+    with no rollback path. Transactional DDL is what keeps a failed release a
+    no-op instead of a wedged database.
+
+    The failure is injected by dropping a column 0027 indexes, which is the
+    cheapest way to make the third CREATE INDEX raise AFTER two have already
+    succeeded.
+    """
+    from alembic import command
+
+    pg_db.init_db()
+    cfg = pg_db._alembic_config()
+    command.downgrade(cfg, "0025_fda_terminal_resolution")
+    with pg_db.get_engine().begin() as conn:
+        conn.execute(text("ALTER TABLE chunk DROP COLUMN psg_type"))
+    assert _stamped_revision(pg_db) == "0025_fda_terminal_resolution"
+
+    with pytest.raises(ProgrammingError):
+        command.upgrade(cfg, "head")
+
+    assert _stamped_revision(pg_db) == "0025_fda_terminal_resolution"
+    # 0026 ran in the same transaction, so its table must be gone with it. This
+    # is the assertion an autocommit_block in 0027 would fail.
+    with pg_db.get_engine().connect() as conn:
+        assert conn.execute(text("SELECT to_regclass('ingredient_chemistry')")).scalar() is None
+    # And the two indexes 0027 did manage to build were rolled back, so no disk
+    # is left consumed against the branch cap.
+    assert not (_chunk_index_names(pg_db) & _FILTER_INDEX_NAMES)
 
 
 def test_bootstrap_creates_chat_session_composite_index(pg_db: ModuleType) -> None:

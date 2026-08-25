@@ -49,6 +49,26 @@ the full serving-readiness guard, so both migration failures and live
 embedding-profile drift abort before any long-lived machine is replaced. There
 is no manual pre-migration step on the normal path.
 
+**Before the deploy that first carries `0027_chunk_filter_indexes`, check branch
+headroom.** That migration builds three btree indexes on `chunk`, and the
+Lakebase branch is capped at 512 MiB (`branch_logical_size_limit_bytes`,
+tier-fixed); measured headroom has been as low as ~21 MiB, and hitting the cap
+mid-build is what the 2026-08-18 incident looked like. The build is
+transactional, so a failure rolls back and releases its space and the deploy
+aborts before any long-lived machine is replaced -- but the deploy still fails,
+so check first:
+
+```bash
+psql "$PROD_DB_URL" -c \
+  "SELECT pg_size_pretty(pg_database_size(current_database())) AS used,
+          pg_size_pretty(512 * 1024 * 1024 - pg_database_size(current_database())) AS headroom"
+```
+
+Estimate, not a measurement: at ~88k `chunk` rows with short text keys the three
+indexes should total single-digit MB, so treat less than ~32 MiB of headroom
+(a few times the finished size, to cover build workspace) as "reclaim first".
+`scripts/reclaim_lakebase_space.py` is the reclaim path.
+
 The deployed corpus schema includes `0023_authoritative_fda_corpus` and
 `0024_fda_streaming_lifecycle`. This follow-up adds
 `0025_fda_terminal_resolution`, so its release advances only the lifecycle and

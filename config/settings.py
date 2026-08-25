@@ -597,13 +597,39 @@ class Settings(BaseSettings):
     db_lock_timeout: str = "10s"
     # Bound the TCP/TLS connection handshake itself (libpq `connect_timeout`,
     # integer seconds). statement_timeout only bounds a query AFTER the session
-    # exists, and pool_pre_ping opens a fresh connection on checkout, so without
-    # this a stalled handshake to the remote Postgres endpoint hangs a request
-    # thread forever (store-1). Integer seconds; '0' or '' disables the bound.
+    # exists, and the pool's checkout liveness listener opens a fresh connection
+    # whenever its ping fails, so without this a stalled handshake to the remote
+    # Postgres endpoint hangs a request thread forever (store-1). Integer
+    # seconds; '0' or '' disables the bound.
     db_connect_timeout: str = "10"
-    # Recycle pooled connections before the server's own idle cutoff so a stale
-    # server-side socket is never handed to a request (pairs with pool_pre_ping).
+    # Bounds connection LIFETIME, comfortably inside Lakebase's guaranteed 24h
+    # idle timeout and its "max lifetime beyond 24h is not guaranteed" caveat.
+    # Idle-driven staleness is covered by db_pool_idle_ping_s below, NOT by this
+    # value. Do NOT lower it to chase scale-to-zero: that would force a TLS
+    # reconnect every few minutes on hot connections for no added safety.
     db_pool_recycle_s: int = 1800
+    # Ping a pooled connection at checkout only after this much idleness
+    # (store/db.py:_register_pool_idle_ping), instead of on every checkout the
+    # way pool_pre_ping did -- that cost 24 of one traced ask turn's 61 round
+    # trips. Derivation of the 30s: Lakebase guarantees a 24h idle timeout, but
+    # a scale-to-zero endpoint suspends after inactivity (default 5 min,
+    # configurable MINIMUM 60s) and terminates connection pools and active
+    # transactions when it does. Whether this endpoint has scale-to-zero on is
+    # not knowable from the repo, so the gate is sized against the most
+    # aggressive setting the platform allows: a connection used 30s ago proves
+    # the endpoint was awake 30s ago, so a >=60s inactivity suspend cannot have
+    # fired. 0 (or less) pings on EVERY checkout -- exactly the old
+    # pool_pre_ping behavior, and the rollback that needs no deploy. A very
+    # large value effectively disables the ping.
+    db_pool_idle_ping_s: int = 30
+    # libpq TCP keepalives: seconds a connection may idle before the first
+    # probe; 0 omits all four keepalive keywords. With db_pool_recycle_s=1800 a
+    # connection can sit parked for 30 min on the public Fly->Lakebase path.
+    # Keepalives hold NAT/firewall state open and make the kernel declare a
+    # vanished peer dead within idle + 3*10s, so the next ping or statement
+    # fails immediately instead of blocking a request thread on TCP
+    # retransmission.
+    db_keepalives_idle_s: int = 30
 
     @field_validator("database_url", mode="before")
     @classmethod

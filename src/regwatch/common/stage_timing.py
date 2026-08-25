@@ -19,10 +19,11 @@ integers to a dict that the shell folds into the turn's existing `route_json`.
 from __future__ import annotations
 
 import contextvars
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from functools import wraps
 from time import perf_counter
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
 # The active collector for the current turn, or None when nobody is collecting.
 # A ContextVar (not a global) so concurrent turns in one process cannot write
@@ -84,6 +85,23 @@ class TurnTimings:
         one span covering the whole overlap (embedding and version scoping
         overlap by design, so they share `retrieve.embed_and_scope`) or as a
         dotted child, which is reported but never summed.
+
+        THE VOCABULARY is closed. Top level: `session_open` (relay shell only),
+        `session_context` (native shell only), `route`, `retrieve`,
+        `synthesis`, `gate`, `provenance`, `guidance`. Dotted children:
+        `route.model`, `route.external_drug`, `retrieve.embed_and_scope`,
+        `retrieve.embed`, `retrieve.vector_search`. Adding a name means
+        re-checking the sequential rule above against every other top-level
+        span, so new names are a deliberate act, not a convenience.
+
+        THE ONE RULE THAT MAKES THE INVARIANT CHECKABLE BY INSPECTION: a stage
+        must never wrap a call to `grounded_qa._decline`. `_decline` is the
+        shared decline ceremony and it internally runs `_finalize_route_shadow`
+        (the `route` stage) and the router completion (the `guidance` stage), so
+        wrapping it would nest two top-level stages inside a third and inflate
+        `measured_total_ms`. The same reasoning applies to any function that
+        internally calls an already-instrumented leaf: instrument LEAVES (one
+        I/O call or one pure-CPU call), not branch functions.
 
         Returns:
             A dict of `<stage>_ms` integers, plus `measured_total_ms` (the sum
@@ -163,3 +181,38 @@ def record_stage(name: str, elapsed_ms: float) -> None:
     timings = _ACTIVE.get()
     if timings is not None:
         timings.record(name, elapsed_ms)
+
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def timed_stage(name: str) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
+    """Decorator form of `stage`, for wrapping a WHOLE function as one span.
+
+    Exists because some wrap points are long functions with early returns, or
+    are called only from expression positions (a boolean `if` condition, an
+    argument list) where a with-block would force a large reindent or a
+    restructure for zero behavior change. Decorating the leaf is the smaller,
+    safer diff there.
+
+    Inherits `stage()`'s contract exactly: inert with no collection scope open,
+    records on the raising path, never suppresses an exception, and never
+    alters the wrapped function's return value.
+
+    Args:
+        name: Stage name, e.g. `"route"`.
+
+    Returns:
+        A decorator that times each call to the function it wraps.
+    """
+
+    def decorate(func: Callable[_P, _R]) -> Callable[_P, _R]:
+        @wraps(func)
+        def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            with stage(name):
+                return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorate

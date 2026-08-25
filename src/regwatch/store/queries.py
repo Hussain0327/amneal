@@ -12,12 +12,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, inspect
+from sqlalchemy import func
 from sqlalchemy import select as sa_select
 from sqlmodel import col, select
 
 from regwatch.common.logging import get_logger
-from regwatch.store.db import get_engine, session_scope
+from regwatch.store.db import session_scope, table_exists
 from regwatch.store.models import BeRequirement, PsgDocument, PsgVersion, QueryLog
 
 log = get_logger(__name__)
@@ -77,9 +77,7 @@ def fetch_citation_recency(version_ids: list[int], doc_ids: list[int]) -> Recenc
     if not version_ids and not doc_ids:
         return empty
     try:
-        engine = get_engine()
-        inspector = inspect(engine)
-        if not inspector.has_table("psg_version") or not inspector.has_table("psg_document"):
+        if not table_exists("psg_version") or not table_exists("psg_document"):
             return empty
         doc_dates: dict[int, str | None] = {}
         by_version: dict[int, CitationRecency] = {}
@@ -152,9 +150,7 @@ def current_dosage_form_routes(
     half-known combo would split same-drug docs that are actually answerable
     together. Returns a sorted, de-duplicated list (deterministic options).
     """
-    engine = get_engine()
-    inspector = inspect(engine)
-    if not inspector.has_table("psg_document") or not inspector.has_table("psg_version"):
+    if not table_exists("psg_document") or not table_exists("psg_version"):
         return []
 
     with session_scope() as s:
