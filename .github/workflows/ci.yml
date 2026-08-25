@@ -95,14 +95,21 @@ jobs:
 
       # Persist mypy's incremental cache between runs (cold mypy is ~60s, warm
       # ~15s). Keyed per Python version and per dependency/config hash so a real
-      # type-surface change starts fresh; the rolling run_id + restore-keys always
-      # restores the latest compatible cache, and mypy re-checks changed files
+      # type-surface change starts fresh. The trailing UTC day stamp (not
+      # run_id, 2026-08-25): actions/cache only SAVES when the primary key
+      # missed, so this writes at most one copy per day instead of one per run
+      # (16 run_id copies were sitting in the 10 GB cache); restore-keys still
+      # restore the newest compatible copy, and mypy re-checks changed files
       # regardless, so a stale cache cannot produce a wrong result.
+      - name: utc day stamp (cache key)
+        id: day
+        run: echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
       - name: cache mypy
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .mypy_cache
-          key: mypy-${{ matrix.python-version }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-${{ github.run_id }}
+          key: mypy-${{ matrix.python-version }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-${{ steps.day.outputs.day }}
           restore-keys: |
             mypy-${{ matrix.python-version }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-
             mypy-${{ matrix.python-version }}-
@@ -116,7 +123,10 @@ jobs:
       - name: pytest
         # --cov-fail-under is a regression floor: measured coverage was ~82%, so
         # 80 leaves headroom while still failing CI if coverage silently erodes.
-        run: uv run pytest -q --cov=src/regwatch --cov-fail-under=80
+        # --durations: the suite is the critical path (348 s for 2282 tests on
+        # 2026-08-25); the slowest-25 table in every run is what makes a creeping
+        # slow test visible before it costs a minute.
+        run: uv run pytest -q --cov=src/regwatch --cov-fail-under=80 --durations=25
 
   python-audit:
     runs-on: ubuntu-latest
@@ -145,85 +155,112 @@ jobs:
       - name: pip-audit (python deps)
         run: uvx pip-audit -r requirements-audit.txt
 
-  docker-build:
+  # Build + scan the three images as PARALLEL matrix legs. The builds and the
+  # Trivy scans are independent of each other, and running them serially
+  # (2026-08-25: 64+86+55 s of builds plus three ~30 s scans) kept this job on
+  # the critical path at 4.7-7.9 min. `docker-build` below fans the legs back
+  # into the ONE context branch protection requires, so the required-check
+  # name is unchanged.
+  docker-image:
     runs-on: ubuntu-latest
+    strategy:
+      # Every leg reports: a web-image CVE must not hide an API-image one.
+      fail-fast: false
+      matrix:
+        include:
+          - name: api
+            context: .
+            file: Dockerfile
+            tag: regwatch:ci
+          - name: corpus-worker
+            context: .
+            file: Dockerfile.corpus-worker
+            tag: regwatch-corpus-worker:ci
+          - name: web
+            context: regwatch/frontend
+            file: regwatch/frontend/Dockerfile
+            tag: regwatch-web:ci
+    env:
+      IMAGE: ${{ matrix.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
       # Buildx (docker-container driver) is required for the GitHub Actions layer
-      # cache backend (cache-from/to type=gha) used by the image builds below.
+      # cache backend (cache-from/to type=gha) used by the image build below.
       - name: set up buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
 
       # load:true exports the built image into the local docker daemon so the
-      # Trivy steps below scan it exactly as before. Separate cache scopes keep
-      # the API and web images from evicting each other; mode=max caches the
-      # intermediate dependency-install layer (the dominant build cost). There
-      # is one slim image flavor and no build args -- this is purely a
-      # build-cache configuration, not a content change.
-      - name: docker build (API image)
+      # Trivy step below scans it exactly as before. One cache scope per image
+      # so the three never evict each other.
+      #
+      # cache-to ONLY on push-to-main (2026-08-25): a PR run's cache writes land
+      # in the PR's own scope, which main can never read, so every PR parked
+      # 0.3-1.2 GB of blobs that lingered up to 7 days and pushed the repo over
+      # the 10 GB cap (10.95 GB / 364 entries), evicting main's useful layers.
+      # PRs now READ main's layers and write nothing; only the canonical main
+      # run refreshes the cache. mode=min exports just the final image's layers
+      # -- the dependency-install layer that matters -- and not the API image's
+      # Go build stage (rebuilds in ~6 s, not worth ~200 MB of blobs).
+      # ignore-error: a GHA cache export failure (e.g. "failed to reserve cache"
+      # under quota pressure) must NOT fail the build -- the cache is an
+      # optimization, not a gate.
+      - name: docker build (${{ matrix.name }} image)
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
         with:
-          context: .
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           load: true
-          tags: regwatch:ci
-          cache-from: type=gha,scope=api
-          # ignore-error: a GHA cache export failure (e.g. "failed to reserve
-          # cache" under quota pressure) must NOT fail the build -- the cache is
-          # an optimization, not a gate.
-          cache-to: type=gha,mode=max,scope=api,ignore-error=true
-
-      - name: docker build (corpus worker image)
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
-        with:
-          context: .
-          file: Dockerfile.corpus-worker
-          load: true
-          tags: regwatch-corpus-worker:ci
-          cache-from: type=gha,scope=corpus-worker
-          cache-to: type=gha,mode=max,scope=corpus-worker,ignore-error=true
+          tags: ${{ matrix.tag }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: ${{ github.event_name == 'push' && format('type=gha,mode=min,scope={0},ignore-error=true', matrix.name) || '' }}
 
       - name: compose config
+        if: matrix.name == 'api'
         run: docker compose config --quiet
 
-      - name: frontend docker build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
-        with:
-          context: regwatch/frontend
-          load: true
-          tags: regwatch-web:ci
-          cache-from: type=gha,scope=web
-          cache-to: type=gha,mode=max,scope=web,ignore-error=true
+      # Image-bloat observability, in docker history order (newest layer
+      # first): a dependency tree that a LATER layer re-copied -- e.g. a
+      # trailing `chown -R` over the .venv -- shows up as a second ~300 MB line
+      # near the top. Total size is the number to watch across PRs.
+      - name: image size and layer history
+        run: |
+          echo "size_bytes=$(docker image inspect -f '{{.Size}}' "$IMAGE")"
+          docker history --format '{{.Size}}\t{{.CreatedBy}}' "$IMAGE" | head -40
 
-      # With buildx the image bytes exist THREE times by scan time: the
-      # builder's local store (mode=max keeps every stage's layers even after
-      # the GHA cache export completes), the daemon store (load: true), and the
-      # copy Trivy writes to its container /tmp while exporting the image from
-      # the daemon. On 2026-07-20 that third copy hit "no space left on device"
-      # (runs 29751451276 / 29751461848) and failed the gate -- the plain
-      # `docker build` layout never had the buildkit copy, which is why the
-      # same scans were green for months before the cache re-land. The local
-      # buildkit store is expendable here (its useful content is already in the
-      # GHA cache; nothing builds after this point), so drop it before
-      # scanning; that puts peak disk BELOW the old plain-build layout. df
-      # lines are observability for the next disk incident.
-      - name: reclaim buildkit disk before scans
+      # By scan time the image bytes exist THREE times: the builder's local
+      # store, the daemon store (load: true), and the copy Trivy writes to its
+      # container /tmp while exporting the image from the daemon. On 2026-07-20
+      # that third copy hit "no space left on device" (runs 29751451276 /
+      # 29751461848) and failed the gate. The local buildkit store is expendable
+      # here (its useful content is already in the GHA cache; nothing builds
+      # after this point), so drop it before scanning. df lines are
+      # observability for the next disk incident.
+      - name: reclaim buildkit disk before scan
         run: |
           df -h /
           docker buildx prune -af > /dev/null
           df -h /
 
-      # Persist Trivy's vuln DB (~100MB) across ephemeral runners (the scans
-      # below mount ~/.cache/trivy). The rolling key writes a fresh copy each run
-      # and restores the most recent one, so the cached DB is at most one run
-      # stale; Trivy still refreshes it when its own metadata says it is past TTL.
+      # Persist Trivy's vuln DB (~100MB) across ephemeral runners (the scan
+      # below mounts ~/.cache/trivy). Keyed per UTC day: actions/cache only
+      # SAVES when the primary key missed, so at most one copy per day gets
+      # written (the old run_id key wrote a fresh ~80 MB copy on EVERY run --
+      # 17 copies / 1.4 GB on 2026-08-25). restore-keys fall back to the newest
+      # earlier copy, and Trivy still refreshes the DB when its own metadata
+      # says it is past TTL, so the gate is never stale. deploy.yml restores
+      # with the same `trivy-db-` prefix.
+      - name: utc day stamp (cache key)
+        id: day
+        run: echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
       - name: cache trivy DB
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/trivy
-          key: trivy-db-${{ github.run_id }}
+          key: trivy-db-${{ steps.day.outputs.day }}
           restore-keys: |
             trivy-db-
 
@@ -237,7 +274,7 @@ jobs:
       # `latest` makes scanner-behavior drift land silently on whatever PR
       # happens to run next. The vuln DB stays fresh regardless -- it is
       # fetched at scan time, not baked into the image tag. Bump deliberately.
-      - name: trivy scan (API image)
+      - name: trivy scan (${{ matrix.name }} image)
         run: |
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
@@ -246,29 +283,7 @@ jobs:
             aquasec/trivy:0.72.0 image \
             --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
             --ignorefile /root/.trivyignore \
-            --scanners vuln,secret regwatch:ci
-
-      - name: trivy scan (corpus worker image)
-        run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$HOME/.cache/trivy:/root/.cache/trivy" \
-            -v "$GITHUB_WORKSPACE/.trivyignore:/root/.trivyignore" \
-            aquasec/trivy:0.72.0 image \
-            --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
-            --ignorefile /root/.trivyignore \
-            --scanners vuln,secret regwatch-corpus-worker:ci
-
-      - name: trivy scan (web image)
-        run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$HOME/.cache/trivy:/root/.cache/trivy" \
-            -v "$GITHUB_WORKSPACE/.trivyignore:/root/.trivyignore" \
-            aquasec/trivy:0.72.0 image \
-            --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
-            --ignorefile /root/.trivyignore \
-            --scanners vuln,secret regwatch-web:ci
+            --scanners vuln,secret "$IMAGE"
 
       # Trivy runs as root in the container and writes ~/.cache/trivy with
       # root-owned 0700 dirs, which the actions/cache POST-save (tar, as the
@@ -283,6 +298,23 @@ jobs:
           if [ -d "$HOME/.cache/trivy" ]; then
             sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache/trivy"
           fi
+
+  # Fan-in for the matrix above: the single "docker-build" context that branch
+  # protection requires. needs.docker-image.result is the AGGREGATE -- success
+  # only when every leg succeeded -- so one red image fails the gate.
+  # if: always() so a failed leg still yields a (failing) fan-in status instead
+  # of leaving the required check "expected" forever.
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: docker-image
+    if: always()
+    steps:
+      - name: require every image leg green
+        env:
+          RESULT: ${{ needs.docker-image.result }}
+        run: |
+          echo "docker-image result: ${RESULT}"
+          test "${RESULT}" = "success"
 
   frontend:
     runs-on: ubuntu-latest
