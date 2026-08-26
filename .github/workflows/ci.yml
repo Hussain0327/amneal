@@ -272,6 +272,18 @@ jobs:
       # ignore-error: a GHA cache export failure (e.g. "failed to reserve cache"
       # under quota pressure) must NOT fail the build -- the cache is an
       # optimization, not a gate.
+      #
+      # no-cache-filters (2026-08-26): mode=min caches the FINAL stage, which
+      # for the two Python images is the stage running apt-get upgrade. Every
+      # build restored that layer, so Debian security updates froze at the last
+      # Dockerfile edit and openssl CVE-2026-14456 (DSA-6465-1) turned main red
+      # with the fix already published upstream. Filtering the `runtime` stage
+      # rebuilds only that stage each run (~30-60 s, almost all apt) while the
+      # dependency stage stays cached, so the Trivy gate self-heals as Debian
+      # ships fixes. The web image is single-stage and has no stage named
+      # runtime, so the filter is a no-op there: web keeps the same latent
+      # exposure, left for a follow-up because filtering it would un-cache
+      # `npm ci`.
       - name: docker build (${{ matrix.name }} image)
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
         with:
@@ -280,6 +292,7 @@ jobs:
           load: true
           tags: ${{ matrix.tag }}
           cache-from: type=gha,scope=${{ matrix.name }}
+          no-cache-filters: runtime
           cache-to: ${{ github.event_name == 'push' && format('type=gha,mode=min,scope={0},ignore-error=true', matrix.name) || '' }}
 
       - name: compose config
