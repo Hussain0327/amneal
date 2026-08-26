@@ -999,3 +999,58 @@ alone does not certify this residual.
   subset of `query_log`, which held 9 rows when this shipped; no user traffic
   reached the live prompt between Aug 22 and Aug 25, so the "day of traffic"
   gate in #272 could not close on its own.
+
+
+## gpt-5.6-luna tried in prod and reverted the same day (Aug 26 2026)
+
+- **What happened, in order (UTC).** Owner asked for `gpt-5.6-luna` and a
+  check that the Responses API is the transport. A pre-flip benchmark ran
+  (below). 14:55 the `OPENAI_LLM_MODEL` Fly secret was set to luna and the
+  four machines rolled clean; 14:57 the first served-model log line read
+  luna. 15:02 the release gate on PR #290 (the same change in code and CI)
+  failed: `citation_precision` 0.698 against the 0.70 gate, with terra
+  scoring 0.755 on main earlier the same day. 15:13 the secret went back to
+  terra. Luna served production for eighteen minutes.
+- **Why it failed the gate.** Retrieval was identical (`recall_at_k` 0.884
+  on both). Luna attaches fewer `[n]` markers: `sentence_citation_rate`
+  0.521 vs 0.681, `faithfulness` 0.814 vs 0.860, mean claims per answer
+  1.95 vs 2.57, three incorrect refusals vs one. Under v7 an uncited source
+  fact is dropped, and a dropped sentence carrying a materiality word
+  refuses the whole turn, so 13 of 50 gated eval turns ended in
+  `material_drop` (`not` x20, `may` x6). Prod showed the same thing live:
+  audit 2679, the "explain more" depth turn after an albuterol table, spent
+  13.9 s of a 14.8 s turn generating 41 claims, the gate admitted 38 and
+  dropped 3 uncited comparison sentences, one containing "may", and the
+  analyst got a refusal. Terra hit that cliff once in ~150 turns since Aug
+  25; luna hit it once in its first seven.
+- **What the benchmark did and did not predict.** Laptop, interleaved,
+  n=8 per arm, real v7 messages, prompt cache warm on 44 of 48 calls, 0
+  errors: both models decode at 9-11 ms/token; luna's p50 total was lower
+  (1.65-1.96 s vs 2.0-2.6 s) only because it wrote 77-80 output tokens vs
+  129-131; TTFT p50 0.66-0.96 s on every arm; `reasoning_tokens` 0 on
+  every arm from `none` to `medium`, so `OPENAI_REASONING_EFFORT` is inert
+  on this prompt; every parameter the provider sends was accepted,
+  including the extractor-shaped `json_object` request. The eval later
+  showed the terseness was partly fewer citations, which latency numbers
+  cannot see. The gate, not the stopwatch, decides a model change.
+- **The transport was already the Responses API.** `OpenAIProvider` has
+  been Responses-only since #270 (`client.responses.create`,
+  `store=false`, system text as `instructions`, `max_output_tokens`,
+  `reasoning.effort`, `text.format=json_object` for the JSON callers).
+  Three docs (`docs/CLAUDE.md`, `docs/PROD_READINESS.md`,
+  `docs/TECH_GUIDE_SIMPLE.md`) still said "Chat Completions" for the
+  2026-08-20 cutover; that wording was never true of the shipped code and
+  is corrected in this change. The "D1 deliberately reversed for model
+  calls (Aug 20 2026)" entry above says it too; per this file's append-only
+  rule that entry stays as written and this line is its dated correction.
+  Two docs also called the Databricks provider "the rollback arm"; it was
+  removed in #270 and `get_llm_provider` rejects `databricks`, so rollback
+  of a model change is `OPENAI_LLM_MODEL` back to the previous OpenAI
+  model, which is exactly what happened today. Function calling and strict
+  `json_schema` outputs are supported by both models and unused by
+  RegWatch; adopting either is a separate decision.
+- **What it would take to try luna again.** A luna-specific citation nudge
+  in the v7 prompt, scored by the eval against the 0.755 baseline before
+  any flip, and, independently of model, the `material_drop` cliff itself,
+  where one hedged uncited sentence discards an otherwise admitted answer.
+  Neither is started.

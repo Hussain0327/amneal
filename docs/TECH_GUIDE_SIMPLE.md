@@ -26,12 +26,12 @@ Verified against the live system on 2026-08-11.
 - Alembic head in the live DB is `0020_eval_run`, which matches the repo. Nothing
   pending.
 - 5,494 chunk rows in the corpus.
-- Generation model: **moving to OpenAI `gpt-5.6-terra`** (Chat Completions,
-  `reasoning_effort=low`) by owner decision 2026-08-20. One model does every
-  role: router, synthesizer, extractor. Before the cutover, prod ran
-  `gpt-oss-120b` (served id `gpt-oss-120b-080525`), open weight, served from
-  the company Databricks tenant at `workspace.default.regwatch`; that remains
-  the rollback path.
+- Generation model: **OpenAI `gpt-5.6-terra` over the Responses API** by owner
+  decision 2026-08-20. One model does every role: router, synthesizer,
+  extractor. Before the cutover, prod ran `gpt-oss-120b` (served id
+  `gpt-oss-120b-080525`), open weight, served from the company Databricks
+  tenant at `workspace.default.regwatch`; that provider has since been
+  deleted from the code, so it is no longer a rollback path.
 - Embeddings: **moving to OpenAI `text-embedding-3-large`**, truncated to 1024
   dimensions via the `dimensions` param, by the same decision. Before the
   cutover, prod ran Databricks Qwen3 at `workspace.default.regwatch-embed`,
