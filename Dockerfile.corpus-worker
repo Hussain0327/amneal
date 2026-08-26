@@ -36,8 +36,11 @@ COPY migrations ./migrations
 COPY src ./src
 RUN uv sync --frozen --extra llm --extra corpus-worker --no-dev
 
-# Runtime stage: what ships and what Trivy scans.
-FROM python:3.12-slim@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e
+# Runtime stage: what ships and what Trivy scans. The stage NAME is
+# load-bearing: ci.yml passes `no-cache-filters: runtime` to the build, so
+# the apt-get upgrade below is re-executed on every CI build instead of
+# being restored from the layer cache.
+FROM python:3.12-slim@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
