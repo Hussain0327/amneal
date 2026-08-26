@@ -107,8 +107,10 @@ class Settings(BaseSettings):
     # A non-legacy profile must already have complete coverage and a compatible
     # index before it can be selected. The optional shadow profile is
     # dual-written/backfilled but never serves user retrieval until explicitly
-    # promoted. Prod promoted a Databricks Qwen3 profile on 2026-07-30, so
-    # "legacy" below is a local-dev default only.
+    # promoted. Prod serves an OpenAI text-embedding-3-large profile at 1024
+    # dimensions, named by the RETRIEVAL_EMBEDDING_PROFILE Fly secret since the
+    # 2026-08-20 provider migration, so "legacy" below is a local-dev default
+    # only. docs/PRODUCTION_TRUTH.md carries the current serving arm.
     #
     # RETRIEVAL_EMBEDDING_PROFILE is the preferred env name (it names the path
     # this knob actually steers); the old ACTIVE_EMBEDDING_PROFILE keeps
@@ -142,9 +144,7 @@ class Settings(BaseSettings):
         derived from the floor answers are gated on.
         """
         profile = (self.active_embedding_profile or "legacy").strip()
-        return self.refusal_score_threshold_by_profile.get(
-            profile, self.refusal_score_threshold
-        )
+        return self.refusal_score_threshold_by_profile.get(profile, self.refusal_score_threshold)
 
     # OpenAI Responses + embeddings: gpt-5.6-terra generation and
     # text-embedding-3-large at 1024 dimensions.
@@ -527,7 +527,7 @@ class Settings(BaseSettings):
     # identity (first rerank_top_k of the wide net). Read via Settings (not a
     # bare os.getenv) so the knob is documented and validated like every other.
     reranker_enabled: bool = False
-    # MMR diversity in stage 2 (docs/DSA.md section 33). OFF by default: when
+    # MMR diversity in stage 2 (retrieve/diversity.py). OFF by default: when
     # false the trim is the unchanged first-RERANK_TOP_K slice, so production
     # stays bit-identical until an eval A/B flips it. When true the same NUMBER
     # of passages is kept, but a candidate that repeats what is already

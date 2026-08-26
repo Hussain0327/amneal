@@ -1,7 +1,7 @@
 """additive nullable query_log.latency_ms for the provider-cutover p95 gate
 
-The Databricks rollout (docs/DATABRICKS_ADOPTION_2026-07-28.md, steps 2 and 7)
-gates each provider flip on a latency comparison against the pre-flip week.
+The 2026-07 Databricks provider rollout (docs/DECISIONS.md) gated each provider
+flip on a latency comparison against the pre-flip week.
 There was no server-side latency column to compare against: ``query_log``
 recorded what was answered, never how long it took.
 

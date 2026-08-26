@@ -21,7 +21,7 @@ Scenario matrix (SNN test names):
   S19-S21a, S23    test_query_stream.py           /query/stream frame grammar
   S31, S31b        test_query_stream.py           live-draft frame grammar
   (relay parity)   test_query_relay_parity.py     GO_NATIVE_QUERY=false smoke
-Deletion-PR hardenings (docs/STEP5_INV_TEST_MAPPING.md gap list): S5 also pins
+Deletion-PR hardenings (the step-5 INV test mapping, in git history): S5 pins
 owner-preservation on a hijack (GAP-4) and S18 the second-user fresh rate-limit
 budget (GAP-5).
 

@@ -1,6 +1,6 @@
 # REGWATCH Non-Technical Guide
 
-Last updated: 2026-08-13
+Last updated: 2026-08-26
 
 Plain English, for Clinical Regulatory Affairs, business stakeholders, managers,
 and reviewers who do not need to read code.
@@ -58,13 +58,14 @@ Today it can:
   limits.
 - Log every question and answer for auditability.
 
-The currently serving PSG corpus held 5,494 searchable text pieces when it was
-measured on 2026-08-11. A replacement FDA-only corpus is building but is not yet
-activated. Its frozen production manifest contains 140,438 source records;
-those are source records, not chunks or embeddings. Every record must end as a
-searchable indexed document or a narrowly evidenced terminal outcome, and every
-searchable chunk must be embedded before cutover. Final totals will be reported
-only after full acceptance.
+A replacement FDA-only corpus was originally scoped to cover the full universe
+of 140,438 source records: FDA applications, PSGs, action packages and BE
+guidance. That full-universe target turned out to be more data than the
+production database can hold, so it was dropped. The corpus that actually
+serves questions today is a smaller, named, curated set the team chose on
+purpose, not the full 140,438. Current size and activation status change
+often enough that this document does not track them; ask the team for the
+current count.
 
 ## The FDA Sources
 
@@ -304,25 +305,35 @@ Two things are deliberate:
   computer. The panel says so and the exported record repeats it. It is meant to
   be copied into a system that is controlled.
 
-**It is a working prototype.** The documents in it are samples, the compliance
-check is a stand-in rather than a real analysis, and nothing is saved. Close the
-tab and your work is gone. It exists so we can agree on how the tool should feel
-before the machinery behind it is built.
+**It is a mix of real and prototype.** The reference library on the left and
+the assistant you can ask about a passage both call the same real, cited Q&A
+backend used everywhere else in REGWATCH; those answers carry real FDA
+citations. The document you are reviewing, and the compliance check run
+against it, are the prototype part: the documents are samples, the check is a
+stand-in rather than a real analysis, and nothing there is saved. Close the tab
+and that part of your work is gone. It exists so we can agree on how the tool
+should feel before the real compliance machinery is built.
 
 ## Where The Data Goes
 
-This was the biggest open question on the project and it is now settled.
+Since 2026-08-20, a normal analyst question does leave the company boundary.
 
-All three pieces that touch an analyst's question run inside the company's own
-Databricks environment:
+- **The model that writes the answer** runs on OpenAI, an external vendor.
+- **The model that matches a question to the right FDA passages** also runs on
+  OpenAI.
+- **The database that stores everything** (every question, every answer, every
+  citation) stays in the company's own Postgres database. It does not move to
+  OpenAI.
 
-- The model that writes the answer.
-- The model that matches a question to the right FDA passages.
-- The database that stores everything.
+OpenAI receives the question text and the retrieved FDA passages needed to
+answer it. It does not receive anything beyond what a single question needs to
+answer: no bulk database export, no other users' history.
 
-So a normal question does not leave the company boundary to get answered. The
-outside vendor is kept configured only as a fallback if we ever need to switch
-back, and it serves nothing today.
+You can check this yourself at any time. The live setting lives in the `[env]`
+block of `fly.toml` in the codebase (`LLM_PROVIDER` and
+`INGEST_EMBEDDING_PROVIDER`), and it is also summarized in
+`docs/PRODUCTION_TRUTH.md`. If this document and that file ever disagree,
+`fly.toml` is right.
 
 ## What Is Still Missing
 
@@ -336,14 +347,13 @@ widely. The full list lives in `docs/ROADMAP.md`. The headline items:
   back.
 - **Tighter database credentials** for the application account.
 - **Alerting on the daily watcher.** The scheduled job runs, but nothing raises
-  an alarm yet if a run fails. There is also a known configuration gap: the
-  scheduled job has not been given the settings for the new in-house matching
-  model, so the first time a real FDA revision lands it could store material
-  that the search index cannot see. Setting those values fixes it.
+  an alarm yet if a run fails. The daily job authenticates to OpenAI with the
+  same key used elsewhere in production; it is not an in-house model, and it
+  needs that key kept current to keep running.
 - **Re-tuning the confidence cut-off.** There is a score below which the system
-  will not use a retrieved passage. That number was tuned against the previous
-  matching model. The matching model has since changed, so the number needs
-  checking again.
+  will not use a retrieved passage. That number was tuned against the matching
+  model that was live at the time. When the matching model changes, the number
+  needs checking again.
 - **Human review is still required.** Nothing here is a substitute for a
   regulatory professional reading the source.
 
@@ -360,8 +370,9 @@ widely. The full list lives in `docs/ROADMAP.md`. The headline items:
 8. Audit logs for every decision.
 
 The language model and the matching model are both pluggable. No specific model
-name is baked into the logic. That is what made the move into the company's own
-environment possible without rewriting how the system works.
+name is baked into the logic. That is what let the team move both models to
+OpenAI on 2026-08-20 without rewriting how the system works, and it is what
+would let a future move back in-house happen the same way.
 
 The goal is not a chatbot that guesses. It is a research system that knows where
 to look and shows you the source.

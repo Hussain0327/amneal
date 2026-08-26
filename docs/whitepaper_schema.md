@@ -167,7 +167,10 @@ now remain analyst input; they cannot render a corpus-backed "No".
 Orange Book patent and exclusivity parsing, persistence and caching with
 `last_fetched_at` freshness, structured citations, and `.docx` export. Landed in PR #2
 (`04f760e`), hardened in PR #3 (`96ecd86`). Still open: expanding the white-paper
-gold set from its current 16 rows (`src/regwatch/eval/whitepaper_gold.jsonl`,
-counted 2026-08-11) to 30-50, and applying the persist-and-cite plus freshness
+gold set from its current 16 rows to 30-50, and applying the persist-and-cite
+plus freshness
 pattern to the Ask and Assemble read paths. Both are tracked in
 [`ROADMAP.md`](ROADMAP.md).
+
+Count the gold set with `grep -c '^{' src/regwatch/eval/whitepaper_gold.jsonl`.
+A plain `wc -l` overcounts: the file carries `#` comment lines between records.

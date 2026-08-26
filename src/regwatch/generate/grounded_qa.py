@@ -4023,9 +4023,11 @@ def ask_core(
             or None
         )
         log.info("llm_prompt", role="router", **ROUTE_PROMPT.log_fields())
-        # REGWATCH_ROUTE_CALL=shadow is live in prod, so this is a full router
-        # round trip on every turn. The dotted child isolates it from the
-        # deterministic route work that shares the parent key.
+        # REGWATCH_ROUTE_CALL is pinned "off" in prod (fly.toml) since
+        # 2026-08-20, so this router round trip does NOT run on the production
+        # Ask path; shadow and live are opt-in. When either is on, this is a
+        # full router round trip on every turn. The dotted child isolates it
+        # from the deterministic route work that shares the parent key.
         with stage("route"), stage("route.model"):
             state.route_shadow = observe_route(
                 provider_factory=lambda: get_llm_provider(role="router"),

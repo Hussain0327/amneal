@@ -14,8 +14,9 @@
 Where it landed: two Fly process groups in one app. `proxy` holds the public
 port 8080 and relays to the `app` group over 6PN. The app group runs
 `regwatch serve`, a dual-stack uvicorn on 8000, and is private. The public
-`GET /health` check is end to end through the proxy, so a proxy with a dead
-upstream falls out of rotation instead of serving 502s while looking healthy.
+`GET /livez` check is end to end through the proxy, so a proxy with a dead
+upstream falls out of rotation instead of serving 502s while looking healthy
+(`fly.toml`'s `[[http_service.checks]]` block).
 
 Phase 1 (PR #94, release v35) un-flipped back to uvicorn-direct. Phase 2
 (PR #95, release v36) added the dual-stack listener. Phase 3 flipped the edge
@@ -230,7 +231,7 @@ Precisely, measured against the proxy's own dialer (`net.Dialer{Timeout: 5s}`,
   dials cost about 0.2ms, so with n=4 all four are dialed in under 1ms.
 
 The rollback trigger is public 503s persisting beyond about 2 minutes after the
-first proxy machine shows `started`, or a proxy `/health` check that never goes
+first proxy machine shows `started`, or a proxy `/livez` check that never goes
 green.
 
 **Reverting the flip has a hard public outage window of 1 to 2 minutes.** flyctl
@@ -240,7 +241,7 @@ machines advertise the public service. That is the revert working as designed.
 Do not interrupt it, do not deploy over it, and do not improvise `fly machine`
 commands mid-roll, which is the documented incident amplifier from 2026-06-18
 and 2026-07-07. Watch `fly status` and loop
-`curl -fsS https://<public-host>/health` until 200. If the window must be
+`curl -fsS https://<public-host>/livez` until 200. If the window must be
 shorter, `fly deploy --strategy immediate` from the reverted checkout replaces
 all machines at once and skips health gates.
 
@@ -284,7 +285,8 @@ keeps keying the login limiter on the edge-attested client IP.
 If you ever need to prove that by hand, read the recorded IP in `fly logs` or
 the audit trail. Do NOT try to prove it by counting to a 429. The limits are 10
 attempts per email per minute and 30 per IP per minute
-(`src/regwatch/common/ratelimit.py`), `allow()` trips at `>= limit`, and the
+(`go/internal/api/ratelimit.go`, moved there from the Python limiter at the
+step-4 auth cutover), `Allow()` trips at `>= limit`, and the
 per-IP bucket only fires on a 31st attempt using distinct emails. The limiter is
 also in-process and split across machines, which makes any count-based probe
 nondeterministic. The log read is deterministic and takes one request.

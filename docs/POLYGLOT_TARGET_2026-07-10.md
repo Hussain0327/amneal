@@ -13,12 +13,12 @@ is recorded in the 2026-08-19 entry in `docs/DECISIONS.md`.
 
 Owner decision (Jul 10): all-Python is unacceptable, so regwatch moves to a
 multi-runtime architecture (four runtimes as approved; three since the
-amendment above). This supersedes the "no new language" default of
-`archive/POLYGLOT_ARCHITECTURE_REVIEW_2026-06-17.md` and the same-day
-conservative verdict in `archive/POLYGLOT_ASSESSMENT_2026-07-10.md`. That was an
-owner-level architecture call about bus factor and control-plane rigor, not a
-measured performance result. The two archived docs remain the record of what is
-and is not a perf-driven move.
+amendment above). This supersedes the "no new language" default of an earlier
+architecture review and the same-day conservative verdict that preceded it,
+both recorded in git history. That was an owner-level architecture call about
+bus factor and control-plane rigor, not a measured performance result. See
+`docs/DECISIONS.md` for the current record of what is and is not a
+perf-driven move.
 
 Approved with one adjustment (the owner's):
 
@@ -118,8 +118,8 @@ with step 8 by the 2026-08-19 amendment.
 **C3. Go does not own migrations during the strangler.** Alembic, run by Fly's
 `release_command`, stays the single schema authority until the Python
 persistence layer is deleted at step 9. Go consumes the schema via sqlc. Moving
-migration ownership is the last move, not an early one. The live Alembic head is
-`0020_eval_run`.
+migration ownership is the last move, not an early one. Run `alembic heads` to
+see the current head; do not hardcode it here, it moves every few days.
 
 ## Risks
 
@@ -130,10 +130,9 @@ Still live:
 - **R3. SSE.** Pre-validation provisional token streaming was deliberately
   reversed at commit 0a96f7e, because the per-sentence gate that guarded it
   could not survive the structured-turn contract. It came back on 2026-08-10 as
-  the flag-gated `draft` channel under the owner-amended INV-1, and that is live
-  in prod. See
-  [`superpowers/specs/2026-08-10-ask-sse-live-draft-design.md`](superpowers/specs/2026-08-10-ask-sse-live-draft-design.md).
-  The Go gateway must relay `status`, `token`, `draft`, `draft_reset` and
+  the flag-gated `draft` channel under the owner-amended INV-1 (see
+  `docs/ARCHITECTURE.md` section 15, INV-1 amendment 1), and that is live in
+  prod. The Go gateway must relay `status`, `token`, `draft`, `draft_reset` and
   `result` frames without reordering or buffering. `/query/stream` is still a
   pass-through proxy; the remaining R3 work is moving only the terminal-frame
   persistence to Go.
@@ -158,10 +157,15 @@ Closed:
   database all sat inside the company's Databricks tenant from 2026-08-11
   through 2026-08-19. As of 2026-08-20, D1 is deliberately reversed for the
   two model-call legs by owner decision (generation and embeddings moved to
-  OpenAI); the database leg is unchanged. See
-  `docs/DATABRICKS_ADOPTION_2026-07-28.md`.
+  OpenAI); the database leg is unchanged. See `docs/DECISIONS.md` for the
+  history and `docs/PRODUCTION_TRUTH.md` for the current residency state.
 
 ## LOC baseline (verified 2026-07-10; re-measured 2026-08-15)
+
+Both snapshots below are point-in-time, not a live figure. Re-measure with a
+line counter (for example `cloc`) before citing either number in a decision;
+scope it to handwritten, behavior-bearing files the same way the gate above
+does (excluding generated OpenAPI and sqlc types).
 
 src Python 19,521; tests Python 20,036; frontend TS+TSX 10,353. Expectation
 accepted at the time: Python LOC goes down, total handwritten LOC stays roughly

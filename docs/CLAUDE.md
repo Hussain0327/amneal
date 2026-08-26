@@ -1,52 +1,34 @@
 # Operating instructions for Claude Code (REGWATCH)
 
-This file mirrors Section 15 of the project spec. **Read this before touching
-anything else.**
+This file states the hard rules from `docs/ARCHITECTURE.md` sections 2 and 15
+(the prime directive and the compliance invariants) in agent-facing form.
+**Read this before touching anything else.**
 
-> **Implementation status. Last updated: 2026-08-20.**
-> REGWATCH is built and running in production. It is not a greenfield build. The
-> hard rules below are still in force. The phase-by-phase plan in the spec is
-> history: phases 0-5 are done (ingest/extract, cited Q&A, Watch, Assemble,
-> eval), plus auth, the White Paper populator, and a Next.js App Router frontend.
-> Streamlit is retired.
+> **Implementation status.**
+> REGWATCH is built and running in production. It is not a greenfield build.
+> The hard rules below are still in force. Phases 0-5 are done (ingest/extract,
+> cited Q&A, Watch, Assemble, eval), plus auth, the White Paper populator, and a
+> Next.js App Router frontend. Streamlit is retired.
 >
-> What is actually running today:
+> This file does not restate volatile runtime facts (the deployed Alembic
+> stamp, the live Fly release, which provider is serving today, flag states).
+> Those rot the moment they are copied here. Read them from their single owner
+> instead:
 >
-> - **Deploy.** Fly app `amneal`, release v104 (2026-08-10). A Go proxy holds the
->   public port and serves auth, sessions, feedback, settings and products
->   natively, and orchestrates `POST /query`. The Python RAG core sits behind it
->   on the private network. Frontend on Vercel. Polyglot migration is through
->   step 5.
-> - **Database.** Databricks Lakebase Postgres, with pgvector in the same
->   database. Rows, vectors and the audit log all live there. Alembic head
->   `0020_eval_run`. Supabase is no longer the datastore. The old dual-mode
->   SQLite/Chroma path was deleted in R5.
-> - **LLM.** Moving from Databricks Model Serving (`gpt-oss-120b-080525` on alias
->   `workspace.default.regwatch`) to OpenAI `gpt-5.6-terra` via Chat Completions,
->   by owner decision 2026-08-20. One model serves every role: router,
->   synthesizer, extractor. See `docs/DATABRICKS_ADOPTION_2026-07-28.md` for the
->   Databricks-era history.
-> - **Embeddings.** Moving from Databricks Qwen3 (endpoint
->   `workspace.default.regwatch-embed`) to OpenAI `text-embedding-3-large`
->   truncated to 1024 dimensions via the `dimensions` param, by the same
->   2026-08-20 decision. All 5,494 chunks were embedded on the Qwen3 profile
->   before the cutover (measured 2026-08-11); dimension stays 1024 so profile
->   geometry is unaffected.
-> - **Data residency (D1) is deliberately reversed for model calls, 2026-08-20.**
->   Generation and embeddings now leave the company's Databricks tenant for
->   OpenAI on the normal path -- an intentional owner decision, not a leak.
->   `D1_ENFORCED` was never set in prod, so no armed guard was bypassed. The
->   database (Databricks Lakebase) is unchanged and stays in-tenant.
-> - **Answer policy.** v7 selective citation, live in prod. Cite the facts, talk
->   like a person.
+> - `docs/PRODUCTION_TRUTH.md`: what actually serves a query today, the live
+>   provider and model, the request paths, and how to re-verify each one.
+> - `docs/CONFIG_REFERENCE.md`: every environment variable, feature flag and
+>   secret, including which layer (code default, `fly.toml`, Fly secret,
+>   Actions secret) wins.
 >
-> For current state and open work see `README.md`, `docs/ARCHITECTURE.md`,
-> `docs/DEPLOY.md`, `docs/PROD_READINESS.md` and `docs/ROADMAP.md`.
+> For the design that does not change week to week, see `docs/ARCHITECTURE.md`.
+> For open work, see `docs/ROADMAP.md`. For what shipped and why, see
+> `docs/DECISIONS.md`.
 
 ## Hard rules
 
 1. **Compliance Invariants are code, not guidelines.** INV-1 through INV-9
-   (Section 4 of the spec) are enforced as tests: `tests/test_invariants.py` plus
+   (`docs/ARCHITECTURE.md` section 15) are enforced as tests: `tests/test_invariants.py` plus
    the per-feature invariant tests (`test_cross_drug_leak.py`,
    `test_multiform_clarify.py`, `test_citations.py`,
    `test_whitepaper_populator.py`, which cover INV-7/8/9). Under v7, INV-1 means
@@ -73,7 +55,10 @@ anything else.**
   - `uv run ruff check src tests migrations tests_contract scripts`
   - `uv run black --check src tests migrations tests_contract`
   - `uv run mypy src tests tests_contract`
-  - `uv run pytest -q --cov=src/regwatch --cov-fail-under=80`
+  - `uv run pytest -q -n 4 --dist loadfile --cov=src/regwatch --cov-fail-under=80 --durations=25`
+- `TEST_DATABASE_URL` must point at a disposable Postgres with pgvector before
+  pytest will run at all; there is no SQLite/Chroma fallback (`tests/conftest.py`).
+  Example: `TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5499/regwatch_py_test`.
 - Note the scopes. `mypy src` alone is not what CI checks, and `black --check`
   fails on formatting `ruff` lets through. Run `black` after your last Python
   edit, not before.
@@ -91,29 +76,30 @@ anything else.**
 ## Defaults you can take without asking
 
 - **Embeddings.** Everything goes through `EmbeddingProvider`, and
-  `EMBEDDING_PROVIDER` has NO default (unset refuses to boot; 2026-08-14
-  postmortem; the current name is `INGEST_EMBEDDING_PROVIDER`). Production uses
-  a named embedding profile (`RETRIEVAL_EMBEDDING_PROFILE`, migration 0015):
-  OpenAI `text-embedding-3-large` truncated to 1024 dims via the `dimensions`
-  parameter, vectors in the `chunk_embedding` table. There is deliberately NO
-  HNSW index on that arm -- the Lakebase branch is capped at 512 MiB and an
-  index roughly doubles vector storage, so retrieval exact-scans ~16k vectors.
-  The `legacy` `chunk.embedding` column (1536-dim) is a frozen historical
-  space; rollback means a previously promoted profile, never the legacy column.
-  `echo` is the test provider.
-- **LLM.** `LLM_PROVIDER` has NO default either. Production runs `openai`
-  (`OPENAI_LLM_MODEL`, currently `gpt-5.6-terra`, Chat Completions with
-  `reasoning_effort=low`) for every role. `echo` is for tests. The Databricks
-  provider remains implemented and is the rollback arm.
-- **Refusal threshold.** `REFUSAL_SCORE_THRESHOLD`, default 0.30. Passages
-  scoring below it are withheld from the synthesizer before it runs. Note that
-  0.30 is the GLOBAL fallback only. Each embedding profile carries its own
-  measured floor in `REFUSAL_SCORE_THRESHOLD_BY_PROFILE`; the live
-  text-embedding-3-large@1024 profile is 0.70, measured 2026-08-20 (40 gold
-  questions scored >= 0.8224, 8 off-corpus controls scored <= 0.5787).
-  `GET /settings` reports this effective per-profile floor, and the Ask
-  confidence band's High cut is derived from it (floor + a third of the
-  headroom to 1.0: 0.80 live), never a fixed number.
+  `INGEST_EMBEDDING_PROVIDER` has NO default (unset refuses to boot; 2026-08-14
+  postmortem; the old name `EMBEDDING_PROVIDER` still works as a deprecated
+  alias). Production uses a named embedding profile
+  (`RETRIEVAL_EMBEDDING_PROFILE`, migration 0015). Only two provider classes
+  exist: `OpenAIEmbeddingProvider` for real calls and `EchoEmbeddingProvider`
+  for tests; there is no Databricks or Qwen provider class. There is
+  deliberately NO HNSW index on the live arm; the Lakebase branch is capped at
+  512 MiB and an index roughly doubles vector storage, so retrieval exact-scans
+  the corpus. See `docs/PRODUCTION_TRUTH.md` for the live model and dimension,
+  and `docs/CONFIG_REFERENCE.md` for the variable names and precedence.
+- **LLM.** `LLM_PROVIDER` has NO default either. `LLM_PROVIDER=databricks`
+  raises `ValueError` in code; there is no working Databricks rollback path.
+  `echo` is for tests. Production runs `openai` over the Responses API
+  (`client.responses.create`, `store=False`, not Chat Completions), with
+  `openai_reasoning_effort` defaulting to `medium`. See
+  `docs/PRODUCTION_TRUTH.md` for the live model name.
+- **Refusal threshold.** `Settings.effective_refusal_threshold()` resolves a
+  per-profile floor from `REFUSAL_SCORE_THRESHOLD_BY_PROFILE`, falling back to
+  the global `REFUSAL_SCORE_THRESHOLD` default 0.30. Passages scoring below the
+  effective floor are withheld from the synthesizer before it runs. The live
+  per-profile value is a Fly secret, not readable from this repo; read it from
+  `GET /settings` or `regwatch status`, never print it as a fixed number. The
+  Ask confidence band's High cut is derived from the same effective floor
+  (floor plus a third of the headroom to 1.0), never a fixed number.
 - **Vector store.** pgvector, in the same Postgres database as the structured
   store. There is no other vector backend since R5.
 - **Structured store.** Postgres via `DATABASE_URL` (Lakebase in prod, a
@@ -134,6 +120,6 @@ Otherwise: pick a default, log it in `DECISIONS.md`, and proceed.
 
 - Don't drop `INV-*` tests.
 - Don't add behaviors that "should be easy to add later" (a hosted submission
-  drafter, an auto-emailer to FDA, a regulatory recommender). They cross the line
-  in Section 4.
+  drafter, an auto-emailer to FDA, a regulatory recommender). They cross hard
+  rule 3 above.
 - Don't use a language model's memory to fill data gaps. Verified sources only.

@@ -4,7 +4,7 @@ Top-K by score alone returns near-duplicates. Eight chunks from one paragraph
 of one guidance are one piece of evidence dressed as eight, and they crowd out
 the distinct passage a multi-aspect question needs. Maximal Marginal Relevance
 keeps the same COUNT but charges a candidate for overlapping what is already
-selected (docs/DSA.md section 33)::
+selected (docs/ARCHITECTURE.md, retrieval)::
 
     next = argmax over remaining d of
         lambda * rel(d) - (1 - lambda) * max sim(d, s) for s in selected

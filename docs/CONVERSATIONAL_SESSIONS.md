@@ -1,6 +1,6 @@
 # Conversational sessions
 
-**Last updated:** 2026-08-11
+**Last updated:** 2026-08-26
 
 RegWatch answers follow-up questions like a chat, and stays inside the FDA/CRA
 boundary while doing it. One rule holds the whole design together:
@@ -14,11 +14,16 @@ boundary while doing it. One rule holds the whole design together:
 
 Since 2026-07-24 the Go edge holds the public port:
 
-- **`POST /query`** is served natively by Go when `GO_NATIVE_QUERY` is on, which
-  it is in production. Go enforces auth (401), request validation (422), the
-  per-user rate limit (429) and session ownership (a foreign `session_id` gets
-  404), writes the chat rows, and calls the Python RAG core through the
-  token-gated internal endpoint `POST /internal/query/compute`.
+- **`POST /query`** is served natively by Go when `GO_NATIVE_QUERY` is on. The
+  code default is `false` (`go/internal/api/config.go:209`), so a fresh
+  checkout relays `/query` to Python unless you set the flag. Whether it is on
+  in production today is a deploy fact, not something this repo's code
+  guarantees; it is pinned in `fly.toml`'s `[env]` block and summarized in
+  `docs/PRODUCTION_TRUTH.md`. When it is on, Go enforces auth (401), request
+  validation (422), the per-user rate limit (429) and session ownership (a
+  foreign `session_id` gets 404), writes the chat rows, and calls the Python
+  RAG core through the token-gated internal endpoint
+  `POST /internal/query/compute`.
 - **`POST /query/stream`** is gated by Go for auth and rate limit, then relayed
   to Python, which runs the whole turn including its own writes. The rate-limit
   bucket is shared with `/query`, so Go is the single authority and Python never
@@ -36,11 +41,13 @@ The semantics below are the same on both paths.
 | `k` | optional retrieval width, 1 to 50 |
 | `live_draft` | opt in to the live draft channel. Stream route only |
 
-`filters` is narrowed to the five session keys (`normalized_name`,
-`dosage_form`, `route`, `psg_type`, `doc_id`). Anything else is dropped, not
-rejected, so options saved by older sessions keep working. Dropping rather than
-trusting matters: a caller-supplied `version_id` would switch off current-version
-scoping and let superseded chunks be cited as current.
+`filters` is narrowed to six session keys: `normalized_name`, `dosage_form`,
+`route`, `psg_type`, `doc_id`, `appl_no`
+(`src/regwatch/common/conversation.py:24-26`, `SESSION_FILTER_KEYS`). Anything
+else is dropped, not rejected, so options saved by older sessions keep
+working. Dropping rather than trusting matters: a caller-supplied `version_id`
+would switch off current-version scoping and let superseded chunks be cited as
+current.
 
 Caller identity is not a request field. It comes from the `regwatch_session`
 cookie. Threads are bound to the authenticated user, and `GET /sessions`,
@@ -135,14 +142,26 @@ Each remembered turn also carries a scope label for the route prompt.
 audit id and a `normalized_name`. Corpus scope is never inferred from shadow
 output.
 
-## Route observation (shadow only)
+## Route observation (shadow and live)
 
-`REGWATCH_ROUTE_CALL` defaults to `off`. Both `shadow` and the reserved value
-`live` currently execute as shadow: one bounded router call, strict parsing, and
-a deterministic scope-compilation record written to
-`query_log.route_json["route_call"]`. It never picks a retrieval query, mutates
-a session, or writes anything the user sees. PR12 is the first change allowed to
-make `live` mean something.
+`REGWATCH_ROUTE_CALL` has three modes: `off`, `shadow`, `live`. The code
+default is `off`, and it is also pinned `off` in production's `fly.toml`
+(2026-08-20, taking the router off the critical Ask path), so neither shadow
+nor live executes today.
+
+**Shadow mode** runs one bounded router call, strict parsing, and writes a
+deterministic scope-compilation record to `query_log.route_json["route_call"]`.
+It never picks a retrieval query, mutates a session, or writes anything the
+user sees.
+
+**Live mode** does more: PR12 shipped `_compile_route_live_scope`
+(`src/regwatch/generate/grounded_qa.py:2339-2351`), which can compile a
+PRODUCT-scope route decision from the shadow observation and let it carry a
+session's product forward for an elliptical follow-up, only when the
+question names no product itself and the existing did-you-mean and
+brand-lookup guards find nothing (`grounded_qa.py:2477-2498`). A CORPUS,
+CLARIFY, or CONVERSE decision still stays audit-only in live mode; only the
+PRODUCT case is allowed to execute.
 
 ## Audit model
 
@@ -169,8 +188,12 @@ filters, the retrieved evidence ids, the citations, and the reason it declined
 if it did.
 
 One accepted edge: if the Python compute side sheds the request under load (a
-503), the best-effort T1 user message may already exist, leaving an orphaned
-user message with no audit row. Nothing ran, so there is nothing to audit.
+503), the best-effort T1 user message may already exist. Go's
+`compensateShedTurn` (`go/internal/api/persist.go:105`) then best-effort
+deletes that T1 row, and the session row too if this turn created it, so most
+sheds leave zero new rows rather than an orphaned message. A shed that beats
+the compensation step (the delete itself fails) is the only case that leaves
+an orphaned user message with no audit row.
 
 `POST /resolve`, which backs the product-scope picker, is **not** a
 conversational turn. It is deterministic entity resolution, mapping an RLD name

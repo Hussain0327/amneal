@@ -10,8 +10,8 @@ what the contract defines.
 
 PR B adds the three paths the cutover introduces or finally closes:
 S24 forces an UNEXPECTED raise inside retrieve() -- the INV-6 gap that used
-to escape ask() as an unaudited 500 (docs/REFACTOR_BACKLOG_2026-07-09.md
-item 17); compute_turn's audited-error boundary now yields one pipeline_error
+to escape ask() as an unaudited 500 (the July 2026 refactor backlog, item 17,
+in git history); compute_turn's audited-error boundary yields one pipeline_error
 row. S25 makes the Go control plane unable to reach the Python core at all
 (ragclient dial refused) -- Go synthesizes one upstream_error row. S26 is the
 answer path (allow_skip=False) under a TOTAL audit outage: the strict write

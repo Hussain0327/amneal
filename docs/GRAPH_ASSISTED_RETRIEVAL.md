@@ -37,8 +37,9 @@ The Ask path today:
 1. Resolves one product and, where needed, one dosage-form/route pair.
 2. Restricts retrieval to the current PSG version, so superseded chunks cannot
    be cited (`retrieve/retriever.py` `_current_version_ids_for_filters`).
-3. Embeds the question through the active embedding profile (Databricks Qwen3,
-   1024-dim) and runs a product-filtered pgvector cosine search.
+3. Embeds the question through the active embedding profile (1024-dim; see
+   `docs/PRODUCTION_TRUTH.md` for which provider is live) and runs a
+   product-filtered pgvector cosine search.
 4. Takes up to `VECTOR_TOP_K` candidates, optionally reranks them (the reranker
    is off by default), and sends at most `RERANK_TOP_K` passages to synthesis.
 5. Withholds passages below `REFUSAL_SCORE_THRESHOLD` before synthesis runs.
@@ -244,12 +245,14 @@ embeddings.
 
 ## Evaluation and promotion gates
 
-The Q&A gold set is 62 rows today (`src/regwatch/eval/gold_set.jsonl`, counted
-2026-08-11). It is stratified by category: refusal 16, current_version 14,
-exact_identifier 11, exception 7, duplicate_boilerplate 6, table 5,
-clarification 3. None of those strata separate single-section from
-cross-section evidence, which is exactly what this change is supposed to
-improve, so expand the set before tuning traversal or sufficiency.
+The Q&A gold set is 62 rows today (`src/regwatch/eval/gold_set.jsonl`,
+re-verified 2026-08-26; the file has comment lines mixed in, so count with
+`grep -vc '^\s*#\|^\s*$'`, not `wc -l`). It is stratified by category: refusal
+16, current_version 14, exact_identifier 11, exception 7,
+duplicate_boilerplate 6, table 5, clarification 3. None of those strata
+separate single-section from cross-section evidence, which is exactly what
+this change is supposed to improve, so expand the set before tuning traversal
+or sufficiency. Re-run the count before relying on it; it will drift.
 
 Compare baseline and graph-assisted on, at minimum:
 

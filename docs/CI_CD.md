@@ -1,13 +1,16 @@
 # CI/CD Pipeline and Pre-Push Checklist
 
-Last updated: 2026-08-12
+Last updated: 2026-08-26
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) is the source of truth.
 This doc says what each job gates on and gives the local command that satisfies
 it, so you find the failure before you push instead of after.
 
-CI runs on every push to `main` and on every pull request. There are nine jobs.
-They run independently and any one of them going red blocks the merge.
+CI runs on every push to `main` and on every pull request. There are 11 jobs:
+`changes`, `openai-eval`, `lint-type-test`, `python-audit`, `docker-image`,
+`docker-build`, `frontend`, `frontend-contract`, `go-proxy`,
+`store-schema-drift`, `cross-service-contract`. They run independently and any
+one of them going red blocks the merge.
 
 CD is [`deploy.yml`](../.github/workflows/deploy.yml). It fires after every green
 `ci` run on `main` and ships that exact commit to Fly. See "CD: deploy.yml"
@@ -21,15 +24,16 @@ From the repo root. If all of this is green, CI almost certainly is too.
 
 ```bash
 # 1. Backend: format, lint, types, layering, tests + coverage floor
-uv sync --extra dev --extra llm --extra local-embeddings
+uv sync --extra dev --extra llm --extra local-embeddings --extra corpus-worker
 uv run ruff check src tests migrations tests_contract scripts
 uv run black --check src tests migrations tests_contract   # ruff does NOT format; black is its own gate
 uv run mypy src tests tests_contract
 uv run lint-imports
-uv run pytest -q --cov=src/regwatch --cov-fail-under=80
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres \
+  uv run pytest -q -n 4 --dist loadfile --cov=src/regwatch --cov-fail-under=80 --durations=25
 
 # 2. Python supply-chain audit (--frozen also asserts uv.lock matches pyproject.toml)
-uv export --frozen --no-emit-project --no-dev --extra llm \
+uv export --frozen --no-emit-project --no-dev --extra llm --extra corpus-worker \
   --format requirements-txt --output-file requirements-audit.txt
 uvx pip-audit -r requirements-audit.txt
 
@@ -51,78 +55,112 @@ npm run lint
 npx tsc --noEmit
 npm run build
 npm test                                            # vitest run
+cd ../..
 
 # 5. Frontend wire types: regenerate and confirm BOTH committed copies are current
+cd regwatch/frontend
 npm run gen:types                                   # needs the API importable (uv sync above)
 git diff --exit-code -- openapi.json lib/api-types.ts   # nonzero => commit the regenerated files
 cd ../..
 
 # 6. Docker images + Trivy scan (slowest; see "Reproduce the Trivy scan" below)
 docker build -t regwatch:ci .
+docker build -t regwatch-corpus-worker:ci -f Dockerfile.corpus-worker .
 docker compose config --quiet
 docker build -t regwatch-web:ci regwatch/frontend
 ```
+
+`TEST_DATABASE_URL` must point at a real Postgres with the pgvector extension
+(CI runs `pgvector/pgvector:pg17`). Without it, `test_pgvector_store.py` and
+`test_postgres_bootstrap.py` skip and the prod datastore path ships unverified.
 
 Backend Python only: blocks 1 and 2, plus the contract suite if you touched
 anything `POST /query` relays through the Go edge. Go only: block 3. Frontend
 only: 4 and 5. API schema change: 5. Dependency or Dockerfile change: 6.
 
-Three jobs have no block above. `databricks-eval` needs live Databricks
-credentials, and `store-schema-drift` and `cross-service-contract` need a
-disposable pgvector Postgres and the proxy binary. Their repro commands are in
-their own sections.
+Four jobs have no block above. `openai-eval` needs a live `OPENAI_API_KEY` and
+only runs at all when `changes` decides the diff can reach the eval path (see
+below). `store-schema-drift` and `cross-service-contract` need a disposable
+pgvector Postgres and, for the latter, the built proxy binary; their repro
+commands are in their own sections. `docker-build` has no build steps of its
+own; it only checks that every `docker-image` matrix leg succeeded.
 
 ---
 
-## The nine jobs
+## The 11 jobs
 
-### `databricks-eval`
+### `changes`
 
-The live evaluation gate, declared first in `ci.yml`. It calls the reusable
-workflow [`databricks-eval.yml`](../.github/workflows/databricks-eval.yml) with
-`prose: false` and `selective: false`.
+Decides whether a pull request's diff can affect the eval's result, and skips
+`openai-eval` when it cannot: frontend, Go, docs and CI-plumbing-only PRs
+(around 40 percent of recent PRs) pay no eval time or live OpenAI tokens.
 
-**Read that carefully: the blocking eval runs with both prompt flags off.** It
-measures the v5 claims baseline, not the v6 prose plus v7 selective-citation
-prompt production actually serves. The v6 and v7 arms exist but are run by hand
-through `workflow_dispatch` (the `prose` and `selective` inputs) and upload their
-scorecards under their own artifact names.
+It diffs the PR against its base commit with plain `git diff --name-only` (no
+third-party action; this repo pins every action by SHA) and sets `eval=true`
+when the change touches `src/`, `config/`, `migrations/`, `pyproject.toml`,
+`uv.lock`, or `.github/workflows/ci.yml` / `openai-eval.yml`. A push to `main`
+or a manual `workflow_dispatch` always evaluates; only `pull_request` events
+are gated. `ci.yml:45-75`.
 
-The job picks its arm at run time:
+The decision is passed into `openai-eval` as the `run` input rather than
+skipping the caller job outright, so the `openai-eval / eval` check still
+reports (as `skipped`, which branch protection accepts) instead of never
+appearing.
 
-1. Databricks arm, if `QWEN_EMBEDDING_BASE_URL`, `QWEN_EMBEDDING_TOKEN` and the
-   `DATABRICKS_SERVING_RUNTIME_VERSION` repo variable are all set. This is the
-   arm that matters: it embeds with Databricks-hosted Qwen3, the same geometry
-   production serves. Per [`EVAL_STATUS.md`](EVAL_STATUS.md) it has been
-   configured since 2026-08-05 and runs on the same profile id prod uses.
-2. Otherwise the job fails loudly ("eval could not run"). The legacy OpenAI
-   arm was removed with the OpenAI provider on 2026-08-17.
+### `openai-eval`
 
-The Databricks arm does four steps in a fixed order: register the embedding
-profile (content-addressed, so it is idempotent), build the HNSW index, seed the
-vector store, then run `run_eval --check-thresholds`. The index has to come
-before the seed, because seeding activates the profile and the activation assert
-demands a ready index.
+The live evaluation gate, calling the reusable workflow
+[`openai-eval.yml`](../.github/workflows/openai-eval.yml) with `prose: true`,
+`selective: true`, and `assert_prod_mode: true`. `ci.yml:84-92`.
 
-Blocking thresholds live in `src/regwatch/eval/run_eval.py`: `recall_at_k` at
-0.80 and `citation_precision` at 0.74. They are a ratchet against the first real
-measurement, not a quality bar. `refusal_accuracy` is measured and printed but
-does not block, by owner decision: the product is moving to a conversational Ask
-layer that is not meant to refuse. If more than 10 percent of gold turns fail
-transport, the run exits 3 instead of scoring, because it did not measure
-anything.
+**This scores what production actually serves.** `prose: true` and
+`selective: true` turn on the same v6 prose synthesis and v7 selective
+citation prod runs (both pinned `"true"` in `fly.toml`). `assert_prod_mode`
+makes the run refuse to score if its own settings drift from
+`config/prod_mode.json`, so a mismatch between what the gate measures and
+what prod serves fails loudly instead of silently. This closed the older gap
+where the blocking eval scored an outdated arm while prod had already moved
+on.
 
-Concurrency group `databricks-eval` with `cancel-in-progress: false`, so live
-evals serialize. Two at once collide on shared Databricks workspace QPS and trip
-that transport gate.
+The job:
+
+1. Preflights `OPENAI_API_KEY`. An empty key fails the job outright
+   (`::error::OPENAI_API_KEY is unset; live eval did not run.`), it does not
+   skip. `openai-eval.yml:96-102`.
+2. Restores a cached seeded corpus keyed on the ingest/embed code, the schema,
+   the lockfile, the embedding model, and the current year-month, or reseeds
+   from the live FDA catalog and OpenAI embeddings on a miss (only
+   push-to-main runs save the cache). `openai-eval.yml:122-201`.
+3. Registers a content-addressed OpenAI embedding profile (idempotent: a cache
+   hit resolves to the profile the restored embeddings already belong to).
+4. Runs `python -m regwatch.eval.run_eval --check-thresholds --assert-prod-mode`
+   against that profile.
+
+Blocking thresholds live in `src/regwatch/eval/run_eval.py`:
+`THRESHOLDS = {"recall_at_k": 0.80, "citation_precision": 0.70}`. They are a
+ratchet against the first real measurement, not a quality bar;
+`citation_precision` was lowered from 0.74 to 0.70 by owner decision on
+2026-08-11, and the run_eval.py comment explains why (a v7-era failure mode
+zeroes 4 gold rows that the old claims-JSON path did not fail on).
+`refusal_accuracy` is measured and printed but does not block. If more than 10
+percent of gold turns fail transport, the run exits 3 instead of scoring,
+because it did not measure anything. 0.90 / 0.95 / 0.95 figures elsewhere are
+non-blocking targets, not the gate.
+
+Concurrency group `openai-eval-<event>-<ref>` with `cancel-in-progress: false`.
+Dispatch runs serialize among themselves; PR and push runs each get their own
+group, so a burst of PRs no longer turns a required check red by getting
+queued out from under a dispatch run (that collision, fixed 2026-08-25, used
+to happen because GitHub cancels the previously pending job in a shared
+group).
 
 If branch protection pins required checks by job name, the name to add is
-`databricks-eval / eval`.
+`openai-eval / eval`. `ci.yml:33`.
 
-You cannot run this locally without the Databricks credentials. The offline
-stand-in is `tests/test_eval_gate.py`, which runs inside plain `pytest` on
-hash-based echo embeddings and does not exercise real geometry or the 0.30
-refusal threshold.
+You cannot run this locally without an `OPENAI_API_KEY`. The offline stand-in
+is `tests/test_eval_gate.py`, which runs inside plain `pytest` on hash-based
+echo embeddings and does not exercise real geometry or the live refusal
+threshold.
 
 ### `lint-type-test` (Python 3.12 only)
 
@@ -138,12 +176,10 @@ halve this job's minutes.
 | black | `uv run black --check src tests migrations tests_contract` | Formatting gate. Drop `--check` to fix. |
 | mypy | `uv run mypy src tests tests_contract` | Strict on `src/`. CI caches `.mypy_cache` between runs. |
 | lint-imports | `uv run lint-imports` | import-linter layering contracts: domain logic must not import I/O layers. |
-| pytest | `uv run pytest -q --cov=src/regwatch --cov-fail-under=80` | Coverage floor 80 percent, measured around 82 per the comment in `ci.yml`. Includes the offline eval gate and the INV-1..9 invariant tests. |
+| pytest | `uv run pytest -q -n 4 --dist loadfile --cov=src/regwatch --cov-fail-under=80 --durations=25` | Coverage floor 80 percent, measured around 82 per the comment in `ci.yml`. `-n 4 --dist loadfile` runs xdist with one worker per runner vCPU, a module's tests pinned to one worker. `--durations=25` prints the slowest 25 tests every run. |
 
-Dependency sync is `uv sync --extra dev --extra llm --extra local-embeddings`.
-
-The live eval used to live in this job. It moved out to `databricks-eval` so
-every live eval serializes through one non-canceling concurrency group.
+Dependency sync is
+`uv sync --extra dev --extra llm --extra local-embeddings --extra corpus-worker`.
 
 To exercise the pgvector tests locally, point `TEST_DATABASE_URL` at a local
 Postgres with pgvector. Without it, `test_pgvector_store.py` and
@@ -152,12 +188,12 @@ unverified, so a green local pytest is not proof the pgvector path works.
 
 ### `python-audit`
 
-Audits the shipped production closure. The slim image installs the `llm` extra
-only, so `local-embeddings` and torch never reach prod and are deliberately out
-of scope.
+Audits the union of both shipped Python closures: the public API (`llm`) and
+the private corpus worker (`llm` + `corpus-worker`). `local-embeddings` and
+torch never reach either production image and are deliberately out of scope.
 
 ```bash
-uv export --frozen --no-emit-project --no-dev --extra llm \
+uv export --frozen --no-emit-project --no-dev --extra llm --extra corpus-worker \
   --format requirements-txt --output-file requirements-audit.txt
 uvx pip-audit -r requirements-audit.txt
 ```
@@ -168,22 +204,45 @@ uvx pip-audit -r requirements-audit.txt
   one, edit the step in `ci.yml`: pip-audit takes ignores on the command line,
   not from `.trivyignore`.
 
-### `docker-build` (image build + Trivy scan)
+### `docker-image` (build + Trivy scan, three-image matrix)
+
+Builds and Trivy-scans three images as parallel matrix legs, so a web-image CVE
+never hides an API-image one:
+
+| Image | Context | Dockerfile | Tag |
+|---|---|---|---|
+| api | `.` | `Dockerfile` | `regwatch:ci` |
+| corpus-worker | `.` | `Dockerfile.corpus-worker` | `regwatch-corpus-worker:ci` |
+| web | `regwatch/frontend` | `regwatch/frontend/Dockerfile` | `regwatch-web:ci` |
 
 ```bash
 docker build -t regwatch:ci .
+docker build -t regwatch-corpus-worker:ci -f Dockerfile.corpus-worker .
 docker compose config --quiet
 docker build -t regwatch-web:ci regwatch/frontend
 ```
 
-CI builds with buildx and the GitHub Actions layer cache (separate `api` and
-`web` scopes; a cache export failure never fails the build), then prunes the
-local buildkit store before scanning. That prune is there because of the
-2026-07-20 ENOSPC incident. Both images are then scanned by a pinned
-`aquasec/trivy:0.72.0`, gating on fixable CRITICAL/HIGH vulns
-(`--ignore-unfixed`) plus any embedded secrets. Suppressions live in
-[`.trivyignore`](../.trivyignore). This is the job that fails most often; see the
-dedicated section below.
+CI builds with buildx and the GitHub Actions layer cache (one scope per image;
+cache writes only happen on push-to-main, and a cache export failure never
+fails the build), then prunes the local buildkit store before scanning. That
+prune is there because of the 2026-07-20 ENOSPC incident. Each image is then
+scanned by a pinned `aquasec/trivy:0.72.0`, gating on fixable CRITICAL/HIGH
+vulns (`--ignore-unfixed`) plus any embedded secrets. Suppressions live in
+[`.trivyignore`](../.trivyignore). This is the job that fails most often; see
+the dedicated section below.
+
+### `docker-build` (fan-in)
+
+Not a build. This job needs `docker-image` (all three legs) and fails unless
+every leg succeeded:
+
+```bash
+test "${docker-image-result}" = "success"
+```
+
+It exists only so branch protection has one stable required-check name
+(`docker-build`) instead of naming three matrix legs individually. There is
+nothing to reproduce locally beyond the `docker-image` commands above.
 
 ### `frontend`
 
@@ -306,6 +365,14 @@ What it does, in order:
    the build's head and then runs the full serving-readiness guard, so profile
    coverage/configured-index/provider drift also aborts before any machine is
    replaced.
+5. After the roll, a separate step asserts every app-group machine reports
+   `started`: `bash scripts/fly-verify-machines.sh wait`. `deploy.yml:199-202`.
+   This is a distinct gate from step 4's migration guard. Deploy v137 once
+   returned exit 0 while both app machines were crash-looping, because
+   `flyctl deploy`'s own wait logic accepts Fly's "warning" health-check state
+   as good enough (postmortem #224, 2026-08-13, prod down 3h35m before anyone
+   noticed). Machine state is the signal that wait missed, so the deploy job
+   checks it directly, after the roll, every time.
 
 Guard rails: a 45-minute job timeout, and a `deploy-fly` concurrency group with
 `cancel-in-progress: false`, so an in-flight release is never killed mid-roll
@@ -319,12 +386,28 @@ only required secret is `FLY_API_TOKEN`. Net effect: every green `ci` run on
 
 - [`watch-daily.yml`](../.github/workflows/watch-daily.yml): the daily Watch run,
   cron `17 7 * * *` (07:17 UTC). It is the only production driver of the watch
-  pipeline. It pins Qwen3 and requires the named profile plus base URL, token,
-  model, revision and dimension. A pre-crawl `init-db` gate validates the
-  registered profile; an `always()` post-ingest step asserts zero pending chunks.
-  Those six `WATCH_*` repository secrets were still absent on 2026-08-12, so the
-  workflow fails closed before crawl until the owner provisions them and
-  verifies a manual dispatch.
+  pipeline. It needs exactly three secrets: `WATCH_DATABASE_URL`,
+  `OPENAI_API_KEY` (shared with `openai-eval.yml`), and
+  `WATCH_ACTIVE_EMBEDDING_PROFILE`, validated against the shape
+  `^ep_[0-9a-f]{32}$` and rejected if it is `legacy` or malformed. It hardcodes
+  `INGEST_EMBEDDING_PROVIDER=openai` and `LLM_PROVIDER=openai` in its own env
+  block; there is no Qwen or Databricks reference anywhere in this workflow. A
+  pre-crawl `init-db` gate validates the registered profile; an `always()`
+  post-ingest step asserts zero pending chunks. While `WATCH_DATABASE_URL` is
+  unset, the job skips cleanly, no failures.
+- [`machine-monitor.yml`](../.github/workflows/machine-monitor.yml): every 10
+  minutes, asserts no machine in the Fly `app` process group is stopped
+  (`scripts/fly-verify-machines.sh check`, the same check `deploy.yml` uses in
+  `wait` mode). Needs `FLY_API_TOKEN` (the same secret `deploy.yml` uses) and
+  optionally `SLACK_WEBHOOK_URL` for failure notifications; while
+  `FLY_API_TOKEN` is unset the job skips cleanly. This is the direct fix for
+  postmortem #224: `uptime-eval.yml` only watches the public edge, which stays
+  "healthy" answering 502s once its upstream app machines are gone, so it
+  cannot see a stopped fleet the way this job can. Whether this workflow is
+  actually enabled (schedules not disabled, the secret actually set) at the
+  repository level cannot be proven from a checkout of this repo; the YAML
+  existing is not evidence it is running. Check the Actions tab or ask an
+  operator.
 - [`uptime-eval.yml`](../.github/workflows/uptime-eval.yml): curls
   `PROD_HEALTH_URL` every 30 minutes and asserts `"status": "ok"`. Skips cleanly
   while that secret is unset.
@@ -344,9 +427,11 @@ only required secret is `FLY_API_TOKEN`. Net effect: every green `ci` run on
   regenerating `go/internal/store/schema.sql` fails `store-schema-drift`.
 - **`uv.lock` drift.** Changing `pyproject.toml` without `uv lock` fails
   `python-audit`'s `--frozen` export.
-- **Two live evals at once.** They share one Databricks workspace, collide on
-  QPS and trip the 10 percent transport gate. The `databricks-eval` concurrency
-  group serializes CI's own runs; a hand-launched dispatch queues behind them.
+- **A PR that touches nothing eval-relevant still shows an `openai-eval / eval`
+  check.** It reports `skipped`, not missing, because of the `changes` job's
+  path gate; branch protection accepts a skip. If you expected the eval to run
+  and it did not, check whether your diff actually touches `src/`, `config/`,
+  `migrations/`, `pyproject.toml`, `uv.lock`, or the two workflow files.
 - **Trivy on the web image.** The recurring one, see below.
 - **pgvector tests skip without a DB.** A green local `pytest` may not have run
   the Postgres path. CI always does.
@@ -394,7 +479,7 @@ docker run --rm \
   aquasec/trivy:0.72.0 image \
   --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH \
   --ignorefile /root/.trivyignore \
-  --scanners vuln,secret regwatch-web:ci          # swap regwatch:ci for the API image
+  --scanners vuln,secret regwatch-web:ci          # swap regwatch:ci or regwatch-corpus-worker:ci for the other images
 ```
 
 Exit 0 = pass. To see what is failing and where, drop `--exit-code` and
