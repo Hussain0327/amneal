@@ -287,8 +287,8 @@ func TestConfigFromEnvEffectiveRefusalThreshold(t *testing.T) {
 }
 
 // TestLatencyMs pins query_log.latency_ms's NULL-not-zero rule. The column
-// feeds the provider-cutover p95 gates (docs/DATABRICKS_ADOPTION_2026-07-28.md
-// steps 2 and 7); a percentile where "unknown" and "instantaneous" both read 0
+// fed the 2026-07 provider-cutover p95 gates (docs/DECISIONS.md); a percentile
+// where "unknown" and "instantaneous" both read 0
 // understates exactly the regression those gates exist to catch.
 func TestLatencyMs(t *testing.T) {
 	t0 := time.Unix(1000, 0)

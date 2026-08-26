@@ -2,11 +2,78 @@
 
 Append-only. What was picked, why, and when.
 
-Last updated: 2026-08-21.
+Last updated: 2026-08-26.
+
+For what runs today, read `docs/PRODUCTION_TRUTH.md` and
+`docs/CONFIG_REFERENCE.md`. This file is history: it explains why the system
+looks the way it does, not what is live right now. A date in an entry heading
+is when that decision was made, not a claim about current state; a dated
+follow-up line under an entry is the closest thing here to current state on
+that topic, and even that can be superseded by a later entry further down.
 
 Old entries are left as they were written. When something later changed, a dated
 follow-up line goes under the original entry instead of editing the original
 away. The newest entries are at the bottom.
+
+## Index
+
+- [Phase 0 - scaffold](#phase-0---scaffold) (undated, before Jun 10 2026)
+- [Phase 1 - ingest + extract](#phase-1---ingest-extract) (undated, before Jun 10 2026)
+- [Phase 2 - retrieval + cited Q&A](#phase-2---retrieval-cited-qa) (undated, before Jun 10 2026)
+- [Phase 3 - watch](#phase-3---watch) (undated, before Jun 10 2026)
+- [Phase 4 - assemble + UI + API](#phase-4---assemble-ui-api) (undated, before Jun 10 2026)
+- [Phase 5 - eval](#phase-5---eval) (undated, before Jun 10 2026)
+- [Post-review fixes (after live demo)](#post-review-fixes-after-live-demo) (undated, before Jun 10 2026)
+- [Live-test observations (worth fixing next)](#live-test-observations-worth-fixing-next) (undated, before Jun 10 2026)
+- [Phase 0 - eval green + entity-resolution-first (cross-drug leak fix)](#phase-0---eval-green-entity-resolution-first-cross-drug-leak-fix) (undated, before Jun 10 2026)
+- [OpenAI Responses API + role-specific models](#openai-responses-api-role-specific-models) (undated, before Jun 10 2026)
+- [Stage A production hardening](#stage-a-production-hardening) (undated, before Jun 10 2026)
+- [Docker container baseline](#docker-container-baseline) (undated, before Jun 10 2026)
+- [Conversational sessions](#conversational-sessions) (undated, before Jun 10 2026)
+- [Frontend/backend workspace split](#frontendbackend-workspace-split) (undated, before Jun 10 2026)
+- [Streamlit POC retired](#streamlit-poc-retired) (undated, before Jun 10 2026)
+- [Entity-resolution hardening](#entity-resolution-hardening) (undated, before Jun 10 2026)
+- [Eval upgrade - fact scoring + a CI gate that actually fires](#eval-upgrade---fact-scoring-a-ci-gate-that-actually-fires) (undated, before Jun 10 2026)
+- [Pilot hardening - vague-input guard, multi-form clarify, watch pipeline, fail-fast providers](#pilot-hardening---vague-input-guard-multi-form-clarify-watch-pipeline-fail-fast-providers) (undated, before Jun 10 2026)
+- [Cookie-session auth + per-user chat history (Jun 10 2026)](#cookie-session-auth-per-user-chat-history-jun-10-2026)
+- [Gate 2 - CRA White Paper populator (Jun 11 2026)](#gate-2---cra-white-paper-populator-jun-11-2026)
+- [Supabase migration - Postgres + pgvector, OpenAI embeddings, custom auth kept (Jun 12 2026)](#supabase-migration---postgres-pgvector-openai-embeddings-custom-auth-kept-jun-12-2026)
+- [Unified shell + URL-as-truth product scope (Jun 15 2026)](#unified-shell-url-as-truth-product-scope-jun-15-2026)
+- [Ask rebuilt as a cited conversational chat (Jun 16 2026)](#ask-rebuilt-as-a-cited-conversational-chat-jun-16-2026)
+- [POST /resolve - deterministic, no-audit-row scope resolution (Jun 16 2026)](#post-resolve---deterministic-no-audit-row-scope-resolution-jun-16-2026)
+- [Refusal threshold 0.30 revalidation (Jun 25 2026) -- PROPOSED, pending human sign-off](#refusal-threshold-030-revalidation-jun-25-2026----proposed-pending-human-sign-off)
+- [SSE progress streaming + open operational probes (Jun 29 2026)](#sse-progress-streaming-open-operational-probes-jun-29-2026)
+- [R5 - SQLite/Chroma dual-mode deleted; Postgres + pgvector is the only datastore](#r5---sqlitechroma-dual-mode-deleted-postgres-pgvector-is-the-only-datastore) (undated, before Jun 10 2026)
+- [Token-delta streaming for Ask (Jul 2 2026)](#token-delta-streaming-for-ask-jul-2-2026)
+- [Polyglot strangler -- Go owns the public edge and /query orchestration (Jul 10-24 2026)](#polyglot-strangler----go-owns-the-public-edge-and-query-orchestration-jul-10-24-2026)
+- [Open-model machinery shipped dormant -- embedding profiles + Databricks providers (Jul 23 2026, #125)](#open-model-machinery-shipped-dormant----embedding-profiles-databricks-providers-jul-23-2026-125)
+- [D1 data residency -- Databricks inference plane adopted; generation flipped to gpt-oss-20b (Jul 28 2026)](#d1-data-residency----databricks-inference-plane-adopted-generation-flipped-to-gpt-oss-20b-jul-28-2026)
+- [D1 runtime served-model guard (Jul 29 2026, #138)](#d1-runtime-served-model-guard-jul-29-2026-138)
+- [Qwen3 embedding Model Service created (Jul 29 2026)](#qwen3-embedding-model-service-created-jul-29-2026)
+- [Tier-1 knowledge graph landed; graph-assisted retrieval proposed (Jul 30 2026)](#tier-1-knowledge-graph-landed-graph-assisted-retrieval-proposed-jul-30-2026)
+- [Evaluation evidence correction; 0.30 remains provisional (Jul 30 2026)](#evaluation-evidence-correction-030-remains-provisional-jul-30-2026)
+- [DefPredict integration + recommendation-policy amendment (Jul 30-31 2026)](#defpredict-integration-recommendation-policy-amendment-jul-30-31-2026)
+- [Constrained AI guidance for every healthy Ask turn (Aug 4 2026)](#constrained-ai-guidance-for-every-healthy-ask-turn-aug-4-2026)
+- [v6 prose synthesis ships dark; live evals serialize (Aug 7 2026)](#v6-prose-synthesis-ships-dark-live-evals-serialize-aug-7-2026)
+- [Conversation-first routing with application-validated scope (Aug 10 2026)](#conversation-first-routing-with-application-validated-scope-aug-10-2026)
+- [v7 selective citation ships dark; the NO_EVIDENCE sentinel is abolished for v7 (Aug 10 2026)](#v7-selective-citation-ships-dark-the-no_evidence-sentinel-is-abolished-for-v7-aug-10-2026)
+- [Prod embeddings moved in-tenant to Qwen3 (Jul 30 2026, recorded Aug 11 2026)](#prod-embeddings-moved-in-tenant-to-qwen3-jul-30-2026-recorded-aug-11-2026)
+- [The serving alias was repointed to gpt-oss-120b (Aug 5 2026, recorded Aug 11 2026)](#the-serving-alias-was-repointed-to-gpt-oss-120b-aug-5-2026-recorded-aug-11-2026)
+- [Prod Postgres is Databricks Lakebase; the Jul 28 "Supabase stays" call is reversed (recorded Aug 11 2026)](#prod-postgres-is-databricks-lakebase-the-jul-28-supabase-stays-call-is-reversed-recorded-aug-11-2026)
+- [D1 data residency is closed (recorded Aug 11 2026)](#d1-data-residency-is-closed-recorded-aug-11-2026)
+- [v7 selective citation is live in prod: cite the facts, talk like a person (Aug 11 2026)](#v7-selective-citation-is-live-in-prod-cite-the-facts-talk-like-a-person-aug-11-2026)
+- [Scheduled Watch uses the named Qwen profile and fails closed (Aug 12 2026)](#scheduled-watch-uses-the-named-qwen-profile-and-fails-closed-aug-12-2026)
+- [The searchable corpus is restricted to five authoritative FDA families (Aug 13 2026)](#the-searchable-corpus-is-restricted-to-five-authoritative-fda-families-aug-13-2026)
+- [Providers are required-explicit; the OpenAI/Anthropic/local-bge paths are removed (Aug 17 2026)](#providers-are-required-explicit-the-openaianthropiclocal-bge-paths-are-removed-aug-17-2026)
+- [Exact-manifest acceptance recognizes only audited terminal resolutions (Aug 17 2026)](#exact-manifest-acceptance-recognizes-only-audited-terminal-resolutions-aug-17-2026)
+- [Polyglot target amended to three runtimes - Rust cut (Aug 19 2026)](#polyglot-target-amended-to-three-runtimes---rust-cut-aug-19-2026)
+- [D1 deliberately reversed for model calls (Aug 20 2026)](#d1-deliberately-reversed-for-model-calls-aug-20-2026)
+- [Presentation is rebuilt from block-tagged claims; chemistry is a registry figure (Aug 21 2026)](#presentation-is-rebuilt-from-block-tagged-claims-chemistry-is-a-registry-figure-aug-21-2026)
+- [The confidence band is cut relative to the live floor, and /settings reports that floor (Aug 21 2026)](#the-confidence-band-is-cut-relative-to-the-live-floor-and-settings-reports-that-floor-aug-21-2026)
+- [Table cells stay short; conditions move to a sentence after the table (Aug 25 2026)](#table-cells-stay-short-conditions-move-to-a-sentence-after-the-table-aug-25-2026)
+- [Citation precision floor lowered to 0.70 (Aug 11 2026)](#citation-precision-floor-lowered-to-070-aug-11-2026)
+- [CI blocking eval scores the v7 production arm (Aug 25 2026)](#ci-blocking-eval-scores-the-v7-production-arm-aug-25-2026)
+- [Documentation set consolidated for handoff (Aug 26 2026)](#documentation-set-consolidated-for-handoff-aug-26-2026)
 
 ## Phase 0 - scaffold
 
@@ -151,7 +218,7 @@ The eval was RED on the real corpus (`recall@8=0.667, citation_precision=0.000, 
 - **Chat history is per-user; foreign sessions 404.** `POST /query` no longer accepts a client-supplied `user_id` - identity comes from the session. A `session_id` owned by another user returns 404 (not 403 - existence is never confirmed); a NULL-user legacy session is adopted on first authenticated use. New `GET /sessions`, `GET /sessions/{id}`, `DELETE /sessions/{id}` serve only the caller's threads.
 - **Audit rows carry identity (INV-6 extension).** `query_log.user_id` (nullable, indexed) is filled on every authenticated `/query` and `/assemble` - including the dossier's inner Q&A row.
 - **In-memory per-user rate limiting.** `RATE_LIMIT_PER_MINUTE` (default 30, 0 disables) on `/query` + `/assemble` (the LLM cost surface) and a fixed 10/email/minute brute-force cap on `/auth/login`; both are a lock + deque sliding window, per process - distributed limiting stays gateway work.
-- **OIDC/SSO deferred to the IT gateway.** App-layer cookie sessions are the pilot boundary; TLS termination and the enterprise identity provider remain environment decisions (docs/PROD_READINESS.md #1).
+- **OIDC/SSO deferred to the IT gateway.** App-layer cookie sessions are the pilot boundary; TLS termination and the enterprise identity provider remain environment decisions (item 1 of the now-removed docs/PROD_READINESS.md; see git history).
 
 ## Gate 2 - CRA White Paper populator (Jun 11 2026)
 
@@ -211,13 +278,15 @@ The eval was RED on the real corpus (`recall@8=0.667, citation_precision=0.000, 
 > STATUS: **PROPOSED -- pending human sign-off.** This entry records a
 > RECOMMENDATION only. `refusal_score_threshold` is UNCHANGED at `0.30`
 > (`config/settings.py`). No runtime code, settings value, or Fly secret was
-> modified. Full packet: `docs/archive/THRESHOLD_VALIDATION_2026-06-25.md`.
+> modified. Full packet: `THRESHOLD_VALIDATION_2026-06-25.md`, formerly in
+> `docs/archive/`, removed from the repo in the 2026-08-26 doc consolidation;
+> find it in git history.
 
 - **Recommendation: KEEP 0.30 (provisional); generate the real sweep before any retune.** The advisory threshold sweep (`src/regwatch/eval/threshold_sweep.py`, wired NON-GATING into `watch-daily.yml`) has **never run in the production OpenAI-1536 + pgvector space**, so there is **no measured cosine distribution** to retune against. Verified 2026-06-25 against repo `Hussain0327/amneal`: the 7 most recent `watch-daily` runs are all 8-11s and take the `skipped (secret not configured)` path (the `threshold sweep` + `upload threshold sweep artifact` steps both have conclusion `skipped`), `artifacts total_count = 0`, and `gh run download -n threshold-sweep` returns "no valid artifacts found" for every run. Root cause: the repo secret `WATCH_DATABASE_URL` is unset, so every real step is gated out by `if: env.DATABASE_URL != ''`.
 - **Why KEEP (lowest regret).** `0.30` was calibrated in the bge-384 era; prod now embeds OpenAI-1536 (a different cosine distribution), and CI structurally cannot revalidate it (CI runs the 1536-dim `echo` test provider against pgvector, not real OpenAI embeddings; see R5 note above). With NO real data, retuning would be guessing in an unmeasured vector space -- exactly the "fill gaps from memory" failure the project forbids. 0.30 is the long-standing operating point, the offline eval gate (`refusal_accuracy >= 0.95`, `tests/test_eval_gate.py`) is green against it, and there is no evidence of a prod regression. The harness's own selection rule never recommends a value that refuses an item 0.30 currently answers (it only ever recommends safer-or-equal), so "no data" correctly defaults to "no change."
 - **INV-1 trigger to RAISE.** The instant a real `threshold_sweep.json` exists: if `recommendation.leaking_at_current` is non-empty (a must-refuse / wrong-drug / absent-product item ANSWERS at 0.30), that is an active cross-drug leak -> RAISE the threshold above the highest leaking must-refuse `max_score`. Per INV-1 (a wrong cited answer is worse than a wrong refusal) this dominates any over-refusal concern; err toward refuse. 0.30 is explicitly **provisional**, not validated, until that artifact exists.
 - **2026-08-11 follow-up: still 0.30, still unvalidated, and now further out of date.** Prod retrieval moved to the Databricks Qwen3 1024-dim vector space on 2026-07-30. The old OpenAI-1536 calibration does not carry over to a different vector space, so any sweep run before that date tells us nothing about today's cutoff. The threshold value itself is unchanged.
-- **To regenerate (run in a prod-credentialed env, not CI):** it has to run in the LIVE Qwen3 1024-dim space, or the numbers mean nothing. Point it at the prod Databricks Lakebase DIRECT endpoint (never a `-pooler` host) with the same `ACTIVE_EMBEDDING_PROFILE` and `QWEN_EMBEDDING_*` values prod uses, then `uv run python -m regwatch.eval.threshold_sweep --out threshold_sweep.json`. The old `EMBEDDING_PROVIDER=openai` recipe is kept below only as history; it measures the rollback space, not production (R5 note: `REQUIRE_DATABASE_URL` no longer exists - `DATABASE_URL` is unconditionally required). Then fill the table in `docs/archive/THRESHOLD_VALIDATION_2026-06-25.md` and apply the decision framework there.
+- **To regenerate (run in a prod-credentialed env, not CI):** it has to run in the LIVE Qwen3 1024-dim space, or the numbers mean nothing. Point it at the prod Databricks Lakebase DIRECT endpoint (never a `-pooler` host) with the same `ACTIVE_EMBEDDING_PROFILE` and `QWEN_EMBEDDING_*` values prod uses, then `uv run python -m regwatch.eval.threshold_sweep --out threshold_sweep.json`. The old `EMBEDDING_PROVIDER=openai` recipe is kept below only as history; it measures the rollback space, not production (R5 note: `REQUIRE_DATABASE_URL` no longer exists - `DATABASE_URL` is unconditionally required). The table this recipe was meant to fill lived in `THRESHOLD_VALIDATION_2026-06-25.md`, formerly in `docs/archive/`, removed from the repo in the 2026-08-26 doc consolidation; find it and the decision framework in git history. `ACTIVE_EMBEDDING_PROFILE` and `QWEN_EMBEDDING_*` are Databricks-era variable names; see `docs/CONFIG_REFERENCE.md` for the names the app reads today.
 
 ## SSE progress streaming + open operational probes (Jun 29 2026)
 
@@ -290,7 +359,8 @@ The eval was RED on the real corpus (`recall@8=0.667, citation_precision=0.000, 
 - **Verdict: inference plane ONLY.** Databricks Model Serving hosts the models
   inside the company tenant; Supabase stays the datastore. Lakebase received a
   full, verified staging snapshot but is NOT live and takes no writes. Full
-  analysis and cost model: docs/DATABRICKS_ADOPTION_2026-07-28.md.
+  analysis and cost model: `DATABRICKS_ADOPTION_2026-07-28.md`, removed from
+  docs/ in the 2026-08-26 doc consolidation; find it in git history.
 - **Prod generation flipped the same day:** `LLM_PROVIDER=databricks`; ONE
   small open-weight model (endpoint alias `workspace.default.regwatch`,
   served id `gpt-oss-20b-080525`) serves router, synthesizer, and extractor.
@@ -667,7 +737,9 @@ alone does not certify this residual.
   (`workspace.default.regwatch-embed`), and the database itself (Lakebase). No
   analyst question leaves for a third-party model API on the normal path.
 - **D1 is not an open blocker any more.** Anything still describing it as one is
-  out of date. `docs/archive/DATA_RESIDENCY_D1.md` is kept as history.
+  out of date. `DATA_RESIDENCY_D1.md`, formerly in `docs/archive/`, was
+  removed from the repo in the 2026-08-26 doc consolidation; find it in git
+  history.
 - **The guardrails stay and are still worth knowing.** `D1_ALLOWED_LLM_MODELS`
   plus the runtime served-model check in `generate/llm.py` reject a response
   served by a model outside the allowlist, and reject partner-hosted families
@@ -847,7 +919,14 @@ alone does not certify this residual.
 - **Generation and embeddings move from Databricks to OpenAI, by owner
   decision.** Generation: `gpt-oss-120b` (Databricks Model Serving) to
   `gpt-5.6-terra` (OpenAI Chat Completions, `reasoning_effort=low`, no
-  `temperature`, `max_completion_tokens` not `max_tokens`). Embeddings: Qwen3
+  `temperature`, `max_completion_tokens` not `max_tokens`).
+  *(Correction, 2026-08-26: the shipped code calls the OpenAI **Responses**
+  API, `client.responses.create` with `store=False`, not Chat Completions, and
+  the reasoning effort default is `medium`, not `low`
+  (`src/regwatch/generate/llm.py:604,549,553-554`;
+  `config/settings.py:154`). The decision itself stands; only this
+  description of the API surface was wrong.)*
+  Embeddings: Qwen3
   (Databricks Model Serving, 1024-dim) to `text-embedding-3-large` (OpenAI,
   Matryoshka-truncated to 1024-dim via the `dimensions` param, so the existing
   `chunk_embedding` profile geometry is unaffected).
@@ -999,3 +1078,79 @@ alone does not certify this residual.
   subset of `query_log`, which held 9 rows when this shipped; no user traffic
   reached the live prompt between Aug 22 and Aug 25, so the "day of traffic"
   gate in #272 could not close on its own.
+
+## Citation precision floor lowered to 0.70 (Aug 11 2026)
+
+- **`THRESHOLDS["citation_precision"]` moved 0.74 -> 0.70, by owner decision.**
+  `src/regwatch/eval/run_eval.py` records why: all three answer arms were run
+  on the same 62-row gold set and the same Databricks/Qwen corpus, 0 errored
+  turns, with `recall_at_k` identical across arms at 0.8372 (retrieval
+  untouched):
+
+  | arm | recall_at_k | citation_precision |
+  | --- | --- | --- |
+  | v5 | 0.8372 | 0.7694 |
+  | v6 | 0.8372 | 0.7619 |
+  | v7 | 0.8372 | 0.7341 |
+
+  The v7 drop is not v7 citing worse; on rows that produced an answer, its
+  precision holds up. It is v7 failing to produce a citable answer at all on
+  4 of 62 rows (one material_drop, two no_valid_citations, one
+  malformed_structure), which the v5 claims-JSON path had zero of. Those rows
+  score 0 while staying in the denominator, the documented behavior of
+  `metrics.evaluate`. 0.70 sits about 3.4 points below the measured v7 arm,
+  the same "slightly below the measurement" margin every other blocking floor
+  uses to absorb live-LLM run-to-run drift. `recall_at_k` stayed at 0.80,
+  unchanged. This is a floor for the prose era, not a verdict that 0.7341 is
+  good; the 4 failing rows are a real, separately tracked defect.
+
+## CI blocking eval scores the v7 production arm (Aug 25 2026)
+
+- **The merge gate now scores what production serves.** `ci.yml`'s
+  `openai-eval` job calls `openai-eval.yml` with `prose: true`,
+  `selective: true`, and `assert_prod_mode: true`. The last flag runs
+  `run_eval --assert-prod-mode` against `config/prod_mode.json`
+  (`prose_synthesis_enabled: true`, `selective_citation_enabled: true`), so a
+  drift between the checked-in target and what the eval actually ran fails
+  the build instead of silently scoring a retired arm. This closes a gap that
+  opened on 2026-08-10, when v7 shipped dark ("v7 selective citation ships
+  dark" entry above): from that date until this change, the blocking eval
+  ran the v5 claims-JSON arm while prod served v7. Cleared for the flip by
+  dispatch run 32868188531 (dark-eval scorecard on v7: n=62, recall@k 0.88,
+  faithfulness 0.86, refusal accuracy 0.89, 0 forbidden violations, all
+  thresholds green).
+- **`databricks-eval.yml` is gone; `openai-eval.yml` replaced it on
+  2026-08-21.** The "v6 prose synthesis ships dark" entry above (Aug 7 2026)
+  correctly describes `.github/workflows/databricks-eval.yml` as the live
+  file of its day. Commit `90506e5` ("migrate to OpenAI Responses API",
+  #270) deleted it and added `.github/workflows/openai-eval.yml` in the same
+  change, alongside the provider migration recorded in "D1 deliberately
+  reversed for model calls" above. A doc still naming `databricks-eval.yml`
+  as current is describing a file that no longer exists; see `docs/CI_CD.md`
+  for the current job map.
+
+## Documentation set consolidated for handoff (Aug 26 2026)
+
+- **Nine documents kept independent copies of the same configuration facts,
+  and rotted independently.** When production moved from Databricks to
+  OpenAI on 2026-08-20, headers got updated and bodies did not; one runbook's
+  documented incident rollback would have caused a second outage had someone
+  followed it. The fix is single ownership: `docs/PRODUCTION_TRUTH.md` owns
+  volatile runtime facts, `docs/CONFIG_REFERENCE.md` owns every environment
+  variable and secret, `docs/ARCHITECTURE.md` owns stable design,
+  `docs/ROADMAP.md` owns open items and production gates,
+  `docs/BUILT_BUT_DORMANT.md` owns code that exists but does not run, and this
+  file owns history. A document that needs a fact another document owns links
+  to it instead of copying the value.
+- **Superseded documents were removed, not silently left to rot further.**
+  `docs/archive/` (15 files), `docs/superpowers/` (3 files),
+  `docs/PROVIDER_TRIAGE.md`, `docs/DATABRICKS_ADOPTION_2026-07-28.md`,
+  `docs/SLM_LAYER_IMPLEMENTATION_PLAN_2026-08-07.md`,
+  `docs/PROMPT_LAYER_RESEARCH_2026-08-07.md`, `docs/PROJECT_SPEC.md`,
+  `docs/TECH_GUIDE_SIMPLE.md`, `docs/PROD_READINESS.md`,
+  `SPECULATIVE_QUERY_PREPARATION.md`, and `regwatch/backend/README.md` are
+  gone from the tree as of this date. Every one of them is a deliberate
+  handoff decision, not data loss: each is recoverable in git history at the
+  commit that removed it. This entry's own references to several of them
+  above were converted from working paths to plain mentions for the same
+  reason.

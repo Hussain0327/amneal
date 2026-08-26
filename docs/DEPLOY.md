@@ -1,6 +1,12 @@
 # DEPLOY - RegWatch PostgreSQL + Fly.io + Vercel runbook
 
-Last updated: 2026-08-21 for the OpenAI-only runtime target.
+Verified 2026-08-26 against `origin/main` at `0a13c4a`. Every `fly.toml`
+excerpt, secret name, and rollback command in this file was checked against
+the code, `fly.toml`, or a GitHub Actions workflow in that commit. For live
+runtime values this doc deliberately does not print (deployed release,
+active embedding profile, effective refusal threshold), see
+`docs/PRODUCTION_TRUTH.md` or run the command this doc names next to the
+claim.
 
 This runbook describes the checked-in target. It does not prove that a live
 production database has been migrated or that the application has been
@@ -101,6 +107,19 @@ SHA-256
 This is a manifest denominator, not a chunk or embedding count. Do not switch
 serving retrieval during schema deployment.
 
+**Scoped-activation amendment, 2026-08-18.** The complete-universe target
+below (all 140,438 records backfilled and indexed before cutover) became
+permanently unreachable under the Lakebase branch's 512 MiB cap
+(`config/settings.py:508-517`). Activation no longer requires a
+complete-universe run. Set `REGWATCH_SERVING_MANIFEST_SHA` to the logical
+SHA-256 of an operator-named, explicitly scoped manifest, and API boot
+checks full embedding coverage against that named manifest instead of the
+140,438-record universe. Leaving it unset keeps the original
+complete-universe-only behavior, which is not achievable at the current
+branch size. Do not treat step 4 below as the only path to
+`REGWATCH_RETRIEVAL_CORPUS=authoritative_fda`; a scoped manifest is the real
+one.
+
 The corrected production canary passed 21 / 21 and produced 499 chunks with
 complete active-profile embeddings. The full backfill is now owned by a
 supervised operator session. Do not run production Dagster jobs, change its
@@ -125,7 +144,7 @@ The rollout ledger is now at these stages:
 2. `authoritative_fda_manifest_job`: complete. Do not rerun it while the
    backfill is active; the driver reads the newest complete-universe row, so a
    second freeze can swap the manifest under the owned run.
-3. `authoritative_fda_shard_job`: backfill partitions 000–511 with that manifest
+3. `authoritative_fda_shard_job`: backfill partitions 000-511 with that manifest
    SHA-256 and the active profile. This one job chunks shard N and then embeds
    shard N. Do NOT substitute the two single-asset jobs and run all chunking
    before all embedding: it leaves the building corpus chunked-but-unembedded
@@ -143,11 +162,14 @@ stopped by default. See [`AUTHORITATIVE_FDA_CORPUS.md`](AUTHORITATIVE_FDA_CORPUS
 for exact run configuration, retry semantics, storage/OCR limits, and evidence
 to retain.
 
-The final status must report `activation_ready: true`, zero policy violations,
-all five families, a successful complete-universe run, exact
-`indexed + evidence-backed terminal == 140438` parity, and
-`embedded_chunks == chunks` for the indexed corpus. Run the new-namespace
-retrieval/citation eval and a serving canary before changing:
+The complete-universe final status (`activation_ready: true`, zero policy
+violations, all five families, exact `indexed + evidence-backed terminal ==
+140438` parity) is the criteria as written in code for the unscoped path. It
+is not achievable in the current Lakebase branch; see the 2026-08-18
+amendment above. The scoped path's bar is full embedding coverage
+(`embedded_chunks == chunks`) against the named `REGWATCH_SERVING_MANIFEST_SHA`
+manifest. Either way, run the new-namespace retrieval/citation eval and a
+serving canary before changing:
 
 ```bash
 REGWATCH_RETRIEVAL_CORPUS=authoritative_fda
@@ -191,13 +213,18 @@ kill_timeout = 30                        # drain in-flight SSE on deploys
   proxy = "regwatch-proxy"    # Go proxy, holds the public port
 
 [env]
-  EMBEDDING_PROVIDER = "qwen3"    # required-explicit; unset refuses to boot
+  INGEST_EMBEDDING_PROVIDER = "openai"   # required-explicit; unset refuses to boot
+  LLM_PROVIDER = "openai"                # required-explicit; unset refuses to boot
+  PROFILE_HNSW_INDEX_REQUIRED = "false"  # exact pgvector scan, no HNSW index
+  REGWATCH_ROUTE_CALL = "off"            # route/scope shadow observer, off the Ask path
   AUTH_COOKIE_SECURE = "true"
   CORS_ALLOW_ORIGINS_CSV = "https://amneal.vercel.app"
   SENTRY_ENVIRONMENT = "production"
   TRUST_PROXY_HEADERS = "true"     # Go login limiter keys on Fly-Client-IP
   REQUIRE_DATABASE_URL = "true"    # read by the GO PROXY only
   GO_NATIVE_QUERY = "true"         # step-5 pin: proxy serves POST /query natively
+  REGWATCH_PROSE_SYNTHESIS = "true"      # v6 prose format; code default is false
+  REGWATCH_SELECTIVE_CITATION = "true"   # v7 answer policy; code default is false
   UPSTREAM_URL = "http://app.process.amneal.internal:8000"
 
 [http_service]
@@ -206,10 +233,15 @@ kill_timeout = 30                        # drain in-flight SSE on deploys
   force_https = true
   auto_stop_machines = false
   min_machines_running = 2
-  [[http_service.checks]]     # end-to-end GET /health through the proxy
+  [[http_service.checks]]     # GET /livez through the proxy, DB-free liveness
 
-[checks.app_health]           # deploy-gates the now-private app group on :8000
+[checks.app_health]           # deploy-gates the now-private app group on :8000, GET /health
 ```
+
+`INGEST_EMBEDDING_PROVIDER` and `LLM_PROVIDER` are the actual key names.
+There is no `EMBEDDING_PROVIDER` key in `fly.toml` (that is a deprecated env
+alias the code still accepts, not what the committed file sets), and there is
+no Databricks value anywhere in it.
 
 Three tests guard this file against well-meaning simplifications:
 `tests/test_trust_proxy_fly_toml.py`, `tests/test_boot_command_drift.py`, and
@@ -223,48 +255,54 @@ continuation line: a `\` followed by spaces is an escaped space, not a line
 continuation, so a trailing `#` silently truncates the command and every variable
 after it is never set.
 
-These are the names set on the app today:
+This is the deploy-critical subset: the secrets that boot or a normal deploy
+depends on. `docs/CONFIG_REFERENCE.md` owns the full environment variable and
+secret inventory; check there before assuming a name below is complete.
 
 ```bash
-# DATABASE_URL              Lakebase DIRECT endpoint (see step 1.1)
-# LLM_PROVIDER              databricks (required-explicit; no OpenAI path exists)
-# DATABRICKS_LLM_MODEL      the serving alias that actually gets called. GET
-#                           /settings displays this same value (the separate
-#                           hand-synced LLM_MODEL display secret is retired).
-# ACTIVE_EMBEDDING_PROFILE  picks the live vector space. EMBEDDING_PROVIDER
-#                           itself comes from fly.toml [env] (qwen3) and is
-#                           required-explicit: an unset value refuses to boot.
-# QWEN_EMBEDDING_DIMENSION  1024. The code default is 1536, so this must be set.
-# INTERNAL_RAG_TOKEN        Go proxy -> Python /internal/query/compute auth
-# METRICS_TOKEN             bearer gate on GET /metrics; unset = world-readable
-# SENTRY_DSN                error tracking
-# D1_ALLOWED_LLM_MODELS     JSON array of serving endpoints / served model ids
+# DATABASE_URL                Lakebase DIRECT endpoint (see step 1.1). Mandatory:
+#                             the app refuses to boot without it.
+# OPENAI_API_KEY              gates both generation and embeddings. Missing it
+#                             raises at LLM/embedding provider construction
+#                             (src/regwatch/generate/llm.py:698-714,
+#                             src/regwatch/process/embedder.py).
+# RETRIEVAL_EMBEDDING_PROFILE picks the live vector space (deprecated alias:
+#                             ACTIVE_EMBEDDING_PROFILE; the new name wins if
+#                             both are set). INGEST_EMBEDDING_PROVIDER itself
+#                             comes from fly.toml [env] ("openai") and is
+#                             required-explicit: an unset value refuses to boot.
+# INTERNAL_RAG_TOKEN          Go proxy -> Python /internal/query/compute auth
+# METRICS_TOKEN               bearer gate on GET /metrics; unset = world-readable
+# SENTRY_DSN                  error tracking; unset boots but logs a loud warning
 fly secrets set \
-  DATABASE_URL="postgresql://regwatch_app:...@ep-...cloud.databricks.com:5432/databricks_postgres" \
-  LLM_PROVIDER="databricks" \
-  DATABRICKS_LLM_BASE_URL="https://<workspace-host>/ai-gateway/mlflow/v1" \
-  DATABRICKS_LLM_TOKEN="..." \
-  DATABRICKS_LLM_MODEL="workspace.default.regwatch" \
-  ACTIVE_EMBEDDING_PROFILE="ep_2e7368b354d911ea3a013c3125e276c2" \
-  QWEN_EMBEDDING_BASE_URL="https://<workspace-host>/ai-gateway/mlflow/v1" \
-  QWEN_EMBEDDING_TOKEN="..." \
-  QWEN_EMBEDDING_MODEL="..." \
-  QWEN_EMBEDDING_REVISION="..." \
-  QWEN_EMBEDDING_DIMENSION="1024" \
+  DATABASE_URL="postgresql://regwatch_app:...@<lakebase-host>:5432/<db>?sslmode=require" \
+  OPENAI_API_KEY="sk-..." \
+  RETRIEVAL_EMBEDDING_PROFILE="ep_<profile-id>" \
   INTERNAL_RAG_TOKEN="..." \
   METRICS_TOKEN="..." \
   SENTRY_DSN="https://...ingest.sentry.io/..." \
-  D1_ALLOWED_LLM_MODELS='["workspace.default.regwatch","gpt-oss-120b-080525"]'
+  -a amneal
 ```
 
-Plus the three answer-policy flags, all ON in prod today:
+`config/settings.py` also has `OPENAI_LLM_MODEL` (default `gpt-5.6-terra`),
+`OPENAI_REASONING_EFFORT` (default `medium`), `OPENAI_EMBEDDING_MODEL`
+(default `text-embedding-3-large`), and `OPENAI_EMBEDDING_DIMENSION` (default
+`1024`). Set these only to override the code default, for example to pin the
+LLM to a dated snapshot instead of a moving alias (see lever 0 in 6.1).
+
+Neither `D1_ENFORCED` nor `D1_ALLOWED_LLM_MODELS` is a field in
+`config/settings.py`. They are not "unset"; they do not exist as a config
+surface at all. The only related code is `D1ResidencyError` in
+`src/regwatch/generate/llm.py:429-436`, defined but never raised by any
+provider. Do not set these names; they do nothing.
+
+Of the three answer-policy flags, two are pinned `"true"` in `fly.toml`
+`[env]` (`REGWATCH_PROSE_SYNTHESIS`, `REGWATCH_SELECTIVE_CITATION`, see 3.1)
+and need no secret in normal operation. `REGWATCH_LIVE_DRAFT` is not pinned
+anywhere; it is a Fly secret, set separately:
 
 ```bash
-fly secrets set \
-  REGWATCH_PROSE_SYNTHESIS="1" \
-  REGWATCH_SELECTIVE_CITATION="1" \
-  REGWATCH_LIVE_DRAFT="1" \
-  -a amneal
+fly secrets set REGWATCH_LIVE_DRAFT="1" -a amneal
 ```
 
 - `REGWATCH_PROSE_SYNTHESIS` is the v6 prose format.
@@ -272,24 +310,25 @@ fly secrets set \
   the prose flag is also on.
 - `REGWATCH_LIVE_DRAFT` streams the provisional draft over SSE.
 
-**Roll these back with `fly secrets unset`, not by setting them to `""`.** The
-prose and selective flags read a blank value as OFF, but `REGWATCH_LIVE_DRAFT`
-does not: an empty string fails bool parsing and takes the process down at boot.
+**Roll any of the three back with `fly secrets set <name>=false` or
+`fly secrets unset <name>`, not by setting a value to `""`.** The prose and
+selective flags read a blank value as OFF, but `REGWATCH_LIVE_DRAFT` does not:
+an empty string fails bool parsing and takes the process down at boot. Because
+the first two are also pinned in `fly.toml` `[env]`, unsetting the secret
+alone is not enough to turn them off for good; the `[env]` pin still applies
+after the secret is gone. A Fly secret overrides `[env]` while it exists
+(fastest incident lever), but a durable rollback also needs the `fly.toml`
+line removed and redeployed.
 
-Notes on what is deliberately NOT set:
+Notes on what is deliberately NOT set, and one name that is not a real knob:
 
-- `D1_ENFORCED` is unset, so the runtime served-model check in `generate/llm.py`
-  is inert. `D1_ALLOWED_LLM_MODELS` is already populated, which is what arming it
-  needs. When armed, the check rejects a response served by a model outside the
-  allowlist, and rejects partner-hosted families (`databricks-gpt*`,
-  `databricks-claude*`, `databricks-gemini*`) even if someone allowlists them by
-  hand. It also refuses to boot if generation and query embedding are not both
-  inside the tenant.
-- `REGWATCH_ROUTE_CALL` is unset, so the route/scope shadow observer is off (see
-  6.3).
+- `REGWATCH_ROUTE_CALL` is pinned `"off"` in `fly.toml` `[env]`, not merely
+  unset (see 3.1). The route/scope shadow observer is off (see 6.3).
 - `WHITEPAPER_TEMPLATE_URL` is unset, so `.docx` renders fall back to marker
   output. `/health` reports `whitepaper_template: absent`. That is current
   behavior, not a hypothetical. See 3.6.
+- `D1_ENFORCED` and `D1_ALLOWED_LLM_MODELS` are not Settings fields and do
+  nothing if set. See the note after the deploy-critical secrets block above.
 
 `DATABASE_URL` is mandatory. Without it the app refuses to boot rather than
 losing the audit trail. `REQUIRE_DATABASE_URL` in `fly.toml` `[env]` is a
@@ -304,7 +343,8 @@ The normal path is automatic. Every green `ci` run on `main` triggers
 `deploy.yml`, which builds the image once, re-scans it with Trivy, pushes it to
 `registry.fly.io/amneal:sha-<commit>`, and ships that exact image via
 `scripts/fly-deploy.sh --image`. Fly runs the migration release command first
-(see section 2). The current release is **v104**, deployed 2026-08-10.
+(see section 2). Read the current release with `fly releases -a amneal`; this
+doc does not name a version, it drifts on every deploy.
 
 Manual deploys (`fly deploy`, or `bash scripts/fly-deploy.sh` from the exact
 commit) are for recovery only.
@@ -320,16 +360,18 @@ deploy again.
 curl -s https://amneal.fly.dev/health | python -m json.tool
 ```
 
-The live response today:
+A shape the current code can actually produce (`src/regwatch/api/main.py:337-460`;
+`corpus_count` and the profile id are illustrative, not live values, do not
+copy them):
 
 ```json
 {
   "status": "ok",
   "components": {
     "db": {"ok": true, "dialect": "postgresql"},
-    "vector_store": {"ok": true, "corpus_count": 5494},
-    "llm": {"provider": "databricks", "key_present": true},
-    "embedding": {"provider": "qwen3", "profile": "ep_2e7368b354d911ea3a013c3125e276c2"}
+    "vector_store": {"ok": true, "corpus_count": 87800},
+    "llm": {"provider": "openai", "key_present": true},
+    "embedding": {"provider": "openai", "profile": "ep_<profile-id>"}
   },
   "whitepaper_template": "absent",
   "warnings": []
@@ -340,12 +382,19 @@ What to check, and what a wrong value means:
 
 - `db.dialect` must be `postgresql`. Anything else means the stack is on the
   wrong datastore.
-- `embedding.provider` must be `qwen3` and `embedding.profile` must be the
-  profile id above. A profile of `legacy` means the query path fell back to the
-  old OpenAI vector space.
-- `llm.provider` must be `databricks` (the only production value; there is no
-  OpenAI provider since 2026-08-17).
-- `corpus_count` must be non-zero.
+- `embedding.provider` should read `openai` and `embedding.profile` should be
+  the `ep_...` id named by the `RETRIEVAL_EMBEDDING_PROFILE` secret. A profile
+  of `legacy` means the query path fell back to the frozen pre-cutover vector
+  space, not the live one; `embedding.provider` is looked up from that
+  profile's own row (`get_embedding_profile`), not read from
+  `EMBEDDING_PROVIDER`, precisely so this check catches drift between the
+  two.
+- `llm.provider` should read `openai`. `key_present` is `true` only when both
+  `OPENAI_API_KEY` and `OPENAI_LLM_MODEL` resolve to a non-empty string
+  (`src/regwatch/api/main.py:396-405`); `openai`/`key_present: false` means
+  the key or model name is missing, not that the provider is wrong.
+- `corpus_count` must be non-zero. This doc does not name the current count;
+  read it live from this endpoint.
 
 Also hit `GET /ready`. It fails closed if the boot RLS sweep left any public
 table unprotected.
@@ -378,16 +427,14 @@ fly ssh console -s -C "regwatch create-user analyst@amneal.com --name 'CRA Analy
   there. Q&A and white-paper serving need only Postgres, so do not attach a
   volume unless you run ingest or watch on that machine.
 - **Watch.** The production Watch path is the `watch-daily.yml` GitHub Actions
-  cron at 07:17 UTC, the only scheduler. Its secrets are documented in
-  [`SECRETS_RUNBOOK.md`](SECRETS_RUNBOOK.md).
-
-  > **Provisioning required.** The cron now uses `EMBEDDING_PROVIDER=qwen3`,
-  > requires the named profile plus all five `QWEN_EMBEDDING_*` values, validates
-  > the registered profile before crawling, and asserts zero pending chunks after
-  > an attempted ingest. The six `WATCH_*` repository secrets remain unset as of
-  > 2026-08-12, so the job now fails closed before crawling until the owner sets
-  > them and verifies a manual dispatch. See
-  > [`SECRETS_RUNBOOK.md`](SECRETS_RUNBOOK.md) section 3.4.
+  cron at 07:17 UTC, the only scheduler. It hardcodes
+  `INGEST_EMBEDDING_PROVIDER=openai` and `LLM_PROVIDER=openai` in its own env
+  block and needs exactly three repository secrets: `WATCH_DATABASE_URL`,
+  `OPENAI_API_KEY`, and `WATCH_ACTIVE_EMBEDDING_PROFILE` (validated against
+  `^ep_[0-9a-f]{32}$` before it crawls anything; `.github/workflows/watch-daily.yml:70-128`).
+  No Qwen or Databricks secret is read anywhere in this workflow. Current
+  secret status is not something this checkout can prove; check with
+  `gh secret list` or see [`SECRETS_RUNBOOK.md`](SECRETS_RUNBOOK.md).
 
   Keep ad hoc `regwatch watch` runs for break-glass recovery, not as the normal
   schedule.
@@ -426,8 +473,8 @@ vercel deploy --prod
 Do these in order. Stop at the first failure.
 
 1. `curl https://<api-host>/health`: 200, `status: ok`, `db.ok: true`, embedding
-   provider `qwen3` on the expected profile, `llm.provider: databricks`,
-   `corpus_count` > 0. Then `GET /ready`: `status: ready`.
+   provider `openai` on the expected profile, `llm.provider: openai`,
+   `corpus_count` > 0. See 3.4. Then `GET /ready`: `status: ready`.
 2. Chunk count matches. `psql "$PROD_DB_URL" -c "select count(*) from chunk"`
    should agree with `corpus_count`, and
    `select version_num from alembic_version` should show the current head.
@@ -466,27 +513,52 @@ Independent levers, least to most drastic. Pick the smallest one that covers the
 failure.
 
 **Lever 0, config flip.** Fastest: about 60 seconds, no redeploy, no CI cycle.
-Fly secrets take precedence over `fly.toml` `[env]`, so a bad provider or flag
-flip reverts with a secret:
+Fly secrets take precedence over `fly.toml` `[env]`, so a bad flag flip
+reverts with a secret.
+
+**There is no Databricks rollback.** `get_llm_provider`
+(`src/regwatch/generate/llm.py:681-734`) accepts only `openai` or `echo`;
+`if name == "databricks": raise ValueError("unknown LLM provider:
+databricks")`, at line 732-733, fires on the first call after the flip. Do
+not set `LLM_PROVIDER=databricks` during an incident. It does not repoint
+generation, it takes every Q&A request down with an unhandled 500 on top of
+whatever the original incident was. `get_embedding_provider`
+(`src/regwatch/process/embedder.py:689-702`) is the same shape: only `echo`
+and the OpenAI provider names are recognized, and there is no Qwen or
+Databricks embedding class in the codebase to fall back to. If the incident
+is genuinely "OpenAI itself is down or unreachable," there is no working
+provider fallback today; that gap is open work, not a documented lever.
+
+The levers that do exist, inside the OpenAI stack:
 
 ```bash
-# rollback path since 2026-08-20: repoint generation/embeddings back to
-# Databricks (LLM_PROVIDER/EMBEDDING_PROVIDER=databricks) if the OpenAI leg
-# needs to come out of the loop; this re-closes D1 for the legs it affects.
-# Add the served model id to D1_ALLOWED_LLM_MODELS first if D1 enforcement
-# is armed (it is not, in prod, today).
-fly secrets set LLM_PROVIDER=databricks DATABRICKS_LLM_MODEL=<verified-endpoint> -a amneal
-fly secrets set GO_NATIVE_QUERY=false -a amneal    # proxy relays POST /query to Python
-fly secrets unset REGWATCH_SELECTIVE_CITATION -a amneal   # v7 policy off, v6 format stays
-fly secrets unset REGWATCH_LIVE_DRAFT -a amneal           # stop streaming the draft
+# Pin the LLM to a known-good dated snapshot instead of the moving
+# "gpt-5.6-terra" alias, if the alias resolving to a new snapshot is itself
+# the problem. OPENAI_LLM_MODEL is a Fly secret; fly.toml does not set it,
+# so this always overrides the code default with no [env] pin to also strip.
+fly secrets set OPENAI_LLM_MODEL=<dated-snapshot-id> -a amneal
+
+# Turn off the step-5 native query path. The proxy relays POST /query to
+# Python instead of orchestrating it in Go. GO_NATIVE_QUERY is pinned "true"
+# in fly.toml [env] (see 3.1); a secret of the same name overrides it while
+# the secret exists.
+fly secrets set GO_NATIVE_QUERY=false -a amneal
+
+# Turn off the v7 answer policy; the v6 prose format stays. Also pinned in
+# fly.toml [env]; same override behavior.
+fly secrets set REGWATCH_SELECTIVE_CITATION=false -a amneal
+
+# Stop streaming the provisional draft over SSE. Not pinned in fly.toml, so
+# unsetting the secret is enough.
+fly secrets unset REGWATCH_LIVE_DRAFT -a amneal
 ```
 
-Unset, do not set to empty. See the warning in step 3.2.
-
-Repointing generation changes which endpoint answers every analyst question, so
-it is an incident lever, not a tuning knob — and if rolling back onto Databricks,
-the endpoint must be verified open-weight and listed in `D1_ALLOWED_LLM_MODELS`
-before the flip, if D1 enforcement is ever armed.
+Unset, do not set to empty. See the warning in step 3.2. Because
+`GO_NATIVE_QUERY` and `REGWATCH_SELECTIVE_CITATION` are also pinned in
+`fly.toml` `[env]`, the secret above is a fast override, not a durable
+rollback: revert or edit `fly.toml` and redeploy to make the change stick past
+a `fly secrets unset` or the next deploy that carries the current committed
+file.
 
 **Lever 1, app rollback (bad deploy, schema unchanged).** List releases, note the
 image ref of the last good one, pin it:
@@ -559,7 +631,8 @@ does not replace it: GitHub cron schedules can lag or pause on inactive repos.
 ### 6.3 Route/scope shadow rollout (PR11b/PR11c)
 
 This measures the conversational router before it is allowed to change anything.
-The code default is `REGWATCH_ROUTE_CALL=off`, and it is unset in prod today.
+The code default is `REGWATCH_ROUTE_CALL=off`, and `fly.toml` `[env]` pins it
+to `"off"` explicitly (see 3.1), not merely leaving it unset.
 
 With `shadow`, the extra route decision and deterministic scope compile are
 recorded under `query_log.route_json.route_call`. The existing product resolver,
@@ -606,8 +679,8 @@ increase(regwatch_route_shadow_failures_total[15m]) /
 clamp_min(sum(increase(regwatch_route_shadow_calls_total[15m])), 1) > 0.02
 ```
 
-Also watch Ask latency p95 and Databricks QPS. Shadow adds one sequential model
-call per enabled turn even though it cannot change the answer.
+Also watch Ask latency p95 and OpenAI request rate. Shadow adds one sequential
+model call per enabled turn even though it cannot change the answer.
 
 Rollback needs no deploy:
 
@@ -621,29 +694,60 @@ that exception to improve the shadow success rate.
 
 ### 6.4 Refusal-threshold revalidation
 
-`REFUSAL_SCORE_THRESHOLD` defaults to `0.30` and does two things in
-`grounded_qa.ask`. If the best retrieved passage scores below it, the turn
-declines with reason `low_top_score` and never reaches the synthesizer. If some
-passages clear it and some do not, only the ones above it are allowed to support
-an answer. Either way, weak evidence cannot become citation cover.
+Two settings gate every answer in `grounded_qa.ask`. If the best retrieved
+passage scores below the resolved floor, the turn declines with reason
+`low_top_score` and never reaches the synthesizer. If some passages clear it
+and some do not, only the ones above it are allowed to support an answer.
+Either way, weak evidence cannot become citation cover.
 
-**That 0.30 has never been validated against the vector space prod actually
-uses.** It was calibrated in the old bge-384 era, checked once in the OpenAI
-1536 space, and prod has since moved to the Qwen3 1024 profile. Cosine
-distributions differ between spaces, so neither earlier calibration transfers.
-Treat 0.30 as provisional.
+**The floor is per-profile, not a single global number.**
+`Settings.effective_refusal_threshold()` (`config/settings.py:120-147`)
+resolves `REFUSAL_SCORE_THRESHOLD_BY_PROFILE`, a dict keyed by embedding
+profile id, for the profile named in `RETRIEVAL_EMBEDDING_PROFILE`. An
+absent entry falls back to the global `REFUSAL_SCORE_THRESHOLD`, default
+`0.30`. This doc does not print the live resolved value; it changes with
+which profile is active and is a Fly secret, not something in this
+checkout. Read it two ways:
 
-**The daily sweep is wired to the right space but cannot recalibrate by itself.**
-The `watch-daily` job runs an advisory, non-gating sweep after the crawl and
-uploads `threshold_sweep.json` as a workflow artifact (Actions run, then
-**Artifacts**, then `threshold-sweep`). It now inherits the named Qwen profile,
-so after the six Watch profile secrets are provisioned its scores use production
-geometry. The corpus labels and refusal cases still need the evaluation work
-below before 0.30 can be promoted as a validated threshold.
+- `GET /settings` (authenticated; `go/internal/api/settings.go`) returns
+  `refusal_score_threshold`, the resolved effective floor, computed the same
+  way as the Python resolver (`go/internal/api/config.go:220-227`).
+- `regwatch status` prints both `refusal_score_threshold` (effective, per
+  profile) and `refusal_score_threshold_global` (the 0.30 fallback), so an
+  operator sees whether a per-profile override is even in play.
+
+A threshold is a property of one embedding model's score distribution.
+Cosine distributions differ between spaces, so a calibration done against one
+embedding profile does not transfer to another. Whenever
+`RETRIEVAL_EMBEDDING_PROFILE` changes to a profile with no entry in
+`REFUSAL_SCORE_THRESHOLD_BY_PROFILE`, treat the resulting 0.30 fallback as
+provisional until it is recalibrated for that profile's geometry.
+
+**The daily sweep is wired to the right space but cannot recalibrate by
+itself.** The `watch-daily` job runs an advisory, non-gating sweep after the
+crawl and uploads `threshold_sweep.json` as a workflow artifact (Actions run,
+then **Artifacts**, then `threshold-sweep`). It inherits whichever profile
+`WATCH_ACTIVE_EMBEDDING_PROFILE` names (`.github/workflows/watch-daily.yml:80-91`),
+so once that secret matches the profile prod actually serves, its scores use
+production geometry. The corpus labels and refusal cases still need the
+evaluation work below before a sweep recommendation can be promoted as a
+validated threshold.
 
 The sweep is read-only with respect to the safety path. It never changes
-`REFUSAL_SCORE_THRESHOLD` and never fails the crawl (`continue-on-error: true`),
-so a hiccup or an off-0.30 recommendation cannot block ingestion or alerting.
+`REFUSAL_SCORE_THRESHOLD` or `REFUSAL_SCORE_THRESHOLD_BY_PROFILE`, and never
+fails the crawl (`continue-on-error: true`), so a hiccup or an odd
+recommendation cannot block ingestion or alerting.
+
+**The sweep's `current` is a hardcoded 0.30, not the live per-profile
+value.** `threshold_sweep.py`'s `--current` option defaults to `0.30`
+(`_CURRENT_DEFAULT`) and `watch-daily.yml` invokes the sweep with no
+`--current` flag (`.github/workflows/watch-daily.yml:271-274`), so every
+comparison in the report is against 0.30 regardless of what
+`REFUSAL_SCORE_THRESHOLD_BY_PROFILE` actually resolves to for the active
+profile in prod. Before trusting a report, check whether the effective floor
+(`GET /settings` or `regwatch status`) is actually 0.30. If it is not, rerun
+the sweep manually with `--current <effective-value>` before reading the
+pathology flags as actionable.
 
 **How to read `threshold_sweep.json`** (the same content prints as a table in the
 step log):
@@ -654,21 +758,29 @@ step log):
   must-refuse max and at or below the must-answer min.
 - `counts.must_clarify_excluded` counts resolver clarification cases, kept for
   audit but excluded from the cutoff curve.
-- `recommendation.recommended` vs `recommendation.current`, with a rationale. The
-  rule is: maximize refuse recall without refusing anything 0.30 currently
-  answers. `provisional`/`overlap: true` means the two distributions overlap, so
-  no clean separator exists and the recommendation is a tradeoff, not a fix.
+- `recommendation.recommended` vs `recommendation.current` (the `--current`
+  value the sweep was run with), with a rationale. The rule is: maximize
+  refuse recall without refusing anything `current` already answers.
+  `provisional`/`overlap: true` means the two distributions overlap, so no
+  clean separator exists and the recommendation is a tradeoff, not a fix.
 - Two pathology flags, which are the actual action triggers:
-  `wrongly_refused_at_current` (must-answer questions already scoring below 0.30)
-  and `leaking_at_current` (must-refuse questions already scoring at or above
-  0.30).
+  `wrongly_refused_at_current` (must-answer questions already scoring below
+  `current`) and `leaking_at_current` (must-refuse questions already scoring
+  at or above `current`).
 
 **Decision procedure.** A human reads the recommendation and both pathology
-lists. Only if warranted, meaning a clean recommendation that differs from 0.30
-or a non-empty pathology list, change the live value with
-`fly secrets set REFUSAL_SCORE_THRESHOLD=... -a amneal`. There is no gate and no
-auto-tune: over-tuning this cutoff trades directly against INV safety, so it is
-an explicit operator decision.
+lists. Only if warranted, meaning a clean recommendation that differs from the
+resolved effective floor or a non-empty pathology list, change the live value.
+A profile-specific change goes in `REFUSAL_SCORE_THRESHOLD_BY_PROFILE` (a
+JSON object keyed by profile id); a global change goes in
+`REFUSAL_SCORE_THRESHOLD`:
+
+```bash
+fly secrets set REFUSAL_SCORE_THRESHOLD_BY_PROFILE='{"ep_<profile-id>": 0.NN}' -a amneal
+```
+
+There is no gate and no auto-tune: over-tuning this cutoff trades directly
+against INV safety, so it is an explicit operator decision.
 
 The last real sweep artifact is from 2026-07-30, watch run
 [30531864530](https://github.com/Hussain0327/amneal/actions/runs/30531864530), in
@@ -698,14 +810,14 @@ Until that exists, the shape of the drill is:
    ```
 
 3. Point a local API at staging and smoke it. It needs the same embedding
-   profile and Qwen credentials as prod, otherwise it boots into the legacy
+   profile and OpenAI credentials as prod, otherwise it boots into the legacy
    vector space and you are testing something prod does not run:
 
    ```bash
    DATABASE_URL='<staging-url>' \
-   ACTIVE_EMBEDDING_PROFILE='ep_2e7368b354d911ea3a013c3125e276c2' \
-   QWEN_EMBEDDING_BASE_URL='...' QWEN_EMBEDDING_TOKEN='...' \
-   QWEN_EMBEDDING_MODEL='...' QWEN_EMBEDDING_DIMENSION=1024 \
+   INGEST_EMBEDDING_PROVIDER='openai' LLM_PROVIDER='openai' \
+   RETRIEVAL_EMBEDDING_PROFILE='ep_<profile-id>' \
+   OPENAI_API_KEY='...' \
    uv run uvicorn regwatch.api.main:app --port 8099
    ```
 

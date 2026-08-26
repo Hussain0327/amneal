@@ -177,8 +177,7 @@ flip regressions.
    `routes.go` conditionals go away and native becomes the only path. Regenerate
    the OpenAPI schema and the frontend api-types, and move the Query wire types
    to the hand-maintained pattern the step-4 surfaces use. The INV-mapping audit
-   that gates this is done, see
-   [`archive/STEP5_INV_TEST_MAPPING.md`](archive/STEP5_INV_TEST_MAPPING.md): no
+   that gates this is done (the step-5 INV test mapping, in git history): no
    INV test may be lost, and a test with no mapped contract successor blocks the
    deletion.
 2. **R3, the stream terminal-frame move.** Keep relaying token frames, move only

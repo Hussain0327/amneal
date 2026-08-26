@@ -1,6 +1,6 @@
 # REGWATCH Docker Guide
 
-Last updated: 2026-08-11
+Last updated: 2026-08-26
 
 This is the local and container baseline: run the Python API, the Next.js UI and
 ingest jobs without changing application code. Production (the Fly app `amneal`)
@@ -15,10 +15,9 @@ ships this same API image. `docs/DEPLOY.md` is the production runbook.
 | `.dockerignore` | Keeps secrets, local data, docs, caches and local tooling out of the image context. |
 | `compose.yaml` | API, UI, one-shot ingest and pgvector `db` services. |
 | `docker/entrypoint.sh` | Creates the data directories and runs `regwatch init-db` before app start. Skipped for `alembic` and `regwatch-proxy` argvs, see Startup Behavior. |
-| `.github/workflows/ci.yml` | Builds both images and gates them with a pinned Trivy scan (fixable CRITICAL/HIGH vulns plus embedded secrets). `deploy.yml` re-scans the API image before every Fly release. |
+| `.github/workflows/ci.yml` | Builds all three images (api, corpus-worker, web) and gates each with a pinned Trivy scan (fixable CRITICAL/HIGH vulns plus embedded secrets). `deploy.yml` re-scans the API image before every Fly release. |
 | `pyproject.toml` / `uv.lock` | Heavy local embedding dependencies sit behind the `local-embeddings` extra. |
 | `src/regwatch/api/main.py` | Skips DB init when the entrypoint already ran it. |
-| `src/regwatch/process/embedder.py` | Clear error if local embeddings are requested without the extra installed. |
 
 ## Container shape
 
@@ -73,8 +72,10 @@ Locally that is the `db` Compose service, a pgvector Postgres backed by the name
 `db-data` Docker volume. Postgres with pgvector has been the only datastore since
 R5; there is no SQLite or Chroma fallback. `DATABASE_URL` is mandatory. Compose
 defaults it to the `db` service, and you can point it at a hosted Postgres
-instead. Production points at Databricks Lakebase, in the same Databricks tenant
-as the models. See `docs/DEPLOY.md`.
+instead. Production points at Databricks Lakebase; the database is the only
+part of the stack that stays in the company's Databricks tenant, since
+generation and embeddings now go to OpenAI on every normal request. See
+`docs/DEPLOY.md`.
 
 Container defaults:
 
@@ -89,51 +90,64 @@ DATABASE_URL=postgresql://postgres:postgres@db:5432/postgres   # Compose default
 
 Two settings pick the vector space, and it helps to keep them apart:
 
-- `EMBEDDING_PROVIDER` names a provider for the legacy arm.
-- `ACTIVE_EMBEDDING_PROFILE` names a registered embedding profile. Anything
-  other than the default `legacy` sends vectors to the profile-keyed
-  `chunk_embedding` table instead.
+- `INGEST_EMBEDDING_PROVIDER` (old alias `EMBEDDING_PROVIDER`, still accepted)
+  names the provider for the ingest/backfill write path and the legacy retrieval
+  arm. Only two provider classes exist: `EchoEmbeddingProvider` (the `echo`
+  test provider) and `OpenAIEmbeddingProvider` (`openai`). Any other value
+  raises at boot. `src/regwatch/process/embedder.py`.
+- `RETRIEVAL_EMBEDDING_PROFILE` (old alias `ACTIVE_EMBEDDING_PROFILE`, still
+  accepted) names a registered embedding profile. Anything other than the
+  default `legacy` sends vectors to the profile-keyed `chunk_embedding` table
+  instead.
 
 **Local Compose defaults to the legacy arm with the test provider**:
-`EMBEDDING_PROVIDER=echo`, no profile — an offline smoke stack, fenced by the
-`REGWATCH_ALLOW_TEST_PROVIDERS` boot guard against seeded corpora. The legacy
-`chunk.embedding` column is `vector(1536)`, so any provider on this arm has to
-be 1536-dim (`assert_embedding_provider_dim` in `store/pgvector_store.py`
-refuses others at boot). Qwen3 is refused on this arm too: it may not write
-into the unversioned legacy space at all.
+`INGEST_EMBEDDING_PROVIDER=echo`, no profile, an offline smoke stack, fenced by
+the `REGWATCH_ALLOW_TEST_PROVIDERS` boot guard against seeded corpora. The
+legacy `chunk.embedding` column is `vector(1536)`, so any provider on this arm
+has to be 1536-dim (`assert_embedding_provider_dim` in `store/pgvector_store.py`
+refuses others at boot).
 
 **Production does not run the legacy arm.** It runs a registered profile:
-Databricks-hosted Qwen3 at 1024 dimensions, profile
-`ep_2e7368b354d911ea3a013c3125e276c2`, with all 5,494 chunks embedded on it
-(measured 2026-08-11). Profile vectors live in `chunk_embedding`, whose embedding
-column deliberately carries no dimension typmod. The profile row's dimension is
-enforced by a database trigger plus a per-profile expression index, which is what
-lets several vector spaces coexist. Because prod runs a real profile,
-`EMBEDDING_PROVIDER=qwen3` in `fly.toml` satisfies the required-explicit boot
-assert without affecting the query path. The legacy column is a frozen
-historical space, not a rollback: its OpenAI embedder was removed 2026-08-17,
-and rollback means a previously promoted profile.
+OpenAI `text-embedding-3-large`, truncated to 1024 dimensions via the
+`dimensions` API parameter, named by the `RETRIEVAL_EMBEDDING_PROFILE` Fly
+secret (`fly.toml` pins `INGEST_EMBEDDING_PROVIDER = "openai"`). Profile
+vectors live in `chunk_embedding`, whose embedding column deliberately carries
+no dimension typmod. The profile row's dimension is enforced by a database
+trigger plus a per-profile expression index, which is what lets several vector
+spaces coexist. The legacy column is a frozen historical space, not a
+rollback: rollback means a previously promoted profile, never the legacy
+column. `docs/PRODUCTION_TRUTH.md` carries the current serving profile id.
 
-To run the production-shaped vector space locally you need the Databricks
-embedding endpoint credentials, then three commands in the order
-`.github/workflows/databricks-eval.yml` uses:
+To run the production-shaped vector space locally you need a real
+`OPENAI_API_KEY`, then two commands in the order `.github/workflows/openai-eval.yml`
+uses:
 
 ```bash
-export QWEN_EMBEDDING_BASE_URL=... QWEN_EMBEDDING_TOKEN=...
+export OPENAI_API_KEY=sk-...
 PROFILE_ID=$(uv run regwatch embedding-profile-register \
-  --serving-runtime-version "$DATABRICKS_SERVING_RUNTIME_VERSION" --id-only)
-uv run regwatch embedding-profile-index "$PROFILE_ID"
-EMBEDDING_PROVIDER=qwen3 ACTIVE_EMBEDDING_PROFILE="$PROFILE_ID" uv run regwatch seed
+  --provider openai --serving-runtime-version openai-api-v1 --id-only)
+INGEST_EMBEDDING_PROVIDER=openai RETRIEVAL_EMBEDDING_PROFILE="$PROFILE_ID" \
+  uv run regwatch seed
 ```
 
-Index before seed. Seeding activates the profile, and the activation assert wants
-a ready HNSW index.
+Registration is content-addressed and idempotent: rerunning it with the same
+arguments returns the same profile id and writes nothing new. Start the API
+against that profile the same way:
+
+```bash
+INGEST_EMBEDDING_PROVIDER=openai LLM_PROVIDER=openai \
+  RETRIEVAL_EMBEDDING_PROFILE="$PROFILE_ID" OPENAI_API_KEY=sk-... \
+  docker compose up api
+```
+
+Retrieval is an exact pgvector scan; there is no HNSW index requirement to
+satisfy first (`PROFILE_HNSW_INDEX_REQUIRED` defaults to false).
 
 There is exactly one build flavor since 2026-08-17: the slim no-torch image.
 `docker compose build` takes no flavor argument (the old
 `INSTALL_LOCAL_EMBEDDINGS` build arg is gone with the local bge provider).
 
-Do not load the full PSG corpus with `EMBEDDING_PROVIDER=echo`. That is enforced
+Do not load the full PSG corpus with `INGEST_EMBEDDING_PROVIDER=echo`. That is enforced
 at startup: when an `echo` embedding or LLM provider meets a non-empty pgvector
 corpus, the API refuses to boot with a `RuntimeError` explaining the fix (switch
 to a real provider, or set `REGWATCH_ALLOW_TEST_PROVIDERS=1` for tests and CI). A
@@ -149,9 +163,12 @@ The first Docker build pulled large CUDA and NVIDIA packages through the
 API image far too heavy for a service smoke test. Those packages live behind
 the `local-embeddings` extra, which since 2026-08-17 serves ONLY the
 off-by-default cross-encoder reranker (`retrieve/reranker.py`,
-`RERANKER_ENABLED`) — the local bge embedding provider the extra was named for
-was removed. The image installs `--extra llm` only (the OpenAI-compatible SDK,
-i.e. the Databricks transport), and no image flavor ever ships torch.
+`RERANKER_ENABLED`); the local bge embedding provider the extra was named for
+was removed. The image installs `--extra llm` only, which is the OpenAI
+Responses API transport (`openai>=2.53.0`, `pyproject.toml`), not a Databricks
+transport; the Databricks LLM path was removed from `llm.py` entirely and
+setting `LLM_PROVIDER` to that retired provider name now raises at boot. No
+image flavor ever ships torch.
 
 ## Startup behavior
 
@@ -159,8 +176,8 @@ The entrypoint creates the container data directories, runs `regwatch init-db`,
 and exports `REGWATCH_DB_INITIALIZED=1`. FastAPI checks that marker and skips its
 own `init_db()` call, so the same work does not happen twice.
 
-Three explicit argv shapes bypass the entrypoint's pre-command `init-db`, plus
-an explicit `REGWATCH_INIT_DB=false` override:
+Four explicit argv shapes change the entrypoint's pre-command `init-db`
+behavior, plus an explicit `REGWATCH_INIT_DB=false` override:
 
 - `regwatch release`: the Fly release command migrates first and then runs the
   full serving guard itself. The entrypoint must not run that guard against the
@@ -168,8 +185,16 @@ an explicit `REGWATCH_INIT_DB=false` override:
   `RELEASE_COMMAND=1` marker enforces the same bypass if the command is wrapped.
 - `alembic ...`: direct operator migration commands retain the same pre-guard
   bypass.
-- `regwatch-proxy`: the Go proxy must boot DB-independent, so a proxy machine
-  never crash-loops on the stamp guard while holding the public port.
+- `regwatch-proxy` (or any path ending in it): the Go proxy must boot
+  DB-independent, so a proxy machine never crash-loops on the stamp guard
+  while holding the public port.
+- `dagster-daemon` / `dagster-webserver`: not a full bypass. Corpus
+  maintenance intentionally creates pending vectors, so the public
+  serving-profile completeness gate cannot run before the daemon that repairs
+  them starts. Instead of skipping init entirely, the entrypoint runs
+  `regwatch authoritative-corpus-init-db`, a maintenance-safe init that still
+  verifies the exact Alembic head, RLS, and database connectivity, then skips
+  the normal `regwatch init-db` call. `docker/entrypoint.sh`.
 
 ## Health check
 
@@ -187,16 +212,16 @@ Compose defaults it looks like this:
  "whitepaper_template":"absent","warnings":[]}
 ```
 
-Production reports `"llm":{"provider":"databricks","key_present":true}`. Every
-LLM role (router, synthesizer, extractor) runs on one in-tenant Databricks
-endpoint, the Unity Catalog alias `workspace.default.regwatch`, which serves
-`gpt-oss-120b-080525`. The embedding component reports the live profile, not the
-`EMBEDDING_PROVIDER` setting, because only the legacy arm reads that setting and
-reporting it made the probe answer "openai" while queries were in fact embedded
-by the Databricks profile model. In prod it reads
-`"embedding":{"provider":"qwen3","profile":"ep_2e7368b354d911ea3a013c3125e276c2"}`.
+Production also reports `"llm":{"provider":"openai","key_present":true}`: every
+LLM role (router, synthesizer, extractor) runs on one model, `fly.toml` pins
+`LLM_PROVIDER = "openai"`. The embedding component reports the live profile,
+not the `INGEST_EMBEDDING_PROVIDER` setting, because only the legacy arm reads
+that setting; reporting it instead would answer "openai" regardless of which
+profile actually served the query. In prod it reads
+`"embedding":{"provider":"openai","profile":"<the live RETRIEVAL_EMBEDDING_PROFILE id>"}`.
 The profile's model name is left out on purpose: `/health` is the one
-anonymous-reachable endpoint.
+anonymous-reachable endpoint. `docs/PRODUCTION_TRUTH.md` carries the current
+live profile id; do not hardcode it here.
 
 Keys are reported as booleans only, never values, and appear conditionally: `db`
 carries `dialect` on success or `error` on failure, and `allow_test_providers`
@@ -255,9 +280,9 @@ Still needed, cross-referenced in `docs/ROADMAP.md`:
 
 - an approved secrets-manager policy and a tested key-rotation drill. The secret
   inventory and provisioning runbook already exist in `docs/SECRETS_RUNBOOK.md`.
-- SSO/OIDC against the corporate IdP in front of the app-layer login, see
-  `docs/PROD_READINESS.md` #1. The rate limiter is still per-process, so multiple
-  replicas need gateway-level limiting.
+- SSO/OIDC against the corporate IdP in front of the app-layer login. The rate
+  limiter is still per-process, so multiple replicas need gateway-level
+  limiting. See `docs/ROADMAP.md`.
 - a rehearsed restore drill and least-privilege app DB credentials on the live
   Lakebase Postgres.
 - load testing against the live deployment. The analyst smoke flows have run; a

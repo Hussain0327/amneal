@@ -1,420 +1,634 @@
-# REGWATCH roadmap: what is still open
+# RegWatch roadmap
 
-One list of everything that is NOT done yet. If another doc disagrees with this
-file or with [`PROD_READINESS.md`](PROD_READINESS.md), these two win.
+Everything that is not done yet, plus the numbered production gates. This file
+is the single owner of open work. If another document says an item is open or
+closed and this file disagrees, this file wins.
 
-Last updated: 2026-08-19 for the polyglot amendment (Rust step cancelled).
-Unrelated live app, database and Fly values were last checked 2026-08-11.
+What this file does not own:
+
+- What actually serves a request today, and which flag is set in production:
+  [`PRODUCTION_TRUTH.md`](PRODUCTION_TRUTH.md).
+- Environment variables, flags and secrets:
+  [`CONFIG_REFERENCE.md`](CONFIG_REFERENCE.md).
+- Stable design, pipeline stages, the answer gate, the data model and the
+  INV-1..9 invariants: [`ARCHITECTURE.md`](ARCHITECTURE.md).
+- Code that exists but does not run:
+  [`BUILT_BUT_DORMANT.md`](BUILT_BUT_DORMANT.md).
+- Why a past decision was made: [`DECISIONS.md`](DECISIONS.md).
+
+Numbers like `#221` are GitHub issues on this repository.
 
 Labels: **BLOCKER** stops external exposure. **SHOULD-HAVE** before launch.
 **DECISION** needs a person to choose. **LATER** is optional.
 
-## What changed since the 2026-08-05 stamp
-
-- **Data residency (D1) is deliberately reversed for model calls, 2026-08-20.**
-  From 2026-07-30 through 2026-08-19 all three legs ran inside the company's
-  own Databricks tenant: generation was `gpt-oss-120b` behind
-  `workspace.default.regwatch`, and query/corpus embeddings were Qwen3 behind
-  `workspace.default.regwatch-embed`, 1024 dim. By owner decision, generation
-  now moves to OpenAI `gpt-5.6-terra` and embeddings move to OpenAI
-  `text-embedding-3-large` truncated to 1024 dimensions. This intentionally
-  reopens D1 for those two legs; it is not a regression or a bypassed guard --
-  `D1_ENFORCED` was never set in prod. The database leg is unchanged: Lakebase
-  still holds every chunk and vector, in-tenant. `LLM_PROVIDER`/
-  `EMBEDDING_PROVIDER` stay required-explicit with no defaults.
-  History of the 2026-07-30 to 2026-08-19 closed period lives in
-  [`archive/DATA_RESIDENCY_D1.md`](archive/DATA_RESIDENCY_D1.md).
-- **The answer rule changed.** "Cite or refuse" is dead as the headline rule. v7
-  selective citation is live in prod: cite the facts, talk like a person.
-  Sentences that state what FDA guidance requires still carry passage numbers,
-  and an uncited one is still dropped by the gate (INV-1, enforced in code, not
-  in the prompt). Our own reasoning and ordinary conversation carry no numbers.
-  There is no sentinel and no code word for "not found" any more.
-
-Already shipped, so not listed below: Router -> Handlers -> Synthesizer with
-INV-1..9 as tests; cited conversational Q&A with
-live token streaming; the White Paper populator and its runs automation; the
-deficiency analyzer; the Next.js shell on Vercel; the Go edge holding all public
-traffic on Fly (auth, sessions, feedback, settings, products, plus `POST /query`
-orchestration, polyglot steps 0 to 5); Postgres plus pgvector on Lakebase as the
-only datastore; continuous deployment and the daily watch cron. The detail is in
-[`../README.md`](../README.md), [`ARCHITECTURE.md`](ARCHITECTURE.md) and the done
-sections of [`PROD_READINESS.md`](PROD_READINESS.md).
+Every item says what it is, why it matters, where the code is, and what done
+means. Claims here were checked against the repository on 2026-08-26. Live
+values that only a deployed system can answer are named as commands, not
+copied.
 
 ---
 
-## Live operator action, complete this one first
+## What blocks production
 
-### Build and validate the authoritative FDA corpus  (SHOULD-HAVE)
+### Corporate SSO, and a rate limiter that is not per process
 
-The code portion now includes the exact five-family policy, official snapshot
-adapters, bounded document streaming, durable content-addressed artifacts,
-sandboxed OCR, separately checkpointed chunk/embedding lifecycle, an exact
-manifest, 512 deterministic Dagster shards, blocking coverage checks, an
-evidence-backed terminal outcome ledger, and a fail-closed reversible cutover.
-The frozen production manifest contains **140,438 source records**.
+Gate 1. Application auth is finished: the Go edge owns cookie sessions,
+ownership checks, and the login brute-force cap, and Fly terminates HTTPS. What
+is missing is the corporate front door, OIDC or SSO against the company IdP
+behind the IT TLS gateway. [`DECISIONS.md`](DECISIONS.md) defers that to IT with
+cookie sessions as the pilot boundary, so the open work is either the gateway or
+a signed acceptance of the pilot boundary.
 
-Migrations 0023 and 0024 plus the worker are deployed. The corrected production
-canary passed 21 / 21 and produced 499 chunks with complete active-profile
-embeddings. The full 512-shard backfill is operator-owned and retrieval remains
-on `legacy`. Release migration 0025 without disturbing that sweep, resolve its
-retry-exhausted tail into indexed versions or validated terminal outcomes, pass
-exact-manifest acceptance plus retrieval/citation evaluation, verify
-`activation_ready=true`, smoke the cutover, and rehearse rollback. Never freeze
-a second manifest beneath the running backfill.
+Separately, the rate limiter is an in-memory sliding window per process
+(`go/internal/api/ratelimit.go`, ported from `common/ratelimit.py`). With two
+proxy machines running, the real fleet ceiling is about twice the configured
+rate. The file says so itself.
 
-- Where: `src/regwatch/corpus/`, `src/regwatch/sources/policy.py`, migrations
-  0023–0025, `Dockerfile.corpus-worker`, and the corpus runbook.
-- Done when: the target environment resolves every frozen-manifest record as
-  indexed or evidence-backed terminal, has zero unresolved document errors and
-  policy violations, reaches 100% selected-profile coverage for indexed chunks,
-  passes evaluation, and rehearses cutover plus rollback.
-
-### Provision and validate the Watch embedding profile  (SHOULD-HAVE)
-
-The code portion is done: the daily workflow pins Qwen3, requires a named active
-profile plus base URL, token, model, revision and dimension before checkout,
-validates the registered profile before crawl, and preserves the post-ingest
-100% coverage assertion. It fails closed instead of allowing an unprofiled
-change-day ingest.
-
-The owner portion is still open. These six repository secrets were all absent
-when checked through the GitHub API on 2026-08-12:
-`WATCH_ACTIVE_EMBEDDING_PROFILE`, `WATCH_QWEN_EMBEDDING_BASE_URL`,
-`WATCH_QWEN_EMBEDDING_TOKEN`, `WATCH_QWEN_EMBEDDING_MODEL`,
-`WATCH_QWEN_EMBEDDING_REVISION`, and `WATCH_QWEN_EMBEDDING_DIMENSION`.
-Until they are provisioned, a configured production run stops at preflight and
-does not crawl. Provision all six together, dispatch the workflow manually, and
-verify its profile-validation and zero-pending coverage steps.
-
-- Where: GitHub repository secrets and `.github/workflows/watch-daily.yml`.
-
----
-
-## Blockers, before any external exposure
-
-### 1. Gateway and SSO, plus distributed rate limiting  (PROD_READINESS #1)
-
-App-layer auth is done: the Go edge owns cookie sessions, ownership checks and
-the login brute-force cap, and Fly terminates HTTPS (`force_https = true`,
-`AUTH_COOKIE_SECURE` pinned in `fly.toml`). What is missing is the corporate
-front door: OIDC/SSO against the company IdP behind a TLS gateway.
-[`DECISIONS.md`](DECISIONS.md) defers that to IT, with cookie sessions as the
-pilot boundary. Separately, the rate limiter is in-memory per process across two
-proxy machines, so the real fleet ceiling is about twice the configured rate.
-
-- Where: `go/internal/api/`, `fly.toml`.
+- Why it matters: this is the exposure decision. Nothing else on this list
+  unblocks external users.
+- Where: `go/internal/api/` (`auth.go`, `sessions.go`, `ratelimit.go`),
+  `fly.toml`.
 - Done when: enterprise auth fronts the app, or the cookie-session layer is
-  formally accepted as the pilot boundary, and rate limiting is no longer
-  per-process.
+  formally accepted as the pilot boundary, and rate limiting no longer scales
+  with machine count.
 
-### 2. Restore drill and least-privilege database credentials  (PROD_READINESS #2)
+### Restore drill, and a least-privilege database role
 
-The database is Databricks Lakebase; the last verified live head was
-`0020_eval_run`, while repository head now includes 0021. The migration release gate is done
-(`release_command = "regwatch release"` in `fly.toml`, which migrates and then
-asserts serving readiness before the roll). What is missing is
-proof: nobody has ever rehearsed a restore, and the scripted
-`scripts/restore_drill.sh` was deleted in R5. The app also still connects with a
-full-privilege role. Polyglot step 7, where Python drops to a read-only role, is
-the least-privilege path.
+Gate 2. Nobody has ever rehearsed a restore. The scripted `restore_drill.sh` was
+deleted in R5 and `scripts/` has no replacement. The application also still
+connects with a full-privilege role.
 
-- Where: [`DEPLOY.md`](DEPLOY.md), the staging and restore drill section;
-  `src/regwatch/store/db.py`.
-- Done when: a restore drill against staging has passed and least-privilege
-  credentials are in place, or formally waived.
+- Why it matters: Lakebase is the only datastore. Every chunk, vector, session
+  and audit row is in it. An unrehearsed restore is an untested backup.
+- Where: [`DEPLOY.md`](DEPLOY.md) staging and restore-drill section,
+  `src/regwatch/store/db.py`. The least-privilege half is polyglot step 7, so it
+  can be folded into the Go strangler work below.
+- Done when: a restore drill against staging has passed and the application
+  connects with a role that cannot drop or alter schema, or both are formally
+  waived in writing.
 
-### 3. UI smoke and load behind the approved gateway  (PROD_READINESS #4)
+### UI smoke and load behind the approved gateway
 
-The UI is feature complete and live on Vercel. What is left is deploy-time proof
-for the exposure decision, not code.
+Gate 4. The UI is feature complete and deployed on Vercel. What is left is
+deploy-time proof for the exposure decision, not code.
 
-- Where: `regwatch/frontend/`, [`DEPLOY.md`](DEPLOY.md) smoke checklist.
+- Why it matters: the smoke checklist is the only end-to-end evidence that the
+  approved auth path, the same-origin `/api` proxy and the analyst flows work
+  together.
+- Where: `regwatch/frontend/`, the smoke checklist in [`DEPLOY.md`](DEPLOY.md).
 - Done when: the smoke flows pass behind the approved auth path and a load test
-  has run.
+  has run against it.
+
+### Decide whether a data-residency control is wanted (DECISION)
+
+Gate 5. This item used to claim a shipped, tested residency guard. That guard
+does not exist. `D1_ENFORCED` and `D1_ALLOWED_LLM_MODELS` appear nowhere in
+`src/`, `config/` or `go/`. The only related code is `class D1ResidencyError` at
+`src/regwatch/generate/llm.py:429`, which several call sites catch and re-raise
+deliberately (`generate/grounded_qa.py`, `deficiency/structured.py`,
+`deficiency/detection/`) but which no provider ever raises. Only tests construct
+it. There is no `tests/test_d1_guards.py`.
+
+The factual position today: generation and embeddings both call OpenAI, an
+external vendor, on every normal question. Only the database stays in the
+company tenant. That is the intended result of the 2026-08-20 owner decision,
+not a bypass.
+
+So the open question is a product and compliance decision, not a bug: does
+RegWatch want a runtime residency control at all now that the model calls are
+deliberately external? If yes, someone has to define what it fences (a served
+model allowlist, a per-tenant provider pin, or an egress policy) and give
+`D1ResidencyError` a real raise site. If no, delete the exception class and the
+catch sites with it.
+
+- Why it matters: the exception type shapes real error handling. The SSE
+  fallback in `llm.py` re-raises it instead of retrying, on the theory that a
+  residency violation must never be re-sent. That machinery is currently
+  unreachable, and a reader can easily mistake it for an armed control.
+- Where: `src/regwatch/generate/llm.py`, and every module that imports
+  `D1ResidencyError`.
+- Done when: the decision is recorded in [`DECISIONS.md`](DECISIONS.md) and the
+  code matches it in either direction.
 
 ---
 
-## Should-have before launch
+## What is next
 
-### Observability  (PROD_READINESS #6)
+### Corpus: review the curated inventory and decide the serving flip (#257)
 
-Structured logging, audit rows, privacy-scrubbed Sentry wiring, component
-`/health`, `/ready` and `/metrics` counters all exist. Per-turn latency is
-captured (`query_log.latency_ms`, migration 0016, both runtimes) but is not
-exported as histograms. Missing: latency and cost metric export, tracing, a
-configured production Sentry DSN, and a decision on whether a paid live LLM
-reachability probe is worth the noise.
+Gate 9. The complete-universe target is dead. The 140,438 source records in the
+frozen manifest can never all be indexed: the Lakebase branch is capped at
+512 MiB, and `config/settings.py:508-516` records the 2026-08-18 amendment that
+made the full universe permanently unreachable. Activation now counts against a
+curated manifest whose sha256 an operator names explicitly in
+`REGWATCH_SERVING_MANIFEST_SHA`. Unset keeps the old complete-universe behavior,
+which now means never activating.
 
-- Where: `common/logging.py`, `common/observability.py`, `common/audit.py`,
-  `api/main.py`, `go/internal/api/`.
+Open work: review what the curated manifest actually contains, decide whether it
+is enough to serve, then run acceptance, retrieval and citation evaluation,
+serving smoke, and a rollback rehearsal before moving
+`REGWATCH_RETRIEVAL_CORPUS` off `legacy`. Never freeze a second manifest
+under a running backfill.
 
-### Watch operations  (PROD_READINESS #7)
-
-The cron is live: `watch-daily.yml` at 07:17 UTC does crawl, match, ingest,
-durable alerts, digest, with a Slack failure notice, a success digest,
-healthcheck pings and an advisory threshold sweep. It failed every day from
-2026-08-07 until the owner updated `WATCH_DATABASE_URL` on 2026-08-10 at 18:19
-UTC. The manual run that evening and the scheduled run on 2026-08-11 both
-passed, so this is not an ongoing outage.
-
-What remains is operational: keep the secrets provisioned (see the hazard above
-and [`SECRETS_RUNBOOK.md`](SECRETS_RUNBOOK.md)), watch real run history, and
-decide whether alerts should move beyond `/watch/latest` plus Slack into
-product-facing email or digests. Deferred from the July watch wave: alert
-ack-state and durable parsed text.
-
-- Where: `watch/run.py`, `watch/alerts.py`, `.github/workflows/watch-daily.yml`.
-
-### Finish the polyglot migration
-
-Steps 0 to 5 of [`POLYGLOT_TARGET_2026-07-10.md`](POLYGLOT_TARGET_2026-07-10.md)
-are done: the Go edge plus native `/query`, live since 2026-07-24. Remaining:
-
-- **The step-5 deletion PR.** Python still serves its own `POST /query`
-  (`src/regwatch/api/main.py`) even though the Go edge orchestrates the live
-  path. Do the INV-coverage mapping first:
-  [`archive/STEP5_INV_TEST_MAPPING.md`](archive/STEP5_INV_TEST_MAPPING.md).
-- **R3**, the safe-prefix streaming rewrite. It has to keep the
-  `D1ResidencyError`-excluded SSE fallback from #138.
-- **Steps 6, 7 and 9**: coarse write commands for ingest and Watch (6), Python
-  down to a read-only DB role (7, the least-privilege item above), and
-  `CommitWhitepaperRun` plus deleting the Python persistence layer (9). Step 8
-  (the Rust PDF CLI) was cancelled 2026-08-19; PDF parsing stays in Python
-  permanently.
-
-### Secrets policy  (PROD_READINESS #10)
-
-`.env` and friends are gitignored, the Actions secret surface is written up in
-[`SECRETS_RUNBOOK.md`](SECRETS_RUNBOOK.md), and prod uses Fly and Vercel platform
-secrets. Still needed: an approved secret manager or platform policy, and key
-rotation that is documented and rehearsed.
-
-### Container resource limits  (PROD_READINESS #11)
-
-The supply-chain gates (pip-audit, npm audit, Trivy image scans) are green and
-enforced. The one residual: neither `compose.yaml` nor `fly.toml` sets any CPU or
-memory limit.
-
-### Check whether the residency guard is armed
-
-The guard ships and is tested: `D1_ENFORCED` plus `D1_ALLOWED_LLM_MODELS`, and a
-runtime check in `generate/llm.py` that rejects a reply served by a model outside
-the allowlist and always rejects the partner-hosted families (`databricks-gpt*`,
-`databricks-claude*`, `databricks-gemini*`). That runtime check only runs when
-`D1_ENFORCED` is on, and it is NOT on in prod. Verified 2026-08-11: `D1_ENFORCED`
-appears in neither `fly secrets list -a amneal` nor `fly.toml`, and the setting
-defaults to `false` (config/settings.py). So the runtime check is inert today,
-and it stayed inert through the 2026-08-20 OpenAI cutover -- the guard was never
-armed, so the move to OpenAI did not bypass it. `D1_ALLOWED_LLM_MODELS` allowlists
-Databricks-served model ids; it has no bearing on the OpenAI path and would need
-its own allowlist logic if the guard is ever re-armed against OpenAI models.
-
----
-
-## Decisions needed
-
-### Product shape: collapse to two surfaces  (DECISION)
-
-Owner direction, 2026-08-05: end up with two surfaces, Ask (the conversational
-one) and Studio (the document workspace), with Assemble, Watch, White Paper and
-Deficiency folded into Studio. Assemble and White Paper become generators that
-write documents into the tree. Watch, Deficiency and the compliance check become
-checks that run against documents already in it. "Is this document out of date?"
-is then Watch pointed at our own drafts.
-
-Nothing has moved yet, and nothing should. The four surfaces being folded in all
-have working backends. Studio mostly does not, so folding them in now would trade
-shipped functionality for a mockup.
-
-Prerequisites, in order:
-
-1. **Studio needs a backend.** One seam is real: the left rail lists the FDA PSG
-   corpus from the database and streams the PDFs inline. Everything else is
-   fixtures. `CHECK_RESULTS` plus a 1.5s timer stands in for the compliance
-   pipeline, and the document service and the assistant are equally fictional.
-   The fixture shapes in `lib/studio-fixtures.ts` are the contract, see
-   [`COMPLIANCE_STUDIO.md`](COMPLIANCE_STUDIO.md) section 8.
-2. **Studio needs persistence.** A refresh destroys every recorded disposition.
-   `localStorage` is not an acceptable answer for GMP dispositions.
-3. **Studio needs the product scope.** It sits outside `app/(shell)/` and never
-   sees `CurrentProductProvider`, so its tree cannot yet be "the documents for
-   the product under review".
-4. **Decide what a document is.** White Paper cells carry their own provenance
-   model and are not spans in a block. Watch alerts are not documents at all.
-   Each fold needs its data model reconciled with Studio's `(blockId, start,
-   end)` anchor, or an explicit decision that it stays separate.
-5. **Decide what happens to the shell.** If only Ask and Studio remain, the
-   `(shell)` route group, the sidebar and the scope bar are all in question.
-
-- Where: `regwatch/frontend/app/studio/`, `app/(shell)/`,
-  [`COMPLIANCE_STUDIO.md`](COMPLIANCE_STUDIO.md),
-  [`ARCHITECTURE.md`](ARCHITECTURE.md) section 3.
-- Open question: whether Deficiency folds in as a check on an open document or
-  stays a whole-submission upload. It takes a PDF today, not a document from a
-  tree.
-
-### Revalidate the 0.30 refusal threshold  (DECISION)
-
-`REFUSAL_SCORE_THRESHOLD=0.30` withholds any passage scoring below it before the
-synthesizer ever runs. It was validated against the old OpenAI 1536-dim space
-([`archive/THRESHOLD_VALIDATION_2026-06-25.md`](archive/THRESHOLD_VALIDATION_2026-06-25.md)).
-Prod now embeds with Qwen3 at 1024 dim, a different cosine distribution, so that
-validation does not carry over and nobody has redone it. The advisory sweep in
-the watch cron cannot settle it alone: its must-refuse cases stop before
-retrieval and produce no cosine scores. Add scored hard negatives and rerun. See
-[`EVAL_STATUS.md`](EVAL_STATUS.md).
-
----
-
-## Product and quality
-
-### Eval  (PROD_READINESS #8)
-
-The gold set is now 62 Q&A rows plus 16 white-paper rows, with every quote
-verified present at its pinned `(short_name, page)`, and the live Databricks eval
-runs on every build (`.github/workflows/databricks-eval.yml`). What is still
-open:
-
-- **The blocking eval does not run what prod runs.** `ci.yml` calls it with
-  `prose: false, selective: false`, so the merge gate scores the old v5 claims
-  chain while prod serves v6 prose plus v7 selective citation. The v6 and v7
-  numbers come from the hand-dispatched arm instead.
-- The blocking floors are a ratchet, not a quality bar: `recall_at_k` 0.80 and
-  `citation_precision` 0.74, each set just under the first real measurement. The
-  0.90 / 0.95 / 0.95 figures are aspirational targets and have never been shown
-  reachable on real geometry.
-- `refusal_accuracy` is measured but not gated, by owner decision, because the
-  product is deliberately moving away from refusing. Its 16 gold rows are slated
-  for removal once that direction lands.
-- Scoring is still mechanical `(short_name, page)` plus `expected_facts`
-  substrings. LLM-as-judge is not wired, so a correct answer worded differently
-  undercounts.
-- The CI eval runs against a seed corpus (66 chunks, 8 documents), not the
-  5,494-chunk production corpus.
-
-See [`EVAL_STATUS.md`](EVAL_STATUS.md).
-
-- Where: `src/regwatch/eval/`, `gold_set.jsonl`, `tests/test_eval_gate.py`.
+- Why it matters: retrieval still serves the legacy PSG index. The FDA corpus
+  work is built and not serving anyone.
+- Where: `src/regwatch/corpus/`, `src/regwatch/sources/policy.py`,
+  `Dockerfile.corpus-worker`, and
+  [`AUTHORITATIVE_FDA_CORPUS.md`](AUTHORITATIVE_FDA_CORPUS.md). Status comes
+  from `regwatch authoritative-corpus-status`.
+- Done when: every record in the named manifest resolves as indexed or as an
+  evidence-backed terminal outcome, indexed chunks have full selected-profile
+  coverage, status reports `activation_ready=true`, evaluation passes, and the
+  cutover and its rollback have both been rehearsed.
 
 ### Post-deploy smoke against the live stack
 
-On 2026-08-03 an answer-path regression reached real users, and the whole CI
-suite was blind to it. `deploy.yml` still has no step that asks one real question
-through the deployed stack and asserts it came back answered.
+On 2026-08-03 an answer-path regression reached real users and the whole CI
+suite was blind to it. `deploy.yml` verifies that machines are running
+(`scripts/fly-verify-machines.sh`) but never asks the deployed stack a real
+question.
 
-- Done when: a post-deploy job queries the live app end to end and fails the
-  deploy, or alerts, on anything other than an answered, cited turn.
+- Why it matters: machine health is not answer health. The failure class that
+  actually hurt users is invisible to every current gate.
 - Where: `.github/workflows/deploy.yml`, `src/regwatch/eval/`.
+- Done when: a post-deploy job asks one real question end to end and fails the
+  deploy, or pages, on anything other than an answered, cited turn.
 
-### Graph-assisted retrieval
+### Observability export
 
-The deterministic Tier-1 graph foundation is landed (`0018_knowledge_graph`,
-`store/graph_store.py`): application, document and section nodes, typed hierarchy
-and adjacency edges, and references back to the citable chunks. Only ingest and
-the CLI write it. No runtime query path reads it yet.
+Gate 6. Structured logging, audit rows, privacy-scrubbed Sentry wiring,
+`/health` component diagnostics, `/ready` and `/metrics` counters all exist.
+`/metrics` is hand-rolled Prometheus text built by aggregating `query_log`
+(`src/regwatch/api/main.py:598-660`), so it emits counters only.
 
-The proposed consumer starts from scoped seed chunks, does a bounded typed
-traversal, reranks the expanded chunks and tests whether the evidence is enough,
-with at most one targeted second expansion. It stays default-off until the eval
-set is bigger and the graph path shows fewer false refusals and ranking misses
-with no citation, scope, latency or context-budget regression. Design and gates:
-[`GRAPH_ASSISTED_RETRIEVAL.md`](GRAPH_ASSISTED_RETRIEVAL.md).
+Missing: latency histograms (per-turn latency is stored in
+`query_log.latency_ms` by both runtimes but never exported), cost gauges,
+tracing, a configured production Sentry DSN, and a decision on whether a paid
+LLM reachability probe is worth the noise.
 
-- Where: `src/regwatch/store/graph_store.py`, `src/regwatch/retrieve/`,
-  `src/regwatch/generate/grounded_qa.py`, `src/regwatch/eval/`.
+- Why it matters: you cannot see a latency regression until a user reports it.
+- Where: `src/regwatch/common/observability.py`, `common/audit.py`,
+  `api/main.py`, `go/internal/api/`.
+- Done when: latency and cost are exported and scraped, tracing is on, and
+  production error tracking is configured.
 
-### Persist-and-cite beyond the White Paper  (PROD_READINESS #9)
+### Watch operations
 
-The persist-and-cite plus freshness pattern (Orange Book and SPL provenance with
-`last_fetched_at`, multi-source synthesis) is wired for the White Paper only. The
-Ask and Assemble read paths still query live HTTP without persisting source rows
-or freshness.
+Gate 7. The cron is live. `.github/workflows/watch-daily.yml` crawls, matches,
+ingests, writes durable alerts and a digest, notifies Slack on failure, and
+pings a healthcheck.
+
+It needs three repository secrets: `WATCH_DATABASE_URL`, `OPENAI_API_KEY`, and
+`WATCH_ACTIVE_EMBEDDING_PROFILE`, the last validated against `^ep_[0-9a-f]{32}$`
+before checkout. Two more are optional and only affect notification:
+`SLACK_WEBHOOK_URL` and `WATCH_HEALTHCHECK_URL`. The workflow hardcodes the
+OpenAI provider and model in its own env block. Earlier versions of this file
+demanded six secrets named for a Qwen embedding endpoint; the workflow no longer
+references any of them, and that item is dead.
+
+Open work is operational, not code: keep the three secrets provisioned and
+matching what the application serves, watch real run history, and decide whether
+alerts should move beyond `/watch/latest` plus Slack into product-facing email
+or digests. Deferred from the July watch wave: alert acknowledgement state and
+durable parsed text.
+
+- Why it matters: this cron is the only production driver of the watch pipeline.
+  A silent failure leaves analysts on stale FDA guidance.
+- Where: `src/regwatch/watch/run.py`, `watch/alerts.py`,
+  `.github/workflows/watch-daily.yml`, and
+  [`SECRETS_RUNBOOK.md`](SECRETS_RUNBOOK.md).
+- Done when: the cron runs on the same embedding profile the application serves,
+  run history is monitored, and an outbound alert channel is chosen.
+
+### Eval hardening
+
+Gate 8. The merge gate now scores the arm production serves, so the largest gap
+in this section is closed (see Recently closed). What is still open:
+
+- The blocking floors are a ratchet, not a quality bar. They live in
+  `THRESHOLDS` in `src/regwatch/eval/run_eval.py` and were each set just below
+  the first real measurement. The aspirational `TARGETS` in the same file have
+  never been shown reachable on real geometry.
+- `refusal_accuracy` is measured but not gated, by owner decision, because the
+  product is moving away from refusing. Its 16 `must_refuse` rows in
+  `gold_set.jsonl` come out when that direction lands.
+- Scoring is mechanical: `(short_name, page)` plus `expected_facts` substrings.
+  A correct answer worded differently undercounts. LLM-as-judge is not wired.
+- The CI eval runs against a small seeded corpus, not the production corpus.
+
+- Why it matters: a gate that can only ratchet cannot tell you the product got
+  better, only that it did not get much worse.
+- Where: `src/regwatch/eval/`, `gold_set.jsonl`, `tests/test_eval_gate.py`,
+  [`EVAL_STATUS.md`](EVAL_STATUS.md).
+- Done when: LLM-as-judge sits alongside the mechanical metrics and the
+  aspirational targets are met rather than aspired to.
+
+### Calibrate the refusal floor and the confidence band (#218)
+
+The refusal floor withholds any passage scoring below it before the synthesizer
+runs. `Settings.effective_refusal_threshold()` resolves a per-profile floor from
+`REFUSAL_SCORE_THRESHOLD_BY_PROFILE` and falls back to the global default
+(`config/settings.py:120-147`). The global default was validated against a
+1536-dimension OpenAI space that no longer exists.
+
+The live space is OpenAI `text-embedding-3-large` truncated to 1024 dimensions,
+a different cosine distribution, so that validation does not carry over.
+Earlier versions of this item blamed Qwen3 embeddings; that is doubly stale,
+since Qwen3 was itself replaced on 2026-08-20.
+
+`REFUSAL_SCORE_THRESHOLD_BY_PROFILE` defaults to an empty dict in the
+repository, so the live per-profile floor is a platform secret this checkout
+cannot read. [`CLAUDE.md`](CLAUDE.md) records a per-profile floor measured on
+2026-08-20 against 40 gold questions and 8 off-corpus controls. Treat that as
+unverified from code, and confirm it against the deployment before you decide
+whether #218 still has a calibration gap or only a documentation one.
+
+The UI compounds this. `confidenceBand()` in `regwatch/frontend/lib/turns.ts`
+cuts High from Moderate at a fixed fraction of the headroom above the live
+floor. An uncalibrated floor makes the band an uncalibrated label on every
+answer.
+
+The advisory sweep in the watch cron cannot settle it alone: its must-refuse
+cases stop before retrieval and produce no cosine scores. Add scored hard
+negatives and rerun.
+
+- Why it matters: the floor decides what an analyst never sees, and the band
+  tells them how much to trust what they do see.
+- Where: `config/settings.py`, `src/regwatch/eval/threshold_sweep.py`,
+  `regwatch/frontend/lib/turns.ts`. Read the deployed value with
+  `GET /settings` or `regwatch status`; it is a platform secret, not a
+  repository value.
+- Done when: a per-profile floor is calibrated on scored hard negatives for the
+  profile in service, recorded in `REFUSAL_SCORE_THRESHOLD_BY_PROFILE`, and the
+  band cut is rechecked against it.
+
+### Structured-claims follow-ups (#272)
+
+Block-tagged claims shipped, along with the fixes that followed. The remaining
+watch items from that merge are tracked on the issue.
+
+- Where: `src/regwatch/generate/prose_turn.py`,
+  `src/regwatch/generate/turn_gate.py`.
+- Done when: #272 is closed with its watch items either fixed or re-filed.
+
+### Finish the Go strangler (#243)
+
+Steps 0 to 5 of [`POLYGLOT_TARGET_2026-07-10.md`](POLYGLOT_TARGET_2026-07-10.md)
+are done. Step 8, the Rust PDF CLI, was cancelled on 2026-08-19; PDF parsing
+stays in Python permanently and the target is Python, TypeScript and Go.
+Remaining:
+
+- **The step-5 deletion PR.** Python still registers its own `POST /query` at
+  `src/regwatch/api/main.py:1010` even though the Go edge orchestrates the live
+  path. Two rules gate the deletion, and they still bind:
+  - No INV test may be lost. A test that dies with the Python route must have a
+    named contract-test successor in `tests_contract/` before the route goes.
+  - A test with no mapped successor blocks the deletion.
+
+  The five coverage gaps that mapping found are all closed, each by a contract
+  test that already exists: 422 validation on native `/query` (S28,
+  `tests_contract/test_query_auth.py`), NULL-owner session adoption through the
+  edge (S29, `test_sessions_cross_runtime.py`), the INV-5 filter whitelist at
+  the edge (S30, `test_query_outcomes.py`), owner-preservation on a hijack (S5,
+  `test_query_auth.py`), and the second-user fresh rate-limit budget (S18,
+  `test_sessions_cross_runtime.py`). The gate condition is therefore met; what
+  remains is the rewire-and-delete pass itself. The full per-test mapping is in
+  git history at `docs/archive/STEP5_INV_TEST_MAPPING.md`.
+- **R3**, the stream terminal-frame move. It has to preserve the SSE fallback's
+  special handling of `D1ResidencyError`, which the residency decision above may
+  change.
+- **Steps 6, 7 and 9**: coarse write commands for ingest and Watch (6), Python
+  down to a read-only database role (7, the least-privilege item above), and
+  `CommitWhitepaperRun` plus deletion of the Python persistence layer (9).
+- CI enforcement of the language boundary is part of the issue and is not built.
+
+- Why it matters: two implementations of `POST /query` is two places for the
+  answer contract to drift.
+- Done when: #243 is closed, with the deletion PR merged and the boundary
+  enforced in CI.
+
+### Compliance Studio backend, steps 3 to 7 (#216)
+
+Studio is a three-way split today, not a mockup and not a finished product:
+
+- Real and wired: the PSG reference rail and the chat assistant call live
+  endpoints (`regwatch/frontend/app/studio/page.tsx:25` imports `askQuery`,
+  `fetchPsgLibrary`, `fetchPsgContent` and `fetchPsgRequirements`).
+- Real but not wired: `POST /studio/check` and `GET /studio/check/{run_id}`
+  exist and persist runs (`src/regwatch/api/main.py:2839` and `:2876`), and the
+  frontend says so at `page.tsx:62`. Nothing in the UI calls them.
+- Fixtures: the working-document set and its findings, in
+  `regwatch/frontend/lib/studio-fixtures.ts`. A refresh destroys every recorded
+  disposition.
+
+Steps 3 to 7 on #216 are the remaining backend work. The two prerequisites that
+are not about the check endpoint: Studio needs persistence for dispositions
+(`localStorage` is not acceptable for GMP records), and it sits outside
+`app/(shell)/` so it never sees `CurrentProductProvider` and its tree cannot yet
+be "the documents for the product under review".
+
+- Where: `regwatch/frontend/app/studio/`, `src/regwatch/api/main.py`,
+  `src/regwatch/deficiency/`, [`COMPLIANCE_STUDIO.md`](COMPLIANCE_STUDIO.md).
+- Done when: the UI calls the real check endpoint, dispositions survive a
+  refresh, and Studio reads the product scope.
+
+### Retire v5 and make the live answer policy the code default
+
+These are the items from the prompt-layer execution plan that never shipped.
+That plan is no longer a living document; it is recoverable from git history.
+
+- `prose_synthesis_enabled` still defaults to `False` in
+  `config/settings.py:171` and `selective_citation_enabled` still defaults to
+  `False` at `:210`, while `fly.toml` pins both to `"true"`. A cleared platform
+  secret would silently reinstate the retired prompt with no deploy and no
+  diff.
+- The v5 claims-JSON path is still in the tree: `GROUNDED_QA_PROMPT`,
+  `TURN_SCHEMA_MESSAGE`, the echo JSON synthesizer branch and `synth_turn_json`.
+  Delete it as one change once the defaults flip.
+- Route promotion. `REGWATCH_ROUTE_CALL` has three modes, off, shadow and live.
+  Live is implemented (`grounded_qa.py:2477-2498`, PRODUCT scope only) and the
+  route prompt is at v2 (`generate/route.py:104`). The default is off and the
+  promotion decision needs shadow data.
+- Clarify from the catalog with candidates named from retrieval, and the decline
+  copy rewrite that removes `refusal_accuracy` and its gold rows.
+- Converse mode behind `REGWATCH_CONVERSE_MODE`. The flag does not exist in
+  `config/settings.py`; nothing is built.
+
+- Why it matters: the deployed answer policy is currently one unset secret away
+  from a silent rollback.
+- Where: `config/settings.py`, `src/regwatch/generate/prompts.py`,
+  `generate/grounded_qa.py`, `generate/route.py`.
+- Done when: each default flip lands as its own change proved by a green
+  blocking eval, and the v5 path is deleted.
+
+### Bounded corpus-scoped Ask (#163)
+
+The scope compiler produces PRODUCT, CORPUS, CLARIFY or CONVERSE, but a
+CORPUS decision only compiles and audits; it never executes. The separate
+corpus-scope flag the plan called for does not exist in `config/settings.py`.
+Until it does, a question about a guidance family with no named product
+clarifies instead of searching.
+
+- Why it matters: "what do the PSGs say about X" is a question analysts ask and
+  the product cannot answer.
+- Where: `src/regwatch/retrieve/scope.py`, `retrieve/scope_catalog.py`,
+  `generate/grounded_qa.py`.
+- Done when: a corpus turn retrieves only from an application-compiled, bounded,
+  allowlisted set of `version_id`s, with zero leakage outside that set, behind a
+  flag that defaults off.
+
+### Give Ask real tools (#268)
+
+`src/regwatch/generate/llm.py` sends no `tools` and parses no tool calls. Every
+answer comes from one retrieval pass and one synthesis call.
+
+- Why it matters: questions that need a lookup the retriever cannot express
+  (a count, a date comparison, a structured field) currently fail as low-score
+  refusals.
+- Where: `src/regwatch/generate/llm.py`, `generate/grounded_qa.py`.
+- Done when: #268 defines the tool set and at least one tool executes under the
+  same gate and audit rules as retrieval.
+
+### Query preparation latency (#221)
+
+Query embedding sits on the post-submit critical path. A proposed design
+prepares the canonical `retrieval_query` digest and its vector while the user is
+still typing, so a hit removes the embedding call from the measured turn. The
+design write-up is no longer a living document. Nothing was ever built (there
+is no `prepare` seam in `src/` or `go/`), and the idea is recorded on #221.
+
+- Why it matters: it is the largest identified saving on Ask latency that does
+  not depend on a vendor.
+- Done when: #221 is closed, either by building it or by recording why not.
+
+### The deficiency precedent KB cannot be populated
+
+The analyzer is live behind no flag (`POST /deficiency/analyze`,
+`GET /deficiency/runs[/{id}]`). Precedents are always absent because the KB is
+always empty: `add_entries` in `src/regwatch/store/deficiency_kb.py:120` has no
+caller anywhere in `src/`, `tests/` or `scripts/`, and its own docstring calls
+itself the loader seam. `deficiency/precedents.py` short-circuits at
+`kb_count() == 0`.
+
+When something does load it, the dimension gate applies:
+`precedents.py:35` builds `get_embedding_provider("openai")` and raises unless
+the provider width equals `KB_EMBEDDING_DIM`, which is 1024. The OpenAI provider
+already defaults to 1024, so the configuration hazard the old text described is
+gone.
+
+Also open: decide whether PDF parsing inside the API process survives past MVP.
+A durable queue is the documented upgrade path.
+
+- Where: `src/regwatch/deficiency/`, `src/regwatch/store/deficiency_kb.py`.
+- Done when: a loader writes real precedent entries, or the precedent feature is
+  removed.
+
+### Persist and cite beyond the White Paper
+
+Gate 9 adjacent. The persist-and-cite plus freshness pattern (source provenance
+with `last_fetched_at`, multi-source synthesis) is wired for the White Paper
+only. The Ask and Assemble read paths still query live HTTP without persisting
+source rows or freshness.
 
 - Where: `src/regwatch/sources/`, the Q&A and assemble handlers.
-
-### Deficiency analyzer: the precedent KB gap
-
-Shipped and live behind no flag (migration 0019, `POST /deficiency/analyze`,
-`GET /deficiency/runs[/{id}]`, sidebar item 05 for every authenticated user). Two
-gaps, both re-verified 2026-08-11:
-
-- **The KB can never be populated today.** `store/deficiency_kb.py` `add_entries`
-  has zero callers anywhere in `src/`, `tests/` or `scripts/`. Its own docstring
-  calls it the loader seam. `deficiency/precedents.py` therefore short-circuits
-  at `kb_count() == 0`, so precedents are always absent.
-- **The dimension gate.** `precedents.py` builds
-  `get_embedding_provider("qwen3")` and raises unless the provider reports 1024
-  dims, to match `deficiency_kb`'s `vector(1024)`. That provider reads
-  `qwen_embedding_dimension`, which still defaults to 1536 in
-  `config/settings.py`. So whatever process loads or queries the KB needs
-  `QWEN_EMBEDDING_DIMENSION=1024` plus the endpoint credentials. The app already
-  talks to that endpoint for retrieval; do not assume a script or a cron does.
-- Decide whether in-API-process PDF parsing survives past MVP. A durable queue is
-  the documented upgrade path.
-- Where: `src/regwatch/deficiency/`, `src/regwatch/store/deficiency_kb.py`.
+- Done when: every cited non-corpus source is persisted with a fetch timestamp
+  on the path that cites it.
 
 ### Answer-gate follow-ups
 
-- `MATERIALITY_WORDS` in `generate/turn_gate.py` is still a hand-written literal
-  and could be narrowed from logged traffic.
-- `common/citations.py::filter_citations` has no production caller left, only
-  `tests/test_citations.py`. Retire the function and its tests together, or keep
-  it on purpose and write down why.
-- Where: `src/regwatch/generate/turn_gate.py`, `src/regwatch/common/citations.py`.
+- `MATERIALITY_WORDS` in `src/regwatch/generate/turn_gate.py:114` is a
+  hand-written literal and could be narrowed from logged traffic.
+- `filter_citations` in `src/regwatch/common/citations.py:77` has no production
+  caller left, only `tests/test_citations.py`. Retire the function and its tests
+  together, or keep it deliberately and write down why.
 
-### Leftovers worth keeping
+### Secrets policy
 
-Small real items that would otherwise be lost when their source docs moved to
-[`archive/`](archive/):
+Gate 10. `.env` and friends are gitignored, the Actions secret surface is
+documented in [`SECRETS_RUNBOOK.md`](SECRETS_RUNBOOK.md), and production uses
+Fly and Vercel platform secrets. Still needed: an approved secret manager or
+platform policy, and key rotation that is documented and rehearsed.
 
-- **Evidence drawer accessibility.** The shell behind the drawer is not `inert`.
-  The aria-modal attribute and the scrim shipped; nothing in the frontend sets
-  `inert`.
-- **White Paper phase 3.** Batch populate, watch-driven staleness flagging,
-  run-to-run section diff and overlay edit history
-  ([`archive/WHITEPAPER_RUNS_PHASE2_DESIGN.md`](archive/WHITEPAPER_RUNS_PHASE2_DESIGN.md) section 11).
-- **Old Supabase project cleanup.** Two dangling `auth.users` rows and an
-  `auth.sessions` row with `not_after = NULL`, and `REVOKE anon, authenticated ON
-  SCHEMA public` was never applied. Prod moved to Lakebase, so this only matters
-  if that Supabase project still exists. Not checkable from the repo.
+- Done when: secrets come from approved injection and a rotation has been run,
+  not just written down.
+
+### Container resource limits
+
+Gate 11 residual. Neither `compose.yaml` nor `fly.toml` sets any CPU or memory
+limit. The supply-chain gates around them are green and enforced.
+
+- Done when: both files carry explicit limits sized from observed usage.
 
 ### Watchlist management for non-technical users
 
 Watchlist products and watched products are managed through the API and the CLI.
-There is no in-app way for an analyst to add or manage them.
+`regwatch/frontend/lib/api.ts` has no watchlist call, so there is no in-app way
+for an analyst to add or manage them.
 
-- Where: `regwatch/frontend/` (Watch surface), `watch/watchlist.py`.
+- Where: `regwatch/frontend/` (Watch surface),
+  `src/regwatch/watch/watchlist.py`.
+- Done when: an analyst can add, remove and review watched products in the UI.
+
+### Evidence drawer accessibility
+
+The drawer sets `aria-modal="true"`
+(`regwatch/frontend/components/EvidenceDrawer.tsx:84`) and ships a scrim, but
+nothing in the frontend sets `inert` on the shell behind it, so a screen reader
+or a Tab key can still reach the page underneath.
+
+- Done when: the shell behind an open drawer or panel is `inert`.
+
+### White Paper phase 3
+
+Batch populate, watch-driven staleness flagging, run-to-run section diff, and
+overlay edit history. The design document was archived; it is recoverable from
+git history.
+
+- Where: `src/regwatch/whitepaper/`.
 
 ---
 
-## Later
+## Production gates
+
+The numbered checklist that used to live in a separate readiness document. The
+numbers are kept because other documents and past discussions cite them by
+number.
+
+| # | Gate | State |
+|---|---|---|
+| 1 | API auth and authorization | SSO and shared-store rate limiting open |
+| 2 | Production datastore | Live; restore drill and least-privilege role open |
+| 3 | Migration discipline | Done |
+| 4 | Production UI | Deployed; smoke and load open |
+| 5 | LLM provider and data handling | No residency control exists |
+| 6 | Observability | Counters and logs done; metric and trace export open |
+| 7 | Ingest and watch scheduling | Cron live; operational follow-up open |
+| 8 | Eval hardening | Gate scores the production arm; judge and targets open |
+| 9 | Structured-source layer | Built; activation decision open |
+| 10 | Secrets management | Platform secrets in use; policy and rotation open |
+| 11 | Supply chain and security in CI | Done; container resource limits open |
+
+Detail for each open gate is in the sections above. Notes on the gates that are
+done or that need a fact restated in one place:
+
+**Gate 1, what is already in place.** Every product endpoint sits behind
+cookie-session auth. Four operational probes do not: `GET /health`,
+`GET /ready`, `GET /metrics` (bearer-gated when `METRICS_TOKEN` is set) and
+`GET /livez`. Session tokens are opaque and stored as sha256, passwords are
+bcrypt, and users are CLI-provisioned. Chat
+history is per user with ownership checks, so a foreign `session_id` returns
+404. Audit rows carry the caller (INV-6). `POST /query` and `POST /assemble` are
+rate limited per user, and login is capped per email and per IP. One value has
+to match on both sides of the internal seam: `INTERNAL_RAG_TOKEN` gates
+`/internal/query/compute`, which the Go proxy calls when native query
+orchestration is on. If the two do not match, native `POST /query` fails.
+
+**Gate 2, what is already in place.** Production Postgres is Databricks Lakebase
+with pgvector in the same database. It is the only datastore. `DATABASE_URL` is
+required and the application refuses to boot without it; pgvector dimension
+checks fail fast. The branch is capped at 512 MiB, which is what killed the
+complete-universe corpus target. Check headroom with `pg_database_size` before
+any bulk write. The current migration head is whatever `alembic heads` reports;
+what is deployed is a live fact, so read it from the deployment rather than from
+a document.
+
+**Gate 3 is done.** `release_command = "regwatch release"` runs in a one-off
+machine before machines roll. It advances Alembic to head and then runs the same
+serving-readiness guard as a cold boot, so a bad migration or embedding-profile
+drift fails before any long-lived machine is replaced. Rollback and roll-forward
+rehearsal is folded into the restore drill in gate 2. Migrations still have to
+be backward compatible and reversible.
+
+**Gate 4, what is already in place.** The scoped surfaces render inside one App
+Router `(shell)` group with one sidebar and one set of tokens. A URL-scoped
+current product (`?rp=&appl=`) is shareable and survives reload. Streaming is
+done: `POST /query/stream` emits provisional `token` and `draft` frames and then
+one validated terminal `result` frame, which is the only authoritative one, so
+INV-1 holds. That endpoint is served by Python; the Go edge only rate-limits in
+front of it.
+
+**Gate 5, the residency position.** See the decision item above. State it
+plainly to anyone who asks: generation and embeddings go to OpenAI on every
+normal question, and only the database stays in the company tenant.
+
+**Gate 11 is done.** CI gates on `pip-audit`, `npm audit` for frontend
+production dependencies, and Trivy scans of the API, corpus-worker and web
+images. The only residual is the container limits item above.
+
+---
+
+## Deferred
 
 - **Cross-encoder reranker.** Exists as a hook, off by default
-  (`RERANKER_ENABLED`). Turn it on and tune `VECTOR_TOP_K` if retrieval precision
-  needs it. Retrieve and rerank failures on the ask path are audited (INV-6).
-- **Further corpus families.** None are approved. Any future expansion requires
-  an explicit policy and product decision; arbitrary FDA/public sources must not
-  be added opportunistically.
-- **Kubernetes or Helm.** Only if the deploy outgrows Fly and Compose.
-- **Refactor backlog.** The 120-item working list in
-  [`archive/REFACTOR_BACKLOG_2026-07-09.md`](archive/REFACTOR_BACKLOG_2026-07-09.md).
+  (`reranker_enabled`, `config/settings.py:531`). Turn it on and tune
+  `VECTOR_TOP_K` if retrieval precision needs it. Retrieve and rerank failures
+  on the ask path are audited under INV-6.
+- **MMR diversity.** Implemented in `src/regwatch/retrieve/diversity.py` behind
+  `REGWATCH_MMR_DIVERSITY`, default off (`config/settings.py:540`). Flipping it
+  needs an eval A/B first.
+- **ANN retrieval.** `RetrievalMode.ANN_RERANKED` exists but
+  `assert_mode_permitted()` in `src/regwatch/retrieve/mode.py` raises
+  unconditionally, and there is no HNSW index on the live arm because of the
+  512 MiB cap. Retrieval is an exact pgvector scan and will stay one until the
+  storage decision changes.
+- **Graph-assisted retrieval.** The Tier-1 graph tables are written by ingest
+  and the CLI, and nothing reads them at runtime. The proposed consumer and its
+  gates are in
+  [`GRAPH_ASSISTED_RETRIEVAL.md`](GRAPH_ASSISTED_RETRIEVAL.md). It stays
+  default-off until the eval set is bigger and the graph path shows fewer false
+  refusals with no citation, scope, latency or context-budget regression.
+- **Product shape: collapse to two surfaces.** Owner direction from 2026-08-05
+  was to end with Ask and Studio, folding Assemble, Watch, White Paper and
+  Deficiency into Studio. Nothing has moved and nothing should: the four
+  surfaces being folded in have working backends and Studio mostly does not, so
+  folding now would trade shipped functionality for a mockup. The Studio backend
+  work (#216) is the prerequisite. One open question either way: whether
+  Deficiency folds in as a check on an open document or stays a whole-submission
+  upload, since it takes a PDF today rather than a document from a tree.
+- **Further corpus families.** None are approved. Any expansion needs an
+  explicit policy and product decision.
+- **Kubernetes or Helm.** Only if the deployment outgrows Fly and Compose.
+- **Old Supabase project cleanup.** Two dangling `auth.users` rows, an
+  `auth.sessions` row with `not_after = NULL`, and a `REVOKE` on the public
+  schema that was never applied. Production moved to Lakebase, so this only
+  matters if that Supabase project still exists. Unverified: it cannot be
+  checked from this repository.
+
+---
+
+## Recently closed
+
+Kept short, and only for items this file used to list as open. History lives in
+[`DECISIONS.md`](DECISIONS.md).
+
+- **The blocking eval now scores what production serves.** Closed 2026-08-25.
+  `.github/workflows/ci.yml:84-92` calls the `openai-eval` workflow with
+  `prose: true`, `selective: true` and `assert_prod_mode: true`, asserted
+  against `config/prod_mode.json`, so a drift between the checked-in target and
+  the scored arm fails the run. The old risk was that the gate scored the
+  retired v5 arm while production served v7.
+- **The Qwen watch-secret blocker.** Obsolete. `watch-daily.yml` needs three
+  secrets and none of them names a Qwen endpoint.
+- **The residency guard item.** Withdrawn, not completed. It described code that
+  does not exist. Replaced by the decision item above.
+- **The complete-universe corpus target.** Dead under the 512 MiB cap since
+  2026-08-18. Replaced by the curated-manifest item above.
+- **Rust in the polyglot target.** Step 8 cancelled 2026-08-19. PDF parsing
+  stays in Python permanently.
 
 ---
 
 ## Suggested order
 
-1. Deploy migration 0023 and complete the authoritative-corpus canary, full
-   deferred sync, embedding backfill, eval, activation, and rollback gates.
-2. Provision the six Watch profile secrets and verify one manual dispatch. The
-   code now fails closed until that owner action is complete.
-3. Gateway and SSO, plus distributed rate limiting. That is the exposure
-   boundary.
-4. Restore drill and least-privilege credentials. Fold least-privilege into
+1. Review the curated corpus manifest and decide the serving flip (#257). It is
+   the largest built-but-unserved asset in the tree.
+2. Corporate SSO and a shared-store rate limiter. That is the exposure boundary.
+3. Restore drill and least-privilege credentials. Fold least privilege into
    polyglot step 7 where you can.
-5. Make the blocking eval run the v7 chain, then revalidate the 0.30 threshold in
-   the Qwen3 space.
-5. Observability export and the post-deploy smoke job.
-6. Secrets policy and container resource limits.
-7. UI smoke and load, plus watchlist UX. The polyglot deletion PR, R3 and steps 6
-   to 9 run in parallel as capacity allows.
+4. Post-deploy smoke, then observability export.
+5. Calibrate the refusal floor and the confidence band (#218), then revisit the
+   eval targets.
+6. Flip the answer-policy defaults and delete the v5 path.
+7. Secrets policy and container limits.
+8. UI smoke and load, watchlist UX, and the Studio backend (#216). The Go
+   strangler work (#243) runs in parallel as capacity allows.

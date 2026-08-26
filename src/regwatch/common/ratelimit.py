@@ -2,7 +2,7 @@
 
 Pilot scope: one API process, so a threading.Lock plus a deque of monotonic
 timestamps per key is sufficient. Distributed rate limiting belongs to the IT
-gateway in production (docs/PROD_READINESS.md #1).
+gateway in production (docs/ROADMAP.md, production gate 1).
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from collections import deque
 # min_machines_running=2 each machine keeps its own window and the EFFECTIVE
 # ceiling is ~2x the configured limit. A shared-store (Redis/Postgres) limiter
 # is the fix for an exact global cap, but that is a separate, parked item
-# (docs/PROD_READINESS.md #1) - do NOT build it here. The LOGIN limiter moved
+# (docs/ROADMAP.md, production gate 1) - do NOT build it here. The LOGIN limiter moved
 # to the Go proxy with the step-4 auth cutover (go/internal/api/ratelimit.go
 # ports this class); only query_limiter remains Python-side.
 

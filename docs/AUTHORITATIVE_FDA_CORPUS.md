@@ -1,6 +1,6 @@
 # Authoritative FDA corpus
 
-Last updated: 2026-08-17
+Last updated: 2026-08-26
 
 This is the source-of-truth contract and runbook for RegWatch's replacement FDA
 corpus. It admits exactly five source families:
@@ -19,12 +19,19 @@ them.
 ## Current state
 
 The document-at-a-time worker, durable raw artifacts and manifests, sandboxed
-OCR, separate chunk/embedding lifecycle, and Dagster orchestration are deployed.
-The corrected `NDA020503` canary passed 21 / 21 and produced 499 chunks. The
-full production backfill is now owned by a supervised operator session and is
-running against one frozen complete-universe manifest. Retrieval remains on
-`legacy`; neither an accumulating authoritative namespace nor this release
-authorizes cutover.
+OCR, separate chunk/embedding lifecycle, and Dagster orchestration are
+deployed. The corrected `NDA020503` canary passed 21 / 21 and produced 499
+chunks. Retrieval remains on `legacy`; neither an accumulating authoritative
+namespace nor this release authorizes cutover.
+
+A supervised operator session ran the full production backfill against the
+frozen complete-universe manifest below. That target turned out to be
+unreachable; see "Scoped activation, 2026-08-18" for what changed and what
+the path to cutover looks like now. For the corpus's live state, run
+`regwatch authoritative-corpus-status`. It reads the database directly and
+reports resolved, indexed, and terminal counts, per-family coverage, and
+whether activation is ready. This document does not restate a point-in-time
+run of that command; the numbers are stale the moment they are copied here.
 
 Migration `0025_fda_terminal_resolution` adds the missing acceptance ledger for
 the inevitable tail. A manifest record is not silently skipped: it must resolve
@@ -85,6 +92,28 @@ Discovery is deterministic for the same official snapshots: artifacts are
 sorted by canonical ID, duplicate canonical IDs are rejected, inline snapshot
 records are content-hashed, and the complete manifest is fingerprinted.
 
+## Scoped activation, 2026-08-18
+
+The complete-universe target above is no longer the only path to cutover.
+`config/settings.py:508-516` records that the full 140,438 source record
+universe became permanently unreachable under the Lakebase free tier's 512
+MiB cap.
+
+`REGWATCH_SERVING_MANIFEST_SHA` names the alternative. Set, activation counts
+against that exact manifest sha256 instead of requiring a complete-universe
+run: `src/regwatch/corpus/status.py` looks for a successful sync of the named
+manifest in place of the frozen complete-universe one, and every downstream
+acceptance check (family coverage, embedding parity, error count) evaluates
+against that manifest's scope instead. Unset, the variable keeps the original
+complete-universe-only behavior, which after 2026-08-18 means the corpus can
+never activate.
+
+No curated manifest is configured today; `REGWATCH_SERVING_MANIFEST_SHA` is
+unset in `.env.example` and unset in `fly.toml`. Deciding what a curated
+manifest should contain, then building and accepting one, is open work. See
+[`ROADMAP.md`](ROADMAP.md), "Corpus: review the curated inventory and decide
+the serving flip".
+
 ## Count semantics
 
 RegWatch reports these counters independently:
@@ -113,10 +142,10 @@ Embeddings (<profile>):          <embedded_chunks> / <chunks>
 Activation ready:                true | false
 ```
 
-Until full acceptance passes, the correct statement is **140,438 frozen source
-records; final resolved, chunk, and embedding totals pending**. Moving backfill
-counters and the completed canary may be reported separately but must not be
-presented as full-corpus coverage.
+Until full acceptance passes, the correct statement is:
+**140,438 frozen source records; final resolved, chunk, and embedding totals
+are pending.** Moving backfill counters and the completed canary may be
+reported separately but must not be presented as full-corpus coverage.
 
 ## Source boundary
 
@@ -250,12 +279,18 @@ a supervised, restartable machine. Run the same image with
 `dagster-webserver -w /app/dagster/workspace.yaml --host 0.0.0.0` only on a
 private operator network. Required worker configuration includes:
 
-- the application `DATABASE_URL` and the deployed active Qwen profile settings;
-- `QWEN_EMBEDDING_BATCH_SIZE` at or below 24. This setting, not the Dagster
-  `batch_size` op config (a database page size), controls how many inputs go
-  into one embedding HTTP request, and the endpoint rejects larger input
-  arrays with 429 -- the retry loop then resends the same oversized payload
-  until the shard fails;
+- the application `DATABASE_URL` and the embedding settings the deployed
+  serving profile was built with. See
+  [`CONFIG_REFERENCE.md`](CONFIG_REFERENCE.md) for the current names
+  (`INGEST_EMBEDDING_PROVIDER`, `RETRIEVAL_EMBEDDING_PROFILE`, and the
+  `OPENAI_EMBEDDING_*` group);
+- a per-request input batch size the serving endpoint accepts. This is the
+  provider batch size, not the Dagster `batch_size` op config, which is a
+  database page size. Get it wrong and the endpoint answers 429, and the retry
+  loop resends the same oversized payload until the shard fails. The retired
+  Databricks endpoint capped it near 24 inputs; the OpenAI endpoint takes up to
+  2048 (`src/regwatch/process/embedder.py`), so the binding limit today is the
+  account request and token rate, not the batch;
 - a separate `DAGSTER_POSTGRES_URL` for run/event/schedule state;
 - `FDA_ARTIFACT_STORE=s3`, its bucket/prefix, encryption choice, and preferably
   workload-identity credentials; and
@@ -293,8 +328,8 @@ errors, 499 chunks, and complete active-profile embeddings. This remains a
 strict indexed-document gate: a terminal outcome never counts toward 21 / 21.
 Do not rerun it or any other production Dagster job from a second operator
 session while the full backfill is owned elsewhere. Check the application-owned
-counters from the owning session—even while the building profile is
-incomplete—with:
+counters from the owning session, even while the building profile is
+incomplete, with:
 
 ```bash
 uv run regwatch authoritative-corpus-status
@@ -388,8 +423,11 @@ than a corpus-wide reconciliation at acceptance time.
 ### 4. Acceptance and cutover
 
 After the owning backfill session finishes and migration 0025 is deployed,
-launch `authoritative_fda_acceptance_job` with the same manifest hash and active
-profile. Acceptance re-reads all 512 shards from Lakebase. For every manifest
+launch `authoritative_fda_acceptance_job` with the same manifest hash and
+active profile. The manifest hash can name either the frozen complete-universe
+manifest or a curated one set as `REGWATCH_SERVING_MANIFEST_SHA`; see "Scoped
+activation, 2026-08-18" above. Acceptance re-reads the shards in scope from
+Lakebase. For every manifest
 record it requires exactly one current version that is either indexed or has a
 valid terminal ledger entry. It revalidates terminal evidence against the exact
 manifest, requires vector parity for every indexed chunk, all five families,
@@ -429,57 +467,48 @@ After rollback, investigate the recorded run and coverage counters, repair the
 underlying document/profile issue, rerun the idempotent phase, and re-evaluate
 the gate. Never force the flag past the gate.
 
-## Google engineering alignment
+## Observability
 
-There is no single universal “Google coding standard” that certifies this
-system. The relevant public baseline is the
-[Google Cloud Well-Architected Framework](https://cloud.google.com/architecture/framework)
-plus Google SRE's guidance on
-[monitoring distributed systems](https://sre.google/sre-book/monitoring-distributed-systems/).
-This implementation maps those principles to concrete controls:
+The corpus records four kinds of operational signal: latency (per-document
+`duration_ms`, run start/completion times), traffic (discovered/expected
+documents, workers, chunks written, embedded batches), errors (unresolved
+document count, typed bounded error samples, failed run state), and
+saturation (queued/running shard counts, pool utilization, pending chunks).
 
-| Area | Implemented control | Release evidence |
-| --- | --- | --- |
-| Operational excellence | exact manifests, partitioned backfills, explicit lifecycle/run ledgers, blocking checks, documented runbook and rollback | manifest hashes, shard/run IDs, asset checks, status output |
-| Security, privacy, compliance | exact FDA source allowlist, manual redirect validation, no retired API key/path, sandboxed OCR, encrypted raw storage, RLS | policy/runtime/OCR tests, image scan, migration review |
-| Reliability | immutable acquired versions, one current lifecycle row, atomic chunk publication, independent vector checkpoints, bounded retries, evidence-backed terminal resolution, exact-manifest reconciliation, fail-closed activation | cleanup/idempotency/terminal-recovery/shard/acceptance tests |
-| Performance | four run-granularity pools, one-document shard workers, bounded bytes/pages/OCR, per-host pacing, batched vectors | Dagster config test, duration and saturation logs |
-| Cost optimization | discovery-only plan, deferred embeddings by default, unchanged-version skip, batch and run limits | zero model calls during plan; pending counters |
-| Sustainability | avoid redundant downloads, parses, and embeddings; reuse content-addressed artifacts and immutable versions | content and processing fingerprints |
-
-For SRE-style observability, the corpus exposes or records the useful batch
-equivalents of the four golden signals:
-
-- latency: per-document `duration_ms` and run start/completion times;
-- traffic: discovered/expected documents, workers, chunks written, embedded
-  batches;
-- errors: unresolved document count, typed bounded error samples, validated
-  terminal-outcome count, failed run state;
-- saturation: queued/running shard counts, pool utilization, pending chunks, and
-  embedding coverage.
-
-Alerts should be based on user-visible objectives, not raw noise. Recommended
-release objectives are: zero policy violations; zero unresolved document errors
-in a complete run; indexed plus evidence-backed terminal parity with the exact
-manifest; 100% selected-profile coverage for indexed chunks; no missing family;
-and activation readiness true. Page on a failed complete run or serving startup
-rejection; ticket on a new terminal outcome, a growing pending-embedding
-backlog, or abnormal latency trend.
+Recommended release objectives: zero policy violations, zero unresolved
+document errors in a complete run, indexed plus evidence-backed terminal
+parity with the exact manifest, full selected-profile coverage for indexed
+chunks, no missing family, and activation readiness true. Page on a failed
+complete run or a serving startup rejection. Ticket on a new terminal
+outcome, a growing pending-embedding backlog, or an abnormal latency trend.
 
 ## Acceptance gate
 
-The corpus is complete only when all of the following are evidenced against the
-target environment:
+Two acceptance paths exist. Both share steps 1-3 and 7-10 below; they differ
+only in what steps 4-6 measure against.
+
+**Complete-universe path: unreachable.** Steps 4-6 measure against the full
+140,438-record manifest, all 512 shards. This can never finish under the
+Lakebase free tier's 512 MiB cap; see "Scoped activation, 2026-08-18" above.
+Do not pursue this path.
+
+**Scoped, curated-manifest path: the realistic one.** With
+`REGWATCH_SERVING_MANIFEST_SHA` set, steps 4-6 measure against that named
+manifest's shards instead of the full universe. No manifest is named today;
+building and naming one is open work, tracked in
+[`ROADMAP.md`](ROADMAP.md).
 
 1. migration upgrade and downgrade/re-upgrade rehearsal pass;
 2. read-only plan reproduces the reviewed manifest or an explained newer FDA
    snapshot;
 3. the application canary reaches exactly 21 / 21 with zero document errors;
-4. all 512 chunk partitions and blocking checks pass against one exact manifest;
-5. indexed plus evidence-backed terminal documents equal the full manifest
-   denominator, with every terminal row revalidated against the exact manifest;
-6. all 512 embedding partitions reach `embedded_chunks == chunks` on the serving
-   profile;
+4. every chunk partition in scope, and its blocking checks, pass against one
+   exact manifest;
+5. indexed plus evidence-backed terminal documents equal the in-scope
+   manifest's denominator, with every terminal row revalidated against the
+   exact manifest;
+6. every embedding partition in scope reaches `embedded_chunks == chunks` on
+   the serving profile;
 7. authoritative status reports no source-policy violations and
    `activation_ready=true`;
 8. retrieval/citation evaluation passes on the new namespace;
@@ -487,8 +516,8 @@ target environment:
 10. rollback to `legacy` is rehearsed without data loss.
 
 Discovery alone satisfies none of steps 3 through 10. The honest current
-handoff is: **140,438 authoritative source records are frozen under manifest
-`fae78c8e...75c0c84`; the corrected canary passed 21 / 21 with 499 chunks; the
-full production backfill is operator-owned and remains on the legacy serving
-namespace; deploy migration 0025 before resolving its terminal tail and running
-acceptance.**
+handoff is: 140,438 frozen source records are recorded under manifest
+`fae78c8e...75c0c84`; the corrected canary passed 21 / 21 with 499 chunks;
+the complete-universe path above is closed; no curated manifest is named yet
+via `REGWATCH_SERVING_MANIFEST_SHA`; the corpus remains on the legacy serving
+namespace.

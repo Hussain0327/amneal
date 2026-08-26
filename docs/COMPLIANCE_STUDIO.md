@@ -5,9 +5,13 @@
 > material. This one reads *our* drafts, and that difference shapes everything
 > below.
 >
-> Status: **the working documents are UI and domain model only.** The document
-> service, the compliance pipeline and the assistant are fixtures behind typed
-> seams, and nothing recorded here survives a page refresh. One seam is real:
+> Status: **the working documents are UI and domain model only.** Their document
+> service and compliance pipeline are fixtures behind typed seams, and nothing
+> recorded against a working draft survives a page refresh. The assistant is
+> split: it answers from the real cited Q&A backend when a reference PSG is
+> open, and returns canned replies for a working draft.
+> [`PRODUCTION_TRUTH.md`](PRODUCTION_TRUTH.md) section 8 owns that split. One
+> further seam is real:
 > the left rail's **reference library** lists the FDA PSG corpus from the
 > database (`GET /psg/documents`), opens each PSG as a document on the same
 > canvas the working files use (`GET /psg/documents/{id}/content`), offers it
@@ -55,7 +59,7 @@ Sequencing lives in [`ROADMAP.md`](ROADMAP.md).
 | Suggested fix, apply, restore | Built (3 of 12 fixture findings carry one) |
 | Disposition record: fixed / fixed elsewhere / not applicable / disputed | Built |
 | Compliance spine (the closure gauge) | Built |
-| Cited assistant panel | Built, canned replies |
+| Cited assistant panel | Built. Real `POST /query` answers over an open reference PSG, canned replies over a working draft |
 | Upload, new folder | Disabled, needs a document service |
 | Persistence of any kind | **Not built.** Refresh destroys everything. |
 
@@ -242,7 +246,7 @@ An endpoint replacing `CHECK_RESULTS` must return findings that:
 | `test/studioMarks.test.ts` | 109 tests on the pure layer |
 | `test/studioLibrary.test.ts` | 13 tests on the library grouping and filter layer |
 | `test/studioReference.test.ts` | 6 tests on the reference-document mapping |
-| `test/StudioPage.test.tsx` | 42 page tests, including the whole loop and the library |
+| `test/StudioPage.test.tsx` | 48 page tests, including the whole loop and the library |
 
 Keyboard: `F8` and `Shift+F8` move between open findings, behind visible
 Previous/Next buttons. A letter or `Alt+Arrow` would collide with typing in the

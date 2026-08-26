@@ -1,8 +1,8 @@
 """Turn recorded route-shadow rows into the Checkpoint 3 evidence bundle.
 
-Checkpoint 3 (docs/SLM_LAYER_IMPLEMENTATION_PLAN_2026-08-07.md:197-199) asks for
-a joint mode/scope confusion matrix, added latency p95, QPS headroom, route
-failure rate, and zero unsafe corpus authorizations in reviewed shadow traces.
+Checkpoint 3 of the route-promotion plan (docs/ROADMAP.md) asks for a joint
+mode/scope confusion matrix, added latency p95, QPS headroom, route failure
+rate, and zero unsafe corpus authorizations in reviewed shadow traces.
 The shadow has been writing every input that answer needs since PR11b, and
 nothing has ever read it back out; the promotion decision was blocked on
 arithmetic nobody had written.

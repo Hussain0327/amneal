@@ -96,10 +96,15 @@ What holds it together:
 2. **Retrieve scoped and current.** Retrieval is filtered to that product's
    ingredient and to the *current* PSG version, so a superseded passage cannot be
    cited as if it were live.
-3. **Keep weak evidence out.** If the best match scores below
-   `REFUSAL_SCORE_THRESHOLD` (default 0.30), those passages go to neither the
-   synthesizer nor the guidance planner. The planner may pick a safe, allowlisted
-   next step, but it cannot author factual answer text.
+3. **Keep weak evidence out.** If the best match scores below the effective
+   refusal floor, those passages go to neither the synthesizer nor the
+   guidance planner. The planner may pick a safe, allowlisted next step, but
+   it cannot author factual answer text. The global default is
+   `REFUSAL_SCORE_THRESHOLD` (0.30), but the floor that actually governs a
+   production embedding profile can be overridden per profile
+   (`REFUSAL_SCORE_THRESHOLD_BY_PROFILE`) and that override is a Fly secret,
+   not a value checked into this repo. Read the live floor with `GET /settings`
+   or `regwatch status`, never by reading this file.
 4. **One bounded AI role per turn.** A grounded question uses the synthesizer. A
    pre-synthesis product, form, scope, capability, or evidence-gap outcome uses
    the router-role guidance planner, which can only select an approved next step
@@ -273,18 +278,24 @@ These are enforced in code with tests. See
 
 ## API
 
-Every product/data endpoint requires a login. `GET /health`, `GET /ready`, and
-`GET /metrics` are operational endpoints outside the auth router; `/metrics` is
-open by default and bearer-gated when `METRICS_TOKEN` is set. Full
-request/response shapes are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Every product/data endpoint requires a login. `GET /health`, `GET /ready`,
+`GET /metrics`, and `GET /livez` are operational endpoints outside the auth
+router; `/metrics` is open by default and bearer-gated when `METRICS_TOKEN` is
+set. Full request/response shapes are in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Since the step-4 cutover the **Go proxy serves `/auth/*`, `/sessions`,
-`/feedback`, `/settings`, and `/products` natively** at the public edge, and
-since step 5 it also **orchestrates `POST /query` natively**: it persists the
-audit row and calls Python's internal, token-gated `POST /internal/query/compute`
-for the RAG work. The `/internal/` subtree is never exposed publicly. The
-remaining structured-source endpoints relay to Python. The public wire contract
-is identical either way, and the [`tests_contract/`](tests_contract/) suite
+`/feedback`, `/settings`, and `/products` natively** at the public edge. Since
+step 5 it can also **orchestrate `POST /query` natively**, but only when
+`GO_NATIVE_QUERY` is true: it persists the audit row and calls Python's
+internal, token-gated `POST /internal/query/compute` for the RAG work. That
+flag's code default is `false` (`go/internal/api/config.go`); a fresh local
+checkout relays `POST /query` to Python and runs it there end to end. Fly's
+committed `fly.toml` pins the flag `true`, so a Fly deploy runs the native
+path, but this repo does not decide which one you get locally. The
+`/internal/` subtree is never exposed publicly. The remaining
+structured-source endpoints relay to Python. The public wire contract is
+identical either way, and the [`tests_contract/`](tests_contract/) suite
 proves it across the boundary.
 
 ```
@@ -316,6 +327,7 @@ DELETE /sessions/{id}     delete a session and its messages
 
 GET    /health            liveness + component diagnostics; 503 when db/vector_store is down
 GET    /ready             readiness: db + vector store + LLM constructability
+GET    /livez             process liveness only, no dependency checks; the fly.toml http check
 GET    /metrics           Prometheus counters; bearer-gated when METRICS_TOKEN is set
 GET    /settings          non-secret config
 ```
@@ -341,7 +353,7 @@ session owned by someone else 404s. `POST /query` and `POST /assemble` share a
 per-user rate limit (`RATE_LIMIT_PER_MINUTE`, default 30). Set
 `AUTH_COOKIE_SECURE=true` behind TLS. CORS is allow-listed via
 `CORS_ALLOW_ORIGINS_CSV`. TLS termination and OIDC/SSO are environment work; see
-[`docs/PROD_READINESS.md`](docs/PROD_READINESS.md).
+the open items in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Watchlist sources
 
@@ -361,7 +373,7 @@ Two layers grade the answer pipeline:
 - **`uv run python -m regwatch.eval.run_eval`** scores a curated gold set
   ([`src/regwatch/eval/gold_set.jsonl`](src/regwatch/eval/gold_set.jsonl)) of
   real, must-refuse, and must-clarify questions against the live corpus. The
-  blocking floors are `recall_at_k >= 0.80` and `citation_precision >= 0.74`.
+  blocking floors are `recall_at_k >= 0.80` and `citation_precision >= 0.70`.
   These are regression floors, not claims that retrieval quality is complete.
   `refusal_accuracy` is still measured and printed but stopped blocking on
   2026-08-06, because Ask is deliberately moving away from refusing. The older
@@ -412,22 +424,55 @@ tests/                    smoke, invariants, eval gate, per-module
 tests_contract/           cross-service contract suite: real Go proxy + uvicorn + Postgres
 ```
 
+Do not add a second Python package root under `regwatch/backend/`. The
+canonical backend is `src/regwatch/`.
+
 ## Docs
 
 Start with the Map of Content, [`docs/MAP.md`](docs/MAP.md). Highest-value entry
 points:
 
-- [Architecture](docs/ARCHITECTURE.md): canonical system design.
+- [Production truth](docs/PRODUCTION_TRUTH.md): what actually serves a request
+  today, which flags are on, which provider is live. The fastest way to answer
+  "what is running right now."
+- [Architecture](docs/ARCHITECTURE.md): canonical, stable system design:
+  boundaries, pipeline stages, the gate, the data model, INV-1 through INV-9.
+- [Config reference](docs/CONFIG_REFERENCE.md): every environment variable,
+  flag, and secret this app reads.
+- [Built but dormant](docs/BUILT_BUT_DORMANT.md): code that exists and is
+  tested but does not run in production, and why.
 - [Authoritative FDA corpus](docs/AUTHORITATIVE_FDA_CORPUS.md): exact source
   boundary, 140,438-record snapshot, counts, checksums, runbook, activation, and
   rollback.
 - [Non-technical guide](docs/NON_TECH_GUIDE.md): plain English for business and
   regulatory readers.
-- [Production readiness](docs/PROD_READINESS.md): the POC-to-production path.
+- [Roadmap](docs/ROADMAP.md): every open item and every production gate.
 - [Decisions](docs/DECISIONS.md): append-only log of what was chosen and why.
 - [CI/CD pipeline](docs/CI_CD.md): the CI gate (Python lint/type/test, audit,
   docker build, frontend, Go proxy, schema-drift, and the cross-service contract
   lane) plus a pre-push checklist. Read it before pushing so you do not fail CI.
+
+## Your first week
+
+1. Run it locally: follow Quick start above through the API and UI steps.
+2. Run the gate: `TEST_DATABASE_URL=... uv run pytest -q` (see Quick start for
+   the exact command), then `uv run python -m regwatch.eval.run_eval`.
+3. Read these four documents, in this order:
+   1. [`docs/PRODUCTION_TRUTH.md`](docs/PRODUCTION_TRUTH.md), what is live
+      today.
+   2. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), how the system is built.
+   3. [`docs/CONFIG_REFERENCE.md`](docs/CONFIG_REFERENCE.md), every flag and
+      secret you will touch.
+   4. [`docs/ROADMAP.md`](docs/ROADMAP.md), what is open and what gates
+      production.
+4. What is broken today, in short: there is no runtime D1 data-residency
+   guard in code even though generation and embeddings both call OpenAI, an
+   external vendor, on every normal question; the Lakebase Postgres branch is
+   capped at 512 MiB, so the full 140,438-record corpus target cannot fit and
+   retrieval runs an exact scan with no HNSW index; and `GO_NATIVE_QUERY`
+   defaults to `false` in code, so a local checkout behaves differently from
+   Fly unless you set it. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the
+   full, current list.
 
 ## Docker
 

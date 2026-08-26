@@ -1,4 +1,4 @@
-"""MMR diversity in stage 2 (docs/DSA.md section 33).
+"""MMR diversity in stage 2 (regwatch.retrieve.diversity).
 
 Pure selection tests: no DB, no LLM, no embeddings, no network. The unit under
 test is `regwatch.retrieve.diversity.mmr_select` plus the one seam that calls

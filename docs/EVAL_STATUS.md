@@ -1,6 +1,6 @@
 # Evaluation status
 
-**Status:** current operational truth. **Last updated:** 2026-08-11
+**Status:** current operational truth. **Last updated:** 2026-08-26
 
 Three different things get called "the eval". They are not the same and this
 page keeps them apart:
@@ -29,30 +29,49 @@ page keeps them apart:
 
 ### Which arm CI actually runs
 
-`.github/workflows/databricks-eval.yml` is the single live eval lane, and every
-live run serializes through one non-canceling concurrency group.
+`.github/workflows/openai-eval.yml` is the single live eval lane. Its
+concurrency group is `openai-eval-${event_name}-${ref}` with
+`cancel-in-progress: false`, so a run serializes only against other runs on the
+same event and ref. Two different PRs get two different groups and run at the
+same time. The older single shared group was dropped on 2026-08-25 because
+GitHub cancels a pending job when another queues in the same group, which
+turned PR evals red whenever a dispatch run held it (`openai-eval.yml:50-58`,
+`ci.yml:21-33`). It hardcodes the provider: `LLM_PROVIDER=openai`,
+`INGEST_EMBEDDING_PROVIDER=openai`, model `gpt-5.6-terra`, embeddings
+`text-embedding-3-large` at 1024 dimensions, set directly in the job's `env`
+block (`openai-eval.yml:67-78`). There is no runtime arm selection and no
+Databricks path in this workflow.
 
 | Entry point | Flags | Blocking? |
 |---|---|---|
-| called from `ci.yml` on every PR and main | `prose: false`, `selective: false` | yes |
-| `workflow_dispatch` | `prose: true` by default, `selective` optional | no, uploads an artifact |
+| called from `ci.yml` as the required check `openai-eval / eval` | `prose: true`, `selective: true`, `assert_prod_mode: true` | yes |
+| `workflow_dispatch` | `prose` and `selective` are free inputs, default `prose: true` | no, uploads an artifact |
 
-**So the blocking gate measures the v5 claims-JSON arm, while production serves
-v7.** The v6 and v7 arms only run when someone dispatches them by hand; their
-artifacts upload as `dark-eval-scorecard` and `dark-eval-scorecard-v7`. That gap
-is real and worth closing.
+**Since 2026-08-25 the blocking gate scores the same v7 arm production serves.**
+`ci.yml` passes `assert_prod_mode: true`, which runs `run_eval
+--assert-prod-mode`. That reads `config/prod_mode.json`
+(`src/regwatch/eval/prod_mode.py`), compares it against this run's effective
+`REGWATCH_PROSE_SYNTHESIS` and `REGWATCH_SELECTIVE_CITATION` settings, and
+exits 4 (`EXIT_WRONG_ARM`) before scoring anything if they disagree
+(`run_eval.py:165-169,245-260`). Before this date the blocking call ran with
+`prose: false, selective: false` while production served v7; a green build
+could not tell a reader which arm passed. That gap is now closed.
 
-The arm is picked at runtime: Databricks when the Qwen3 embedding secrets and
-`DATABRICKS_SERVING_RUNTIME_VERSION` are present, and a loud failure when they
-are not (the legacy OpenAI arm was removed with the OpenAI provider on
-2026-08-17). The Databricks arm is the one that matters, because production
-embeds queries with Databricks-hosted Qwen3 and a gate running on any other
-space never measured the geometry prod serves.
+`workflow_dispatch` runs the same workflow by hand for checking a policy
+change before it merges. Its artifact uploads as `dark-eval-scorecard` (prose
+without selective) or `dark-eval-scorecard-v7` (prose plus selective).
 
 ## First measured baseline
 
+This baseline and the 2026-08-06 run below both predate the 2026-08-20 move
+to OpenAI and the 2026-08-25 prod-mode blocking arm. They ran on Databricks
+`workspace.default.regwatch`, the profile id production served at the time,
+not the arm CI blocks on today. Read them for the scoring-methodology history
+below, not as a statement about the current gate.
+
 `eval_run` id=1, 2026-08-05, commit `89320164`. Arm
-`ep_2e7368b354d911ea3a013c3125e276c2` (the profile id production also serves),
+`ep_2e7368b354d911ea3a013c3125e276c2` (the profile id production served at the
+time),
 corpus 66 chunks / 8 documents, digest `2b58b032e512`, `vector_top_k=50`,
 `rerank_top_k=8`, reranker off, LLM `workspace.default.regwatch`.
 
@@ -117,8 +136,22 @@ That is one run, not a trend.
 
 ## Gates are a ratchet, targets are not acceptance criteria
 
-Blocking floors, in `run_eval.THRESHOLDS`: `recall_at_k` 0.80,
-`citation_precision` 0.74. Nothing else blocks.
+`--check-thresholds` has four blocking exits. Read them as a list, because
+three of them are not quality floors and a green quality score does not mean a
+green gate:
+
+| Exit | Gate | Where |
+|---|---|---|
+| 2 | `THRESHOLDS`: `recall_at_k` 0.80, `citation_precision` 0.70 | `run_eval.py:106-108,672` |
+| 3 | More than `MAX_UNMEASURED_FRACTION` (10%) of turns failed in transport, before any scoring | `run_eval.py:163,658-667` |
+| 4 | `--assert-prod-mode` found settings that differ from `config/prod_mode.json` | `run_eval.py:169,259,271` |
+| 5 | End-to-end p95 above `LATENCY_P95_CEILING_MS` (180,000 ms, override with `REGWATCH_EVAL_LATENCY_P95_CEILING_MS`) | `run_eval.py:112,138,178,686` |
+
+The citation-precision floor was lowered from 0.74 on 2026-08-11, by owner
+decision, because the v7
+arm's measured citation precision (0.7341 on the 62-row gold set) is lower
+than v5's (0.7694) from four rows that fail to produce a citable answer at
+all, not from citing worse on the rows that do answer. `run_eval.py:80-104`.
 
 The 0.90 / 0.95 / 0.95 numbers in `run_eval.TARGETS` are **targets**. They were
 written against hash-based echo embeddings with `REFUSAL_SCORE_THRESHOLD=0.0`
@@ -130,6 +163,20 @@ it, because the eval drives a live LLM and a floor set exactly at the
 measurement would flake red on noise. The gate means "no worse than the day it
 was first measured". Raise the floors as quality improves; never lower one
 without recording why here.
+
+### `config/prod_mode.json`: refusing to score the wrong arm
+
+`config/prod_mode.json` is a checked-in manifest of the answer-policy flags
+production runs today: `prose_synthesis_enabled`, `selective_citation_enabled`.
+`src/regwatch/eval/prod_mode.py` reads it and compares it against this run's
+effective settings. `run_eval --assert-prod-mode` (the flag `ci.yml` passes as
+`assert_prod_mode: true`) exits 4 before scoring anything if they disagree.
+Docs and CI cite this file instead of restating the flags, so the two cannot
+drift apart the way the old `prose: false, selective: false` blocking call
+did. The manifest itself is a repository target; it does not read the live
+deployment, so a mismatch between `prod_mode.json` and what Fly actually
+serves is still possible and would not be caught here. Check
+`docs/PRODUCTION_TRUTH.md` for the live values.
 
 Where each number lives: the scorecard table prints `recall_at_k`, `mrr`,
 `citation_precision`, `faithfulness`, `sentence_citation_rate`, `fact_recall`
@@ -238,9 +285,11 @@ its metrics stand.
 The underlying problem is not fixed here. The shared Databricks endpoint is
 pay-per-token with a workspace QPS limit, and two live evals at once exceed it.
 The durable fixes are a provisioned-throughput endpoint (a cost decision) or
-serializing the live eval across PRs (a CI latency decision). The workflow now
-serializes every live eval through one concurrency group, which removes the
-self-collision; the gate reports the condition honestly either way.
+serializing the live eval across PRs (a CI latency decision). Neither has
+shipped. The concurrency group is per event and ref, so two PRs still run their
+evals concurrently and can still collide on shared provider rate limits. Only
+reruns on the same ref serialize. The gate reports the condition honestly
+either way.
 
 ## `faithfulness` and `sentence_citation_rate`
 
@@ -297,13 +346,27 @@ instruction lived only in system messages. Fixed at the provider seam
 (`_ensure_user_json_token`) so every structured caller is covered, with the
 prompt texts and their audited hashes left byte-identical.
 
-## The 0.30 refusal threshold is still unvalidated
+## The refusal threshold: global default unvalidated, live profile calibrated
 
 `REFUSAL_SCORE_THRESHOLD` defaults to 0.30. Passages scoring below it are
-withheld from the synthesizer before it runs. Nothing has calibrated that
-number.
+withheld from the synthesizer before it runs.
+`Settings.effective_refusal_threshold()` resolves a per-profile override from
+`REFUSAL_SCORE_THRESHOLD_BY_PROFILE` first, falling back to that global 0.30
+default only for a profile with no entry. `config/settings.py:120-147`.
 
-The one live sweep artifact came from the old OpenAI 1536-dim path:
+**The global 0.30 default is still unvalidated** wherever it applies. Nothing
+below shows it was calibrated for the 1536-dim space it was originally set
+against.
+
+**The live embedding profile has a calibrated per-profile floor, 0.70,** set
+2026-08-20: 40 gold questions scored `>= 0.8224`, 8 off-corpus controls scored
+`<= 0.5787`. See `docs/DECISIONS.md`, "The confidence band is cut relative to
+the live floor" (2026-08-21). Do not read a live number from this document;
+check `GET /settings` or `regwatch status`, which both call the same
+resolver.
+
+The one historical sweep artifact below predates that calibration and came
+from the old OpenAI 1536-dim path, retained for method, not for its number:
 
 | Gold group | Rows | Rows with a cosine score | Outcome |
 |---|---:|---:|---|
@@ -320,9 +383,12 @@ from the threshold harness, not `run_eval.refusal_accuracy`, and it was inflated
 by counting a correct `multi_form` clarification as an answer failure. The
 evaluator now excludes `must_clarify` rows from the cosine curve.
 
-On top of all that, **the vector space itself changed**. Production has embedded
-on Databricks Qwen3 at 1024 dimensions since 2026-07-30, so nothing measured in
-the OpenAI 1536-dim space transfers.
+On top of all that, **the vector space itself changed since this sweep, and
+changed again.** Production moved to Databricks Qwen3 at 1024 dimensions on
+2026-07-30, then back to OpenAI `text-embedding-3-large` truncated to 1024
+dimensions on 2026-08-20, the D1 reversal recorded in `docs/DECISIONS.md`.
+`config/settings.py:149-159`. Nothing measured in the old OpenAI 1536-dim
+space transfers to either later arm.
 
 ### Before the cutoff moves
 
@@ -333,8 +399,10 @@ the OpenAI 1536-dim space transfers.
    evidence.~~ **Done: 12 or more refusal rows name a seeded product and reach
    vector retrieval**, enforced by
    `tests/test_gold_set_integrity.py::test_refusals_include_scored_hard_negatives`.
-3. Re-run the corrected `threshold_sweep` on the Qwen3 1024-dim arm against a
-   controlled corpus snapshot. Not yet done on this arm.
+3. Re-run the corrected `threshold_sweep` on the live OpenAI 1024-dim arm
+   against a controlled corpus snapshot. The 2026-08-20 calibration above used
+   a gold-question sweep, not `threshold_sweep`; that tool has not run on
+   this arm.
 4. Keep the artifact with commit, corpus snapshot, embedding profile, model and
    configuration fingerprints.
 5. Review retrieval ranks and the cite/withhold decisions row by row, not only

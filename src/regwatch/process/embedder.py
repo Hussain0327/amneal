@@ -239,10 +239,13 @@ def _full_jitter_delay_s(base_s: float, cap_s: float, retry_index: int) -> float
     Full jitter draws uniformly from ``[0, min(cap, base * 2**retry_index)]``
     rather than adding a small jitter on top of the whole exponential delay.
     Equal jitter left a hard floor under every waiting client, so callers that
-    one 429 burst rejected together also woke up together. The served
-    embedding endpoint rate-limits above roughly 24 inputs per request, which
-    makes those synchronized retry waves routine during a bulk embed; drawing
-    from zero is what actually spreads them out.
+    one 429 burst rejected together also woke up together. Bulk embeds run many
+    spans concurrently against one account-level rate limit, which makes those
+    synchronized retry waves routine; drawing from zero spreads them out. The
+    roughly 24-inputs-per-request cap this was first tuned against belonged to
+    the retired Databricks endpoint; OpenAI takes up to 2048 inputs per request
+    (see OpenAIEmbeddingProvider below), so today the binding limit is the
+    account's request and token rate, not the batch size.
 
     Args:
       base_s: Delay ceiling for the first retry, in seconds.

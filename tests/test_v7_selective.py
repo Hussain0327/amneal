@@ -3,7 +3,7 @@
 Shape mirrors tests/test_prose_synthesis.py: identity/wiring pins first, then
 end-to-end behavior through ask() as later stages land the gate/renderer/
 grounded_qa changes B.10 describes. Test IDs (T-1..T-15) match the plan in
-docs/V7_DESIGN_PARKED_2026-08-10.md B.10.6; this file grows stage by stage
+the v7 design plan (in git history); this file grows stage by stage
 (S1..S5) exactly as the code they exercise lands -- a test id's FULL shape is
 only reachable once its dependencies exist, so earlier stages carry the
 S-stage-appropriate subset of each assertion.
