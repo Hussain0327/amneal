@@ -80,7 +80,7 @@ jobs:
       RETRIEVAL_EMBEDDING_PROFILE: ${{ secrets.WATCH_ACTIVE_EMBEDDING_PROFILE }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL: "https://api.openai.com/v1"
-      OPENAI_LLM_MODEL: "gpt-5.6-terra"
+      OPENAI_LLM_MODEL: "gpt-5.6-luna"
       OPENAI_REASONING_EFFORT: "medium"
       OPENAI_EMBEDDING_MODEL: "text-embedding-3-large"
       OPENAI_EMBEDDING_DIMENSION: "1024"

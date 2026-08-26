@@ -52,7 +52,7 @@ _DEFAULT_RERANK_TOP_K = 8
 # tokens by o200k_harmony, + 500 reasoning) fits under it.
 SYNTH_MAX_TOKENS_CEILING = 6000
 
-# Reasoning levels supported by gpt-5.6-terra on the Responses API.
+# Reasoning levels the Responses API accepts for the gpt-5.6 family.
 _REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 
 # Preferred (new) -> deprecated (old) environment names. Resolution itself is
@@ -146,11 +146,11 @@ class Settings(BaseSettings):
             profile, self.refusal_score_threshold
         )
 
-    # OpenAI Responses + embeddings: gpt-5.6-terra generation and
+    # OpenAI Responses + embeddings: gpt-5.6-luna generation and
     # text-embedding-3-large at 1024 dimensions.
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
-    openai_llm_model: str | None = "gpt-5.6-terra"
+    openai_llm_model: str | None = "gpt-5.6-luna"
     openai_reasoning_effort: str | None = "medium"
     openai_embedding_model: str | None = "text-embedding-3-large"
     # 1024 is the RegWatch profile width (Matryoshka truncation of the model's

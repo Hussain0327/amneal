@@ -999,3 +999,45 @@ alone does not certify this residual.
   subset of `query_log`, which held 9 rows when this shipped; no user traffic
   reached the live prompt between Aug 22 and Aug 25, so the "day of traffic"
   gate in #272 could not close on its own.
+
+## Generation model moves from gpt-5.6-terra to gpt-5.6-luna (Aug 26 2026)
+
+- **Owner decision: `OPENAI_LLM_MODEL` becomes `gpt-5.6-luna`.** Same
+  provider, same transport, same prompt (v7, sha unchanged). The change is
+  one string in the code default, the Go `/settings` mirror, the two CI
+  workflow envs (`openai-eval.yml`, `watch-daily.yml`), the drift tests that
+  pin those envs, `.env.example`, and the docs. Production picks it up from
+  the Fly secret; rollback is the same secret set back to `gpt-5.6-terra`.
+- **The transport was already the Responses API.** `OpenAIProvider` has been
+  Responses-only since #270 (`client.responses.create`, `store=false`,
+  system text as `instructions`, `max_output_tokens`, `reasoning.effort`,
+  `text.format=json_object` for the JSON callers). Three docs
+  (`docs/CLAUDE.md`, `docs/PROD_READINESS.md`, `docs/TECH_GUIDE_SIMPLE.md`)
+  still said "Chat Completions" for the 2026-08-20 cutover; that wording was
+  never true of the shipped code and is corrected in this change. The "D1
+  deliberately reversed for model calls (Aug 20 2026)" entry above says it
+  too; per this file's append-only rule that entry stays as written and this
+  line is its dated correction. Function calling and
+  strict `json_schema` structured outputs are supported by the model and
+  unused by RegWatch: no caller sends `tools`, and the JSON paths keep the
+  `json_object` + `extract_json_blob` shape. Adopting either is a separate
+  decision.
+- **Measured before the flip (laptop, interleaved, n=8 per arm, real v7
+  message list, prompt cache warm on 44 of 48 calls -- the 4 misses are the
+  round-0 call of each effort-bearing arm, and warm calls cache 1595 of 1598
+  input tokens -- 0 errors):** luna and terra
+  decode at the same rate (9-11 ms/token, both effort levels). Luna's p50
+  total is lower (1.65-1.96 s vs 2.0-2.6 s) because it wrote about 40 percent
+  fewer output tokens on the same question (77-80 vs 129-131), not because it
+  is faster per token. TTFT is equal within noise (p50 0.66-0.96 s on every
+  arm). `reasoning_tokens` was 0 on every arm, `none` through `medium`, so
+  `OPENAI_REASONING_EFFORT` is inert for both models on this prompt and the
+  effort-level differences in the table are noise. Both models honor the v7
+  marker grammar (no refusals, no malformed turns, identical gate outcomes).
+  Luna accepts every parameter the provider sends, including the
+  extractor-shaped `json_object` request.
+- **What this does and does not buy.** The switch is safe and slightly
+  shorter end to end; it does not change the serving speed of the model, so
+  it is not the latency lever. The v7 gate and the CI eval still decide
+  answer quality; the shorter answers are a behavior change the eval must
+  score before anyone reads the lower total as a pure win.

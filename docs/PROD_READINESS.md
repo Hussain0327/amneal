@@ -147,11 +147,12 @@ Two of these are now done. The numbers are kept because other docs cite them.
     covered since 2026-07-30.
   - the database: Lakebase, see #2.
 - **Deliberately reversed for the two model-call legs, 2026-08-20, by owner
-  decision.** Generation moves to OpenAI `gpt-5.6-terra` (Chat Completions,
-  `reasoning_effort=low`, no `temperature`); embeddings move to OpenAI
-  `text-embedding-3-large` truncated to 1024 dimensions via the `dimensions`
-  param. An analyst question now leaves for a third-party model API on the
-  normal path -- that is the intended outcome of the decision, not a leak. The
+  decision.** Generation moves to OpenAI `gpt-5.6-terra` over the Responses
+  API (`gpt-5.6-luna` since 2026-08-26; no `temperature`); embeddings move to
+  OpenAI `text-embedding-3-large` truncated to 1024 dimensions via the
+  `dimensions` param. An analyst question now leaves for a third-party model
+  API on the normal path -- that is the intended outcome of the decision, not
+  a leak. The
   database leg is untouched: Lakebase still holds every chunk and vector,
   in-tenant, unchanged. Be precise about the split: only the model calls moved.
   `EMBEDDING_PROVIDER` and `LLM_PROVIDER` stay required-explicit (no default;

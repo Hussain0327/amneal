@@ -13,7 +13,7 @@ browser -> Vercel -> Fly Go proxy -> Fly FastAPI
                                   |-> RegWatch PostgreSQL + pgvector
 ```
 
-Generation is `gpt-5.6-terra` over the Responses API with medium reasoning and
+Generation is `gpt-5.6-luna` over the Responses API with medium reasoning and
 `store=false`. Embeddings are `text-embedding-3-large` at 1024 dimensions.
 Retrieval is exact pgvector search. RegWatch owns and supplies all application
 state through `DATABASE_URL`; OpenAI does not store the application

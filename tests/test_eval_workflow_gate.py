@@ -38,7 +38,7 @@ def test_eval_pins_openai_models_and_exact_retrieval() -> None:
     env = _load(_EVAL_WORKFLOW)["jobs"]["eval"]["env"]
 
     assert env["LLM_PROVIDER"] == "openai"
-    assert env["OPENAI_LLM_MODEL"] == "gpt-5.6-terra"
+    assert env["OPENAI_LLM_MODEL"] == "gpt-5.6-luna"
     assert env["OPENAI_REASONING_EFFORT"] == "medium"
     assert env["INGEST_EMBEDDING_PROVIDER"] == "openai"
     assert env["OPENAI_EMBEDDING_MODEL"] == "text-embedding-3-large"

@@ -150,7 +150,7 @@ func ConfigFromEnv() (Config, error) {
 		// mirrors the OpenAI Responses model used by every role.
 		EmbeddingProvider:     embeddingProvider,
 		LLMProvider:           envOrDefault("LLM_PROVIDER", ""),
-		LLMModel:              envOrDefault("OPENAI_LLM_MODEL", "gpt-5.6-terra"),
+		LLMModel:              envOrDefault("OPENAI_LLM_MODEL", "gpt-5.6-luna"),
 		RefusalScoreThreshold: 0.30,
 		CompanyName:           envOrDefault("COMPANY_NAME", "Amneal"),
 	}

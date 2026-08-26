@@ -38,7 +38,7 @@ def test_openai_provider_constructs_when_configured(monkeypatch: pytest.MonkeyPa
         monkeypatch,
         LLM_PROVIDER="openai",
         OPENAI_API_KEY="sk-test-not-a-real-key",
-        OPENAI_LLM_MODEL="gpt-5.6-terra",
+        OPENAI_LLM_MODEL="gpt-5.6-luna",
     )
     provider = get_llm_provider()
     assert provider.name == "openai"
@@ -72,9 +72,9 @@ def test_current_model_name_never_raises(monkeypatch: pytest.MonkeyPatch) -> Non
     _reload(monkeypatch, LLM_PROVIDER="echo")
     assert current_model_name() == "echo"
 
-    _reload(monkeypatch, LLM_PROVIDER="openai", OPENAI_LLM_MODEL="gpt-5.6-terra")
-    assert current_model_name() == "gpt-5.6-terra"
-    assert current_model_name(role="router") == "gpt-5.6-terra"
+    _reload(monkeypatch, LLM_PROVIDER="openai", OPENAI_LLM_MODEL="gpt-5.6-luna")
+    assert current_model_name() == "gpt-5.6-luna"
+    assert current_model_name(role="router") == "gpt-5.6-luna"
 
     _reload(monkeypatch, LLM_PROVIDER="databricks")
     assert current_model_name() == "unconfigured"

@@ -16,8 +16,9 @@ Labels: **BLOCKER** stops external exposure. **SHOULD-HAVE** before launch.
   own Databricks tenant: generation was `gpt-oss-120b` behind
   `workspace.default.regwatch`, and query/corpus embeddings were Qwen3 behind
   `workspace.default.regwatch-embed`, 1024 dim. By owner decision, generation
-  now moves to OpenAI `gpt-5.6-terra` and embeddings move to OpenAI
-  `text-embedding-3-large` truncated to 1024 dimensions. This intentionally
+  now moves to OpenAI `gpt-5.6-terra` (`gpt-5.6-luna` since 2026-08-26) and
+  embeddings move to OpenAI `text-embedding-3-large` truncated to 1024
+  dimensions. This intentionally
   reopens D1 for those two legs; it is not a regression or a bypassed guard --
   `D1_ENFORCED` was never set in prod. The database leg is unchanged: Lakebase
   still holds every chunk and vector, in-tenant. `LLM_PROVIDER`/

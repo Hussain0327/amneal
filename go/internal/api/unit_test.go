@@ -198,20 +198,20 @@ func TestConfigFromEnvPublicSettings(t *testing.T) {
 	// Mirrors of config/settings.py: providers are required-explicit, so the
 	// unset state is the EMPTY STRING here, never a guessed provider.
 	if cfg.EmbeddingProvider != "" || cfg.LLMProvider != "" ||
-		cfg.LLMModel != "gpt-5.6-terra" || cfg.RetrievalTopK != nil ||
+		cfg.LLMModel != "gpt-5.6-luna" || cfg.RetrievalTopK != nil ||
 		cfg.RefusalScoreThreshold != 0.30 || cfg.CompanyName != "Amneal" {
 		t.Fatalf("settings defaults: %+v", cfg)
 	}
 
 	// Prod values (fly.toml [env] + app-wide secrets reach proxy machines).
 	t.Setenv("INGEST_EMBEDDING_PROVIDER", "openai")
-	t.Setenv("OPENAI_LLM_MODEL", "gpt-5.6-terra")
+	t.Setenv("OPENAI_LLM_MODEL", "gpt-5.6-luna")
 	t.Setenv("RETRIEVAL_TOP_K", "8")
 	cfg, err = ConfigFromEnv()
 	if err != nil {
 		t.Fatalf("overrides: %v", err)
 	}
-	if cfg.EmbeddingProvider != "openai" || cfg.LLMModel != "gpt-5.6-terra" ||
+	if cfg.EmbeddingProvider != "openai" || cfg.LLMModel != "gpt-5.6-luna" ||
 		cfg.RetrievalTopK == nil || *cfg.RetrievalTopK != 8 {
 		t.Fatalf("settings overrides: %+v", cfg)
 	}
