@@ -3,7 +3,7 @@
 Business logic NEVER hard-codes a model name. It calls `get_llm_provider()`
 and uses the protocol below.
 
-`openai` uses gpt-5.6-luna over the Responses API. RegWatch owns conversation
+`openai` uses gpt-5.6-terra over the Responses API. RegWatch owns conversation
 state, so every request is stateless (`store=False`) and sends the applicable
 transcript explicitly. `echo` is the test provider.
 """

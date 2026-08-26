@@ -45,9 +45,8 @@
 >   fired there.
 > - **Update 2026-08-20: D1 is deliberately reversed for the model-call legs.**
 >   By owner decision, generation moves from Databricks `gpt-oss-120b` to
->   OpenAI `gpt-5.6-terra` (`gpt-5.6-luna` since 2026-08-26), and embeddings
->   move from Databricks Qwen3 to OpenAI `text-embedding-3-large` truncated to
->   1024 dimensions. This intentionally
+>   OpenAI `gpt-5.6-terra`, and embeddings move from Databricks Qwen3 to OpenAI
+>   `text-embedding-3-large` truncated to 1024 dimensions. This intentionally
 >   reopens exactly the leak this document's tables argued against below --
 >   that tradeoff was reconsidered and the owner chose it anyway. It is not a
 >   bypassed guard: `D1_ENFORCED` was never set in prod. The database leg is

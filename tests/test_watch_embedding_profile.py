@@ -58,7 +58,7 @@ def test_watch_uses_openai_for_generation_and_embeddings() -> None:
     assert env["INGEST_EMBEDDING_PROVIDER"] == "openai"
     assert env["LLM_PROVIDER"] == "openai"
     assert env["OPENAI_API_KEY"] == "${{ secrets.OPENAI_API_KEY }}"
-    assert env["OPENAI_LLM_MODEL"] == "gpt-5.6-luna"
+    assert env["OPENAI_LLM_MODEL"] == "gpt-5.6-terra"
     assert env["OPENAI_REASONING_EFFORT"] == "medium"
     assert env["OPENAI_EMBEDDING_MODEL"] == "text-embedding-3-large"
     assert env["OPENAI_EMBEDDING_DIMENSION"] == "1024"

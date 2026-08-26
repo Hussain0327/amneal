@@ -591,7 +591,7 @@ _FLAVOR_OVERRIDES: dict[str, dict[str, str]] = {
     "dead_provider": {
         "LLM_PROVIDER": "openai",
         "OPENAI_API_KEY": "sk-test-dead",
-        "OPENAI_LLM_MODEL": "gpt-5.6-luna",
+        "OPENAI_LLM_MODEL": "gpt-5.6-terra",
     },
     # LANDMINE: TRUNCATE ... RESTART IDENTITY reuses user id 1 for every test's
     # first seeded user while the in-app query limiter (keyed "user:{id}") lives

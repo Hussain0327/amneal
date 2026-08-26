@@ -17,7 +17,7 @@ def _response(
     status: str = "completed",
     input_tokens: int = 11,
     output_tokens: int = 7,
-    model: str = "gpt-5.6-luna",
+    model: str = "gpt-5.6-terra",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         id="resp_test",
@@ -60,7 +60,7 @@ def _provider(
     reasoning_effort: str | None = "medium",
 ) -> OpenAIProvider:
     return OpenAIProvider(
-        model="gpt-5.6-luna",
+        model="gpt-5.6-terra",
         base_url="https://api.openai.com/v1",
         api_key="sk-test",
         reasoning_effort=reasoning_effort,
@@ -82,7 +82,7 @@ def test_request_uses_responses_shape_and_regwatch_owned_state() -> None:
 
     call = responses.calls[-1]
     assert call == {
-        "model": "gpt-5.6-luna",
+        "model": "gpt-5.6-terra",
         "instructions": "System one.\n\nSystem two.",
         "input": [
             {"role": "user", "content": "question"},
@@ -127,7 +127,7 @@ def test_complete_reads_output_text_and_responses_usage() -> None:
     result = _provider(responses).complete([LLMMessage("user", "question")])
 
     assert result.text == "answer"
-    assert result.model == "gpt-5.6-luna"
+    assert result.model == "gpt-5.6-terra"
     assert result.usage == LLMUsage(input_tokens=20, output_tokens=9)
 
 
@@ -186,7 +186,7 @@ def test_factory_builds_openai_provider_with_medium_reasoning(
         llm_provider="openai",
         openai_api_key="sk-test",
         openai_base_url="https://api.openai.com/v1",
-        openai_llm_model="gpt-5.6-luna",
+        openai_llm_model="gpt-5.6-terra",
         openai_reasoning_effort="medium",
         openai_timeout_s=45.0,
         openai_max_retries=2,
@@ -198,7 +198,7 @@ def test_factory_builds_openai_provider_with_medium_reasoning(
     provider = get_llm_provider(role="synthesizer")
 
     assert isinstance(provider, OpenAIProvider)
-    assert provider.model == "gpt-5.6-luna"
+    assert provider.model == "gpt-5.6-terra"
     assert provider.reasoning_effort == "medium"
 
 

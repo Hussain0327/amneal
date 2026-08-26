@@ -104,7 +104,7 @@ def test_whole_provider_block_blank_constructs(monkeypatch: pytest.MonkeyPatch) 
     s = _settings()
     assert s.openai_embedding_dimension == 1024
     assert s.openai_embedding_model == "text-embedding-3-large"
-    assert s.openai_llm_model == "gpt-5.6-luna"
+    assert s.openai_llm_model == "gpt-5.6-terra"
     assert s.openai_reasoning_effort == "medium"
     assert s.openai_api_key is None
 

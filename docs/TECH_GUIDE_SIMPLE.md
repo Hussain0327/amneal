@@ -26,10 +26,9 @@ Verified against the live system on 2026-08-11.
 - Alembic head in the live DB is `0020_eval_run`, which matches the repo. Nothing
   pending.
 - 5,494 chunk rows in the corpus.
-- Generation model: **OpenAI over the Responses API** by owner decision
-  2026-08-20: `gpt-5.6-terra` at the cutover, `gpt-5.6-luna` since
-  2026-08-26. One model does every role: router, synthesizer, extractor.
-  Before the cutover, prod ran `gpt-oss-120b` (served id
+- Generation model: **OpenAI `gpt-5.6-terra` over the Responses API** by owner
+  decision 2026-08-20. One model does every role: router, synthesizer,
+  extractor. Before the cutover, prod ran `gpt-oss-120b` (served id
   `gpt-oss-120b-080525`), open weight, served from the company Databricks
   tenant at `workspace.default.regwatch`; that provider has since been
   deleted from the code, so it is no longer a rollback path.
@@ -44,10 +43,9 @@ Verified against the live system on 2026-08-11.
 
 Data residency for the model-call legs was deliberately reversed on 2026-08-20,
 by owner decision: generation and embeddings moved from Databricks to OpenAI
-(`gpt-5.6-terra`, `gpt-5.6-luna` since 2026-08-26, and `text-embedding-3-large`
-@ 1024-dim). A normal analyst question now leaves the company's Databricks
-tenant for OpenAI on the normal path -- intentional, not a leak. The database
-is unchanged: it still sits
+(`gpt-5.6-terra` and `text-embedding-3-large` @ 1024-dim). A normal analyst
+question now leaves the company's Databricks tenant for OpenAI on the normal
+path -- intentional, not a leak. The database is unchanged: it still sits
 inside the company's Databricks tenant (Lakebase), holding every chunk and
 vector.
 

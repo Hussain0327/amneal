@@ -56,8 +56,7 @@ no audit row.
 
 The production Postgres is Databricks Lakebase, unchanged and still in-tenant.
 Generation and embeddings moved from Databricks Model Serving to OpenAI
-(`gpt-5.6-terra`, `gpt-5.6-luna` since 2026-08-26, and `text-embedding-3-large`
-@ 1024-dim) on 2026-08-20 by
+(`gpt-5.6-terra` and `text-embedding-3-large` @ 1024-dim) on 2026-08-20 by
 owner decision, which deliberately reopens the D1 data-residency question for
 those two legs -- the database leg stays in-tenant. `D1_ENFORCED` was never set
 in prod, so no armed guard was bypassed. See [Section 2 of

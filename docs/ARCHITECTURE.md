@@ -92,7 +92,7 @@ Fly.io / Go proxy
    |
    v
 Fly.io / FastAPI ---------> OpenAI Responses API
-   |                         gpt-5.6-luna, reasoning=medium, store=false
+   |                         gpt-5.6-terra, reasoning=medium, store=false
    |
    +-----------------------> OpenAI Embeddings API
    |                         text-embedding-3-large, dimensions=1024
@@ -112,7 +112,7 @@ OpenAI API concern.
 | Concern | Contract |
 |---|---|
 | LLM provider | OpenAI Responses API |
-| LLM model | `gpt-5.6-luna` |
+| LLM model | `gpt-5.6-terra` |
 | Reasoning | `medium` |
 | OpenAI response storage | disabled with `store=false` |
 | Conversation state | transcript managed and replayed by RegWatch |
@@ -955,7 +955,7 @@ names or credentials fail at startup.
 | `DATABASE_URL` | Mandatory RegWatch PostgreSQL + pgvector connection |
 | `LLM_PROVIDER` | `openai` for real calls; `echo` for tests only |
 | `OPENAI_API_KEY` | Credential shared by Responses and Embeddings APIs |
-| `OPENAI_LLM_MODEL` | `gpt-5.6-luna` |
+| `OPENAI_LLM_MODEL` | `gpt-5.6-terra` |
 | `OPENAI_REASONING_EFFORT` | `medium` |
 | `EMBEDDING_PROVIDER` | `openai` for real calls; `echo` for tests only |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-large` |

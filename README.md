@@ -148,7 +148,7 @@ The canonical system design is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 The repository target is OpenAI-only for model calls:
 
-- Generation uses the OpenAI Responses API with `gpt-5.6-luna`, medium
+- Generation uses the OpenAI Responses API with `gpt-5.6-terra`, medium
   reasoning, and `store=false`. RegWatch supplies the conversation transcript
   on every request; it does not use OpenAI conversation state or
   `previous_response_id`.
@@ -236,7 +236,7 @@ flowchart LR
     GO --> PY["Fly.io / FastAPI"]
     GO --> PG[("RegWatch PostgreSQL + pgvector")]
     PY --> PG
-    PY --> RESP["OpenAI Responses<br/>gpt-5.6-luna"]
+    PY --> RESP["OpenAI Responses<br/>gpt-5.6-terra"]
     PY --> EMB["OpenAI Embeddings<br/>text-embedding-3-large / 1024"]
 ```
 
@@ -245,7 +245,7 @@ flowchart LR
 | Edge | Go proxy for auth, sessions, rate limits, query orchestration, and audit |
 | RAG core | Python, FastAPI, deterministic retrieval and citation gates |
 | Frontend | Next.js App Router and React |
-| LLM | OpenAI Responses API, `gpt-5.6-luna`, medium reasoning, `store=false` |
+| LLM | OpenAI Responses API, `gpt-5.6-terra`, medium reasoning, `store=false` |
 | Embeddings | OpenAI `text-embedding-3-large`, 1024 dimensions |
 | Retrieval | exact pgvector search; approximate HNSW mode disabled |
 | State | RegWatch PostgreSQL selected by `DATABASE_URL`; no OpenAI application state |

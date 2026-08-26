@@ -22,10 +22,10 @@ anything else.**
 >   `0020_eval_run`. Supabase is no longer the datastore. The old dual-mode
 >   SQLite/Chroma path was deleted in R5.
 > - **LLM.** Moving from Databricks Model Serving (`gpt-oss-120b-080525` on alias
->   `workspace.default.regwatch`) to OpenAI over the Responses API, by owner
->   decision 2026-08-20: `gpt-5.6-terra` at the cutover, `gpt-5.6-luna` since
->   2026-08-26. One model serves every role: router, synthesizer, extractor.
->   See `docs/DATABRICKS_ADOPTION_2026-07-28.md` for the Databricks-era history.
+>   `workspace.default.regwatch`) to OpenAI `gpt-5.6-terra` over the Responses
+>   API, by owner decision 2026-08-20. One model serves every role: router,
+>   synthesizer, extractor. See `docs/DATABRICKS_ADOPTION_2026-07-28.md` for the
+>   Databricks-era history.
 > - **Embeddings.** Moving from Databricks Qwen3 (endpoint
 >   `workspace.default.regwatch-embed`) to OpenAI `text-embedding-3-large`
 >   truncated to 1024 dimensions via the `dimensions` param, by the same
@@ -102,7 +102,7 @@ anything else.**
   space; rollback means a previously promoted profile, never the legacy column.
   `echo` is the test provider.
 - **LLM.** `LLM_PROVIDER` has NO default either. Production runs `openai`
-  (`OPENAI_LLM_MODEL`, currently `gpt-5.6-luna`, over the Responses API with
+  (`OPENAI_LLM_MODEL`, currently `gpt-5.6-terra`, over the Responses API with
   the effort from `OPENAI_REASONING_EFFORT`, default `medium`) for every role.
   `echo` is for tests. The Databricks provider was removed in #270 on
   2026-08-21 (`get_llm_provider` rejects `databricks`), so there is no
