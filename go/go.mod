@@ -3,7 +3,7 @@ module github.com/Hussain0327/amneal/go
 go 1.26.6
 
 require (
-	github.com/getsentry/sentry-go v0.48.0
+	github.com/getsentry/sentry-go v0.49.0
 	github.com/jackc/pgx/v5 v5.10.0
 	golang.org/x/crypto v0.55.0
 	golang.org/x/text v0.41.0
