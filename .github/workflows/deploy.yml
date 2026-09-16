@@ -86,7 +86,7 @@ jobs:
       # push-to-main run just refreshed, so the dependency layers are cache
       # hits; no cache-to (this trigger's saves would silently no-op anyway).
       - name: set up buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
 
       # load:true puts the image in the local daemon for Trivy and for the push
       # below. Both tags name ONE image: `regwatch:deploy` keeps the scan
